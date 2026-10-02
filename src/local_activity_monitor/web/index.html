@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Local Activity Monitor</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body><main>
+<header><div><p class="eyebrow">LOCAL ACTIVITY MONITOR</p><h1>本機觀察統計</h1><p class="subtitle">Jev 呼叫與 Codex 活動, 留在這台電腦</p></div><div class="live"><span id="live-dot"></span><span id="live">連線中</span></div></header>
+<aside class="notice">只包含本機可觀察的紀錄, 不代表 Provider 帳戶全部用量, 剩餘額度或費用; 未知 token 保留為未知</aside>
+<section class="section-head"><div><h2>Jev 使用情況</h2><p id="jev-scope">讀取狀態中</p></div><label>時間範圍 <select id="window"><option value="1h">最近 1 小時</option><option value="24h" selected>最近 24 小時</option><option value="7d">最近 7 天</option><option value="all">全部本機紀錄</option></select></label></section>
+<div id="jev-cards" class="cards"></div>
+<div class="panels"><section class="panel"><h3>呼叫趨勢</h3><svg id="chart" viewBox="0 0 640 150" role="img" aria-label="每小時 Jev 呼叫次數"></svg><p id="chart-note" class="muted"></p></section><section class="panel"><h3>結果與資料範圍</h3><div id="statuses"></div><p id="bytes" class="muted"></p><p class="muted">一次操作可有多次 HTTP 嘗試; 只記錄操作完成時的摘要, 不保存輸入文字與回答</p></section></div>
+<section class="panel"><h3>最近 Jev 操作</h3><div class="table-wrap"><table><thead><tr><th>時間</th><th>操作 / 來源</th><th>Model</th><th>狀態</th><th>Input / Output</th><th>耗時</th><th>HTTP</th></tr></thead><tbody id="jev-rows"></tbody></table></div><p id="jev-empty" class="empty"></p></section>
+<section class="section-head"><div><h2>Codex 本機活動</h2><p id="codex-scope">讀取狀態中</p></div><span class="tag">唯讀 metadata</span></section>
+<div id="codex-cards" class="cards"></div><section class="panel"><h3>近期對話</h3><div class="table-wrap"><table><thead><tr><th>Thread ID</th><th>Model / 活動</th><th>Input</th><th>Cached input</th><th>Output</th><th>Reasoning output</th><th>Total</th><th>工具</th></tr></thead><tbody id="codex-rows"></tbody></table></div><p id="codex-empty" class="empty"></p><p class="muted">Token 使用每個 thread 最新累計快照, 不將重複快照相加; cached 與 reasoning 是子項目, 不額外加到 total; fork 可能繼承歷史數值</p></section>
+<section class="panel"><h3>觀察到的工具</h3><div id="tools" class="tools"></div><p class="muted">僅統計紀錄直接提供的工具名稱; exec 內部呼叫不另解析; 次數涵蓋首次讀取的檔案尾端與之後新紀錄, 不代表完整歷史</p></section>
+<footer><span id="updated"></span><span>Loopback only · 每 4 秒重新整理</span></footer>
+</main></body></html>
