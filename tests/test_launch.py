@@ -14,7 +14,7 @@ class LaunchTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="monitor launch ")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.python = self.root / ".venv" / ("Scripts/python.exe" if launch.sys.platform == "win32" else "bin/python")
         self.file_patch = patch.object(launch, "__file__", str(self.root / "launch.py"))
         self.file_patch.start()
@@ -78,7 +78,7 @@ class LaunchTests(unittest.TestCase):
     def test_platform_interpreter_and_space_paths_preserve_arguments(self):
         for platform in ('win32','linux','darwin'):
             with self.subTest(platform=platform), tempfile.TemporaryDirectory(prefix='monitor platform ') as folder:
-                root=Path(folder);python=root/'.venv'/('Scripts/python.exe' if platform=='win32' else 'bin/python')
+                root=Path(folder).resolve();python=root/'.venv'/('Scripts/python.exe' if platform=='win32' else 'bin/python')
                 python.parent.mkdir(parents=True);python.touch()
                 with patch.object(launch,'__file__',str(root/'launch.py')),patch.object(launch.sys,'platform',platform),patch.object(launch.subprocess,'run',return_value=subprocess.CompletedProcess([],0)) as run,patch('builtins.input') as prompt:
                     self.assertEqual(launch.main(['--codex-home',str(root/'home with spaces')]),0)

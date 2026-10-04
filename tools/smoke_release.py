@@ -50,7 +50,7 @@ def main():
                 with opener.open(instance["url"]+path, timeout=10) as response:
                     value = json.load(response)
                 if path.startswith("api/snapshot"):
-                    assert value["monitor"]["runtime"]["version"] == __version__
+                    assert value["monitor"]["version"] == __version__
                     assert value["codex"]["threads"] == []
                 elif path == "locales.json":
                     assert value["en"] and value["ja"]
