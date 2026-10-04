@@ -109,13 +109,13 @@ class McpObservationTests(unittest.TestCase):
     def test_unknown_tool_shape_does_not_hide_calls_or_break_other_sources(self):
         self.call('mcp__future__new_tool', {'private':'SECRET'}, ['future output shape'])
         self.call('mcp__workspace_inspection__validation_evidence', {}, {'runs':[None,{'results':None},{'results':[{'status':'passed'},{'status':'failed'}]}]}, 'evidence')
-        dashboard=Dashboard(self.home,codex=True);dashboard.refresh();data=dashboard.snapshot('24h')
+        dashboard=Dashboard(self.home,codex=True);dashboard.refresh();data=dashboard.snapshot('all')
         self.assertEqual({s['server'] for s in data['mcp']['servers']},{'future','workspace_inspection'})
         future=next(e for e in data['mcp']['events'] if e['server']=='future')
         self.assertEqual(future['result'],{})
         self.assertEqual(future['category'],'other')
         dashboard.set_settings({'mcp_categories':{'future':'apps'}})
-        self.assertEqual(next(e for e in dashboard.snapshot('24h')['mcp']['events'] if e['server']=='future')['category'],'apps')
+        self.assertEqual(next(e for e in dashboard.snapshot('all')['mcp']['events'] if e['server']=='future')['category'],'apps')
         self.assertFalse(data['availability']['jev'])
         self.assertNotIn('SECRET',json.dumps(data))
 
@@ -138,7 +138,7 @@ class McpObservationTests(unittest.TestCase):
         self.assertEqual(dashboard.snapshot('24h')['mcp']['recording_status'],{})
         self.home.joinpath('config.toml').write_text('[mcp_servers.jev]\ncommand="PRIVATE"\n',encoding='utf-8')
         dashboard.refresh()
-        self.assertEqual(dashboard.snapshot('24h')['mcp']['recording_status']['jev']['enabled'],False)
+        self.assertIsNone(dashboard.snapshot('24h')['mcp']['recording_status']['jev']['enabled'])
         self.assertNotIn('PRIVATE',json.dumps(dashboard.snapshot('24h')['mcp']))
 
     def test_mcp_usage_and_credit_snapshots_keep_units_and_exclude_private_fields(self):
@@ -167,7 +167,7 @@ class McpObservationTests(unittest.TestCase):
         dashboard.set_settings({'mcp_sources':{'future':False}})
         self.assertEqual(dashboard.snapshot('24h')['mcp']['events'],[])
         dashboard.set_settings({'mcp_sources':{'future':True}})
-        self.assertEqual(dashboard.snapshot('24h')['mcp']['events'][0]['result']['status'],'ok')
+        self.assertEqual(dashboard.snapshot('all')['mcp']['events'][0]['result']['status'],'ok')
 
     def test_mcp_description_from_local_readme_and_custom_override(self):
         directory=self.home/'future';directory.mkdir();directory.joinpath('server.py').write_text('PRIVATE_SOURCE',encoding='utf-8')

@@ -10,6 +10,44 @@ from local_activity_monitor.server import Dashboard, configure
 
 
 class MonitorStateTests(unittest.TestCase):
+    def test_runtime_metadata_is_local_and_collected_once(self):
+        with patch('local_activity_monitor.monitor_state.platform.release', return_value='test-release') as release, \
+             patch('local_activity_monitor.monitor_state.platform.version', return_value='test-version'), \
+             patch('local_activity_monitor.monitor_state.platform.python_implementation', return_value='TestPython'), \
+             patch('local_activity_monitor.monitor_state.struct.calcsize', return_value=8), \
+             patch('local_activity_monitor.monitor_state.os.process_cpu_count', return_value=3, create=True) as cpus, \
+             patch('local_activity_monitor.monitor_state.platform.node', side_effect=AssertionError('hostname accessed')), \
+             patch('local_activity_monitor.monitor_state.os.getenv', side_effect=AssertionError('environment accessed')):
+            state = MonitorState()
+            self.assertEqual(state.runtime['system_release'], 'test-release')
+            self.assertEqual(state.runtime['system_version'], 'test-version')
+            self.assertEqual(state.runtime['python_implementation'], 'TestPython')
+            self.assertEqual(state.runtime['process_bits'], 64)
+            self.assertEqual(state.runtime['logical_cpus'], 3)
+            state.snapshot()
+            state.snapshot()
+            release.assert_called_once_with()
+            cpus.assert_called_once_with()
+        self.assertEqual(set(state.runtime), {'python', 'platform', 'architecture', 'pid', 'version',
+                                             'system_release', 'system_version', 'python_implementation',
+                                             'process_bits', 'logical_cpus'})
+
+    def test_runtime_cpu_count_falls_back_and_preserves_unknown(self):
+        for fallback in (6, None):
+            with self.subTest(fallback=fallback), \
+                 patch('local_activity_monitor.monitor_state.os.process_cpu_count', return_value=None, create=True), \
+                 patch('local_activity_monitor.monitor_state.os.cpu_count', return_value=fallback):
+                self.assertEqual(MonitorState().runtime['logical_cpus'], fallback)
+
+    def test_runtime_cpu_count_supports_older_python(self):
+        import os
+        from unittest.mock import Mock
+        attrs = {key: value for key, value in vars(os).items() if key != 'process_cpu_count'}
+        attrs['cpu_count'] = Mock(return_value=4)
+        with patch('local_activity_monitor.monitor_state.os', type('LegacyOS', (), attrs)):
+            self.assertEqual(MonitorState().runtime['logical_cpus'], 4)
+        attrs['cpu_count'].assert_called_once_with()
+
     def test_default_settings_are_stable_and_restore_customizations(self):
         with tempfile.TemporaryDirectory() as directory:
             dashboard=Dashboard(Path(directory),codex=True,max_files=100)

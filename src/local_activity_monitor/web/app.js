@@ -23,7 +23,7 @@ function discoverCopy(){
 }
 function applyCopy(){for(const target of copyTargets)if(target.text)target.text.textContent=target.before+ui(target.base)+target.after;else target.el.setAttribute(target.attribute,ui(target.base));}
 async function loadLocales(){try{const response=await request("/locales.json",{cache:"no-store"});if(!response.ok||!response.data?.en||!response.data?.ja)throw new Error();translations=response.data;translatedValues=new Set(Object.values(translations).flatMap(Object.values));}catch{locale="zh-TW";$("action-message").textContent="語言檔無法讀取, 使用繁體中文";}}
-function applyLanguage(){tagIdentities=new Map(Object.entries(translations[locale]||{}).map(([key,value])=>[value,defaultCopy[key]||key]));for(const [key,value]of Object.entries(preferences.copy||{}))tagIdentities.set(value,defaultCopy[key]||key);preferences.locale=locale;document.documentElement.lang=locale;numberFormat=new Intl.NumberFormat(locale);dateFormat=new Intl.DateTimeFormat(locale,{year:"numeric",month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});applyCopy();applyAppearance();document.querySelector(".settings-layout>.modal-tabs")?.setAttribute("aria-label",ui("設定分類"));$("language-select").value=locale;for(const input of document.querySelectorAll(".pagination input"))input.setAttribute("aria-label",ui(" 頁碼").trim());for(const tab of document.querySelectorAll(".modal-tabs button[data-copy-base]"))tab.textContent=ui(tab.dataset.copyBase);if(data)render(data);syncHelp();}
+function applyLanguage(){tagIdentities=new Map(Object.entries(translations[locale]||{}).map(([key,value])=>[value,defaultCopy[key]||key]));for(const [key,value]of Object.entries(preferences.copy||{}))tagIdentities.set(value,defaultCopy[key]||key);preferences.locale=locale;document.documentElement.lang=locale;numberFormat=new Intl.NumberFormat(locale);dateFormat=new Intl.DateTimeFormat(locale,{year:"numeric",month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});applyCopy();applyAppearance();document.querySelector(".settings-layout>.modal-tabs")?.setAttribute("aria-label",ui("設定分類"));$("language-select").value=locale;for(const input of document.querySelectorAll(".pagination input"))input.setAttribute("aria-label",ui(" 頁碼").trim());for(const tab of document.querySelectorAll(".modal-tabs button[data-copy-base]"))tab.textContent=ui(tab.dataset.copyBase);if(data)render(data);syncSourceWindow();windowOptions($("source-window-global"));$("source-window-global").value=sourceWindows.global;const draft=$("tab-source-window").value;windowOptions($("tab-source-window"),true);$("tab-source-window").value=draft;setupTabDescriptions();syncHelp();}
 const $ = id => document.getElementById(id);
 let numberFormat=new Intl.NumberFormat(locale),dateFormat=new Intl.DateTimeFormat(locale,{year:"numeric",month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
 const fmt = value => value == null ? "--" : numberFormat.format(value);
@@ -37,6 +37,21 @@ const labels = {
 const tokenLabels = editableLabels({input_tokens:"Input",cached_input_tokens:"Cached input",output_tokens:"Output",reasoning_output_tokens:"Reasoning output",total_tokens:"Total"});
 const observationLabels = editableLabels({codex:"對話紀錄",jev:"Jev 用量",metadata:"對話名稱與分類",usage:"用量與額度快照",git:"Git 操作",jev_calls:"Jev 送出與回傳內容",skills:"Skills 讀取",checks:"test / build / lint 操作",tool_events:"工具呼叫明細",mcp:"MCP 操作與結果",web:"網路工具與參考網址",files:"檔案讀寫紀錄",errors:"對話與工具錯誤",logs:"Log 觀察與程式事件保存",sqlite:"SQL / SQLite 操作"});
 const actionLabels=editableLabels({read:"讀取",write:"寫入",change:"變更",deployment:"部署",operation:"操作"}),fileLabels=editableLabels({added:"新增",modified:"修改",deleted:"刪除",moved:"移動",write:"寫入",read:"讀取"});
+const activityWindows=["1h","24h","7d","all"];
+const windowPreference=preferences.sourceWindows||{};
+const sourceWindows={global:activityWindows.includes(windowPreference.global)?windowPreference.global:activityWindows.includes(preferences.inputs?.window)?preferences.inputs.window:"24h",tabs:Object.fromEntries(Object.entries(windowPreference.tabs||{}).filter(([key,value])=>/^[a-z][a-z:-]{0,79}$/.test(key)&&activityWindows.includes(value)).slice(0,64))};
+preferences.sourceWindows=sourceWindows;
+function sourceWindowKey(name){return name==="codex"?"codex:"+conversationSource:name==="errors"?"errors:"+diagnosticSource:name==="workflow"?"workflow:"+activitySource:name;}
+function activeSourceWindow(){const name=document.querySelector('[data-tab][aria-selected="true"]')?.dataset.tab||"overview";return sourceWindows.tabs[sourceWindowKey(name)]||sourceWindows.global;}
+function windowOptions(select,inherit=false){select.replaceChildren(...(inherit?["inherit",...activityWindows]:activityWindows).map(value=>{const option=node("option",value==="inherit"?ui("沿用全域設定"):sourceWindowLabels[value]);option.value=value;return option;}));}
+function syncSourceWindow(){
+  for(const tab of document.querySelectorAll("[data-tab]")){const name=tab.dataset.tab,head=$("view-"+name).querySelector(".section-head"),actions=head.querySelector(".section-actions")||node("div",null,"section-actions");if(!actions.parentElement)head.append(actions);head.querySelector(".source-window-badge")?.remove();let select=name==="mcp"?$("window"):$("source-window-"+name);if(!select){select=node("select",null,"source-range-select");select.id="source-window-"+name;select.addEventListener("change",()=>{const key=sourceWindowKey(name);if(select.value==="inherit")delete sourceWindows.tabs[key];else sourceWindows.tabs[key]=select.value;applySourceWindow();});actions.prepend(select);}windowOptions(select,true);select.options[0].textContent=sourceWindowLabels[sourceWindows.global]+" ("+ui("全域")+")";select.value=sourceWindows.tabs[sourceWindowKey(name)]||"inherit";select.setAttribute("aria-label",ui("來源紀錄範圍"));bindHelp(select,ui("可覆寫全域範圍, 圖表範圍與表格篩選會在此範圍內套用"));const gear=head.querySelector(".tab-settings-button");if(gear){gear.setAttribute("aria-label",tab.textContent+ui(" Tab 設定"));gear.title=ui("Tab 設定");}}
+}
+function applySourceWindow(){version++;syncSourceWindow();logData=null;saveView();refresh();if(data&&!$("view-logs").hidden)loadLogs();}
+function setupSourceWindowSettings(){
+  const global=node("label",null,"setting-row"),globalSelect=node("select");globalSelect.id="source-window-global";windowOptions(globalSelect);globalSelect.value=sourceWindows.global;global.append(node("span",ui("來源紀錄範圍")),globalSelect);$("refresh-interval").closest(".setting-row").after(global,node("p",ui("列表與操作統計一起套用. 最新對話狀態, 累計 Token 與帳戶額度保留來源回報值"),"muted"));globalSelect.addEventListener("change",()=>{sourceWindows.global=globalSelect.value;applySourceWindow();});
+  const section=node("section"),label=node("label",null,"setting-row"),select=node("select");select.id="tab-source-window";windowOptions(select,true);label.append(node("span",ui("來源紀錄範圍")),select);section.append(node("h4",ui("此 Tab 的來源紀錄")),label,node("p",ui("可覆寫全域範圍, 圖表範圍與表格篩選會在此範圍內套用"),"muted"));$("tab-chart-controls").before(section);select.addEventListener("change",()=>{const key=sourceWindowKey(currentTabSettings);if(select.value==="inherit")delete sourceWindows.tabs[key];else sourceWindows.tabs[key]=select.value;applySourceWindow();feedback("tab-settings-message",ui("來源紀錄範圍已套用"));});syncSourceWindow();
+}
 const viewInputs=["thread-search","filter-type","filter-environment","filter-project","filter-trigger","filter-status","filter-reasoning","filter-model","page-size","filter-git","window","filter-mcp-category","filter-mcp-server","filter-mcp-result","file-search","filter-file-operation","filter-file-method","filter-file-project","filter-file-tool"];
 let pendingStatus=preferences.inputs?.["filter-status"];
 let pendingFileProject=preferences.inputs?.["filter-file-project"],pendingFileTool=preferences.inputs?.["filter-file-tool"];
@@ -109,7 +124,7 @@ function syncModalDrag(dialog,reset=false){
 function openDialog(dialog){if(document.activeElement instanceof HTMLElement)tooltipSuppressed.add(document.activeElement);hideHelp();hideChartTip();syncModalDrag(dialog,true);dialog.showModal();syncHelp();}
 function bindHelp(el,text){
   const base=[...copyCatalog].find(key=>key===text||ui(key)===text)||text;if(copyCatalog.has(base)&&editableCopy(base)&&base.length>30)helpCatalog.add(base);el.dataset.help=text;el.removeAttribute("title");el.setAttribute("aria-describedby",helpTip.id);if(el.dataset.helpBound)return;el.dataset.helpBound="true";
-  function show(event){if(tooltipSuppressed.has(el)||el.classList.contains("help-dismissed")||el.closest("dialog")&&(event.type==="focusin"||el.matches("button,input,select")))return;const text=[el.dataset.help,dragAllowed(el)&&el.dataset.dragHelp?ui(el.dataset.dragHelp):""].filter(Boolean).join(". ");if(!text){if(helpTarget===el)hideHelp();return;}hideChartTip();helpTarget=el;helpTip.textContent=text;(el.closest("dialog")||document.body).append(helpTip);helpTip.hidden=false;const rect=el.getBoundingClientRect(),x=event.type==="focusin"?rect.left:event.clientX,y=event.type==="focusin"?rect.bottom:event.clientY;placeTooltip(helpTip,x,y,el);}
+  function show(event){if(tooltipSuppressed.has(el)||el.classList.contains("help-dismissed")||el.closest("dialog")&&(event.type==="focusin"||el.matches("button,input,select")&&!el.matches('[role="tab"]')))return;const text=[el.dataset.help,dragAllowed(el)&&el.dataset.dragHelp?ui(el.dataset.dragHelp):""].filter(Boolean).join(". ");if(!text){if(helpTarget===el)hideHelp();return;}hideChartTip();helpTarget=el;helpTip.textContent=text;(el.closest("dialog")||document.body).append(helpTip);helpTip.hidden=false;const rect=el.getBoundingClientRect(),x=event.type==="focusin"?rect.left:event.clientX,y=event.type==="focusin"?rect.bottom:event.clientY;placeTooltip(helpTip,x,y,el);}
   for(const event of ["pointermove","focusin"])el.addEventListener(event,show);for(const event of ["pointerleave","focusout"])el.addEventListener(event,()=>{if(helpTarget===el)hideHelp();});
   for(const event of ["pointerleave","focusout"])el.addEventListener(event,()=>el.classList.remove("help-dismissed"));
 }
@@ -291,7 +306,7 @@ function applyAppearance(){
   $("theme-select").value=appearance.theme;$("accent-select").value=appearance.accent;$("font-size").value=appearance.font;if(data)for(const view of tableViews.values())adaptTable(view);syncHelp();
 }
 let diagnosticSource=preferences.tab==="logs"?"logs":preferences.diagnosticSource||"errors",activitySource=["git","checks"].includes(preferences.tab)?preferences.tab:["git","checks"].includes(preferences.activitySource)?preferences.activitySource:"git";
-function selectSubPage(parent,key,navId,entries){for(const [value,tabId,panelId]of entries){const active=value===key;$(tabId).setAttribute("aria-selected",String(active));$(tabId).tabIndex=active?0:-1;$(panelId).hidden=!active;}if(parent==="errors"){diagnosticSource=key;preferences.diagnosticSource=key;if(key==="logs"&&data&&!$("view-errors").hidden)loadLogs();}else{activitySource=key;preferences.activitySource=key;}if(data){renderCharts();renderSources();saveView();}}
+function selectSubPage(parent,key,navId,entries){for(const [value,tabId,panelId]of entries){const active=value===key;$(tabId).setAttribute("aria-selected",String(active));$(tabId).tabIndex=active?0:-1;$(panelId).hidden=!active;}if(parent==="errors"){diagnosticSource=key;preferences.diagnosticSource=key;if(key==="logs"&&data&&!$("view-errors").hidden)loadLogs();}else{activitySource=key;preferences.activitySource=key;}if(data){syncSourceWindow();renderCharts();renderSources();saveView();if(data.codex?.activity_scope?.window!==activeSourceWindow()){version++;logData=null;refresh();}}}
 const diagnosticPages=[["errors","diagnostic-errors","error-content"],["logs","tab-logs","view-logs"]],activityPages=[["git","tab-git","view-git"],["checks","tab-checks","view-checks"]];
 function bindSubPages(parent,navId,entries,selected){for(const [index,[key,tabId]]of entries.entries()){$(tabId).addEventListener("click",()=>selectSubPage(parent,key,navId,entries));$(tabId).addEventListener("keydown",event=>{if(event.altKey||!["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","Home","End"].includes(event.key))return;event.preventDefault();const next=event.key==="Home"?0:event.key==="End"?entries.length-1:(index+(["ArrowRight","ArrowDown"].includes(event.key)?1:entries.length-1))%entries.length;$(entries[next][1]).click();$(entries[next][1]).focus();});}selectSubPage(parent,selected,navId,entries);}
 function switchTab(name){
@@ -299,7 +314,7 @@ function switchTab(name){
   if(["git","checks","workflow"].includes(name)){selectSubPage("workflow",name==="workflow"?activitySource:name,"activity-tabs",activityPages);name="workflow";}
   if(name==="jev"){name="mcp";mcpSource="jev";if(data)renderMcp();}
   for(const tab of document.querySelectorAll("[data-tab]")){const active=tab.dataset.tab===name;tab.setAttribute("aria-selected",String(active));tab.tabIndex=active?0:-1;$("view-"+tab.dataset.tab).hidden=!active;}
-  if(data){renderCharts();renderSources();saveView();}
+  if(data){const previousWindow=data.codex?.activity_scope?.window;syncSourceWindow();renderCharts();renderSources();saveView();if(previousWindow!==activeSourceWindow()){version++;logData=null;refresh();}}
   if(name==="errors"&&diagnosticSource==="logs"&&data)loadLogs();
 }
 function scrollToSection(id){requestAnimationFrame(()=>{const target=$(id);if(target&&!target.hidden)target.scrollIntoView({block:"start",behavior:"instant"});else window.scrollTo({top:0,behavior:"instant"});});}
@@ -338,8 +353,16 @@ function updateProjects(){
   if(pendingProject){if([...select.options].some(option=>option.value===pendingProject))select.value=pendingProject;pendingProject=null;}
 }
 function statusBadge(thread){const status=thread.status,backfill=status==="observed"&&thread.status_backfill_pending,tone=backfill?"backfill":["running","active","in_progress"].includes(status)?"running":["completed","success","ok"].includes(status)?"completed":["error","failed","timeout"].includes(status)?"error":["pending","queued"].includes(status)?"waiting":"neutral",badge=tag(backfill?ui("回補中"):labels.status[status]||status||"--","thread-status status-"+tone);bindHelp(badge,ui("狀態確認時間")+": "+when(thread.status_updated_at)+(thread.status_source==="cached_lifecycle"?" · "+ui("沿用最近確認的工作事件"):"")+(thread.status_backfill_pending?" · "+ui("正在回補工作起訖紀錄"):""));return badge;}
+function subagentHeaders(){return [ui("時間"),ui("對話"),"Subagent",ui("角色"),ui("狀態"),ui("模型"),ui("推理等級"),ui("工具呼叫"),ui("最近活動"),ui("父對話")];}
+function subagentRows(threads){return threads.map(thread=>{const row=node("tr"),parent=(data.codex.threads||[]).find(item=>item.thread_id===thread.execution.parent_thread_id);cell(row,when(thread.created_at));cell(row).append(threadLink(thread));cell(row,thread.execution.agent_nickname||"--");cell(row,thread.execution.agent_role||"--");cell(row).append(statusBadge(thread));cell(row,thread.model||"--","mono");cell(row).append(reasoningBadge(thread.reasoning_effort));valueCell(row,thread.tool_calls);cell(row,when(thread.updated_at));if(parent)cell(row).append(threadLink(parent));else cell(row,thread.execution.parent_thread_id,"mono");return clickableRow(row,()=>openDetail({kind:"thread",id:thread.thread_id,thread}));});}
+function projectIdentity(project){const label=node("span",null,"project-identity");if(project.icon&&typeof project.icon==="string"&&!/[<>\/]/.test(project.icon)&&project.icon.length<=8)label.append(node("span",project.icon,"project-icon"));label.append(node("span",project.name||project.id));return label;}
+function projectRows(){const projects=new Map((data.codex.projects||[]).map(project=>[project.id,project]));for(const thread of data.codex.threads||[])if(thread.project_id&&!projects.has(thread.project_id))projects.set(thread.project_id,{id:thread.project_id,name:thread.project_name||thread.project_id,kind:thread.project_kind});return [...projects.values()];}
+function projectKind(project){return labels.type[project.kind]||({local:ui("本機"),cloud:ui("雲端")})[project.kind]||project.kind||ui("來源未提供");}
+function renderProjects(){const projects=projectRows();replaceRows("project-rows",...projects.map(project=>{const row=node("tr"),threads=(data.codex.threads||[]).filter(thread=>thread.project_id===project.id),recent=threads.map(thread=>thread.updated_at).filter(Boolean).sort().at(-1)||project.updated_at;cell(row).append(button(project.name||project.id,()=>openDetail({kind:"project",project}),"link"));cell(row).append(tag(projectKind(project)));valueCell(row,threads.length);cell(row,when(recent));return clickableRow(row,()=>openDetail({kind:"project",project}));}));$("project-empty").textContent=projects.length?ui("對話數與關聯只涵蓋目前已載入的對話"):ui("目前載入範圍沒有專案資料");let buttonRoot=$("global-instructions");if(!buttonRoot){buttonRoot=button(ui("查看 Global AGENTS.md"),()=>openDetail({kind:"instructions",scope:"global"}));buttonRoot.id="global-instructions";$("project-cards").append(buttonRoot);}}
+function renderArchived(){const threads=(data.codex.threads||[]).filter(thread=>thread.archived===true);replaceRows("archived-rows",...threads.map(thread=>{const row=node("tr");cell(row).append(threadLink(thread));const project=projectRows().find(item=>item.id===thread.project_id);if(project)cell(row).append(button(project.name||project.id,()=>openDetail({kind:"project",project}),"link"));else cell(row,thread.project_name||"--");cell(row).append(statusBadge(thread));cell(row,thread.model||"--");cell(row).append(reasoningBadge(thread.reasoning_effort));cell(row,when(thread.updated_at));return clickableRow(row,()=>openDetail({kind:"thread",id:thread.thread_id,thread}));}));$("archived-empty").textContent=threads.length?ui("只顯示來源明確標記為已封存且已載入的對話"):ui("目前載入範圍沒有已封存的對話");}
+function renderSubagents(){const threads=(data.codex.threads||[]).filter(thread=>thread.execution?.parent_thread_id);replaceRows("subagent-rows",...subagentRows(threads));$("subagent-empty").textContent=threads.length?ui("顯示已載入且有上層 Thread ID 的子 agent, 狀態取自來源最近紀錄"):ui("目前載入範圍沒有可關聯的子 agent 紀錄");}
 function renderCodex(){
-  const c=data.codex;
+  const c=data.codex;renderSubagents();renderProjects();renderArchived();
   selectOptions("filter-status",[["all",ui("全部狀態")],...[...new Set(["running","completed","observed",...(c.threads||[]).map(t=>t.status).filter(Boolean)])].map(value=>[value,labels.status[value]||value])]);
   if(pendingStatus){if([...$("filter-status").options].some(option=>option.value===pendingStatus))$("filter-status").value=pendingStatus;pendingStatus=null;}
   selectOptions("filter-reasoning",[["all",ui("全部等級")],...[...new Set((c.threads||[]).map(t=>t.reasoning_effort).filter(Boolean))].sort().map(value=>[value,value]),["unknown",ui("未知")]]);
@@ -383,15 +406,15 @@ function renderTools(){
   if(!Object.keys(tools).length)$("tools").append(node("p","--","empty"));
   $("nested-tools").replaceChildren(...sorted(nested).map(([tool,count])=>{const el=toolButton(tool,()=>openDetail({kind:"nested-tool",tool}),count);return el;}));
   if(!Object.keys(nested).length)$("nested-tools").append(node("p","--","empty"));
-  const statistics=[...sorted(tools).map(([tool,count])=>({tool,count,kind:"tool",label:ui("直接呼叫")})),...sorted(nested).map(([tool,count])=>({tool,count,kind:"nested-tool",label:ui("exec 辨識")}))];
-  replaceRows("tool-stat-rows",...statistics.map(item=>{const row=node("tr"),name=node("td"),count=node("td",fmt(item.count));name.append(toolButton(item.tool,()=>openDetail({kind:item.kind,tool:item.tool})));count.dataset.sortValue=String(item.count);row.append(name,node("td",item.label),count);return row;}));
+  const statistics=c.tool_statistics||[...Object.entries(c.tools||{}).map(([tool,calls])=>({tool,calls,nested:false})),...Object.entries(c.nested_tools||{}).map(([tool,calls])=>({tool,calls,nested:true}))];
+  replaceRows("tool-stat-rows",...statistics.map(item=>{const row=node("tr");cell(row).append(toolButton(item.tool,()=>openDetail({kind:item.nested?"nested-tool":"tool",tool:item.tool})));cell(row,ui(item.nested?"程式碼辨識":"直接呼叫"));for(const key of ["calls","thread_count","returned","known_duration_count","average_ms","p99_ms"])valueCell(row,item[key]);cell(row,when(item.last_at));cell(row,when(item.last_response_at));return row;}));
   $("tool-stat-empty").textContent=statistics.length?"":ui("尚無工具紀錄");
   attachTables();
 }
 let mcpSource=typeof preferences.mcpSource==="string"?preferences.mcpSource:preferences.tab==="jev"?"jev":"all";
 function selectMcpSource(source){
   mcpSource=source;preferences.mcpSource=source;mcpPage=1;$("filter-mcp-server").value=source;$("filter-mcp-category").value="all";$("filter-mcp-result").value="all";
-  if(data){renderMcp();renderCharts();attachTables();renderSources();saveView();}
+  if(data){renderMcp();renderCharts();attachTables();renderSources();saveView();}if($("mcp-source-picker")?.tagName==="DETAILS"&&!dragEnabled)$("mcp-source-picker").open=false;
 }
 
 function dragSubTabs(nav,key,identity){
@@ -452,14 +475,14 @@ function telemetryValue(value){return value==null?"--":typeof value==="boolean"?
 function metricPriority(key){return /(?:credits?|balance|remaining|quota|cost)/.test(key)?100:/(?:tokens?|saved|saving|reduction|compress)/.test(key)?80:/(?:errors?|failed|latency|_ms$)/.test(key)?70:/(?:calls|operations|attempts|retries)/.test(key)?60:50;}
 function telemetryPanel(server,report,section="all"){
   const panel=node("section",null,"panel source-telemetry");panel.dataset.cardKey="telemetry:"+server;
-  panel.append(node("h3",server+" · "+ui(section==="summary"?"觀察摘要":"來源紀錄")));
+  const heading=node("h3"),caption=server+" · "+ui(section==="summary"?"觀察摘要":"來源紀錄");heading.append(section==="summary"?button(caption,()=>openDetail({kind:"mcp-source",server}),"link"):document.createTextNode(caption));panel.append(heading);
   if(section!=="records"){
     panel.append(metadataList([[ui("狀態"),logHealthLabels[report.health]||report.health],[ui("開始紀錄"),when(report.enabled_at)]]));
     const metrics=telemetryFields(report.summary).filter(([,value])=>value!=null).map(([key,value])=>[key,telemetryValue(value)]);
     for(const [key,value]of Object.entries(report.summary||{}))if(value&&typeof value==="object"&&!Array.isArray(value))for(const [name,count]of telemetryFields(value))metrics.push([key+" · "+name,telemetryValue(count)]);
     const selected=section==="summary"?[...metrics].sort((a,b)=>metricPriority(b[0])-metricPriority(a[0])).slice(0,8):metrics;
     if(selected.length)panel.append(node("h4",ui("用量摘要")),metadataList(selected.map(([key,value])=>[metricLabel(key),value])));
-    if(section==="summary")panel.append(button(ui("查看明細"),()=>openDetail({kind:"mcp-source",server}),"link"));
+    if(section==="summary")panel.append(button(ui("查看明細"),()=>openDetail({kind:"mcp-source",server}),"detail-open"));
   }
   if(section!=="summary"){
     const recent=report.recent||[];if(recent.length){const fields=[...new Set(recent.flatMap(record=>telemetryFields(record).map(([key])=>key)))];panel.append(node("h4",ui("操作紀錄")),table(fields.map(metricLabel),recent.map(record=>{const row=node("tr");for(const key of fields)cell(row,telemetryValue(record[key]));return clickableRow(row,()=>openDetail({kind:"source-record",server,record}));}),ui("來源紀錄"),"source:"+server+":recent"));}
@@ -468,15 +491,15 @@ function telemetryPanel(server,report,section="all"){
 }
 function connectionBadge(source){const connection=source.connection||{},names={response:"最近有回應",pending:"等待回應",error:"連線錯誤",paused:"觀察停用"};if(!names[connection.state])return document.createDocumentFragment();const badge=tag(ui(names[connection.state]),"connection-status connection-"+connection.state);bindHelp(badge,ui("依本機呼叫, 回傳與診斷紀錄判斷")+(connection.observed_at?" · "+when(connection.observed_at):""));return badge;}
 function mcpObservationPanel(source,events){
-  if(!events.length)return null;
+  if(!events.length&&!source.calls&&!source.recognized&&!Object.keys(source.latest_metrics||{}).length)return null;
   const panel=node("section",null,"panel source-observation");panel.dataset.cardKey="mcp:"+source.server;
-  const heading=node("h3");heading.append(button(source.server+" · "+ui("觀察摘要"),()=>navigateToMcpSource(source.server),"link"));panel.append(heading);
-  const direct=events.filter(event=>!event.nested),replies=direct.filter(event=>event.completed_at),recent=[...events].sort((a,b)=>(b.completed_at||b.timestamp||"").localeCompare(a.completed_at||a.timestamp||"")),summary=[[ui("工具呼叫"),fmt(direct.length)],[ui("exec 辨識"),fmt(events.length-direct.length)],[ui("工具已回傳"),fmt(replies.length)],[ui("最近活動"),when(source.last_at)]];
+  const heading=node("h3");heading.append(button(source.server+" · "+ui("觀察摘要"),()=>openDetail({kind:"mcp-source",server:source.server}),"link"));panel.append(heading);
+  const direct=events.filter(event=>!event.nested),replies=direct.filter(event=>event.completed_at),recent=[...events].sort((a,b)=>(b.completed_at||b.timestamp||"").localeCompare(a.completed_at||a.timestamp||"")),summary=[[ui("工具呼叫"),fmt(source.calls)],[ui("exec 辨識"),fmt(source.recognized)],[ui("工具已回傳"),fmt(source.returned)],[ui("最近活動"),when(source.last_at)]];
   panel.append(metadataList(summary));
-  const values=new Map();for(const event of recent)for(const [key,value]of Object.entries(event.result||{}))if(!values.has(key)&&(typeof value==="boolean"||typeof value==="number"&&Number.isFinite(value)))values.set(key,value);
+  const values=new Map(Object.entries(source.latest_metrics||{}).map(([key,item])=>[key,item.value]));for(const event of recent)for(const [key,value]of Object.entries(event.result||{}))if(!values.has(key)&&(typeof value==="boolean"||typeof value==="number"&&Number.isFinite(value)))values.set(key,value);
   const selected=[...values].sort((a,b)=>metricPriority(b[0])-metricPriority(a[0])).slice(0,8);
   if(selected.length)panel.append(node("h4",ui("主要指標")),metadataList(selected.map(([key,value])=>[metricLabel(key),telemetryValue(value)])));
-  panel.append(button(ui("查看明細"),()=>openDetail({kind:"mcp-source",server:source.server}),"link"));return panel;
+  panel.append(button(ui("查看明細"),()=>openDetail({kind:"mcp-source",server:source.server}),"detail-open"));return panel;
 }
 function mcpTags(source,events){
   if(Array.isArray(source.tags)&&source.tags.length)return source.tags.map(label=>tag(label,"category"));
@@ -498,9 +521,7 @@ function renderMcp(){
   if(mcpSource!=="all")$("filter-mcp-server").value=mcpSource;
   $("source-record-range").hidden=!Object.keys(data.mcp?.telemetry||{}).some(server=>mcpSource==="all"||server===mcpSource);$("mcp-telemetry").replaceChildren(...Object.entries(data.mcp?.telemetry||{}).filter(([server,report])=>(mcpSource==="all"||server===mcpSource)&&(report.recent?.length||report.series?.length)).map(([server,report])=>telemetryPanel(server,report,"records")));
   const metrics=mcpSource==="all"?null:mcpMetrics(selectedEvents,"mcp-metric-rows");$("mcp-metrics-panel").hidden=!metrics;$("mcp-metrics").replaceChildren(...metrics?[metrics]:[]);
-  $("mcp-ranking-panel").hidden=mcpSource!=="all"||!m.servers.length;$("mcp-ranking-table-panel").hidden=$("mcp-ranking-panel").hidden;
-  const ranking=[...m.servers].sort((a,b)=>b.calls-a.calls||b.recognized-a.recognized||a.server.localeCompare(b.server));
-  $("mcp-ranking").replaceChildren(table([ui("來源"),ui("工具呼叫"),ui("exec 辨識"),ui("錯誤"),ui("最近活動")],ranking.map(source=>{const row=node("tr");cell(row,source.server,"mono");valueCell(row,source.calls);valueCell(row,source.recognized);valueCell(row,source.errors);cell(row,when(source.last_at));return clickableRow(row,()=>navigateToMcpSource(source.server));}),ui("MCP 呼叫排行"),"mcp-ranking-rows"));
+  $("mcp-ranking-panel").hidden=mcpSource!=="all"||!m.servers.length;
   $("mcp-observations").replaceChildren(...Object.entries(data.mcp?.telemetry||{}).filter(([server])=>mcpSource==="all"||server===mcpSource).map(([server,report])=>telemetryPanel(server,report,"summary")),...(mcpSource==="all"?m.servers:[]).filter(source=>!data.mcp?.telemetry?.[source.server]).map(source=>mcpObservationPanel(source,m.events.filter(event=>event.server===source.server))).filter(Boolean));
   const filtered=m.events.filter(e=>(mcpSource==="all"||e.server===mcpSource)&&($("filter-mcp-category").value==="all"||e.category===$("filter-mcp-category").value)&&($("filter-mcp-server").value==="all"||e.server===$("filter-mcp-server").value)&&($("filter-mcp-result").value==="all"||$("filter-mcp-result").value==="error"&&["error","failed","timeout","cancelled","canceled","missing_dependencies"].includes(e.result?.status)||$("filter-mcp-result").value==="known"&&e.result?.status||$("filter-mcp-result").value==="unknown"&&!e.result?.status));
   const rows=sortRecords("mcp-rows",filtered,[e=>e.timestamp,e=>e.thread_name||e.thread_id,eventProject,e=>e.server,e=>data.mcp.categories[e.category]||e.category,e=>e.tool,e=>actionLabels[e.action],e=>e.nested?ui("exec 辨識"):ui("工具呼叫"),e=>e.result?.status,e=>e.duration_ms,mcpBrief],e=>e.timestamp),size=tableSize("mcp-rows"),pages=Math.max(1,Math.ceil(rows.length/size));mcpPage=Math.max(1,Math.min(mcpPage,pages));
@@ -534,14 +555,14 @@ function renderGit(){
   if([...select.options].some(option=>option.value===selected))select.value=selected;
   if(pendingGit){if([...select.options].some(option=>option.value===pendingGit))select.value=pendingGit;pendingGit=null;}
   const events=git.events.filter(event=>select.value==="all"||event.operation===select.value);
-  $("git-scope").textContent=data.settings?.observations.git===false?ui("Git 觀察已關閉"):ui("點操作名稱可查看所屬工具呼叫");
+  $("git-scope").textContent=ui("Git 觀察已關閉");$("git-scope").hidden=data.settings?.observations.git!==false;
   cards("git-cards",[[ui("Git 操作"),fmt(git.total),ui("操作種類 ")+fmt(Object.keys(git.operations).length)],[ui("涉及對話"),fmt(new Set(git.events.map(e=>e.thread_id)).size),ui("目前操作紀錄")],[ui("工具已回傳"),fmt(git.events.filter(e=>e.completed_at).length),ui("依工具回傳時間")],[ui("工作目錄"),fmt(new Set(git.events.map(e=>e.repository).filter(Boolean)).size),ui("已辨識的目錄名稱")]]);
   replaceRows("git-rows",...events.map(event=>{const row=node("tr");cell(row,when(event.timestamp));eventThreadCell(row,event);cell(row).append(button(event.operation,()=>openDetail({kind:"operation",event}),"link mono"));cell(row,event.repository||ui("未知"));cell(row,when(event.completed_at));cell(row,fmt(event.duration_ms));return row;}));
   $("git-empty").textContent=events.length?"":ui("無");
 }
 function renderWorkflow(){
   const skills=data.codex.skills||{events:[],counts:{}},checks=data.codex.checks||[];
-  replaceRows("skill-rows",...skills.events.map(event=>{const row=node("tr");cell(row,when(event.timestamp));eventThreadCell(row,event);cell(row).append(event.has_document===false?node("span",event.skill):button(event.skill,()=>openDetail({kind:"skill",skill:event.skill}),"link"));return row;}));
+  replaceRows("skill-rows",...skills.events.map(event=>{const row=node("tr"),thread=(data.codex.threads||[]).find(item=>item.thread_id===event.thread_id),tool=event.tool||(thread?.tool_events||[]).find(item=>item.call_id===event.call_id)?.tool;cell(row,when(event.timestamp));eventThreadCell(row,event);cell(row).append(button(event.skill,()=>openDetail({kind:"skill",skill:event.skill,event}),"link"));projectCell(row,event);cell(row,tool||"--","mono");cell(row).append(tag(tool?ui(tool==="exec"?"exec 辨識":"工具參數辨識"):"--"));cell(row,when(event.completed_at));valueCell(row,event.duration_ms);cell(row,event.call_id||"--","mono");return clickableRow(row,()=>openDetail({kind:"skill",skill:event.skill,event}));}));
   $("skill-empty").textContent=skills.events.length?"":ui("無");
   cards("check-cards",[[ui("驗證操作"),fmt(checks.length),ui("目前載入紀錄")],[ui("操作種類"),fmt(new Set(checks.map(e=>e.operation)).size),ui("test / build / lint")],[ui("涉及對話"),fmt(new Set(checks.map(e=>e.thread_id)).size),ui("有驗證操作的對話")],[ui("工具已回傳"),fmt(checks.filter(e=>e.completed_at).length),ui("有回傳時間的紀錄")]]);
   replaceRows("check-rows",...checks.map(event=>{const row=node("tr");cell(row,when(event.timestamp));eventThreadCell(row,event);cell(row).append(button(event.operation,()=>openDetail({kind:"operation",event}),"link mono"));cell(row,when(event.completed_at));cell(row,fmt(event.duration_ms));return row;}));
@@ -549,7 +570,7 @@ function renderWorkflow(){
 }
 
 let uptimeSample=null;
-function renderUptime(){if(!uptimeSample||document.hidden)return;const elapsed=Math.max(0,Math.floor(uptimeSample.seconds+(performance.now()-uptimeSample.received)/1000)),days=Math.floor(elapsed/86400),clock=[Math.floor(elapsed/3600)%24,Math.floor(elapsed/60)%60,elapsed%60].map(value=>String(value).padStart(2,"0")).join(":");$("program-uptime").textContent=ui("已執行 ")+fmt(days)+ui(" 天")+" "+clock;}
+function renderUptime(){if(!uptimeSample||document.hidden)return;const elapsed=Math.max(0,Math.floor(uptimeSample.seconds+(performance.now()-uptimeSample.received)/1000)),days=Math.floor(elapsed/86400),clock=[Math.floor(elapsed/3600)%24,Math.floor(elapsed/60)%60,elapsed%60].map(value=>String(value).padStart(2,"0")).join(":");$("program-uptime").textContent=ui("已執行 ")+(days?fmt(days)+ui(" 天")+" ":"")+clock;}
 setInterval(renderUptime,1000);
 
 function render(next){
@@ -613,7 +634,7 @@ const sourceScopes=editableLabels({
 });
 const sourceLimitLabels=editableLabels({file_limit:"追蹤檔案上限",sql_event_limit:"SQL 明細上限",git_event_limit:"Git 明細上限",check_event_limit:"驗證明細上限",file_event_limit:"檔案明細上限",skill_event_limit:"Skills 明細上限",tool_limit:"每個 MCP 的工具摘要上限",file_count:"已追蹤檔案",read_limit:"每次讀取上限",tail_bytes:"首次尾端讀取 (bytes)",scan_seconds:"檔案盤點間隔 (秒)",call_limit:"工具紀錄上限",buffer_limit:"片段暫存上限 (bytes)",history_pending_files:"待回補檔案",listed_file_limit:"列出來源檔案上限",read_bytes:"累計讀取量 (bytes)",unsupported_lines:"無法解析的紀錄 (行)",retained:"保留紀錄",skills:"Skills 紀錄",entry_limit:"Checkpoint 紀錄上限",skill_limit:"Skills 紀錄上限",byte_limit:"保存上限 (bytes)",row_limit:"讀取列數上限",rows_read:"已讀取列數",selected_threads:"查詢對話數",matched_threads:"符合的對話數",event_limit:"事件上限",configured_sources:"設定的來源數",loaded_sources:"已載入來源數",loaded_records:"已載入明細",series_points:"趨勢資料點",record_limit:"明細讀取上限",series_limit:"趨勢資料點上限",history_limit:"效能樣本上限",retained_samples:"保留效能樣本",retained_events:"保留執行事件",error_history_limit:"錯誤摘要上限",error_history_byte_limit:"錯誤摘要容量 (bytes)",history_hours:"錯誤回補範圍 (小時)",backfill_pending:"待回補資料",read_lines:"已讀取 (行)",parsed_lines:"已辨識 (行)",oversized_lines:"超過長度上限 (行)"});
 function sourceMetrics(values){return Object.entries(values||{}).filter(([,value])=>value!=null&&["number","boolean"].includes(typeof value)).map(([key,value])=>[sourceLimitLabels[key]||metricLabel(key),typeof value==="boolean"?ui(value?"是":"否"):fmt(value)+(key==="read_limit"?" "+(values.read_unit||"bytes"):"")]);}
-function sourceFeature(tab){const id=tab.id.slice(5);return id==="codex"?(conversationSource==="conversations"?"codex":conversationSource):id==="errors"?diagnosticSource:id==="workflow"?activitySource:id;}
+function sourceFeature(tab){const id=tab.id.slice(5);return id==="codex"?(conversationSource==="dots"?"dots":"codex"):id==="errors"?diagnosticSource:id==="workflow"?activitySource:id;}
 const sourceWindowLabels=editableLabels({"1h":"最近 1 小時","24h":"最近 24 小時","7d":"最近 7 天",all:"全部本機紀錄"});
 const sourceReaderNames=editableLabels({"Checkpoint load":"Checkpoint 載入","Checkpoint save":"Checkpoint 保存"});
 function sourceReader(reader){
@@ -627,7 +648,7 @@ function sourceReader(reader){
 function sourceDetails(key,source,opened){
   const item=node("details"),summary=node("summary",source.name);item.dataset.source=key;item.open=opened.has(key);
   if(source.health)summary.append(tag(logHealthLabels[source.health]||source.health));item.append(summary,node("p",sourceScopes[source.scope]||source.scope||"--","source-description"));
-  const modes=editableLabels({read_only:"唯讀",bounded_metadata_cache:"循環保存"});item.append(metadataList([[ui("讀取方式"),modes[source.mode]||source.mode],...(source.window?[[ui("資料時間範圍"),sourceWindowLabels[source.window]||source.window]]:[]),...sourceMetrics(source.limits)]));
+  const modes=editableLabels({read_only:"唯讀",bounded_metadata_cache:"循環保存"});item.append(metadataList([[ui("讀取方式"),modes[source.mode]||source.mode],...(source.display_window?[[ui("顯示時間範圍"),sourceWindowLabels[source.display_window]||source.display_window]]:[]),...(source.window?[[ui("來源保留範圍"),sourceWindowLabels[source.window]||source.window]]:[]),...sourceMetrics(source.limits)]));
   if(source.locations?.length){item.append(node("h4",ui("來源位置")));for(const location of source.locations)item.append(node("p",location,"mono source-location"));}
   if(source.observations?.length){const fields=node("div",null,"source-fields");fields.append(...source.observations.map(field=>tag(observationLabels[field]||metricLabel(field))));item.append(node("h4",ui("觀察項目")),fields);}
   if(source.fields?.length){const fields=node("div",null,"source-fields");fields.append(...source.fields.map(field=>tag(field)));item.append(node("h4",ui("選取欄位")),fields);}
@@ -644,7 +665,7 @@ function renderSources(){
 }
 function populateSourceReference(footer){
   const old=footer.querySelector(":scope>.source-reference-content"),opened=new Set([...(old?.querySelectorAll("details[open]")||[])].map(item=>item.dataset.source)),content=node("div",null,"source-reference-content"),grid=node("div",null,"source-read-grid");
-  content.append(node("p",ui("下方列出此頁讀取器的實際設定與載入結果. 圖表時間範圍與表格篩選可另行設定"),"source-description"));
+  content.append(node("p",ui("下方列出此頁讀取器的實際設定與載入結果. 列表與操作統計依來源紀錄範圍篩選, 圖表與表格條件可再縮小範圍. 未知時間紀錄只在全部範圍顯示"),"source-description"));
   grid.append(...footer.sourceItems.map(([key,source])=>sourceDetails(key,source,opened)));content.append(grid);if(old)old.replaceWith(content);else footer.append(content);
 }
 
@@ -658,7 +679,7 @@ async function loadLogs(){
   if(logBusy){logQueued=true;return;}logBusy=true;
   if(!logData)$("log-message").textContent=ui("正在讀取 Log 紀錄");
   try{
-    const response=await request("/api/logs",{cache:"no-store"});if(!response.ok)throw new Error();logData=response.data;
+    const window=activeSourceWindow(),current=version,response=await request("/api/logs?window="+encodeURIComponent(window),{cache:"no-store"});if(!response.ok)throw new Error();if(current!==version||window!==activeSourceWindow())return;logData=response.data;
     if(!data||$("view-logs").hidden)return;
     renderLogSummary();
     replaceRows("log-rows",...(logData?.entries||[]).map(event=>{const row=node("tr");cell(row,when(event.timestamp));cell(row).append(severityTag(event.severity));cell(row,logSource(event.source));cell(row,event.module||"--","mono");cell(row,logMessage(event));cell(row,event.code||"--","mono");if(event.thread_id)eventThreadCell(row,event);else cell(row,"--");projectCell(row,event);cell(row,event.method||event.tool||"--","mono");cell(row,event.error_type||"--","mono");cell(row,event.file||"--","mono");valueCell(row,event.record_id);return clickableRow(row,()=>openDetail({kind:"log",event}));}));
@@ -669,7 +690,8 @@ function renderMonitor(){
   const m=data.monitor||{},c=data.codex,enabled=Object.values(data.settings?.observations||{}).filter(Boolean).length;
   const activeHelp=document.activeElement.closest("#monitor-storage .metadata-help"),helpIndex=activeHelp?[...activeHelp.parentElement.querySelectorAll(".metadata-help")].indexOf(activeHelp):-1,helpDismissed=activeHelp?.classList.contains("help-dismissed");
   cards("monitor-cards",[[ui("整理狀態"),ui(m.health==="error"?"整理失敗":m.health==="ok"?"正常":"啟動中"),ui("累計錯誤 ")+fmt(m.errors||0)+ui(" 次")],[ui("執行時間"),fmt(Math.floor((m.uptime_seconds||0)/60))+ui(" 分鐘"),ui("已整理 ")+fmt(m.refreshes||0)+ui(" 次")],[ui("本輪整理耗時"),fmt(m.refresh_ms)+" ms",ui("CPU 時間 ")+fmt(m.cpu_ms)+" ms"],[ui("保留工具紀錄"),fmt(m.retained_calls||0),ui("上限 ")+fmt(m.call_limit)+ui(" 筆")]]);
-  $("monitor-runtime").replaceChildren(metadataList([[ui("程式版本"),m.version||ui("未知")],[ui("Python 版本"),m.python||ui("未知")],[ui("系統"),m.platform||ui("未知")],[ui("處理器架構"),m.architecture||ui("未知")],["PID",m.pid||ui("未知")],[ui("啟用的觀察項目"),fmt(enabled)],[ui("HTTP 請求"),fmt(m.requests||0)],[ui("HTTP 錯誤回應"),fmt(m.http_errors||0)],[ui("上次整理錯誤"),m.last_error_at?when(m.last_error_at):ui("無")],[ui("目前錯誤類型"),m.error_type||ui("無")]]));
+  const cliVersions=[...new Set((data.codex.threads||[]).map(thread=>thread.execution?.cli_version).filter(Boolean))].sort();
+  $("monitor-runtime").replaceChildren(metadataList([[ui("程式版本"),m.version||ui("未知")],[ui("Python 版本"),m.python||ui("未知")],[ui("Python 實作"),m.python_implementation],[ui("Codex CLI (紀錄)"),cliVersions.join(", ")||null,ui("已載入對話記錄的 Codex CLI 版本, 不代表目前安裝版本")],[ui("系統"),m.platform||ui("未知")],[ui("系統版本"),m.system_release],[ui("系統組建"),m.system_version],[ui("程序位元數"),m.process_bits?m.process_bits+" bits":null],[ui("可用邏輯核心"),fmt(m.logical_cpus)],[ui("處理器架構"),m.architecture||ui("未知")],["PID",m.pid||ui("未知")],[ui("啟用的觀察項目"),fmt(enabled)],[ui("HTTP 請求"),fmt(m.requests||0)],[ui("HTTP 錯誤回應"),fmt(m.http_errors||0)],[ui("上次整理錯誤"),m.last_error_at?when(m.last_error_at):ui("無")],[ui("目前錯誤類型"),m.error_type||ui("無")]]));
   $("monitor-storage").replaceChildren(metadataList([
     [ui("追蹤 session 檔案"),fmt(c.files||0)+" / "+fmt(m.file_limit),ui("目前追蹤的 session 檔案數 / 程式上限. 一個對話可能有多個檔案, 所以不等於對話數")],
     [ui("保留效能樣本"),fmt(m.history?.length||0)+" / "+fmt(m.history_limit),ui("每次資料整理完成會保存一筆耗時, CPU 與讀取量, 供效能圖表使用. 顯示目前筆數 / 上限, 超過上限移除最舊樣本, 重啟後清空")],
@@ -695,7 +717,7 @@ function renderHighlights(){
   items.push([ui("Log 紀錄"),"logs",fmt(data.logs?.retained||0)+ui(" 筆事件"),ui("來源健康狀態與執行紀錄")]);
   items.push([ui("SQL / SQLite"),"sqlite",fmt(c.sqlite?.total||0)+ui(" 筆操作"),ui("工具紀錄與 SQL 診斷")]);
 
-  for(const source of data.mcp?.servers||[]){if(!source.enabled||source.server==="web")continue;const latest=m.events.filter(event=>event.server===source.server).sort((a,b)=>(b.completed_at||b.timestamp||"").localeCompare(a.completed_at||a.timestamp||""))[0],report=data.mcp.telemetry?.[source.server],info=report?telemetryFields(report.summary).slice(0,3).map(([key,value])=>metricLabel(key)+": "+telemetryValue(value)).join(" · "):latest?mcpBrief(latest):ui("已設定");items.push([source.server,"mcp",fmt(source.calls)+ui(" 次呼叫 · ")+fmt(source.recognized)+ui(" 處 exec 辨識"),info,source.server]);}
+  for(const source of data.mcp?.servers||[]){if(!source.enabled||source.server==="web")continue;const latest=m.events.filter(event=>event.server===source.server).sort((a,b)=>(b.completed_at||b.timestamp||"").localeCompare(a.completed_at||a.timestamp||""))[0],report=data.mcp.telemetry?.[source.server],info=report?telemetryFields(report.summary).slice(0,3).map(([key,value])=>metricLabel(key)+": "+telemetryValue(value)).join(" · "):latest?mcpBrief(latest):source.description||ui(data.mcp.categories[source.category]||"MCP 工具");items.push([source.server,"mcp",fmt(source.calls)+ui(" 次呼叫 · ")+fmt(source.recognized)+ui(" 處 exec 辨識"),info,source.server]);}
   $("overview-highlights").replaceChildren(...items.map(([name,tab,value,info,category])=>{const el=button(null,()=>{if(category&&tab==="mcp"){openDetail({kind:"mcp-source",server:category});return;}if(tab==="jev"){openDetail({kind:"mcp-source",server:"jev"});return;}navigateToTab(tab);},"highlight-card tab-order-row");el.dataset.tabOrder=category?"mcp:"+category:tab;el.append(node("h3",name),node("div",value,"highlight-value"),node("p",info,"muted"));return el;}));arrangeHighlights();
 }
 function metadataList(items){
@@ -720,17 +742,38 @@ const detailHistory=[];
 function rememberDetail(){if(detail&&$("detail-dialog").open){detailHistory.push({view:detail,scroll:$("detail-content").scrollTop});if(detailHistory.length>20)detailHistory.shift();}}
 function clearDetailTabs(){const nav=$("detail-content").previousElementSibling;if(nav?.classList.contains("modal-tabs"))nav.remove();}
 function updateDetailBack(){$("detail-back").disabled=!detailHistory.length;}
-function openDetail(value,remember=true){if(remember)rememberDetail();detail=value;renderDetail();$("detail-content").scrollTop=0;updateDetailBack();if(!$("detail-dialog").open)openDialog($("detail-dialog"));if(value.kind==="sqlite"&&!value.sqlLoaded&&!value.sqlLoading)loadSqlContent(value);}
+function openDetail(value,remember=true){if(remember)rememberDetail();detail=value;renderDetail();$("detail-content").scrollTop=0;updateDetailBack();if(!$("detail-dialog").open)openDialog($("detail-dialog"));if(value.kind==="project"&&!value.projectLoaded&&!value.projectLoading)loadProjectContent(value);if(value.kind==="instructions"&&!value.instructionsLoaded&&!value.instructionsLoading)loadInstructions(value);if(value.kind==="sqlite"&&!value.sqlLoaded&&!value.sqlLoading)loadSqlContent(value);if(value.kind==="operation"&&(data.codex.git?.events||[]).some(event=>event.thread_id===value.event.thread_id&&event.call_id===value.event.call_id&&event.operation===value.event.operation)&&!value.gitLoaded&&!value.gitLoading)loadGitContent(value);}
+function parseDisplayData(text){
+  try{return {ok:true,value:JSON.parse(text)};}catch{}
+  // Normalize JSON-compatible literal spelling only, without evaluating expressions.
+  try{const normalized=text.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b(?:True|False|None)\b/g,token=>token[0]==="'"?'"'+token.slice(1,-1).replace(/\\'/g,"'").replace(/"/g,'\\"')+'"':({True:"true",False:"false",None:"null"})[token]||token);return {ok:true,value:JSON.parse(normalized)};}catch{return {ok:false};}
+}
+function jsonPayload(value){
+  const pre=node("pre",null,"payload json-payload"),code=node("code"),text=JSON.stringify(value,null,2)??"null",tokens=/"(?:\\.|[^"\\])*"|\b(?:true|false|null)\b|-?\b\d+(?:\.\d+)?(?:e[+-]?\d+)?\b|[{}\[\],:]/gi;let end=0;
+  for(const match of text.matchAll(tokens)){code.append(document.createTextNode(text.slice(end,match.index)));const token=match[0],type=token.charCodeAt(0)===34?/^\s*:/.test(text.slice(match.index+token.length))?"key":"string":/^(?:true|false)$/.test(token)?"boolean":token==="null"?"null":/^-?\d/.test(token)?"number":"punctuation";code.append(node("span",token,"json-"+type));end=match.index+token.length;}code.append(document.createTextNode(text.slice(end)));pre.append(code);return pre;
+}
+function structuredPayload(label,value){
+  const fold=node("details",null,"structured-payload"),body=node("div",null,"structured-payload-body");fold.append(node("summary",label),body);let count=0;
+  function render(target,item,depth=0){
+    if(++count>200||depth>6){target.append(typeof item==="object"?jsonPayload(item):node("pre",String(item),"payload"));return;}
+    if(typeof item==="string"){const text=item.trim(),parsed=text.length<=65536&&/^[\[{]/.test(text)?parseDisplayData(text):{ok:false};if(parsed.ok)return render(target,parsed.value,depth+1);target.append(node("pre",item||"--","payload"));return;}
+    if(Array.isArray(item)&&item.every(value=>value&&typeof value.text==="string")){for(const value of item.slice(0,200))render(target,value.text,depth+1);return;}
+    if(item&&typeof item==="object"){target.append(jsonPayload(item));for(const [key,value]of Object.entries(item))if(typeof value==="string"&&(value.includes("\n")||/^[\[{]/.test(value.trim()))){const section=node("section");section.append(node("h4",metricLabel(key)));target.append(section);render(section,value,depth+1);}return;}
+    target.append(jsonPayload(item));
+  }
+  render(body,value);return fold;
+}
 function renderDetail(){
   clearDetailTabs();
   if(!detail||!data)return;
-  const content=$("detail-content");content.replaceChildren();
+  const content=$("detail-content");content.replaceChildren();$("detail-title").parentElement.querySelector(".detail-time")?.remove();
   if(detail.kind==="thread"||detail.kind==="thread-tools"){
     const t=data.codex.threads.find(item=>item.thread_id===detail.id)||detail.thread;detail.thread=t;
     $("detail-title").textContent=(detail.kind==="thread-tools"?ui("工具明細 · "):"")+title(t);
     if(detail.kind==="thread"){
-      content.append(metadataList([["Thread ID",t.thread_id],[ui("對話建立時間"),when(t.created_at)],[ui("最近活動時間"),when(t.updated_at)],[ui("Token 更新時間"),when(t.token_updated_at)],[ui("類型"),labels.type[t.activity_type]||ui("未知")],[ui("執行位置"),labels.environment[t.environment]||ui("未知")],[ui("專案"),t.project_name||t.project_id||(t.project_scope==="none"?ui("無專案"):ui("未知"))],[ui("活動來源"),labels.trigger[t.trigger]||ui("未知")],[ui("排程綁定"),t.has_schedule==null?ui("未知"):ui(t.has_schedule?"有":"無")],[ui("狀態"),statusBadge(t)],[ui("Model"),t.model||"--"],[ui("Reasoning 等級"),reasoningBadge(t.reasoning_effort)],[ui("Model 設定更新時間"),when(t.context_updated_at)]]));
+      content.append(metadataList([["Thread ID",t.thread_id],[ui("對話建立時間"),when(t.created_at)],[ui("Token 更新時間"),when(t.token_updated_at)],[ui("類型"),labels.type[t.activity_type]||ui("未知")],[ui("執行位置"),labels.environment[t.environment]||ui("未知")],[ui("專案"),t.project_name||t.project_id||(t.project_scope==="none"?ui("無專案"):ui("未知"))],[ui("活動來源"),labels.trigger[t.trigger]||ui("未知")],[ui("排程綁定"),t.has_schedule==null?ui("未知"):ui(t.has_schedule?"有":"無")],[ui("狀態"),statusBadge(t)],[ui("Model"),t.model||"--"],[ui("Reasoning 等級"),reasoningBadge(t.reasoning_effort)],[ui("Model 設定更新時間"),when(t.context_updated_at)]]));
       content.append(metadataList([[ui("狀態確認時間"),when(t.status_updated_at)],[ui("資料來源"),t.event_only?ui("操作或診斷紀錄中的對話 ID"):t.metadata_only?ui("本機對話目錄"):ui("Codex session 與本機目錄")],[ui("狀態來源"),t.status_source==="session_lifecycle"?ui("工作開始 / 完成事件"):t.status_source==="catalog_status"?ui("本機目錄狀態"):t.status_source==="cached_lifecycle"?ui("最近確認的工作事件"):t.status_backfill_pending?ui("正在回查較早的工作事件"):ui("來源未提供狀態")]]));
+      const project=projectRows().find(item=>item.id===t.project_id);if(project)content.append(button(ui("查看專案")+" · "+(project.name||project.id),()=>openDetail({kind:"project",project})));
       if(t.metadata_only)content.append(node("p",ui(t.event_only?"目前只取得紀錄中的對話 ID, 尚未載入對應的對話資訊":t.activity_type==="chat"?"這筆雲端對話的資料來自本機目錄. 可取得的欄位依本機目錄資料":"目前只取得對話目錄資料, 尚未載入對應的 session"),"muted"));
       const executionLabels={model_provider:"Provider",cli_version:ui("Codex 版本"),originator:ui("執行程式"),history_mode:ui("歷史紀錄模式"),approval_policy:ui("操作審核模式"),sandbox_mode:ui("Sandbox 模式"),collaboration_mode:ui("協作模式"),context_window:ui("Context window (tokens)"),git_branch:ui("紀錄時的 Git 分支"),git_commit:ui("紀錄時的 Git commit"),parent_thread_id:ui("上層 Thread ID"),agent_nickname:ui("Agent 名稱"),agent_role:ui("Agent 角色"),service_tier:ui("服務等級"),reasoning_summary:ui("Reasoning 摘要模式"),approvals_reviewer:ui("操作審核來源")},execution=Object.entries(t.execution||{}).map(([key,value])=>[executionLabels[key]||key,typeof value==="number"?fmt(value):value]);
       if(execution.length)content.append(node("h4",ui("執行設定")),metadataList(execution));
@@ -746,6 +789,10 @@ function renderDetail(){
     if(files.length)content.append(table([ui("時間"),ui("操作"),ui("檔案位置"),ui("工具"),ui("紀錄方式"),ui("工具回傳時間"),ui("耗時 (ms)")],fileRows(files,false)));else content.append(node("p",ui("無"),"empty"));
     const threadErrors=(data.errors?.events||[]).filter(e=>e.thread_id===t.thread_id);if(threadErrors.length)content.append(node("h4",ui("錯誤與警告")),table([ui("時間"),ui("等級"),ui("類型"),ui("對話"),ui("專案"),ui("來源"),ui("工具"),ui("錯誤說明"),ui("代碼")],errorRows(threadErrors)));
     appendThreadMcp(content,t);
+  }else if(detail.kind==="project"){
+    const project=detail.project,threads=(data.codex.threads||[]).filter(thread=>thread.project_id===project.id);$("detail-title").replaceChildren(projectIdentity(project));content.append(metadataList([["Project ID",project.id],[ui("類型"),projectKind(detail.projectContent||project)],[ui("已載入對話"),fmt(threads.length)]]));if(detail.projectError)content.append(node("p",detail.projectError,"empty"));else if(!detail.projectLoaded)content.append(node("p",ui("讀取專案設定中"),"empty"));else{const folders=detail.projectContent?.folders||[];if(folders.length){const list=node("ul",null,"project-folders");for(const folder of folders)list.append(node("li",typeof folder==="string"?folder:folder.path||folder.name,"mono path-cell"));content.append(node("h4",ui("可使用的資料夾")),list);}else content.append(node("p",ui("來源未提供資料夾設定"),"muted"));}content.append(button(ui("查看 Project AGENTS.md"),()=>openDetail({kind:"instructions",scope:"project",project})),node("h4",ui("所屬對話")),node("p",ui("對話數與關聯只涵蓋目前已載入的對話"),"muted"));if(threads.length)content.append(table([ui("對話"),ui("狀態"),ui("模型"),ui("最近活動")],threads.map(thread=>{const row=node("tr");cell(row).append(threadLink(thread));cell(row).append(statusBadge(thread));cell(row,thread.model||"--");cell(row,when(thread.updated_at));return row;})));else content.append(node("p",ui("目前載入範圍沒有所屬對話"),"empty"));
+  }else if(detail.kind==="instructions"){
+    $("detail-title").textContent=detail.scope==="global"?"Global AGENTS.md":(detail.project.name||detail.project.id)+" · AGENTS.md";content.append(node("p",ui("唯讀顯示目前來源的指示文件, 不會變更這次對話的指示"),"muted"));if(detail.instructionsError)content.append(node("p",detail.instructionsError,"empty"));else if(!detail.instructionsLoaded)content.append(node("p",ui("讀取文件中"),"empty"));else{const documents=detail.instructionsContent?.documents||[];if(!documents.length)content.append(node("p",ui("目前來源沒有可讀取的 AGENTS.md"),"empty"));for(const document of documents){content.append(node("h4",document.file||"AGENTS.md"),metadataList([[ui("讀取大小 (bytes)"),fmt(document.read_bytes)]]),node("pre",document.text||"--","payload skill-document"));if(document.truncated)content.append(node("p",ui("文件較長, 顯示前段內容"),"muted"));}}
   }else if(detail.kind==="tool"||detail.kind==="nested-tool"){
     const nested=detail.kind==="nested-tool",key=nested?"nested_tools":"tools",threads=(data.codex.threads||[]).filter(t=>(!detail.ids||detail.ids.includes(t.thread_id))&&t[key]?.[detail.tool]);
     $("detail-title").textContent=(nested?ui("exec 內層工具 · "):ui("工具明細 · "))+detail.tool;
@@ -757,6 +804,12 @@ function renderDetail(){
   }else if(detail.kind==="operation"){
     const event=detail.event;$("detail-title").textContent=event.operation;
     content.append(metadataList([[ui("呼叫時間"),when(event.timestamp)],[ui("工具回傳時間"),when(event.completed_at)],[ui("工具耗時 (ms)"),fmt(event.duration_ms)],[ui("工作目錄名稱"),event.repository||ui("未知")],[ui("工具 Call ID"),event.call_id]]));
+    if((data.codex.git?.events||[]).some(item=>item.thread_id===event.thread_id&&item.call_id===event.call_id&&item.operation===event.operation)){
+      content.append(node("h4",ui("Git 指令")),node("pre",detail.gitError||(!detail.gitLoaded?ui("讀取內容中"):(detail.gitContent?.commands||[]).join("\n")||"--"),"payload"));
+      content.append(structuredPayload(ui(detail.gitContent?.output_scope==="outer_scope"?"外層工具回覆":"Git 回覆"),detail.gitError||(!detail.gitLoaded?ui("讀取內容中"):detail.gitContent?.output??"--")));
+      if(detail.gitContent?.output_scope==="outer_scope")content.append(node("p",ui("此回覆來自整次工具呼叫, 可能包含其他指令的輸出"),"muted"));
+      if(detail.gitContent?.truncated)content.append(node("p",ui("顯示前 32,768 字元"),"muted"));
+    }
     const t=data.codex.threads.find(item=>item.thread_id===event.thread_id);if(t)content.append(threadLink(t,ui("查看對話 · ")+title(t)));
   }else if(detail.kind==="file"){
     const e=detail.event;$("detail-title").textContent=ui("檔案操作 · ")+(fileLabels[e.operation]||e.operation);
@@ -765,9 +818,11 @@ function renderDetail(){
   }else if(detail.kind==="skill"){
     $("detail-title").textContent=ui("Skill 讀取 · ")+detail.skill;
     const events=(data.codex.skills?.events||[]).filter(event=>event.skill===detail.skill);
+    if(detail.event)content.append(metadataList([[ui("時間"),when(detail.event.timestamp)],["Thread ID",detail.event.thread_id],["Call ID",detail.event.call_id]]));
     content.append(node("p",fmt(data.codex.skills?.counts?.[detail.skill]||0)+ui(" 次讀取"),"detail-total"));
     content.append(node("h4",ui("Skill 檔案")));
-    if(!detail.documents){content.append(node("p",detail.documentError||ui("讀取文件中"),"empty"));if(!detail.documentError&&!detail.documentLoading)loadSkillDocuments(detail);}
+    if(!detail.event)content.append(node("p",ui("選擇讀取紀錄以查看文件"),"muted"));
+    else if(!detail.documents){content.append(node("p",detail.documentError||ui("讀取文件中"),"empty"));if(!detail.documentError&&!detail.documentLoading)loadSkillDocuments(detail);}
     else if(!detail.files?.length)content.append(node("p",ui("找不到這個 Skill 的本機文件"),"empty"));
     else{
       if(detail.root)content.append(metadataList([[ui("Skill 位置"),detail.root]]));
@@ -780,7 +835,7 @@ function renderDetail(){
       else if(detail.documentError)content.append(node("p",detail.documentError,"empty"));
       else if(selected){content.append(metadataList([[ui("讀取大小 (bytes)"),fmt(selected.read_bytes)],["SHA-256",selected.sha256]]),node("pre",selected.text,"payload skill-document"));if(selected.truncated)content.append(node("p",ui("文件較長, 顯示前段內容"),"muted"));}
     }
-    content.append(node("h4",ui("近期讀取紀錄")),table([ui("時間"),ui("對話")],events.map(event=>{const row=node("tr");cell(row,when(event.timestamp));eventThreadCell(row,event);return row;})));
+    content.append(node("h4",ui("近期讀取紀錄")),table([ui("時間"),ui("對話"),ui("操作")],events.map(event=>{const row=node("tr");cell(row,when(event.timestamp));eventThreadCell(row,event);cell(row).append(button(ui("查看明細"),()=>openDetail({kind:"skill",skill:event.skill,event}),"link"));return row;})));
   }else if(detail.kind==="error"){
     const e=detail.event;$("detail-title").textContent=errorReason(e);
     content.append(metadataList([[ui("時間"),when(e.timestamp)],[ui("等級"),severityTag(e.severity)],[ui("類型"),errorCategories[e.category]||e.category],[ui("來源"),errorSources[e.source]||e.source],[ui("代碼"),e.code||"--"],[ui("錯誤類型"),e.error_type||"--"],[ui("來源模組"),e.module||"--"],[ui("操作"),e.method||"--"],["HTTP status",fmt(e.http_status)],[ui("命令回傳代碼"),fmt(e.exit_code)],["Thread ID",e.thread_id||"--"],["Call ID",e.call_id||"--"]]));
@@ -795,10 +850,10 @@ function renderDetail(){
     const source=(data.mcp?.servers||[]).find(item=>item.server===detail.server),events=(data.mcp?.events||[]).filter(event=>event.server===detail.server);$("detail-title").textContent=detail.server;
     if(source){
       const head=node("div",null,"source-detail-head"),tags=node("div",null,"tag-line");tags.append(...mcpTags(source,events),connectionBadge(source),tag(source.enabled?source.origin==="configured"?ui("已設定"):ui("有紀錄"):ui("已關閉"),source.enabled?"configured":"disabled"));
-      head.append(tags,button(ui("查看來源頁面"),()=>{const server=detail.server;$("detail-dialog").close();navigateToMcpSource(server);},"source-open"));content.append(head);
+      head.append(tags,button(ui("查看來源頁面"),()=>{const server=detail.server;$("detail-dialog").close();navigateToMcpSource(server);},"source-open"));
       if(source.description)content.append(node("p",source.description,"tool-purpose"));
-      const summary=node("div",null,"cards source-detail-cards");cards(summary,[[ui("工具呼叫"),fmt(source.calls),""],[ui("exec 辨識"),fmt(source.recognized),""],[ui("已提供結果"),fmt(source.known_status),""],[ui("錯誤"),fmt(source.errors),""]]);content.append(summary);
-      const times=[];if(source.last_at)times.push([ui("最近活動"),when(source.last_at)]);if(source.connection?.last_response_at)times.push([ui("最後回應"),when(source.connection.last_response_at)]);if(source.connection?.pending_calls)times.push([ui("等待回應"),fmt(source.connection.pending_calls)]);if(times.length)content.append(metadataList(times));
+      const summary=node("div",null,"cards source-detail-cards");cards(summary,[[ui("工具呼叫"),fmt(source.calls),""],[ui("exec 辨識"),fmt(source.recognized),""],[ui("已提供結果"),fmt(source.known_status),""],[ui("錯誤"),fmt(source.errors),""]]);content.append(summary,head);
+      const times=[];if(source.connection?.last_response_at)times.push([ui("最後回應"),when(source.connection.last_response_at)]);if(source.connection?.pending_calls)times.push([ui("等待回應"),fmt(source.connection.pending_calls)]);if(times.length)content.append(metadataList(times));
     }
     if(data.mcp?.telemetry?.[detail.server])content.append(telemetryPanel(detail.server,data.mcp.telemetry[detail.server]));
     const metrics=mcpMetrics(events,"detail:source:"+detail.server);if(metrics)content.append(metrics);if(events.length)content.append(node("h4",ui("操作紀錄")),table([ui("時間"),ui("工具"),ui("結果"),ui("耗時 (ms)"),ui("操作摘要")],events.map(event=>{const row=node("tr");cell(row,when(event.timestamp));cell(row,event.tool,"mono");cell(row,labels.status[event.result?.status]||event.result?.status||"--");valueCell(row,event.duration_ms);cell(row,mcpBrief(event));return clickableRow(row,()=>openDetail({kind:"mcp",event}));}),ui("操作紀錄"),"detail:source:"+detail.server+":events"));
@@ -806,6 +861,7 @@ function renderDetail(){
     const e=detail.event,full=e.server==="web"?"web__run":"mcp__"+e.server+"__"+e.tool;
     $("detail-title").textContent=e.server+" · "+e.tool;purposeBlock(content,full);
     content.append(metadataList([[ui("來源"),e.server],[ui("分類"),ui(data.mcp.categories[e.category])||e.category],[ui("紀錄方式"),e.nested?ui("exec 程式碼中的呼叫位置"):ui("工具呼叫")],[ui("時間"),when(e.timestamp)],[ui("回傳時間"),when(e.completed_at)],[ui("耗時 (ms)"),fmt(e.duration_ms)],[ui("exec 整次耗時 (ms)"),fmt(e.container_duration_ms)],[ui("結果"),labels.status[e.result?.status]||e.result?.status||ui("未知")],["Call ID",e.call_id]]));
+    const source=(data.mcp?.servers||[]).find(item=>item.server===e.server);if(source){content.append(node("h4",ui("來源使用摘要")),metadataList([[ui("工具呼叫"),fmt(source.calls)],[ui("exec 辨識"),fmt(source.recognized)],[ui("工具已回傳"),fmt(source.returned)],[ui("已提供結果"),fmt(source.known_status)],[ui("錯誤"),fmt(source.errors)],[ui("平均耗時 (ms)"),fmt(source.average_ms)],["P99 (ms)",fmt(source.p99_ms)],[ui("最近活動"),when(source.last_at)]]));const report=data.mcp.telemetry?.[e.server];if(report)content.append(telemetryPanel(e.server,report,"summary"));}
     const names={format:ui("文件格式"),ocr_mode:ui("OCR 模式"),write:ui("寫入設定"),write_output:ui("寫出文件"),max_files:ui("檔案數量上限"),written:ui("已寫入"),truncated:ui("內容截斷"),content_chars:ui("文字長度 (字元)"),ocr_status:ui("OCR 結果"),ocr_eligible_items:ui("待處理 OCR 項目"),ocr_processed_items:ui("已處理 OCR 項目"),ocr_omitted_items:ui("省略 OCR 項目"),ocr_errors:ui("OCR 錯誤數"),changed_files:ui("差異檔案數"),only_in_source_files:ui("只在來源的檔案數"),only_in_target_files:ui("只在目標的檔案數"),evidence_runs:ui("驗證紀錄數"),checks_passed:ui("檢查通過數"),checks_failed:ui("檢查失敗數"),checks_skipped:ui("略過檢查數"),findings:ui("發現項目數"),findings_critical:"Critical",findings_high:"High",findings_medium:"Medium",findings_low:"Low",retries:ui("重試次數"),http_attempts:ui("HTTP 嘗試次數"),input_tokens:"Input tokens",output_tokens:"Output tokens"};
     const selected={...e.metadata,...e.result},items=Object.entries(selected).filter(([key,v])=>!["references","resources","status"].includes(key)&&["string","boolean","number"].includes(typeof v)).map(([key,v])=>[names[key]||key,typeof v==="boolean"?(v?ui("是"):ui("否")):typeof v==="number"?fmt(v):labels.status[v]||v]);
     if(items.length)content.append(node("h4",ui("操作摘要")),metadataList(items));
@@ -818,7 +874,7 @@ function renderDetail(){
     const e=detail.event;$("detail-title").textContent=logMessage(e);
     content.append(metadataList([[ui("時間"),when(e.timestamp)],[ui("等級"),severityTag(e.severity)],[ui("來源"),logSource(e.source)],[ui("模組"),e.module||"--"],[ui("代碼"),e.code||"--"],[ui("操作"),e.method||e.tool||ui("未知")],[ui("錯誤類型"),e.error_type||"--"],[ui("檔案"),e.file||"--"],[ui("紀錄 ID"),fmt(e.record_id)],["Thread ID",e.thread_id||"--"],["HTTP status",fmt(e.http_status)]]));
     if(e.thread_id)content.append(threadLink(threadIndex.get(e.thread_id)||{...e,metadata_only:true,event_only:true},ui("查看對話")));
-    content.append(node("h4",ui("紀錄欄位")),node("pre",JSON.stringify(e,null,2),"payload"));
+    content.append(structuredPayload(ui("紀錄欄位"),e));
   }
   if(detail.kind==="sqlite"){
     const e=detail.event;$("detail-title").textContent=ui("SQL 操作")+" · "+e.statement;
@@ -833,19 +889,30 @@ function renderDetail(){
     if(s.source==="monitor")content.append(node("p",ui("程式事件保存於 CODEX_HOME/monitoring/local-activity-monitor.jsonl, 最多保留目前與上一份檔案. 效能樣本與本輪狀態事件仍保存在記憶體"),"muted"));
     if(s.source==="session"||s.source==="jev_telemetry")content.append(button(ui("查看完整操作紀錄"),()=>{$("detail-dialog").close();navigateToTab(s.source==="session"?"codex":"jev",s.source==="session"?"view-codex":"mcp-telemetry");},"link"));
   }
-  if(detail.kind==="thread")groupThreadDetails(content);
+  for(const time of $("detail-dialog").querySelectorAll(".detail-time"))time.remove();
+  const timestamp=detail.kind==="mcp-source"?(data.mcp?.servers||[]).find(source=>source.server===detail.server)?.last_at:detail.event?.timestamp||detail.thread?.updated_at||detail.record?.timestamp;
+  if(timestamp){const time=node("time",ui(detail.kind==="mcp-source"||detail.kind==="thread"?"最近活動":"時間")+": "+when(timestamp),"detail-time");time.dateTime=timestamp;$("detail-title").after(time);}
+  if(detail.kind==="thread"){const children=(data.codex.threads||[]).filter(thread=>thread.execution?.parent_thread_id===detail.thread.thread_id);if(children.length)content.append(node("h4","Subagents"),node("p",ui("顯示已載入且有上層 Thread ID 的子 agent, 狀態取自來源最近紀錄"),"muted"),table(subagentHeaders(),subagentRows(children),"Subagents"));groupThreadDetails(content);}
   attachTables();
 }
+async function loadProjectContent(selected){selected.projectLoading=true;try{const result=await request("/api/codex/project?project_id="+encodeURIComponent(selected.project.id),{cache:"no-store"});if(!result.ok)throw new Error();selected.projectContent=result.data;}catch{selected.projectError=ui("專案設定讀取失敗");}finally{selected.projectLoading=false;selected.projectLoaded=true;if(detail===selected)renderDetail();}}
+async function loadInstructions(selected){selected.instructionsLoading=true;try{const query=new URLSearchParams({scope:selected.scope});if(selected.project)query.set("project_id",selected.project.id);const result=await request("/api/codex/instructions?"+query,{cache:"no-store"});if(!result.ok)throw new Error();selected.instructionsContent=result.data;}catch{selected.instructionsError=ui("指示文件讀取失敗");}finally{selected.instructionsLoading=false;selected.instructionsLoaded=true;if(detail===selected)renderDetail();}}
 async function loadSqlContent(selected){
   selected.sqlLoading=true;
   try{const response=await request("/api/codex/sql?"+new URLSearchParams({id:selected.event.id}),{cache:"no-store"});if(!response.ok)throw new Error(ui("SQL 內容無法讀取"));selected.sqlContent=response.data;selected.sqlLoaded=true;}
   catch(error){selected.sqlError=error.message||ui("SQL 內容無法讀取");}
   finally{selected.sqlLoading=false;if(detail===selected){const scroll=$("detail-content").scrollTop;renderDetail();$("detail-content").scrollTop=scroll;}}
 }
+async function loadGitContent(selected){
+  selected.gitLoading=true;if(detail===selected)renderDetail();
+  try{const event=selected.event,response=await request("/api/codex/git?"+new URLSearchParams({thread_id:event.thread_id,call_id:event.call_id,operation:event.operation}),{cache:"no-store"});if(!response.ok)throw new Error(ui("Git 明細無法讀取"));selected.gitContent=response.data;selected.gitLoaded=true;}
+  catch(error){selected.gitError=error.message||ui("Git 明細無法讀取");}
+  finally{selected.gitLoading=false;if(detail===selected){const scroll=$("detail-content").scrollTop;renderDetail();$("detail-content").scrollTop=scroll;}}
+}
 async function loadSkillDocuments(selected,path){
   const token={};selected.documentRequest=token;selected.documentLoading=true;selected.documentError=null;if(path)selected.documentPath=path;if(detail===selected)renderDetail();
   try{
-    const response=await request("/api/codex/skill?"+new URLSearchParams({skill:selected.skill,...path?{file:path}:{}}),{cache:"no-store"});if(!response.ok)throw new Error(ui("Skill 文件觀察已關閉"));if(selected.documentRequest!==token)return;
+    const response=await request("/api/codex/skill?"+new URLSearchParams({skill:selected.skill,...selected.event?{thread_id:selected.event.thread_id,call_id:selected.event.call_id}:{},...path?{file:path}:{}}),{cache:"no-store"});if(!response.ok)throw new Error(ui("Skill 文件觀察已關閉"));if(selected.documentRequest!==token)return;
     selected.files=response.data.files;selected.root=response.data.root;selected.filesTruncated=response.data.files_truncated;
     const documents=response.data.documents;selected.documents=path?[...(selected.documents||[]).filter(file=>file.relative_path!==path),...documents]:documents;
     if(!path)selected.documentPath=(documents.find(file=>file.name.toLowerCase()==="readme.md")||documents[0])?.relative_path;
@@ -863,8 +930,8 @@ async function openJev(call,thread,remember=true,scroll=0){
     const content=$("detail-content");content.replaceChildren();
     const t=thread||data.codex.threads.find(item=>item.thread_id===call.thread_id);if(t)content.append(threadLink(t,ui("返回對話 · ")+title(t)));
     content.append(metadataList([[ui("呼叫時間"),when(call.timestamp)],[ui("回傳時間"),when(call.completed_at)],[ui("工具 Call ID"),call.call_id]]));
-    content.append(node("h4",ui("送出至 Jev")),node("pre",result.request==null?ui("本機紀錄未提供獨立的 Jev request"):JSON.stringify(result.request,null,2),"payload"));
-    content.append(node("h4",result.response_scope==="containing_tool_call"?ui("包含 Jev 的工具呼叫回傳"):ui("Jev 回傳")),node("pre",result.response==null?ui("本機紀錄未提供回傳內容"):typeof result.response==="string"?result.response:JSON.stringify(result.response,null,2),"payload"));
+    content.append(structuredPayload(ui("送出至 Jev"),result.request==null?ui("本機紀錄未提供獨立的 Jev request"):result.request));
+    content.append(structuredPayload(result.response_scope==="containing_tool_call"?ui("包含 Jev 的工具呼叫回傳"):ui("Jev 回傳"),result.response==null?ui("本機紀錄未提供回傳內容"):result.response));
   }catch(error){if(detail===selected)$("detail-content").replaceChildren(node("p",error.message||ui("內容讀取失敗"),"empty"));}
   finally{if(detail===selected)$("detail-content").scrollTop=scroll;}
 }
@@ -880,7 +947,7 @@ function compatibleSettings(saved,current,categories){
 async function refresh(){
   if(busy){refreshQueued=true;return;}busy=true;const current=version;
   try{
-    const url="/api/snapshot?window="+encodeURIComponent($("window").value);
+    const url="/api/snapshot?window="+encodeURIComponent(activeSourceWindow());
     let response=await request(url,{cache:"no-store"});if(!response.ok)throw new Error();let next=response.data;
     if(loadedRevision&&next.revision&&loadedRevision!==next.revision){
       if(pendingRevision!==next.revision){pendingRevision=next.revision;$("live").textContent=ui("程式已更新, 準備重新載入");return;}
@@ -929,7 +996,18 @@ function renderObservationSettings(){
   }
   search.addEventListener("input",()=>{const query=search.value.trim().toLowerCase();for(const card of sources.children)card.hidden=!card.dataset.sourceSearch.includes(query);});
   recording.append(node("p",ui("紀錄設定由各 MCP 來源管理"),"muted"));
-  for(const source of data.mcp?.servers||[]){if(source.server==="web")continue;const state=data.mcp.recording_status?.[source.server],row=node("div",null,"setting-row");row.append(node("span",source.server,"mono"),tag(state?.enabled==null?"--":ui(state.enabled?"已啟用":"已停用")));if(state?.health)row.append(node("span",logHealthLabels[state.health]||state.health,"muted"));recording.append(row);}if(!data.mcp?.servers?.length)recording.append(node("p","--","empty"));syncHelp();syncModalDrag($("settings-dialog"));
+  const recordingCards=node("div",null,"recording-cards");recording.append(recordingCards);
+  for(const source of data.mcp?.servers||[]){
+    if(source.server==="web")continue;
+    const state=data.mcp.recording_status?.[source.server],report=data.mcp.telemetry?.[source.server],card=node("article",null,"recording-card"),head=node("header"),items=[],flags=Object.entries(state?.flags||{});
+    head.append(node("strong",source.server,"mono"),tag(ui(data.mcp.categories[source.category])||source.category));card.append(head);
+    if(flags.length)for(const [key,flag]of flags){const label=key==="recording_enabled"?ui("紀錄開關"):key==="telemetry_enabled"?ui("Telemetry 開關"):metricLabel(key);items.push([label,tag(ui(flag.enabled?"已啟用":"已停用"),flag.enabled?"enabled":"disabled"),ui("來源回報的紀錄或 Telemetry 開關")+". "+key]);}
+    else items.push([ui("來源紀錄"),tag(state?.enabled==null?ui("未回報開關"):ui(state.enabled?"已啟用":"已停用"),state?.enabled==null?"unknown":state.enabled?"enabled":"disabled"),ui("來源回報的紀錄或 Telemetry 開關")]);
+    const observed=source.calls>0||source.recognized>0||(report?.summary?.calls||0)>0||(report?.recent?.length||0)>0,active=source.enabled&&data.settings.observations.mcp&&(data.settings.observations.codex||report&&report.health!=="paused");
+    items.push([ui("本機觀察"),tag(ui(!active?"觀察已暫停":observed?"已取得紀錄":"等待紀錄"),!active?"paused":observed?"observed":"waiting")]);card.append(metadataList(items));
+    const meta=node("div",null,"recording-meta");if(state?.health)meta.append(tag(labels.status[state.health]||logHealthLabels[state.health]||state.health));if(state?.observed_at)meta.append(node("time",when(state.observed_at)));if(meta.childElementCount)card.append(meta);recordingCards.append(card);
+  }
+  if(!recordingCards.childElementCount)recording.append(node("p","--","empty"));syncHelp();syncModalDrag($("settings-dialog"));
 }
 function openSettings(){
   $("language-select").value=locale;
@@ -1002,14 +1080,7 @@ function adaptTable(view){
   for(const th of view.headerCells)if(th.querySelector("button"))th.querySelector("button").tabIndex=stacked?-1:0;
   syncTableHead(view);
 }
-function syncTableHead(view){
-  const head=view.table.tHead;if(!head)return;
-  if(!view.table.closest(".table-scroll")){head.style.transform="";return;}
-  const rect=view.table.getBoundingClientRect(),content=view.table.closest("dialog")?.querySelector("#detail-content,.settings-content"),top=content?content.getBoundingClientRect().top:0,offset=Math.max(0,Math.min(top-rect.top,rect.height-head.offsetHeight));
-  head.style.transform="translateY("+offset+"px)";
-}
-let tableHeaderFrame=null;
-window.addEventListener("scroll",()=>{if(tableHeaderFrame!=null)return;tableHeaderFrame=requestAnimationFrame(()=>{tableHeaderFrame=null;for(const view of tableViews.values())if(view.table.getClientRects().length&&view.table.closest(".table-scroll"))syncTableHead(view);});},{capture:true,passive:true});
+function syncTableHead(view){if(view.table.tHead)view.table.tHead.style.transform="";}
 const defaultColumnHeaders=["最近活動時間","時間","呼叫時間","對話名稱","對話","專案","Skill","操作","SQL 操作","檔案位置","資料庫位置","工具","來源","Model","Reasoning 等級","狀態","結果","工具回傳狀態","錯誤說明","等級","操作類型","資料庫引擎","類型","位置","活動來源","Input","Cached input","Output","Reasoning output","Total","工具 (次)","工作總耗時 (秒)","耗時 (ms)","工具耗時 (ms)","工具整次耗時 (ms)","工具回傳時間","紀錄方式","代碼","Thread ID","Call ID"];
 function columnOrder(key){const view=tableViews.get(key),saved=tableStates[key]?.columns,defaults=key==="docs-rows"?view.headers:defaultColumnHeaders.filter(header=>view.headers.includes(header)).concat(view.headers);return [...new Set((Array.isArray(saved)?saved:[]).filter(header=>view.headers.includes(header)).concat(defaults))].map(header=>view.headers.indexOf(header));}
 function applyTableHeatmap(key){
@@ -1137,15 +1208,17 @@ $("apply-display").addEventListener("click",()=>{
   display=next;$("display-options").value=options.join(", ");for(const view of chartViews.values())if(view.fields.top){view.settings.top=display.ranking==="all"?0:display.ranking;fillDisplayOptions(view.fields.top,display.ranking,true);}
   fillDisplayOptions($("page-size"),display.table);for(const key of tableViews.keys()){tableStates[key]={...tableStates[key],size:display.table,page:1};redrawTable(key);}persistTables();renderCharts();attachTables();feedback("display-message",ui("顯示數量已套用到所有排行榜與表格"));
 });
+const tabDescriptions=editableLabels({summary:"查看對話活動與執行狀態",tools:"查看工具呼叫與耗時",files:"查看檔案讀寫操作",mcp:"查看 MCP 來源與操作",errors:"查看錯誤與來源 Log",subagents:"顯示已載入且有上層 Thread ID 的子 agent, 狀態取自來源最近紀錄",projects:"查看專案與所屬對話",archived:"查看已封存的對話",dots:"查看 My dots 產出與對話",logs:"查看錯誤與來源 Log",git:"查看 Git 操作與活動趨勢",checks:"查看版本控制與驗證操作"});
+function setupTabDescriptions(){for(const tab of document.querySelectorAll('[role="tab"]:not([data-tab])')){const panel=$(tab.getAttribute("aria-controls")),description=panel?.querySelector(".tab-description");if(description)bindHelp(tab,description.textContent);else{const key=tab.dataset.modalKey||tab.id.replace(/^(?:codex-|tab-|diagnostic-)/,"");bindHelp(tab,tabDescriptions[key]||ui("查看此分類的資料與設定"));}}}
 function modalTabs(container,groups,id,selected,onSelect){
   const nav=node("div",null,"document-modes modal-tabs"),entries=[];nav.setAttribute("role","tablist");nav.setAttribute("aria-label",ui("明細分類"));
-  for(const [index,[key,label,panel]]of groups.entries()){const tab=button(label,()=>select(key)),tabId=id+"-tab-"+index,panelId=id+"-panel-"+index;tab.id=tabId;tab.dataset.modalKey=key;tab.dataset.copyBase=label;tab.setAttribute("role","tab");tab.setAttribute("aria-controls",panelId);panel.id=panelId;panel.setAttribute("role","tabpanel");panel.setAttribute("aria-labelledby",tabId);entries.push({key,tab,panel});nav.append(tab);}
-  function select(key){for(const entry of entries){const active=entry.key===key;entry.tab.setAttribute("aria-selected",String(active));entry.tab.tabIndex=active?0:-1;entry.panel.hidden=!active;}onSelect?.(key);}
+  for(const [index,[key,label,panel]]of groups.entries()){const tab=button(label,()=>select(key)),tabId=id+"-tab-"+index,panelId=id+"-panel-"+index;tab.id=tabId;tab.dataset.modalKey=key;tab.dataset.copyBase=label;tab.setAttribute("role","tab");bindHelp(tab,tabDescriptions[key]||ui("查看此分類的資料與設定"));tab.setAttribute("aria-controls",panelId);panel.id=panelId;panel.setAttribute("role","tabpanel");panel.setAttribute("aria-labelledby",tabId);entries.push({key,tab,panel});nav.append(tab);}
+  function select(key){container.scrollTop=0;const dialog=container.closest("dialog");if(dialog)dialog.scrollTop=0;const scroller=container.closest(".settings-content,#detail-content");if(scroller)scroller.scrollTop=0;for(const entry of entries){const active=entry.key===key;entry.tab.setAttribute("aria-selected",String(active));entry.tab.tabIndex=active?0:-1;entry.panel.hidden=!active;}onSelect?.(key);}
   for(const [index,entry]of entries.entries())entry.tab.addEventListener("keydown",event=>{if(event.altKey)return;if(event.altKey||!["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","Home","End"].includes(event.key))return;event.preventDefault();const next=event.key==="Home"?0:event.key==="End"?entries.length-1:(index+(["ArrowRight","ArrowDown"].includes(event.key)?1:entries.length-1))%entries.length;select(entries[next].key);entries[next].tab.focus();});
   const previous=container.previousElementSibling;if(previous?.classList.contains("modal-tabs"))previous.remove();container.before(nav);container.replaceChildren(...entries.map(entry=>entry.panel));select(entries.some(entry=>entry.key===selected)?selected:entries[0].key);dragSubTabs(nav,id,tab=>tab.dataset.modalKey);
 }
 function groupThreadDetails(content){
-  const groups=new Map(),headingGroup=new Map([[ui("工具使用 (次)"),"tools"],[ui("exec 內辨識到的工具"),"tools"],[ui("工具呼叫紀錄"),"tools"],[ui("MCP 觀察"),"mcp"],[ui("檔案讀寫紀錄"),"files"],[ui("MCP / Web 操作"),"mcp"],[ui("網路參考"),"mcp"],[ui("錯誤與警告"),"errors"]]),names={summary:ui("對話資訊"),tools:ui("工具"),files:ui("檔案"),mcp:"MCP",errors:ui("錯誤紀錄")};let key="summary";
+  const groups=new Map(),headingGroup=new Map([[ui("工具使用 (次)"),"tools"],[ui("exec 內辨識到的工具"),"tools"],[ui("工具呼叫紀錄"),"tools"],[ui("MCP 觀察"),"mcp"],[ui("檔案讀寫紀錄"),"files"],[ui("MCP / Web 操作"),"mcp"],["Subagents","subagents"],[ui("網路參考"),"mcp"],[ui("錯誤與警告"),"errors"]]),names={summary:ui("對話資訊"),tools:ui("工具"),files:ui("檔案"),mcp:"MCP",subagents:"Subagents",errors:ui("錯誤紀錄")};let key="summary";
   for(const child of [...content.children]){if(child.tagName==="H4"&&headingGroup.has(child.textContent))key=headingGroup.get(child.textContent);if(!groups.has(key))groups.set(key,node("section"));groups.get(key).append(child);}
   modalTabs(content,[...groups].map(([id,panel])=>[id,names[id]||id,panel]),"thread-detail",detail.section,key=>detail.section=key);
 }
@@ -1155,9 +1228,10 @@ function groupSettings(){
   const position=groups.findIndex(([key])=>key==="設定檔");for(const [index,[key,id]]of [["監測項目","observation-data"],["MCP 來源","observation-mcp"],["來源紀錄","observation-recording"]].entries()){const section=node("section");section.append(node("h4",ui(key)));const target=node("div");target.id=id;section.append(target);groups.splice(position+index,0,[key,ui(key),section]);}
   modalTabs(content,groups,"settings-sections","外觀");const nav=content.previousElementSibling,layout=node("div",null,"settings-layout");nav.setAttribute("aria-label",ui("設定分類"));nav.setAttribute("aria-orientation","vertical");content.before(layout);layout.append(nav,content);status.className="settings-feedback";layout.before(status);
 }
-let conversationSource=["conversations","usage","dots"].includes(preferences.conversationSource)?preferences.conversationSource:"conversations";
-function selectConversationSource(key){conversationSource=key;preferences.conversationSource=key;for(const item of ["conversations","usage","dots"]){const selected=item===key,tab=$("codex-"+item);tab.setAttribute("aria-selected",String(selected));tab.tabIndex=selected?0:-1;$(item==="conversations"?"conversation-content":item+"-content").hidden=!selected;}if(data){attachTables();renderCharts();renderSources();saveView();}}
-for(const [index,key]of ["conversations","usage","dots"].entries()){const tab=$("codex-"+key);tab.addEventListener("click",()=>selectConversationSource(key));tab.addEventListener("keydown",event=>{if(event.altKey)return;if(!["ArrowLeft","ArrowRight","Home","End"].includes(event.key))return;event.preventDefault();const items=["conversations","usage","dots"],next=event.key==="Home"?0:event.key==="End"?2:(index+(event.key==="ArrowRight"?1:2))%3;selectConversationSource(items[next]);$("codex-"+items[next]).focus();});}selectConversationSource(conversationSource);dragSubTabs($("conversation-tabs"),"codex",tab=>tab.id);
+if(preferences.tab==="codex"&&preferences.conversationSource==="usage")preferences.tab="usage";
+let conversationSource=["conversations","subagents","projects","archived","dots"].includes(preferences.conversationSource)?preferences.conversationSource:"conversations";
+function selectConversationSource(key){conversationSource=key;preferences.conversationSource=key;for(const item of ["conversations","subagents","projects","archived","dots"]){const selected=item===key,tab=$("codex-"+item);tab.setAttribute("aria-selected",String(selected));tab.tabIndex=selected?0:-1;$(item==="conversations"?"conversation-content":item+"-content").hidden=!selected;}if(data){attachTables();syncSourceWindow();renderCharts();renderSources();saveView();if(data.codex?.activity_scope?.window!==activeSourceWindow()){version++;refresh();}}}
+for(const [index,key]of ["conversations","subagents","projects","archived","dots"].entries()){const tab=$("codex-"+key);tab.addEventListener("click",()=>selectConversationSource(key));tab.addEventListener("keydown",event=>{if(event.altKey)return;if(!["ArrowLeft","ArrowRight","Home","End"].includes(event.key))return;event.preventDefault();const items=["conversations","subagents","projects","archived","dots"],next=event.key==="Home"?0:event.key==="End"?items.length-1:(index+(event.key==="ArrowRight"?1:items.length-1))%items.length;selectConversationSource(items[next]);$("codex-"+items[next]).focus();});}selectConversationSource(conversationSource);dragSubTabs($("conversation-tabs"),"codex",tab=>tab.id);
 function usageWindow(minutes){return minutes==null?"--":minutes%1440===0?fmt(minutes/1440)+ui(" 天"):minutes%60===0?fmt(minutes/60)+ui(" 小時"):fmt(minutes)+ui(" 分鐘");}
 let usageModelCounts={},usageModelSegments={};
 function renderAllowance(id,usage){
@@ -1165,8 +1239,8 @@ function renderAllowance(id,usage){
 }
 function renderUsage(){
   const usage=data.codex.usage,threads=data.codex.threads||[],groups=new Map();
-  $("usage-observed").textContent=ui("最後觀測")+": "+when(usage?.updated_at);renderAllowance("usage-windows",usage);
-  cards("usage-cards",[[ui("方案"),usage?.plan_type||"--",usage?.limit_id||"--"],[ui("Credits 餘額"),fmt(usage?.credits?.balance),ui("來源提供的 credits")],[ui("Credits 可用"),usage?.credits?.has_credits==null?"--":ui(usage.credits.has_credits?"是":"否"),usage?.credits?.unlimited==null?"--":ui(usage.credits.unlimited?"無上限":"有上限")]]);
+  $("usage-observed").hidden=true;
+  cards("usage-cards",[[ui("方案"),usage?.plan_type||"--",usage?.limit_id||"--"],[ui("Credits 餘額"),fmt(usage?.credits?.balance),ui("來源提供的 credits")],[ui("最後觀測"),when(usage?.updated_at),ui("來源最後回報")],...(usage?.limits||[]).map(item=>[ui("剩餘比例")+" · "+usageWindow(item.window_minutes),item.remaining_percent==null?"--":fmt(item.remaining_percent)+"%",ui("重設時間")+": "+when(item.resets_at)])]);
   for(const thread of threads){const model=thread.model||"unknown";if(!groups.has(model))groups.set(model,{model,threads:0,known:0,complete:true,tokens:{}});const group=groups.get(model);group.threads++;const t=thread.tokens||{};group.complete&&=[t.input_tokens,t.cached_input_tokens,t.output_tokens,t.total_tokens].every(Number.isFinite)&&t.input_tokens>=t.cached_input_tokens&&t.input_tokens+t.output_tokens===t.total_tokens;if(Object.values(thread.tokens||{}).some(Number.isFinite))group.known++;for(const [key,value]of Object.entries(thread.tokens||{}))if(Number.isFinite(value))group.tokens[key]=(group.tokens[key]||0)+value;}
   replaceRows("usage-model-rows",...[...groups.values()].map(group=>{const row=node("tr");cell(row,group.model==="unknown"?"--":group.model,"mono");valueCell(row,group.threads);valueCell(row,group.known);for(const key of ["input_tokens","cached_input_tokens","output_tokens","reasoning_output_tokens","total_tokens"])valueCell(row,group.tokens[key]);valueCell(row,group.tokens.input_tokens>0&&group.tokens.cached_input_tokens!=null&&group.tokens.cached_input_tokens<=group.tokens.input_tokens?Math.round(group.tokens.cached_input_tokens/group.tokens.input_tokens*10000)/100:null);return row;}));
   usageModelCounts=Object.fromEntries([...groups.values()].filter(group=>group.tokens.total_tokens!=null).map(group=>[group.model,group.tokens.total_tokens]));usageModelSegments=Object.fromEntries([...groups.values()].map(group=>{const t=group.tokens,complete=group.complete&&[t.input_tokens,t.cached_input_tokens,t.output_tokens,t.total_tokens].every(Number.isFinite)&&t.input_tokens>=t.cached_input_tokens&&t.input_tokens+t.output_tokens===t.total_tokens;return [group.model,complete?[["一般輸入",t.input_tokens-t.cached_input_tokens],["快取輸入",t.cached_input_tokens],["輸出",t.output_tokens]]:[["未分類",t.total_tokens]]];}));
@@ -1174,15 +1248,15 @@ function renderUsage(){
 
   $("usage-note").textContent=ui("依模型分析對話 Token 用量與快取比例");
 }
-function renderDots(){const dots=data.codex.dots||{},events=dots.events||[];cards("dot-cards",[[ui("產出紀錄"),fmt(Array.isArray(dots.events)?events.length:null),ui("已載入的產出 metadata")],[ui("關聯對話"),fmt(Array.isArray(dots.events)?new Set(events.map(event=>event.thread_id)).size:null),ui("可從列表開啟對話")],[ui("活動快照項目"),fmt(dots.activity_items),ui("本機快照中的項目數")]]);replaceRows("dot-rows",...events.map(event=>{const row=node("tr");cell(row,when(event.timestamp));eventThreadCell(row,event);cell(row,event.artifact_type||"--");cell(row,event.thread_id,"mono");return row;}));$("dot-note").textContent=ui("查看 My dots 產出時間, 類型與關聯對話");}
+function renderDots(){const dots=data.codex.dots||{},events=dots.events||[];cards("dot-cards",[[ui("產出紀錄"),fmt(Number.isFinite(dots.total)?dots.total:Array.isArray(dots.events)?events.length:null),ui("已載入的產出 metadata")],[ui("關聯對話"),fmt(Array.isArray(dots.events)?new Set(events.map(event=>event.thread_id)).size:null),ui("可從列表開啟對話")],[ui("活動快照項目"),fmt(dots.activity_items),ui("本機快照中的項目數")]]);replaceRows("dot-rows",...events.map(event=>{const row=node("tr");cell(row,when(event.timestamp));eventThreadCell(row,event);cell(row,event.artifact_type||"--");cell(row,event.thread_id,"mono");return row;}));$("dot-note").textContent=ui("查看 My dots 產出時間, 類型與關聯對話");}
 
 let currentTabSettings=null;
 function tabScope(name){return name==="workflow"?$("view-"+activitySource):name==="errors"?$(diagnosticSource==="logs"?"view-logs":"error-content"):name==="codex"?$(conversationSource==="conversations"?"conversation-content":conversationSource+"-content"):$("view-"+name);}
 function visibleInScope(scope,element){return scope.contains(element)&&!element.closest("[hidden]");}
 function openTabSettings(name){
-  currentTabSettings=name;$("overview-layout-controls").hidden=name!=="overview";if(name==="overview")renderOverviewSettings();const scope=tabScope(name),charts=[...chartViews].filter(([id])=>visibleInScope(scope,$(id))),tables=[...tableViews].filter(([,view])=>visibleInScope(scope,view.table));
+  currentTabSettings=name;windowOptions($("tab-source-window"),true);$("tab-source-window").value=sourceWindows.tabs[sourceWindowKey(name)]||"inherit";$("overview-layout-controls").hidden=name!=="overview";if(name==="overview")renderOverviewSettings();const scope=tabScope(name),charts=[...chartViews].filter(([id])=>visibleInScope(scope,$(id))),tables=[...tableViews].filter(([,view])=>visibleInScope(scope,view.table));
   $("tab-settings-title").textContent=$("tab-"+name).textContent+ui(" · Tab 設定");$("tab-chart-controls").hidden=!charts.length;$("tab-table-controls").hidden=!tables.length;fillDisplayOptions($("tab-table-size"),display.table);$("tab-settings-message").textContent="";
-  const keys={overview:[],codex:["codex","metadata","usage"],tools:["tool_events"],mcp:["mcp"],web:["web"],files:["files"],sqlite:["sqlite"],jev:["jev","jev_calls"],git:["git"],workflow:["git","checks"],skills:["skills"],checks:["checks"],monitor:[],errors:["errors","logs"],logs:["logs","codex"]}[name]||[];
+  const keys={overview:[],usage:["usage"],codex:["codex","metadata"],tools:["tool_events"],mcp:["mcp"],web:["web"],files:["files"],sqlite:["sqlite"],jev:["jev","jev_calls"],git:["git"],workflow:["git","checks"],skills:["skills"],checks:["checks"],monitor:[],errors:["errors","logs"],logs:["logs","codex"]}[name]||[];
   $("tab-observations").replaceChildren(...keys.filter(key=>data.settings.observations[key]!=null).map(key=>{const row=node("label",null,"setting-row"),input=node("input");input.type="checkbox";input.className="switch";input.setAttribute("role","switch");input.checked=data.settings.observations[key];input.addEventListener("change",async()=>{const requested=input.checked;input.disabled=true;try{await changeSettings({observations:{[key]:requested}});feedback("tab-settings-message",ui("觀察設定已套用"));}catch(error){input.checked=!requested;feedback("tab-settings-message",error.message,"error");}finally{input.disabled=false;}});row.title=ui("啟用或停用此觀察項目, 不會修改來源紀錄");row.append(node("span",observationLabels[key]||key),input);return row;}));
   $("tab-observations-heading").hidden=!keys.length;openDialog($("tab-dialog"));
 }
@@ -1193,13 +1267,14 @@ function addTabSettings(){for(const tab of document.querySelectorAll("[data-tab]
 
 
 function configuration(){
-  saveView();preferences.tables=tableStates;preferences.tabOrder=tabOrder;const keys=["tab","inputs","page","appearance","display","charts","tables","tableSchema","tabOrder","copy","settings","locale","mcpSource","overview","highlightOrder","subOrders","cardOrders","diagnosticSource","activitySource","conversationSource","filterCollapsed","sectionCollapsed","chartDefaultsVersion"];
+  saveView();preferences.tables=tableStates;preferences.tabOrder=tabOrder;const keys=["tab","inputs","page","appearance","display","charts","tables","tableSchema","tabOrder","copy","settings","locale","mcpSource","overview","highlightOrder","subOrders","cardOrders","diagnosticSource","activitySource","conversationSource","filterCollapsed","sectionCollapsed","chartDefaultsVersion","sourceWindows"];
   return {application:"local-activity-monitor",kind:"settings",version:1,exported_at:new Date().toISOString(),preferences:Object.fromEntries(keys.filter(key=>preferences[key]!=null).map(key=>[key,preferences[key]]))};
 }
 function readConfiguration(value){
   const object=item=>item&&typeof item==="object"&&!Array.isArray(item),bounded=(items,max,check)=>object(items)&&Object.keys(items).length<=max&&Object.entries(items).every(([key,item])=>key.length<=400&&!["__proto__","constructor","prototype"].includes(key)&&check(item,key));
   if(!object(value)||value.application!=="local-activity-monitor"||value.kind!=="settings"||value.version!==1||!object(value.preferences)||(value.recording!=null&&typeof value.recording!=="boolean"))throw new Error(ui("設定檔格式或版本不支援"));
   const p=value.preferences,a=p.appearance,s=p.settings;
+  if(p.sourceWindows!=null&&(!object(p.sourceWindows)||!activityWindows.includes(p.sourceWindows.global)||!bounded(p.sourceWindows.tabs||{},64,(item,key)=>/^[a-z][a-z:-]{0,79}$/.test(key)&&activityWindows.includes(item))))throw new Error(ui("來源紀錄範圍設定格式無效"));
   if(p.locale!=null&&!["zh-TW","en","ja"].includes(p.locale))throw new Error(ui("設定檔格式或版本不支援"));
   if(!object(a)||!["auto","light","dark"].includes(a.mode)||!["slate","neutral"].includes(a.theme)||!["green","blue","orange"].includes(a.accent)||!Number.isInteger(a.font)||a.font<12||a.font>18||!validDisplay(p.display)||!object(s)||!Number.isInteger(s.interval)||s.interval<1||s.interval>3600||!Number.isInteger(s.max_files)||s.max_files<1||s.max_files>5000||typeof s.track_all!=="boolean")throw new Error(ui("外觀, 更新頻率或顯示數量不在可用範圍"));
   if(!bounded(s.observations,64,item=>typeof item==="boolean")||!bounded(s.mcp_sources||{},64,item=>typeof item==="boolean")||!bounded(s.mcp_categories||{},64,item=>typeof item==="string"&&item.length<=80)||!bounded(s.tool_descriptions||{},64,item=>typeof item==="string"&&item.length<=400)||!bounded(s.mcp_descriptions||{},64,item=>typeof item==="string"&&item.length<=400)||!bounded(s.mcp_tags||{},64,item=>Array.isArray(item)&&item.length<=4&&item.every(text=>typeof text==="string"&&text.trim()&&text.length<=40))||!bounded(p.copy||{},500,item=>typeof item==="string"&&item.length<=400)||!bounded(p.inputs||{},100,item=>typeof item==="string"&&item.length<=2000))throw new Error(ui("觀察設定或介面文字格式無效"));
@@ -1207,7 +1282,7 @@ function readConfiguration(value){
   if(typeof p.tab!=="string"||p.tab.length>80||!Number.isInteger(p.page)||p.page<1||!Array.isArray(p.tabOrder)||p.tabOrder.length>100||!p.tabOrder.every(key=>typeof key==="string"&&key.length<=80)||!Number.isInteger(p.tableSchema||1)||(p.tableSchema||1)>6)throw new Error(ui("Tab 或頁碼設定格式無效"));
   if(p.diagnosticSource!=null&&!["errors","logs"].includes(p.diagnosticSource)||p.activitySource!=null&&!["git","skills","checks"].includes(p.activitySource))throw new Error(ui("Tab 或頁碼設定格式無效"));
   if(p.mcpSource!=null&&(typeof p.mcpSource!=="string"||!/^[a-zA-Z0-9_.-]{1,80}$/.test(p.mcpSource)))throw new Error(ui("MCP 來源設定格式無效"));
-  if(p.conversationSource!=null&&!["conversations","usage","dots"].includes(p.conversationSource))throw new Error(ui("Tab 或頁碼設定格式無效"));
+  if(p.conversationSource!=null&&!["conversations","subagents","projects","archived","dots"].includes(p.conversationSource))throw new Error(ui("Tab 或頁碼設定格式無效"));
   if(p.highlightOrder!=null&&(!Array.isArray(p.highlightOrder)||p.highlightOrder.length>100||!p.highlightOrder.every(id=>typeof id==="string"&&id.length<=80))||p.subOrders!=null&&!bounded(p.subOrders,100,items=>Array.isArray(items)&&items.length<=100&&items.every(id=>typeof id==="string"&&id.length<=80)))throw new Error(ui("Tab 或頁碼設定格式無效"));
   if(p.cardOrders!=null&&!bounded(p.cardOrders,100,items=>Array.isArray(items)&&items.length<=100&&items.every(id=>typeof id==="string"&&id.length<=80)))throw new Error(ui("Tab 或頁碼設定格式無效"));
   if(p.filterCollapsed!=null&&!bounded(p.filterCollapsed,500,item=>typeof item==="boolean"))throw new Error(ui("篩選設定格式無效"));
@@ -1278,8 +1353,8 @@ $("language-select").addEventListener("change",()=>{if(!["zh-TW","en","ja"].incl
 $("settings-close").addEventListener("click",()=>$("settings-dialog").close());
 $("dark-toggle").addEventListener("click",()=>{appearance.mode=document.documentElement.dataset.mode==="dark"?"light":"dark";applyAppearance();saveView();});
 for(const el of document.querySelectorAll("#mode-options [data-mode]"))el.addEventListener("click",()=>{appearance.mode=el.dataset.mode;applyAppearance();saveView();});
-for(const [id,key]of [["theme-select","theme"],["accent-select","accent"],["font-size","font"]])$(id).addEventListener("change",()=>{if(key==="font")roundNumber($(id));if(!$(id).checkValidity()){applyAppearance();return;}appearance[key]=key==="font"?Number($(id).value):$(id).value;applyAppearance();saveView();feedback("settings-message",key==="font"?ui("字體大小已套用: ")+appearance.font+" px":ui("外觀已更新"));});
-$("font-size").addEventListener("input",()=>{const value=Number($("font-size").value);if(!$("font-size").checkValidity()||!Number.isInteger(value))return;appearance.font=value;applyAppearance();saveView();feedback("settings-message",ui("外觀已更新"));});
+for(const [id,key]of [["theme-select","theme"],["accent-select","accent"]])$(id).addEventListener("change",()=>{appearance[key]=$(id).value;applyAppearance();saveView();feedback("settings-message",ui("外觀已更新"));});
+$("font-size").addEventListener("keydown",event=>{if(event.key==="Enter"){event.preventDefault();$("apply-font").click();}});
 $("apply-font").addEventListener("click",()=>{const input=$("font-size");if(!roundNumber(input)||!input.checkValidity()){feedback("settings-message",ui("請輸入有效數值"),"error");return;}appearance.font=Number(input.value);applyAppearance();saveView();feedback("settings-message",ui("字體大小已套用: ")+appearance.font+" px");});
 systemDark.addEventListener("change",applyAppearance);
 async function applySessionCount(){if(settingsBusy||!data)return;const input=$("session-count");roundNumber(input);if(!input.checkValidity()||!Number.isInteger(Number(input.value))){input.value=data.settings.max_files;feedback("settings-message",ui("session 數量請輸入 1 - 5000 的整數"),"error");return;}input.disabled=true;try{await changeSettings({max_files:Number(input.value)});}catch{input.value=data.settings.max_files;}finally{input.disabled=data.settings.track_all;}}
@@ -1305,14 +1380,14 @@ $("load-more").addEventListener("click",loadMore);
 const lazyObserver=new IntersectionObserver(entries=>{if(entries.some(e=>e.isIntersecting))loadMore();},{rootMargin:"150px"});lazyObserver.observe($("load-more"));
 pageInput($("page-number"),()=>{page=Number($("page-number").value);if(data){renderCodex();attachTables();}saveView();});
 for(const [id,action]of [["page-first",()=>1],["page-prev",()=>page-1],["page-next",()=>page+1],["page-last",()=>pageCount]])$(id).addEventListener("click",()=>{page=action();renderCodex();saveView();});
-$("window").addEventListener("change",()=>{version++;saveView();refresh();});
+$("window").addEventListener("change",()=>{if($("window").value==="inherit")delete sourceWindows.tabs.mcp;else sourceWindows.tabs.mcp=$("window").value;applySourceWindow();});
 for(const id of viewInputs){const value=preferences.inputs?.[id],input=$(id);if(typeof value==="string"&&!['filter-project','filter-git'].includes(id)&&(input.tagName!=="SELECT"||[...input.options].some(option=>option.value===value)))input.value=value;}
 page=Number.isInteger(preferences.page)?preferences.page:1;
 if(preferences.tab==="jev")preferences.tab="mcp";if(preferences.tab==="logs")preferences.tab="errors";if(["git","checks"].includes(preferences.tab))preferences.tab="workflow";
 dragSubTabs($("diagnostic-tabs"),"diagnostics",tab=>tab.id);dragSubTabs($("activity-tabs"),"activity",tab=>tab.id);
 bindSubPages("errors","diagnostic-tabs",diagnosticPages,diagnosticSource);bindSubPages("workflow","activity-tabs",activityPages,activitySource);
 if([...document.querySelectorAll("[data-tab]")].some(tab=>tab.dataset.tab===preferences.tab))switchTab(preferences.tab);
-discoverCopy();applyCopy();applyTabOrder();groupSettings();setupCollapsibleSections();fillDisplayOptions($("page-size"),preferences.inputs?.["page-size"]||display.table);
+discoverCopy();applyCopy();applyTabOrder();groupSettings();setupSourceWindowSettings();setupTabDescriptions();setupCollapsibleSections();fillDisplayOptions($("page-size"),preferences.inputs?.["page-size"]||display.table);
 for(const id of ["activity-chart","git-time-chart","web-time-chart","file-time-chart","monitor-refresh-chart","monitor-cpu-chart","monitor-read-chart","error-time-chart"])chartControls(id,true);
 for(const id of ["top-tools","source-chart","model-chart","environment-chart","trigger-chart","mcp-action-chart","mcp-source-chart","git-chart","skill-chart","check-chart","file-operation-chart","error-source-chart"])chartControls(id);
 chartControls("sqlite-operation-chart");chartControls("usage-model-chart");for(const id of ["overview-tools-chart","overview-token-chart","overview-error-chart","overview-file-chart","overview-sql-chart","overview-source-column","overview-model-ring","overview-model-pie","overview-token-stack"])chartControls(id);chartControls("overview-cpu-chart",true);for(const id of ["overview-git-chart","overview-skill-chart","overview-check-chart" ,"overview-dot-chart"])chartControls(id);for(const id of ["overview-web-chart","overview-error-time-chart","overview-refresh-chart","overview-read-chart"])chartControls(id,true);setupOverview();

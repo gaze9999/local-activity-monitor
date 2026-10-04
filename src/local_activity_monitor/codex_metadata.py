@@ -55,9 +55,11 @@ def execution_metadata(values):
 CATALOG_LIMIT = 2000
 INDEX_TAIL_LIMIT = 1024*1024
 APP_STATE_LIMIT = 16*1024*1024
+PROJECT_LIMIT = 2000
+PROJECT_ROOT_LIMIT = 5000
 
 
-def read_metadata(home, identities, dots=None, source_info=None):
+def read_metadata(home, identities, dots=None, source_info=None, project_details=None):
     entries = {}
     def report(path, health, fields=(), **limits):
         if source_info is not None:
@@ -74,7 +76,7 @@ def read_metadata(home, identities, dots=None, source_info=None):
             db.execute("PRAGMA query_only=ON")
             columns = {row[1] for row in db.execute("PRAGMA table_info(local_thread_catalog)")}
             required = ("host_id", "thread_id", "display_title", "source_created_at", "source_updated_at", "source_kind", "thread_source", "project_id")
-            optional = [key for key in ("model", "reasoning_effort", "model_provider", "chatgpt_async_status") if key in columns]
+            optional = [key for key in ("model", "reasoning_effort", "model_provider", "chatgpt_async_status", "archived") if key in columns]
             wanted = (*required, *optional)
             if set(required) <= columns:
                 rows_read = 0
@@ -89,6 +91,9 @@ def read_metadata(home, identities, dots=None, source_info=None):
                         continue
                     entries[identity] = {"thread_name": text(title), "created_at": date(created), "updated_at": date(updated), "activity_type": "chat" if source == "chatgpt" else "codex" if source in ("vscode", "cli", "exec") else "unknown", "environment": environment, "project_id": text(project, 160), "project_scope": "project" if text(project, 160) else "none", "trigger": trigger if trigger in ("dot", "orbit", "automation", "schedule", "heartbeat", "subagent", "guardian_review", "user") else "unknown"}
                     values = dict(zip(optional, row[8:]))
+                    entries[identity]["_host_id"] = host
+                    if type(values.get("archived")) is int and values["archived"] in (0, 1):
+                        entries[identity]["archived"] = bool(values["archived"])
                     for key in ("model", "reasoning_effort"):
                         item = values.get(key)
                         if isinstance(item, str) and re.fullmatch(r"[a-zA-Z0-9_.:-]{1,160}", item):
@@ -138,7 +143,7 @@ def read_metadata(home, identities, dots=None, source_info=None):
                 with closing(sqlite3.connect(path.as_uri()+"?mode=ro", uri=True, timeout=.08)) as db:
                     db.execute("PRAGMA query_only=ON")
                     columns = {row[1] for row in db.execute("PRAGMA table_info(threads)")}
-                    wanted = [key for key in ("id", "title", "model", "reasoning_effort", "originator", "thread_source", "model_provider", "cli_version", "approval_mode", "sandbox_policy", "git_branch", "git_sha", "agent_nickname", "agent_role", "history_mode") if key in columns]
+                    wanted = [key for key in ("id", "title", "model", "reasoning_effort", "originator", "thread_source", "model_provider", "cli_version", "approval_mode", "sandbox_policy", "git_branch", "git_sha", "agent_nickname", "agent_role", "history_mode", "archived", "project_id") if key in columns]
                     if not {"id", "title"} <= set(wanted):
                         report(path, "unsupported")
                         continue
@@ -150,6 +155,10 @@ def read_metadata(home, identities, dots=None, source_info=None):
                             rows_read += 1
                             values = dict(zip(wanted, row))
                             entry = entries.setdefault(values["id"], {})
+                            if type(values.get("archived")) is int and values["archived"] in (0, 1):
+                                entry["archived"] = bool(values["archived"])
+                            if text(values.get("project_id"), 160):
+                                entry.update(project_id=text(values["project_id"], 160), project_scope="project")
                             if not entry.get("thread_name") and text(values.get("title")):
                                 entry["thread_name"] = text(values["title"])
                             if text(values.get("model"), 160):
@@ -164,7 +173,41 @@ def read_metadata(home, identities, dots=None, source_info=None):
                                 entry["activity_type"] = "codex"
                             if values.get("thread_source") in ("user", "subagent", "guardian_review"):
                                 entry["trigger"] = values["thread_source"]
-                    report(path, "ok", wanted, rows_read=rows_read, selected_threads=len(selected))
+                    project_fields = []
+                    project_rows = root_rows = 0
+                    if project_details is not None:
+                        project_columns = {row[1] for row in db.execute("PRAGMA table_info(projects)")}
+                        root_columns = {row[1] for row in db.execute("PRAGMA table_info(project_roots)")}
+                        if {"id", "name"} <= project_columns:
+                            project_wanted = [key for key in ("id", "name", "created_at_ms", "updated_at_ms") if key in project_columns]
+                            order = " ORDER BY updated_at_ms DESC" if "updated_at_ms" in project_columns else " ORDER BY id"
+                            for project_row in db.execute("SELECT "+",".join(project_wanted)+" FROM projects"+order+f" LIMIT {PROJECT_LIMIT}"):
+                                project_values = dict(zip(project_wanted, project_row))
+                                project_id, project_name = project_values["id"], project_values["name"]
+                                if text(project_id, 160):
+                                    project_details[project_id] = {"id": project_id, "name": text(project_name), "source": "projects", "folders": []}
+                                    for key in ("created_at", "updated_at"):
+                                        value = project_values.get(key+"_ms")
+                                        if type(value) in (int, float):
+                                            project_details[project_id][key] = date(value/1000)
+                                project_rows += 1
+                            project_fields.extend("projects."+key for key in project_wanted)
+                        project_ids = sorted(set(project_details) | {entry["project_id"] for entry in entries.values() if entry.get("project_id")})
+                        for start in range(0, len(project_ids), 400):
+                            batch = project_ids[start:start+400]
+                            placeholders = ",".join("?" for _ in batch)
+                            if {"project_id", "path"} <= root_columns and root_rows < PROJECT_ROOT_LIMIT:
+                                for project_id, root in db.execute(f"SELECT project_id,path FROM project_roots WHERE project_id IN ({placeholders}) LIMIT {PROJECT_ROOT_LIMIT-root_rows}", batch):
+                                    root_rows += 1
+                                    detail = project_details.setdefault(project_id, {"id": project_id, "name": None, "source": "project_roots", "folders": []})
+                                    if text(root, 4096) and len(detail["folders"]) < 32:
+                                        detail["folders"].append(text(root, 4096))
+                                project_fields.extend(("project_roots.project_id", "project_roots.path"))
+                        for entry in entries.values():
+                            detail = project_details.get(entry.get("project_id"), {})
+                            if detail.get("name"):
+                                entry["project_name"] = detail["name"]
+                    report(path, "ok", (*wanted, *sorted(set(project_fields))), rows_read=rows_read, selected_threads=len(selected), project_rows=project_rows, project_root_rows=root_rows, project_limit=PROJECT_LIMIT, project_root_limit=PROJECT_ROOT_LIMIT)
                 break
             except sqlite3.Error:
                 failed(path)
@@ -201,13 +244,47 @@ def read_metadata(home, identities, dots=None, source_info=None):
             if isinstance(state, dict):
                 projects = state.get("local-projects", {})
                 assignments = state.get("thread-project-assignments", {})
+                mappings = state.get("app-server-project-id-by-legacy-project-id-by-host", {})
+                legacy_project_rows = 0
+                def mapped_project(project_id, host="local"):
+                    mapping = mappings.get(host) if isinstance(mappings, dict) else None
+                    target = mapping.get(project_id) if isinstance(mapping, dict) else None
+                    return target if isinstance(target, str) and project_details is not None and project_details.get(target, {}).get("source") == "projects" else project_id
+                if project_details is not None and isinstance(projects, dict):
+                    for legacy_id, project in list(projects.items())[:PROJECT_LIMIT]:
+                        if not text(legacy_id, 160) or not isinstance(project, dict):
+                            continue
+                        legacy_project_rows += 1
+                        project_id = mapped_project(legacy_id)
+                        detail = project_details.setdefault(project_id, {"id": project_id})
+                        if project_id == legacy_id and detail.get("source") != "projects":
+                            detail.update(name=text(project.get("name")), source="local-projects")
+                        elif not detail.get("name"):
+                            detail["name"] = text(project.get("name"))
+                        roots = project.get("rootPaths")
+                        if isinstance(roots, list) and not detail.get("folders"):
+                            detail["folders"] = [text(root, 4096) for root in roots[:32] if text(root, 4096)]
                 for identity, entry in entries.items():
                     assignment = assignments.get(identity) if isinstance(assignments, dict) else None
                     if isinstance(assignment, dict) and text(assignment.get("projectId"), 160):
-                        entry.update(project_id=text(assignment["projectId"], 160), project_scope="project")
-                    project = projects.get(entry.get("project_id")) if isinstance(projects, dict) else None
+                        entry.update(project_id=mapped_project(text(assignment["projectId"], 160), entry.get("_host_id", "local")), project_scope="project")
+                        kind = assignment.get("projectKind")
+                        if project_details is not None and isinstance(kind, str) and re.fullmatch(r"[a-zA-Z0-9_.:-]{1,80}", kind):
+                            project_details.setdefault(entry["project_id"], {"id": entry["project_id"], "name": None, "folders": []})["kind"] = kind
+                        origin = assignment.get("projectOrigin")
+                        if project_details is not None and isinstance(origin, str) and re.fullmatch(r"[a-zA-Z0-9_.:-]{1,80}", origin):
+                            project_details.setdefault(entry["project_id"], {"id": entry["project_id"], "name": None, "folders": []})["origin"] = origin
+                    project = projects.get(assignment.get("projectId") if isinstance(assignment, dict) else entry.get("project_id")) if isinstance(projects, dict) else None
                     if isinstance(project, dict):
-                        entry["project_name"] = text(project.get("name"))
+                        known = project_details.get(entry.get("project_id"), {}) if project_details is not None else {}
+                        entry["project_name"] = known.get("name") or text(project.get("name"))
+                        if project_details is not None:
+                            detail = project_details.setdefault(entry["project_id"], {"id": entry["project_id"]})
+                            if detail.get("source") != "projects":
+                                detail.update(name=text(project.get("name")), source="local-projects")
+                            roots = project.get("rootPaths")
+                            if isinstance(roots, list) and not detail.get("folders"):
+                                detail["folders"] = [text(root, 4096) for root in roots[:32] if text(root, 4096)]
                 atom = state.get("electron-persisted-atom-state", {})
                 outputs = atom.get("orbit-outputs-v1") if isinstance(atom, dict) else None
                 if dots is not None:
@@ -230,8 +307,9 @@ def read_metadata(home, identities, dots=None, source_info=None):
                         if isinstance(output, dict) and isinstance(output.get("threadId"), str) and output["threadId"] in entries:
                             entries[output["threadId"]]["trigger"] = "dot"
                     if dots is not None:
+                        dots["_retained_events"] = dots["events"]
                         dots["events"] = sorted(dots["events"], key=lambda item:item["timestamp"] or "", reverse=True)[:500]
-                report(path, "ok", ("project_name", "project_membership", "dot_thread_id", "artifact_type", "produced_at"), byte_limit=APP_STATE_LIMIT)
+                report(path, "ok", ("project_name", "project_membership", "project_kind", "project_origin", "project_root_metadata", "legacy_project_id_mapping", "dot_thread_id", "artifact_type", "produced_at"), byte_limit=APP_STATE_LIMIT, project_limit=PROJECT_LIMIT, loaded_projects=legacy_project_rows)
             else:
                 report(path, "unsupported", byte_limit=APP_STATE_LIMIT)
         else:
