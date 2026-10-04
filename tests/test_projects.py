@@ -16,12 +16,15 @@ class ProjectTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.home = Path(self.temp.name)/'codex'
+        # macOS exposes its temp directory through /var -> /private/var.
+        # Use real fixture paths while preserving rejection of linked roots.
+        fixture_root = Path(self.temp.name).resolve()
+        self.home = fixture_root/'codex'
         self.home.mkdir()
         sessions = self.home/'sessions'
         sessions.mkdir()
         (sessions/f'rollout-{THREAD}.jsonl').write_text(json.dumps({'type': 'session_meta', 'timestamp': '2026-10-05T00:00:00Z', 'payload': {'id': THREAD}})+'\n', encoding='utf-8')
-        self.root = Path(self.temp.name)/'PRIVATE_WORKSPACE_ROOT'
+        self.root = fixture_root/'PRIVATE_WORKSPACE_ROOT'
         self.root.mkdir()
 
     def database(self, archived=1):
