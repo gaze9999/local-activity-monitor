@@ -1,4 +1,4 @@
-"""Confirm first-time setup, then run the repository-local installation."""
+"""Confirm first-time setup, then watch and run repository-local source."""
 from pathlib import Path
 import subprocess
 import sys
@@ -37,7 +37,7 @@ def main(args=None):
                 cwd=root, check=True,
             )
         return subprocess.run(
-            [str(python), "-I", "-B", "-m", "local_activity_monitor", "--codex", "--open", *args],
+            [str(python), "-I", "-B", str(root/"watch.py"), "--codex", "--open", *args],
             cwd=root,
         ).returncode
     except (OSError, subprocess.CalledProcessError) as error:

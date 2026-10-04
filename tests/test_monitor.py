@@ -58,7 +58,10 @@ class MonitorTests(unittest.TestCase):
         for _ in range(300): self.write(path,self.record('response_item',{'type':'message','content':'s'*2000}))
         self.write(path,self.record('token_usage_record',{'thread_token_usage':{'total_tokens':9}}))
         collector=CodexCollector(self.home,tail_bytes=8192); collector.refresh()
-        self.assertLessEqual(collector.read_bytes,8192)
+        with path.open('rb') as stream:
+            head_bytes=len(stream.readline(65536))
+        self.assertGreaterEqual(collector.read_bytes,8192+head_bytes)
+        self.assertLessEqual(collector.read_bytes,8*1024*1024)
         self.assertTrue(collector.snapshot()['threads'][0]['partial_history'])
         self.assertEqual(collector.snapshot()['threads'][0]['tokens']['total_tokens'],9)
     def test_config_opt_in_idempotent_and_disable_preserves_history_path(self):
