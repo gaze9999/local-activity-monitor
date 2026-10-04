@@ -16,7 +16,7 @@
 | appearance / locale | mode, theme, accent, font, zh-TW / en / ja |
 | display | options, ranking, table |
 | charts | 時間範圍, 長度 / 單位, 間隔, 項目數, 上限, statistics 與 shape |
-| chartDefaultsVersion | 圖表預設遷移版本, 目前為 1. 舊 MCP 全部顯示預設改為前 5 名, 保留已選定的正數 |
+| chartDefaultsVersion | 舊版圖表預設遷移標記, 接受值 1 以相容既有設定檔 |
 | tables | size, page, sort, filters, hidden, columns, heatmap |
 | tableSchema | 欄位相容版本, 目前為 6 |
 | copy | 預設完整標籤 / tooltip → 自訂文字 |
@@ -38,6 +38,8 @@
 匯入先驗證並顯示套用範圍, 確認後呼叫後端, 保存 localStorage 並重新載入. 取消或無效內容保留既有設定. 匯入以 `replace_customizations` 替換自訂來源分類, 觀察開關, 標籤與說明. 一般編輯採增量更新. 前後端只接受可寫欄位, 不接受任意檔案位置或 command
 
 全部設定還原預設以後端 `default_settings` 為基準: 10 秒更新, 20 個近期 session, 各來源的程式預設開關, 空自訂 map, 前端預設顯示 / 排序 / 外觀 / 語言. 需先確認, 已有觀察紀錄保留
+
+前端新預設為排行榜 5 項, 表格每頁 10 筆, 介面字級 16 px, 所有數量選擇在各卡片 / 表格齒輪內. 已保存的有效自訂值保留, 不以值恰好等於舊預設判斷使用者是否曾經自訂
 
 ## 相容與保存範圍
 

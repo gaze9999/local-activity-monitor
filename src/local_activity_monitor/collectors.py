@@ -67,12 +67,15 @@ def monitor_config(home):
 
 
 class JevCollector:
+    RECENT_LIMIT = 80
+    SERIES_LIMIT = 168
+    SCOPE = "completed_operations_in_local_database"
     def __init__(self, home):
         self.home = home
 
     def snapshot(self, window="24h"):
         enabled, database, since = monitor_config(self.home)
-        result = {"source": "jev", "enabled": enabled, "enabled_at": since, "health": "waiting" if enabled else "disabled", "scope": "completed_operations_in_local_database", "window": window, "summary": {}, "recent": [], "series": []}
+        result = {"source": "jev", "enabled": enabled, "enabled_at": since, "health": "waiting" if enabled else "disabled", "scope": self.SCOPE, "window": window, "summary": {}, "recent": [], "series": []}
         if database is None and (self.home/"monitoring/jev-monitor.json").exists():
             result["health"] = "invalid_config"
         if database is None or not database.is_file():
@@ -86,11 +89,11 @@ class JevCollector:
                 count = row[0]
                 result["summary"] = dict(calls=count, since=timestamp(row[1]), http_attempts=row[2] or 0, retries=row[3] or 0, input_tokens=row[4], output_tokens=row[5], input_known_calls=row[6], output_known_calls=row[7], input_unknown_calls=count-row[6], output_unknown_calls=count-row[7], request_body_bytes=row[8] or 0, known_response_bytes=row[9] or 0, response_unknown_attempts=row[10] or 0, average_latency_ms=round(row[11]) if row[11] is not None else None)
                 result["summary"]["statuses"] = {status: n for status, n in db.execute("SELECT status,count(*) FROM jev_events WHERE timestamp>=? GROUP BY status LIMIT 40", (cutoff,)) if name(status)}
-                for when, n in db.execute("SELECT substr(timestamp,1,13),count(*) FROM jev_events WHERE timestamp>=? GROUP BY 1 ORDER BY 1 DESC LIMIT 168", (cutoff,)):
+                for when, n in db.execute(f"SELECT substr(timestamp,1,13),count(*) FROM jev_events WHERE timestamp>=? GROUP BY 1 ORDER BY 1 DESC LIMIT {self.SERIES_LIMIT}", (cutoff,)):
                     if isinstance(when, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d", when):
                         result["series"].append({"time": when+":00:00Z", "calls": n})
                 result["series"].reverse()
-                for raw, in db.execute("SELECT metadata FROM jev_events WHERE timestamp>=? ORDER BY timestamp DESC LIMIT 80", (cutoff,)):
+                for raw, in db.execute(f"SELECT metadata FROM jev_events WHERE timestamp>=? ORDER BY timestamp DESC LIMIT {self.RECENT_LIMIT}", (cutoff,)):
                     if not isinstance(raw, str) or len(raw) > 65536:
                         continue
                     try:
@@ -115,6 +118,13 @@ class CodexCollector:
     FILE_LIMIT = 5000
     CALL_LIMIT = 50000
     BUFFER_LIMIT = 8*1024*1024
+    READ_LIMIT = 8*1024*1024
+    SOURCE_LOCATION_LIMIT = 20
+    SCAN_INTERVAL = 15
+    SQL_EVENT_LIMIT = 500
+    GIT_EVENT_LIMIT = 500
+    CHECK_EVENT_LIMIT = 500
+    FILE_EVENT_LIMIT = 1000
 
     def __init__(self, root, max_files=20, tail_bytes=1024*1024):
         self.root, self.max_files, self.tail_bytes = root, max_files, tail_bytes
@@ -134,7 +144,7 @@ class CodexCollector:
     def scan(self):
         if time.monotonic() < self.next_scan:
             return
-        self.next_scan = time.monotonic() + 15
+        self.next_scan = time.monotonic() + self.SCAN_INTERVAL
         if not self.root.is_dir():
             self.health = "missing"
             return
@@ -257,7 +267,7 @@ class CodexCollector:
 
     def refresh(self):
         self.scan()
-        budget = 8*1024*1024
+        budget = self.READ_LIMIT
         entries = list(self.files.items())
         start = self.read_cursor % max(1, len(entries))
         for index, (path, state) in enumerate(entries[start:]+entries[:start]):
@@ -601,7 +611,8 @@ class CodexCollector:
             target["calls"].update(state["calls"])
             target["partial_history"] |= state["partial_history"]
         dots = {}
-        metadata = read_metadata(self.root.parent, threads, dots) if self.features["metadata"] else {}
+        metadata_sources = {}
+        metadata = read_metadata(self.root.parent, threads, dots, metadata_sources) if self.features["metadata"] else {}
         pending_status = {state["thread_id"] for state in self.files.values() if state.get("history_cursor")}
         rows, tools, nested_tools, git_events, skill_events, check_events, series, mcp_events, tool_series = [], Counter(), Counter(), [], [], [], Counter(), [], Counter()
         file_events, error_events, sqlite_events = [], [], []
@@ -691,9 +702,18 @@ class CodexCollector:
             selected = {event['thread_id'] for event in rows}
             retained = {(event['thread_id'], event['call_id'], event['skill']):event | {'thread_name':metadata.get(event['thread_id'], {}).get('thread_name')} for event in self.thread_state.skills if event['thread_id'] in selected}
             retained.update({(event['thread_id'], event['call_id'], event['skill']):event for event in skill_events})
-            skill_events = sorted(retained.values(), key=lambda event:event['timestamp'] or '', reverse=True)[:500]
+            skill_events = sorted(retained.values(), key=lambda event:event['timestamp'] or '', reverse=True)[:self.thread_state.SKILL_LIMIT]
         check_events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
         file_events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
         sqlite_events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
-        sqlite_summary = {"events": sqlite_events[:500], "total": len(sqlite_events), "operations": dict(Counter(event["operation"] for event in sqlite_events))}
-        return {"usage": max((state["allowance"] for state in self.files.values() if state.get("allowance")), key=lambda item:item["updated_at"], default=None) if self.features["usage"] else None, "dots": dots, "sqlite": sqlite_summary, "source": "codex", "health": self.health, "started_at": self.started_at, "scope": "recent_file_tail_and_new_records", "track_all": self.track_all, "max_files": self.max_files, "files": len(self.files), "bytes_read": self.read_bytes, "error_backfill_pending": sum(state.get("error_cursor") or 0 for state in self.files.values()), "malformed_lines": self.malformed, "threads": rows, "tools": dict(tools), "nested_tools": dict(nested_tools), "observed_tool_calls": sum(tools.values()), "activity_series": [{"time": key, "calls": value} for key, value in sorted(series.items())[-10080:]], "tool_series": [{"time": key[0], "tool": key[1], "calls": value} for key, value in sorted(tool_series.items())[-20000:]], "mcp_events": mcp_events, "error_events": error_events if self.features["errors"] else [], "file_activity": {"events": file_events[:1000], "total": len(file_events), "operations": dict(Counter(event["operation"] for event in file_events))}, "git": {"events": git_events[:500] if self.features["git"] else [], "operations": dict(Counter(event["operation"] for event in git_events)) if self.features["git"] else {}, "total": len(git_events) if self.features["git"] else 0}, "skills": {"events": skill_events[:500] if self.features["skills"] else [], "counts": dict(Counter(event["skill"] for event in skill_events)) if self.features["skills"] else {}}, "checks": check_events[:500] if self.features["checks"] else []}
+        sqlite_summary = {"events": sqlite_events[:self.SQL_EVENT_LIMIT], "total": len(sqlite_events), "operations": dict(Counter(event["operation"] for event in sqlite_events))}
+        return {"metadata_sources": list(metadata_sources.values()), "read_state": {
+            "file_limit": self.FILE_LIMIT if self.track_all else self.max_files, "file_count": len(self.files),
+            "read_limit": self.READ_LIMIT, "tail_bytes": self.tail_bytes, "scan_seconds": self.SCAN_INTERVAL,
+            "call_limit": self.CALL_LIMIT, "buffer_limit": self.BUFFER_LIMIT,
+            "sql_event_limit": self.SQL_EVENT_LIMIT, "git_event_limit": self.GIT_EVENT_LIMIT, "check_event_limit": self.CHECK_EVENT_LIMIT, "file_event_limit": self.FILE_EVENT_LIMIT, "skill_event_limit": self.thread_state.SKILL_LIMIT,
+            "history_pending_files": sum(bool(state.get("history_cursor")) for state in self.files.values()),
+            "locations": [str(path) for path in list(self.files)[:self.SOURCE_LOCATION_LIMIT]], "listed_file_limit": self.SOURCE_LOCATION_LIMIT,
+            "enabled_features": [key for key, enabled in self.features.items() if enabled],
+            "checkpoint": {"location": str(self.thread_state.path), "load_health": self.thread_state.load_health, "write_health": self.thread_state.write_health, "retained": len(self.thread_state.entries), "skills": len(self.thread_state.skills), "entry_limit": self.thread_state.LIMIT, "skill_limit": self.thread_state.SKILL_LIMIT, "byte_limit": self.thread_state.BYTE_LIMIT},
+        }, "usage": max((state["allowance"] for state in self.files.values() if state.get("allowance")), key=lambda item:item["updated_at"], default=None) if self.features["usage"] else None, "dots": dots, "sqlite": sqlite_summary, "source": "codex", "health": self.health, "started_at": self.started_at, "scope": "recent_file_tail_and_new_records", "track_all": self.track_all, "max_files": self.max_files, "files": len(self.files), "bytes_read": self.read_bytes, "error_backfill_pending": sum(state.get("error_cursor") or 0 for state in self.files.values()), "malformed_lines": self.malformed, "threads": rows, "tools": dict(tools), "nested_tools": dict(nested_tools), "observed_tool_calls": sum(tools.values()), "activity_series": [{"time": key, "calls": value} for key, value in sorted(series.items())[-10080:]], "tool_series": [{"time": key[0], "tool": key[1], "calls": value} for key, value in sorted(tool_series.items())[-20000:]], "mcp_events": mcp_events, "error_events": error_events if self.features["errors"] else [], "file_activity": {"events": file_events[:self.FILE_EVENT_LIMIT], "total": len(file_events), "operations": dict(Counter(event["operation"] for event in file_events))}, "git": {"events": git_events[:self.GIT_EVENT_LIMIT] if self.features["git"] else [], "operations": dict(Counter(event["operation"] for event in git_events)) if self.features["git"] else {}, "total": len(git_events) if self.features["git"] else 0}, "skills": {"events": skill_events[:self.thread_state.SKILL_LIMIT] if self.features["skills"] else [], "counts": dict(Counter(event["skill"] for event in skill_events)) if self.features["skills"] else {}}, "checks": check_events[:self.CHECK_EVENT_LIMIT] if self.features["checks"] else []}
