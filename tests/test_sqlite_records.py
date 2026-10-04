@@ -1,13 +1,76 @@
 import json
+from contextlib import closing
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
+from unittest.mock import MagicMock
 
-from local_activity_monitor.sqlite_records import sqlite_operations, sql_operations, sql_diagnostic
+from local_activity_monitor.sqlite_records import diagnostic_content, sql_content, sqlite_operations, sql_operations, sql_diagnostic
 from local_activity_monitor.collectors import CodexCollector
+from local_activity_monitor.server import Dashboard, handler
 
 
 class SQLiteRecordTests(unittest.TestCase):
+    def test_selected_statements_keep_literals_comments_and_multiline_sql(self):
+        sql = "-- statement\nSELECT 'semi;colon', 'comma,value';\nUPDATE items SET value='it''s valid'"
+        rows = sqlite_operations([("mcp__sqlite__query", {"sql": sql}, False)], include_sql=True)
+        self.assertEqual(rows[0]["sql"], "-- statement\nSELECT 'semi;colon', 'comma,value'")
+        self.assertEqual(rows[1]["sql"], "UPDATE items SET value='it''s valid'")
+        self.assertNotIn("sql", sqlite_operations([("mcp__sqlite__query", {"sql": sql}, False)])[0])
+        code = "import sqlite3\nc=sqlite3.connect(':memory:')\nc.execute('SELECT 42')\nc.execute(dynamic_sql)"
+        self.assertEqual([row.get("sql") for row in sqlite_operations([("exec_command", {"cmd": code}, False)], True)], [None, "SELECT 42"])
+
+    def test_sql_credentials_and_display_limit(self):
+        sql = "INSERT INTO accounts (name, password, api_key) VALUES ('visible,one', 'PRIVATE(x)', 'PRIVATE2'),('it''s fine','PRIVATE3','PRIVATE4'); UPDATE accounts SET password='PRIVATE5'"
+        result = sql_content(sql)
+        self.assertNotIn("PRIVATE", result["sql"])
+        self.assertIn("visible,one", result["sql"])
+        self.assertIn("it''s fine", result["sql"])
+        self.assertFalse(result["truncated"])
+        result = sql_content("SELECT '"+"x"*40000+"'")
+        self.assertTrue(result["truncated"])
+        self.assertEqual(len(result["sql"]), 32768)
+        self.assertIsNone(diagnostic_content("codex_core", 'sql="SELECT PRIVATE"')["sql"])
+        self.assertIsNone(diagnostic_content("sqlx::query", 'elapsed=1ms')["sql"])
+        self.assertEqual(diagnostic_content("sqlx::query", 'sql="SELECT 1\\nFROM items" elapsed=1ms')["sql"], "SELECT 1\nFROM items")
+
+    def test_sql_detail_endpoint_reads_only_known_records_and_respects_switch(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder);sessions=home/"sessions";sessions.mkdir()
+            thread="00000000-0000-4000-8000-000000000001"
+            path=sessions/("rollout-"+thread+".jsonl")
+            records=[{"timestamp":"2026-10-04T00:00:00Z", "type":"session_meta", "payload":{"id":thread}}, {"timestamp":"2026-10-04T00:00:01Z", "type":"response_item", "payload":{"type":"function_call", "name":"exec_command", "call_id":"sql-call", "arguments":json.dumps({"cmd":'sqlite3 demo.db "SELECT 12; SELECT 34"'})}}]
+            path.write_text("\n".join(json.dumps(row) for row in records)+"\n",encoding="utf-8")
+            dashboard=Dashboard(home,codex=True);dashboard.refresh()
+            events=dashboard.cache["24h"]["codex"]["sqlite"]["events"]
+            select=next(event for event in events if event["index"]==2)
+            self.assertNotIn("SELECT 34",json.dumps(dashboard.cache))
+            self.assertEqual(dashboard.sql_detail(select["id"])["sql"],"SELECT 34")
+            instance=object.__new__(handler(dashboard,8787))
+            for path,host,expected in [("/api/codex/sql?id="+select["id"],"127.0.0.1:8787",200),("/api/codex/sql?id="+"f"*64,"127.0.0.1:8787",409),("/api/codex/sql?id=../../auth.json","127.0.0.1:8787",400),("/api/codex/sql?id="+select["id"]+"&file=auth.json","127.0.0.1:8787",400),("/api/codex/sql?id="+select["id"],"external.example:8787",403)]:
+                instance.path=path;instance.headers={"Host":host};instance.reply=MagicMock();instance.do_GET()
+                self.assertEqual(instance.reply.call_args.args[0],expected)
+            dashboard.observations["sqlite"]=False
+            self.assertIsNone(dashboard.sql_detail(select["id"]))
+
+    def test_diagnostic_detail_uses_exact_core_row_and_desktop_offset(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home=Path(folder)
+            with closing(sqlite3.connect(home/"logs_1.sqlite")) as db,db:
+                db.execute("CREATE TABLE logs(id INTEGER PRIMARY KEY, ts REAL, level TEXT, target TEXT, feedback_log_body TEXT)")
+                db.execute("INSERT INTO logs VALUES(1,1791072000,'INFO','sqlx::query',?)", ('sql="SELECT 45" elapsed=1ms',))
+            root=home/"logs";root.mkdir();path=root/"codex-desktop-test.log"
+            lines=['2026-10-04T00:00:01Z INFO [sqlite] sql="SELECT 67" elapsed=2ms', '2026-10-04T00:00:01Z INFO [sqlite] sql="SELECT 89" elapsed=3ms']
+            path.write_text("\n".join(lines)+"\n",encoding="utf-8")
+            dashboard=Dashboard(home,codex=True);dashboard.diagnostics.roots=[root];dashboard.refresh()
+            events=dashboard.cache["24h"]["codex"]["sqlite"]["events"]
+            self.assertEqual({dashboard.sql_detail(event["id"])["sql"] for event in events}, {"SELECT 45","SELECT 67","SELECT 89"})
+            self.assertNotIn("SELECT 45",json.dumps(dashboard.cache))
+            original=next(event for event in events if event.get("source")=="codex_desktop")
+            path.write_text("changed line\n",encoding="utf-8")
+            self.assertIsNone(dashboard.sql_detail(original["id"])["sql"])
+
     def test_sql_diagnostic_requires_module_and_projects_only_measured_fields(self):
         body = 'summary="SELECT PRIVATE FROM secret" elapsed=241µs rows_affected=0 rows_returned=3 password="PRIVATE elapsed=900ms"'
         value = sql_diagnostic("sqlx::query", body)

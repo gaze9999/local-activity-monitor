@@ -3,6 +3,7 @@ from collections import Counter, deque
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import os
+import hashlib
 from pathlib import Path
 import re
 import sqlite3
@@ -10,7 +11,7 @@ import sys
 import time
 
 from .mcp_records import decoded_output
-from .sqlite_records import sql_diagnostic
+from .sqlite_records import diagnostic_content, sql_content, sql_diagnostic
 
 IDENTIFIER = re.compile(r"[a-zA-Z0-9_./:-]{1,160}\Z")
 UUID = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
@@ -143,7 +144,7 @@ class DiagnosticCollector:
                 self.events.remove(min(self.events, key=lambda item:item["timestamp"]))
         self.events.append(event)
 
-    def desktop_line(self, line, file=None, historical=False):
+    def desktop_line(self, line, file=None, historical=False, offset=None):
         stats = self.stats["desktop"]
         stats["read_lines"] += 1
         match = re.match(r"^(\S{20,40}) ([a-zA-Z]{1,16}) \[([a-zA-Z0-9_.:-]{1,160})\] (.*)", line)
@@ -176,7 +177,7 @@ class DiagnosticCollector:
         stats["parsed_lines"] += 1
         sql = sql_diagnostic(source, body) if self.capture_sql and not historical else None
         if sql:
-            self.sql_events.append(sql | {"timestamp": when, "source": "codex_desktop", "module": source, "thread_id": thread, "file": file, "recognition": "diagnostic_log", "result": "log_error" if level in ("error", "fatal", "critical") else "log_recorded"})
+            self.sql_events.append(sql | {"timestamp": when, "source": "codex_desktop", "module": source, "thread_id": thread, "file": file, "record_offset": offset, "record_hash": hashlib.sha256(line.encode()).hexdigest(), "recognition": "diagnostic_log", "result": "log_error" if level in ("error", "fatal", "critical") else "log_recorded"})
         if level in ("error", "fatal", "critical", "warn", "warning"):
             self.append(event | {"severity": "warning" if level in ("warn", "warning") else "error"}, historical)
         if self.capture_logs and not historical:
@@ -226,18 +227,21 @@ class DiagnosticCollector:
                 budget -= len(raw)
                 self.read_bytes += len(raw)
                 stats["read_bytes"] += len(raw)
+                line_offset = state["offset"]-len(raw)-len(state["buffer"])
                 lines = (state["buffer"]+raw).split(b"\n")
                 state["buffer"] = lines.pop()
                 if state["discard"] and lines:
                     skipped = lines.pop(0)
+                    line_offset += len(skipped)+1
                     if state.get("history_cursor"):
                         state["history_cursor"] += len(skipped)+1
                     state["discard"] = False
                 for line in lines:
                     if len(line) <= 65536:
-                        self.desktop_line(line.decode("utf-8", errors="replace"), path.name)
+                        self.desktop_line(line.decode("utf-8", errors="replace"), path.name, offset=line_offset)
                     else:
                         stats["oversized_lines"] += 1
+                    line_offset += len(line)+1
                 if len(state["buffer"]) > 65536:
                     state.update(buffer=b"", discard=True)
                     stats["oversized_lines"] += 1
@@ -272,6 +276,38 @@ class DiagnosticCollector:
                 self.health["desktop"] = "partly_unavailable"
                 stats["error_type"] = type(error).__name__
         self.backfill_pending["desktop"] = sum(state.get("history_cursor", 0) for state in self.files.values())
+
+    def sql_detail(self, event):
+        if event.get("source") == "codex_core" and self.sql_path and self.sql_path.name == event.get("file") and type(event.get("record_id")) is int:
+            try:
+                stat = self.sql_path.stat()
+                if (stat.st_dev, stat.st_ino) != self.sql_file_id:
+                    return sql_content(None)
+                with closing(sqlite3.connect(self.sql_path.as_uri()+"?mode=ro", uri=True, timeout=.08)) as db:
+                    db.execute("PRAGMA query_only=ON")
+                    row = db.execute("SELECT ts,target,substr(feedback_log_body,1,65536) FROM logs WHERE id=?", (event["record_id"],)).fetchone()
+                if row and row[1] == event.get("module") and datetime.fromtimestamp(row[0], timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z") == event.get("timestamp"):
+                    return diagnostic_content(row[1], row[2])
+            except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError):
+                pass
+        elif event.get("source") == "codex_desktop" and type(event.get("record_offset")) is int:
+            for path, state in self.files.items():
+                if path.name != event.get("file"):
+                    continue
+                try:
+                    stat = path.stat()
+                    if (stat.st_dev, stat.st_ino) != state.get("file_id"):
+                        continue
+                    with path.open("rb") as stream:
+                        stream.seek(event["record_offset"])
+                        line = stream.readline(65537).rstrip(b"\n").decode("utf-8", errors="replace")
+                    if hashlib.sha256(line.encode()).hexdigest() == event.get("record_hash"):
+                        match = re.match(r"^\S+ \S+ \[([^]]+)\] (.*)", line)
+                        if match:
+                            return diagnostic_content(match[1], match[2])
+                except OSError:
+                    continue
+        return sql_content(None)
 
     def refresh_core(self):
         stats = self.stats["core"]

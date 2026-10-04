@@ -2,7 +2,7 @@
 
 Codex 活動監測, 包含 Jev 與 MCP. 使用 Python 標準函式庫與原生網頁, 不需 Node, GPU, API Key 或雲端服務
 
-操作方式見 [使用說明](docs/usage.md), 資料來源與擴充方式見 [程式架構](docs/architecture.md), [設定檔格式](docs/settings-format.md) 與 [錯誤觀察](docs/error-observation.md). [活動匯出規劃](docs/export-plan.md) 保存後續功能需求. 本輪檢查見 [驗證紀錄](docs/validation.md)
+操作方式見 [使用說明](docs/usage.md), 資料來源與擴充方式見 [程式架構](docs/architecture.md), [設定檔格式](docs/settings-format.md) 與 [錯誤觀察](docs/error-observation.md). 維護與修改原則見 [維護與驗收](docs/maintenance.md). [活動匯出規劃](docs/export-plan.md) 保存後續功能需求. 本輪檢查見 [驗證紀錄](docs/validation.md)
 
 ## 下載即用
 
@@ -58,7 +58,7 @@ macOS 若下載的檔案未保留執行權限, 在 repo 執行一次 `chmod +x S
 
 預設頁面是 `http://127.0.0.1:8787/`. 只能從本機連線. `--port 8790` 可指定其他 port. 終端按 Ctrl+C 停止, 關閉瀏覽器分頁不會停止服務
 
-也可安裝已建置的 `local_activity_monitor-0.2.0-py3-none-any.whl`, 並從任意資料夾呼叫環境中的 `local-activity-monitor`. 不必保留 checkout
+也可安裝已建置的 `local_activity_monitor-0.2.1-py3-none-any.whl`, 並從任意資料夾呼叫環境中的 `local-activity-monitor`. 不必保留 checkout
 
 ## MCP 來源紀錄
 
@@ -144,6 +144,8 @@ Token 使用每個 thread 最新累計快照. 不將每次快照或 last-turn co
 ![程式狀態](docs/images/monitor-current.png)
 
 ![MCP 來源設定](docs/images/settings-current.png)
+
+![MCP 來源與觀察摘要](docs/images/mcp-current.png)
 
 ## 後續增加來源
 
