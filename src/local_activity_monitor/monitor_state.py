@@ -6,6 +6,7 @@ import os
 import platform
 import json
 import re
+import struct
 import threading
 import time
 
@@ -34,7 +35,13 @@ class MonitorState:
         self.log_skipped = self.log_bytes = 0
         self.refreshes = self.errors = self.requests = self.http_errors = 0
         self.health, self.error_type, self.last_error_at = "starting", None, None
-        self.runtime = {"python": platform.python_version(), "platform": platform.system(), "architecture": platform.machine(), "pid": os.getpid()}
+        cpu_count = getattr(os, "process_cpu_count", os.cpu_count)()
+        if cpu_count is None:
+            cpu_count = os.cpu_count()
+        self.runtime = {"python": platform.python_version(), "platform": platform.system(), "architecture": platform.machine(), "pid": os.getpid(),
+                        "system_release": platform.release(), "system_version": platform.version(),
+                        "python_implementation": platform.python_implementation(), "process_bits": struct.calcsize("P")*8,
+                        "logical_cpus": cpu_count}
         self.runtime["version"] = __version__
         self.snapshot_bytes = self.transfer_bytes = 0
         self.load_journal()

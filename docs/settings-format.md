@@ -12,9 +12,10 @@
 | conversationSource / diagnosticSource / activitySource / mcpSource | 對話, 錯誤與 Log, 專案活動與 MCP 選定子頁 |
 | filterCollapsed | 各篩選區收合狀態, 最多 500 個 boolean 項目 |
 | sectionCollapsed | 觀察來源等區塊的收合狀態, 最多 100 個 boolean 項目 |
-| inputs / page | 搜尋, 篩選, Jev window, 對話頁碼 |
+| inputs / page | 搜尋, 篩選, 舊版來源 window, 對話頁碼 |
 | appearance / locale | mode, theme, accent, font, zh-TW / en / ja |
 | display | options, ranking, table |
+| sourceWindows | global 來源紀錄範圍與 tabs 主 / 子頁覆寫, 預設 24h |
 | charts | 時間範圍, 長度 / 單位, 間隔, 項目數, 上限, statistics 與 shape |
 | chartDefaultsVersion | 舊版圖表預設遷移標記, 接受值 1 以相容既有設定檔 |
 | tables | size, page, sort, filters, hidden, columns, heatmap |
@@ -29,6 +30,7 @@
 - 設定檔最多 2 MiB, HTTP 設定 body 最多 256 KiB
 - font 12 - 18 px, interval 1 - 3600 秒, max_files 1 - 5000. JSON 需提供有效整數, 頁面輸入四捨五入
 - display.options 1 - 200, 最多 8 個不重複整數. ranking / table 必須是其中一項或 `all`
+- sourceWindows.global 與 tabs 值接受 1h / 24h / 7d / all. tabs 最多 64 個項目, key 為主頁或帶子頁的識別碼, 未設定者沿用全域範圍
 - charts 最多 100 項, tables 最多 500 項. 每張表 columns / hidden 最多 100 個欄名, heatmap 為 boolean
 - 圖表最近長度 1 - 365, 單位分鐘 / 小時 / 天, interval 1 / 5 / 15 分鐘或 1 / 6 / 24 小時. top 最多 200, maximum 0 - 1000000000, 自訂起點需早於終點
 - shape 支援 bar / line / column / stacked / pie / donut. 總覽各圖表固定類型
@@ -39,7 +41,7 @@
 
 全部設定還原預設以後端 `default_settings` 為基準: 10 秒更新, 20 個近期 session, 各來源的程式預設開關, 空自訂 map, 前端預設顯示 / 排序 / 外觀 / 語言. 需先確認, 已有觀察紀錄保留
 
-前端新預設為排行榜 5 項, 表格每頁 10 筆, 介面字級 16 px, 所有數量選擇在各卡片 / 表格齒輪內. 已保存的有效自訂值保留, 不以值恰好等於舊預設判斷使用者是否曾經自訂
+前端新預設為排行榜 5 項, 表格每頁 10 筆, 介面字級 14 px, 所有數量選擇在各卡片 / 表格齒輪內. 已保存的有效自訂值保留, 不以值恰好等於舊預設判斷使用者是否曾經自訂
 
 ## 相容與保存範圍
 
@@ -48,3 +50,5 @@
 localStorage 依 origin 隔離. 後端觀察設定保存於目前程序, 網頁重新連線後套用瀏覽器值. 來源紀錄狀態維持該來源設定, Jev 本機 telemetry 使用 CODEX_HOME 的 opt-in 檔. 設定檔不含活動紀錄, 原始 Log, credentials, session 本文或 Jev payload. 自訂說明, 搜尋與 filter 文字會包含在 JSON
 
 活動資料與圖片匯出見 [活動匯出規劃](export-plan.md)
+
+來源紀錄範圍同時套用列表與操作統計, 來源時間缺值只在全部範圍顯示. 最新對話狀態, 累計 Token 與帳戶額度保留來源回報值. 舊版有效 window 值可遷移, 字級欄位先保留草稿, 按套用才更新及保存

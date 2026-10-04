@@ -390,13 +390,27 @@ def summarize(sources, events, enabled=None, overrides=None, diagnostics=()):
         servers.append({"server": server, "origin": origin, "category": category(server, overrides=overrides), "enabled": enabled.get(server, True), "calls": len(direct), "recognized": len(rows)-len(direct), "returned": sum(bool(item.get("completed_at")) for item in direct), "known_status": len(known), "errors": errors, "average_ms": round(sum(durations)/len(durations)) if durations else None, "p99_ms": p99, "p95_ms": durations[min(len(durations)-1, int(len(durations)*.95))] if durations else None, "last_at": max((item.get("completed_at") or item["timestamp"] or "" for item in rows), default=None)})
     for server in servers:
         rows = [event for event in visible if event["server"] == server["server"]]
+        metrics = {}
+        for event in sorted(rows, key=lambda item: item.get("completed_at") or item.get("timestamp") or ""):
+            for key, value in event.get("result", {}).items():
+                if type(value) is bool or type(value) in (int, float) and number(value) is not None:
+                    if key in metrics or len(metrics) < 32:
+                        metrics[key] = {"value": value, "timestamp": event.get("completed_at") or event.get("timestamp")}
+        server["latest_metrics"] = metrics
         server["tools"] = sorted({event["tool"] for event in rows})[:TOOL_LIMIT]
         server["connection"] = connection_state(rows, server["enabled"], [event for event in diagnostics if event.get("server") == server["server"]])
     recording = {}
     for event in sorted(visible, key=lambda item: item.get("completed_at") or item.get("timestamp") or ""):
         result = event.get("result", {})
-        for key, item in result.items():
-            if key.endswith(("recording_enabled", "telemetry_enabled")) and type(item) is bool:
-                recording[event["server"]] = {"enabled": item, "health": result.get("status"), "observed_at": event.get("completed_at") or event.get("timestamp")}
+        flags = {key: item for key, item in result.items() if isinstance(key, str) and key.endswith(("recording_enabled", "telemetry_enabled")) and type(item) is bool}
+        if flags:
+            state = recording.setdefault(event["server"], {"flags": {}})
+            observed_at = event.get("completed_at") or event.get("timestamp")
+            for key, item in flags.items():
+                state["flags"][key] = {"enabled": item, "health": result.get("status"), "observed_at": observed_at}
+            # Select from this latest report, not older flags retained for display.
+            # Recording takes priority over telemetry regardless of field order.
+            key = min(flags, key=lambda field: (not field.endswith("recording_enabled"), field))
+            state.update(state["flags"][key], key=key)
     visible.sort(key=lambda item: item["timestamp"] or "", reverse=True)
     return {"servers": servers, "events": visible[:EVENT_LIMIT], "total_events": len(visible), "categories": CATEGORIES, "recording_status": recording}

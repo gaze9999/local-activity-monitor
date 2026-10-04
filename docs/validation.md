@@ -1,5 +1,23 @@
 # 驗證紀錄
 
+## 2026-10-05, 0.2.2 最終驗收
+
+Windows, Python 3.14.7, Codex in-app browser. 延續隔離 fixture, 擴充至 86 個 session, 11 個 MCP 來源, 加入父子對話, 封存對話, 專案 roots, Global / Project AGENTS.md 與 Git 結構化回傳. 測試資料未使用正式對話內容或改寫正式來源設定
+
+- 本機共 169 項 unittest, 168 項通過, 1 項大型 HTTP 對照測試因標準服務傳輸逾時跳過, 耗時 6.277 秒. 新增回歸覆蓋範圍篩選先於明細上限, Skills / Dot 全部保留資料的計數, 未知 MCP 的零值及多個紀錄旗標, 工具獨立統計, 專案名稱來源優先順序, 封存及父子 metadata, Git / Skills 按需內容, 指示文件的路徑 / 讀取 / 遮蔽邊界
+- 來源範圍由全域預設及各主 / 子頁覆寫決定. 實際 API 比較 1 小時與全部, 工具, MCP, Skills, Dot, Log 與監測樣本使用範圍內資料. 最新對話狀態, 累計 Token, 額度, runtime 與累計 HTTP 計數保持最近來源語意. 測試確認時間未知事件只在全部顯示, 快照投影不增加來源讀取
+- 1280 x 900 桌面與 390 x 844 窄螢幕檢查 12 個主頁. 主標題, 單行說明, 右側範圍與設定入口使用共用配置. en / ja 的 18 px 窄螢幕檢查亦涵蓋全部主頁, 沒有頁面橫向溢出, 範圍控制位置一致. 表格不使用浮動表頭
+- 實際確認用量頁位於總覽之後, 摘要包含最後觀測與各視窗剩餘比例, 下方額度卡片只保留一組. 說明與官方連結合併置底. MCP 來源固定展開並換行, 沒有來源搜尋, 選取項目標題或水平捲軸
+- 字級輸入 18 時保留已套用的 14, 按套用才改成 18. 桌面最終畫面回到 14. 排行預設 5, 表格預設 10, Skills 與工具統計分別提供 9 / 10 個欄位. 設定匯出, 預覽匯入及重新載入後保留全域 7 天和各頁全部範圍的覆寫
+- Skills 按鈕實際開啟並切換 README.md / SKILL.md. 專案頁取得資料夾與相關 86 個已載入對話, Subagents 與封存頁各取得 1 筆, Global / Project AGENTS.md 入口按需載入對應文件. 名稱使用資料庫的新值, 不被舊 app state 覆蓋
+- 明細的最近活動時間置於標題, 修正按需載入時的重複時間. 對話明細實際捲至 1,087 px 後切換子 Tab, 內容回到 0. 子頁及明細 Tab 的用途改為 tooltip. Jev 摘要與查看明細可點開, MCP 來源動作位於四張摘要卡之後
+- Git 明細實際顯示已觀察的指令與預設收合回覆. JSON 及 JSON 相容的 Python literal 資料以縮排和彩色 key / string / number / punctuation 顯示, 巢狀 output 能解出獨立結構. 解析不使用 eval, 不執行紀錄內容. 最後瀏覽器沒有 console error / warn
+- Node 語法, 18 個 Python 檔的 3.10 AST, README 相對連結及 diff 檢查通過. en / ja 各 1397 個 key 一致, 目前介面 source catalog 1255 個 key 無缺漏. 新英文文案及日文完整 tooltip 的 textlint MCP 檢查無提示, 短標籤另人工核對. 最後文件校對使用已核對資料流的本機 textlint CLI, 不傳送文件至遠端
+
+效能使用相同 85 個 session fixture 與 ae8bdc4 的程式, 分別以兩種先後順序量測, 每組各 20 次 refresh + snapshot. 修改前增量中位數為 44.857 / 38.275 ms, 修改後為 59.267 / 47.681 ms, CPU 中位數各為 46.875 / 39.062 ms 與 62.5 / 46.875 ms. 新程式增加四個時間範圍與 metadata 投影, 這兩組量測增加約 9.4 至 14.4 ms, session 增量讀取仍皆為 0 bytes. 每組冷啟動只有單次樣本, 不用來判定加速. 最近一次 snapshot gzip 由 34,526 減為 26,574 bytes, 差異包含時間範圍語意與樣本數, 不代表壓縮效率改善. 未重跑 5,000 個 session 效能測試
+
+發布前的原生平台建置與隔離啟動由既有 release workflow 驗證, 實際結果見 [Actions](https://github.com/gaze9999/local-activity-monitor/actions/workflows/release.yml). 以下保留先前階段的驗證資料, 筆數與頁面配置以本節最終驗收為準
+
 ## 2026-10-04 至 2026-10-05, 0.2.2
 
 Windows, Python 3.14.7 與 Codex in-app browser. 使用隔離的 85 個 session, 11 個 MCP 來源, Jev 與 SQL 示範資料. 沒有使用正式對話內容或改寫正式來源設定
