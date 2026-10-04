@@ -5,10 +5,16 @@ from collections import Counter
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import json
+import hashlib
 from pathlib import Path
 import re
 import sqlite3
 import time
+
+from .codex_metadata import execution_metadata, read_metadata
+from .error_records import identifier, tool_error
+from .mcp_records import mcp_operations, response_metadata
+from .operation_records import file_operations, invocations, operations, qualified_tool, redact, workflow_operations
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 UUID_IN_NAME = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -53,7 +59,7 @@ def monitor_config(home):
         return data["enabled"], database, timestamp(data.get("enabled_at"))
     except FileNotFoundError:
         return False, None, None
-    except (OSError, ValueError, TypeError, KeyError):
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return False, None, None
 
 
@@ -100,6 +106,10 @@ class JevCollector:
 
 class CodexCollector:
     """Bounded initial tail, incremental append reads, latest cumulative snapshots."""
+    FILE_LIMIT = 5000
+    CALL_LIMIT = 50000
+    BUFFER_LIMIT = 8*1024*1024
+
     def __init__(self, root, max_files=20, tail_bytes=1024*1024):
         self.root, self.max_files, self.tail_bytes = root, max_files, tail_bytes
         self.files = {}
@@ -108,6 +118,11 @@ class CodexCollector:
         self.read_bytes = 0
         self.malformed = 0
         self.health = "waiting"
+        self.track_all = False
+        self.features = {"metadata": True, "git": True, "jev_calls": True, "skills": True, "checks": True, "tool_events": True, "mcp": True, "web": True, "files": True, "errors": True}
+        self.mcp_sources = {}
+        self.trimmed_calls = 0
+        self.read_cursor = 0
 
     def scan(self):
         if time.monotonic() < self.next_scan:
@@ -123,7 +138,8 @@ class CodexCollector:
                     paths.append((path.stat().st_mtime_ns, path))
                 except OSError:
                     continue
-            active = [path for _, path in sorted(paths, reverse=True)[:self.max_files]]
+            ordered = sorted(paths, reverse=True)
+            active = [path for _, path in ordered[:self.FILE_LIMIT if self.track_all else self.max_files]]
             self.files = {path: self.files.get(path, self.new_file(path)) for path in active}
             self.health = "ok"
         except OSError:
@@ -131,7 +147,7 @@ class CodexCollector:
 
     def new_file(self, path):
         ids = UUID_IN_NAME.findall(path.name)
-        return {"offset": None, "buffer": b"", "discard": False, "thread_id": ids[-1] if ids else None, "model": None, "tokens": {}, "token_time": "", "token_priority": 0, "updated_at": None, "status": "observed", "calls": {}, "partial_history": True, "bytes": 0}
+        return {"offset": None, "buffer": b"", "discard": False, "thread_id": ids[-1] if ids else None, "model": None, "reasoning_effort": None, "execution": {}, "context_time": "", "tokens": {}, "token_time": "", "token_priority": 0, "created_at": None, "updated_at": None, "status": "observed", "activity_type": "unknown", "trigger": "unknown", "calls": {}, "partial_history": True, "bytes": 0, "task_start": None, "task_intervals": {}, "errors": [], "task_time": "", "history_cursor": None}
 
     def consume(self, state, record):
         payload = record.get("payload")
@@ -141,22 +157,78 @@ class CodexCollector:
         kind = record.get("type")
         if when and (not state["updated_at"] or when > state["updated_at"]):
             state["updated_at"] = when
+        if self.features["errors"] and kind == "event_msg":
+            event_type = identifier(payload.get("type"))
+            if event_type and (event_type in ("error", "turn_aborted", "turn_failed") or event_type.endswith("_failed")):
+                error = payload.get("error")
+                code = identifier(error.get("code")) if isinstance(error, dict) else None
+                state["errors"].append({"timestamp": when, "category": "conversation", "code": code or identifier(payload.get("error_code")) or event_type, "reason": event_type, "source": "session", "severity": "warning" if event_type == "turn_aborted" else "error"})
+                state["errors"] = state["errors"][-50:]
         if kind == "session_meta":
             identity = payload.get("id")
             if isinstance(identity, str) and UUID.fullmatch(identity):
                 state["thread_id"] = identity
-        elif kind == "turn_context":
-            value = name(payload.get("model"))
-            if value:
-                state["model"] = value
+                state["created_at"] = when
+            state["activity_type"] = "work" if payload.get("originator") == "codex_work_desktop" else "codex" if payload.get("originator") == "Codex Desktop" else "unknown"
+            if payload.get("thread_source") in ("user", "subagent", "guardian_review", "dot", "orbit", "automation", "schedule", "heartbeat"):
+                state["trigger"] = payload["thread_source"]
+            state["execution"].update(execution_metadata(payload))
+            git = payload.get("git")
+            if isinstance(git, dict):
+                state["execution"].update(execution_metadata({"git_branch": git.get("branch"), "git_sha": git.get("commit_hash")}))
+        elif kind == "turn_context" or kind == "event_msg" and payload.get("type") == "thread_settings_applied":
+            context = payload if kind == "turn_context" else payload.get("thread_settings")
+            matches = kind == "turn_context" or not payload.get("thread_id") or payload.get("thread_id") == state["thread_id"]
+            if isinstance(context, dict) and matches and (not state["context_time"] or when and when >= state["context_time"]):
+                state["model"] = name(context.get("model"))
+                state["reasoning_effort"] = name(context.get("reasoning_effort", context.get("effort")))
+                state["execution"].update(execution_metadata(context))
+                state["context_time"] = when or ""
         elif kind == "response_item" and payload.get("type") in ("function_call", "custom_tool_call"):
-            tool, identity = name(payload.get("name")), payload.get("call_id") or payload.get("id")
+            tool, identity = name(qualified_tool(payload)), payload.get("call_id") or payload.get("id")
             if tool and isinstance(identity, str) and len(identity) <= 160:
-                state["calls"][identity] = {"tool": tool, "timestamp": when}
+                calls = invocations(payload) if any(self.features[key] for key in ("git", "jev_calls", "skills", "checks", "tool_events", "mcp", "web", "files")) else []
+                git, jev = operations(payload, self.features["git"], self.features["jev_calls"], calls)
+                skills, checks = workflow_operations(payload, self.features["skills"], self.features["checks"], calls, include_paths=True)
+                previous = state["calls"].get(identity, {})
+                mcp = [event for event in mcp_operations(calls, self.features["web"]) if event["server"] == "web" or self.features["mcp"]] if self.features["mcp"] or self.features["web"] else []
+                for event in mcp:
+                    if self.mcp_sources.get(event["server"]) is False:
+                        event["metadata"] = {}
+                state["calls"][identity] = {"tool": tool, "timestamp": when, "completed_at": previous.get("completed_at"), "error": previous.get("error"), "nested_tools": dict(Counter(tool for tool, _, nested in calls if nested and name(tool))) if self.features["tool_events"] else {}, "git": git if self.features["git"] else [], "skills": skills if self.features["skills"] else [], "checks": checks if self.features["checks"] else [], "jev": [{"operation": item["operation"], "nested": item["nested"]} for item in jev] if self.features["jev_calls"] else [], "mcp": mcp, "isolated": len(calls) == 1}
+                state["calls"][identity]["files"] = file_operations(calls) if self.features["files"] else []
                 if len(state["calls"]) > 8192:
                     del state["calls"][next(iter(state["calls"]))]
+                    self.trimmed_calls += 1
+        elif kind == "response_item" and payload.get("type") in ("function_call_output", "custom_tool_call_output"):
+            identity = payload.get("call_id")
+            if isinstance(identity, str) and identity in state["calls"]:
+                call = state["calls"][identity]
+                call["completed_at"] = when
+                if self.features["errors"]:
+                    call["error"] = tool_error(payload.get("output"))
+                if call.get("isolated") and len(call.get("mcp", [])) == 1:
+                    event = call["mcp"][0]
+                    if self.features["web" if event["server"] == "web" else "mcp"] and self.mcp_sources.get(event["server"], True):
+                        event["result"] = response_metadata(event["server"], payload.get("output"))
         elif kind == "event_msg" and payload.get("type") in ("task_started", "task_complete"):
-            state["status"] = "running" if payload["type"] == "task_started" else "completed"
+            latest = when and when >= state["task_time"]
+            if latest:
+                state["status"] = "running" if payload["type"] == "task_started" else "completed"
+                state["task_time"] = when
+            if payload["type"] == "task_started" and when and latest:
+                state["task_start"] = timestamp(payload.get("started_at")) or when
+            elif payload["type"] == "task_complete" and when:
+                start = timestamp(payload.get("started_at")) or state["task_start"]
+                end = timestamp(payload.get("completed_at")) or when
+                if start and end >= start:
+                    state["task_intervals"][start] = end
+                    if len(state["task_intervals"]) > 1024:
+                        del state["task_intervals"][next(iter(state["task_intervals"]))]
+                if latest:
+                    state["task_start"] = None
+            if latest:
+                state["history_cursor"] = None
         usage, priority = None, 0
         if kind == "token_usage_record":
             usage, priority = payload.get("thread_token_usage"), 2
@@ -167,13 +239,18 @@ class CodexCollector:
             clean = {key: integer(usage.get(key)) for key in COUNTERS}
             if any(value is not None for value in clean.values()):
                 state.update(tokens=clean, token_time=when, token_priority=priority)
+        if kind == "event_msg" and payload.get("type") == "token_count" and isinstance(payload.get("info"), dict):
+            state["execution"].update(execution_metadata({"context_window": payload["info"].get("model_context_window")}))
 
     def refresh(self):
         self.scan()
         budget = 8*1024*1024
-        for path, state in self.files.items():
-            if budget <= 0:
+        entries = list(self.files.items())
+        start = self.read_cursor % max(1, len(entries))
+        for index, (path, state) in enumerate(entries[start:]+entries[:start]):
+            if budget < 65536:
                 break
+            self.read_cursor = start+index+1
             try:
                 size = path.stat().st_size
                 if state["offset"] is not None and size < state["offset"]:
@@ -181,13 +258,18 @@ class CodexCollector:
                 with path.open("rb") as stream:
                     if state["offset"] is None:
                         head = stream.readline(65536)
+                        self.read_bytes += len(head)
+                        state["bytes"] += len(head)
+                        budget -= len(head)
                         if head.endswith(b"\n"):
                             self.parse(state, head)
                         state["offset"] = max(len(head), size-self.tail_bytes)
                         state["partial_history"] = state["offset"] > len(head)
+                        if state["partial_history"] and not state["task_time"]:
+                            state["history_cursor"] = state["offset"]
                         state["discard"] = state["partial_history"]
                     stream.seek(state["offset"])
-                    raw = stream.read(min(budget, self.tail_bytes))
+                    raw = stream.read(max(0, min(budget, self.tail_bytes)))
                     state["offset"] += len(raw)
                     state["bytes"] += len(raw)
                     budget -= len(raw)
@@ -196,7 +278,9 @@ class CodexCollector:
                 lines = data.split(b"\n")
                 state["buffer"] = lines.pop()
                 if state["discard"] and lines:
-                    lines.pop(0)
+                    skipped = lines.pop(0)
+                    if state["history_cursor"] is not None:
+                        state["history_cursor"] += len(skipped)+1
                     state["discard"] = False
                 for line in lines:
                     self.parse(state, line)
@@ -205,6 +289,56 @@ class CodexCollector:
                     state["discard"] = True
             except OSError:
                 self.health = "partly_unavailable"
+        for path, state in self.files.items():
+            while budget > 0 and state["history_cursor"]:
+                end = state["history_cursor"]
+                start = max(0, end-min(budget, 1024*1024))
+                try:
+                    with path.open("rb") as stream:
+                        stream.seek(start)
+                        raw = stream.read(end-start)
+                except OSError:
+                    self.health = "partly_unavailable"
+                    break
+                budget -= len(raw)
+                self.read_bytes += len(raw)
+                state["bytes"] += len(raw)
+                lines = raw.split(b"\n")
+                first = lines.pop(0) if start else b""
+                state["history_cursor"] = start+len(first)+1 if start and lines else start
+                if state["history_cursor"] >= end:
+                    state["history_cursor"] = start
+                for line in reversed(lines):
+                    if len(line) <= 1024*1024 and (b'"task_started"' in line or b'"task_complete"' in line):
+                        try:
+                            record = json.loads(line)
+                            if isinstance(record, dict) and record.get("type") == "event_msg" and isinstance(record.get("payload"), dict) and record["payload"].get("type") in ("task_started", "task_complete"):
+                                self.consume(state, record)
+                                if state["task_time"]:
+                                    break
+                        except (ValueError, RecursionError):
+                            continue
+                if state["task_time"] or not raw:
+                    state["history_cursor"] = None
+        retained = sum(len(state["calls"]) for state in self.files.values())
+        if retained > self.CALL_LIMIT:
+            oldest = sorted((call.get("timestamp") or "", str(path), identity, state) for path, state in self.files.items() for identity, call in state["calls"].items())
+            for _, _, identity, state in oldest[:retained-self.CALL_LIMIT]:
+                del state["calls"][identity]
+                self.trimmed_calls += 1
+        retained_errors = sorted((event.get("timestamp") or "", str(path), index, state) for path, state in self.files.items() for index, event in enumerate(state["errors"]))
+        drop = {}
+        for _, path, index, state in retained_errors[:max(0, len(retained_errors)-1000)]:
+            drop.setdefault(path, (state, []))[1].append(index)
+        for state, indexes in drop.values():
+            for index in sorted(indexes, reverse=True):
+                del state["errors"][index]
+        buffered = 0
+        for state in self.files.values():
+            buffered += len(state["buffer"])
+            if buffered > self.BUFFER_LIMIT:
+                buffered -= len(state["buffer"])
+                state["buffer"], state["discard"] = b"", True
 
     def parse(self, state, raw):
         if not raw or len(raw) > 1024*1024:
@@ -216,23 +350,234 @@ class CodexCollector:
         except (ValueError, RecursionError):
             self.malformed += 1
 
+    def skill_detail(self, skill, document=None):
+        paths = []
+        for state in self.files.values():
+            for call in state["calls"].values():
+                for item in call.get("skills", []):
+                    if item["skill"] == skill and item.get("doc_path") and item not in paths:
+                        paths.append(item)
+        for item in reversed(paths[-16:]):
+            try:
+                raw = item["doc_path"]
+                if raw.startswith(("//", "\\\\")):
+                    continue
+                path = Path(raw).expanduser()
+                if not path.is_absolute():
+                    if not item.get("workdir") or not Path(item["workdir"]).is_absolute():
+                        continue
+                    path = Path(item["workdir"])/path
+                path = path.resolve()
+                if path.name.lower() != "skill.md" or not path.is_file():
+                    continue
+                root = path.parent
+                files, pending, visited, truncated = {}, [(root, 0)], 0, False
+
+                def describe(candidate):
+                    try:
+                        target = candidate.resolve()
+                        if candidate.is_symlink() or not target.is_relative_to(root) or not target.is_file():
+                            return
+                        relative = candidate.relative_to(root).as_posix()
+                        if any(part.startswith(".") for part in candidate.relative_to(root).parts) or candidate.name.lower() in ("auth.json", "credentials.json", "secrets.json") or candidate.suffix.lower() in (".pem", ".key", ".pfx", ".p12"):
+                            return
+                        stat = target.stat()
+                        suffix = target.suffix.lower()
+                        readable = suffix in (".md", ".markdown", ".mdown", ".txt", ".rst", ".adoc", ".asciidoc") or target.name.lower() in ("readme", "license", "changelog")
+                        files[relative] = {"name": candidate.name, "relative_path": relative, "path": str(target), "kind": "document" if readable else "python" if suffix in (".py", ".pyw") else "file", "format": suffix.lstrip("."), "readable": readable, "bytes": stat.st_size, "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat().replace("+00:00", "Z")}
+                    except (OSError, ValueError, RuntimeError):
+                        return
+
+                # Primary documents stay available even when the inventory is capped
+                describe(path)
+                describe(root/"README.md")
+                while pending and visited <= 1000 and len(files) < 200:
+                    directory, depth = pending.pop()
+                    try:
+                        for candidate in directory.iterdir():
+                            visited += 1
+                            if visited > 1000 or len(files) >= 200:
+                                truncated = True
+                                break
+                            target = candidate.resolve()
+                            if candidate.is_symlink() or not target.is_relative_to(root) or candidate.name.startswith("."):
+                                continue
+                            if target.is_dir():
+                                if candidate.name in ("__pycache__", "node_modules", "venv", "dist", "build"):
+                                    continue
+                                if depth < 4:
+                                    pending.append((candidate, depth+1))
+                                else:
+                                    truncated = True
+                            else:
+                                describe(candidate)
+                    except (OSError, ValueError, RuntimeError):
+                        continue
+                truncated |= bool(pending)
+                inventory = sorted(files.values(), key=lambda entry: (entry["relative_path"].lower() not in ("skill.md", "readme.md"), entry["relative_path"].lower()))
+                selected = [files[document]] if document in files and files[document]["readable"] else []
+                if document is None:
+                    selected = [entry for entry in inventory if entry["relative_path"].lower() in ("skill.md", "readme.md")]
+                documents = []
+                for entry in selected:
+                    try:
+                        candidate = root/entry["relative_path"]
+                        target = candidate.resolve()
+                        if candidate.is_symlink() or not target.is_relative_to(root) or not target.is_file():
+                            continue
+                        with target.open("rb") as stream:
+                            content = stream.read(262145)
+                    except (OSError, ValueError, RuntimeError):
+                        continue
+                    limited = content[:262144]
+                    text = limited.decode("utf-8-sig", errors="replace")
+                    documents.append({**entry, "text": redact(text[:32768]), "read_bytes": len(limited), "truncated": len(content)>262144 or len(text)>32768, "sha256": hashlib.sha256(limited).hexdigest()})
+                return {"skill": skill, "root": str(root), "files": inventory, "files_truncated": truncated, "documents": documents}
+            except (OSError, ValueError, RuntimeError):
+                continue
+        return {"skill": skill, "files": [], "files_truncated": False, "documents": []}
+
+    def jev_detail(self, thread_id, call_id, index):
+        request, output, nested, operation, isolated = None, None, False, None, True
+        for path, state in self.files.items():
+            if state["thread_id"] != thread_id:
+                continue
+            try:
+                with path.open("rb") as stream:
+                    stream.seek(0, 2)
+                    offset = max(0, stream.tell()-self.tail_bytes)
+                    stream.seek(offset)
+                    if offset:
+                        stream.readline()
+                    for raw in stream:
+                        try:
+                            record = json.loads(raw)
+                            payload = record.get("payload") if isinstance(record, dict) else None
+                            if record.get("type") != "response_item" or not isinstance(payload, dict) or payload.get("call_id") != call_id:
+                                continue
+                            if payload.get("type") in ("function_call", "custom_tool_call"):
+                                _, calls = operations(payload)
+                                if index < len(calls):
+                                    request, nested, operation = calls[index]["arguments"], calls[index]["nested"], calls[index]["operation"]
+                                    isolated = not nested or len(invocations(payload)) == 1
+                            elif payload.get("type") in ("function_call_output", "custom_tool_call_output"):
+                                output = payload.get("output")
+                                if isinstance(output, str):
+                                    try:
+                                        output = json.loads(output)
+                                    except ValueError:
+                                        pass
+                        except (ValueError, AttributeError, RecursionError):
+                            continue
+            except OSError:
+                continue
+        return {"operation": operation, "request": redact(request) if operation else None, "response": redact(output) if operation and isolated else None, "response_scope": "containing_tool_call" if nested else "jev_tool_call"}
+
     def snapshot(self):
         threads = {}
         for state in self.files.values():
             identity = state["thread_id"]
             if not identity:
                 continue
-            target = threads.setdefault(identity, {"thread_id": identity, "model": None, "tokens": {}, "token_time": "", "updated_at": None, "status": "observed", "calls": {}, "partial_history": False})
+            target = threads.setdefault(identity, {"thread_id": identity, "model": None, "reasoning_effort": None, "execution": {}, "context_time": "", "tokens": {}, "token_time": "", "created_at": None, "updated_at": None, "status": "observed", "activity_type": "unknown", "trigger": "unknown", "calls": {}, "partial_history": False, "task_intervals": {}, "task_start": None, "errors": [], "task_time": ""})
+            target["task_intervals"].update(state["task_intervals"])
+            target["errors"].extend(state["errors"])
+            if state["task_time"] > target["task_time"]:
+                target["task_time"], target["status"], target["task_start"] = state["task_time"], state["status"], state["task_start"]
+            if state["task_start"] and (not target["task_start"] or state["task_start"] > target["task_start"]):
+                target["task_start"] = state["task_start"]
+            if state["created_at"] and (not target["created_at"] or state["created_at"] < target["created_at"]):
+                target["created_at"] = state["created_at"]
             if state["token_time"] >= target["token_time"]:
                 target.update(tokens=state["tokens"], token_time=state["token_time"])
+            target["execution"].update({key: value for key, value in state["execution"].items() if key not in target["execution"]})
+            if state["context_time"] and state["context_time"] >= target["context_time"]:
+                target.update(model=state["model"], reasoning_effort=state["reasoning_effort"], context_time=state["context_time"])
+                target["execution"].update(state["execution"])
             if (state["updated_at"] or "") >= (target["updated_at"] or ""):
-                target.update(model=state["model"], updated_at=state["updated_at"], status=state["status"])
+                target.update(updated_at=state["updated_at"], activity_type=state["activity_type"], trigger=state["trigger"])
             target["calls"].update(state["calls"])
             target["partial_history"] |= state["partial_history"]
-        rows, tools = [], Counter()
+        metadata = read_metadata(self.root.parent, threads) if self.features["metadata"] else {}
+        pending_status = {state["thread_id"] for state in self.files.values() if state.get("history_cursor")}
+        rows, tools, nested_tools, git_events, skill_events, check_events, series, mcp_events, tool_series = [], Counter(), Counter(), [], [], [], Counter(), [], Counter()
+        file_events, error_events = [], []
+        for identity, entry in metadata.items():
+            if identity not in threads:
+                threads[identity] = {"thread_id": identity, "model": None, "reasoning_effort": None, "execution": {}, "tokens": {}, "token_time": "", "created_at": None, "updated_at": None, "status": "observed", "activity_type": "unknown", "trigger": "unknown", "calls": {}, "partial_history": True, "metadata_only": True}
         for thread in threads.values():
+            entry = metadata.get(thread["thread_id"], {})
+            row = {key: thread[key] for key in ("thread_id", "model", "reasoning_effort", "tokens", "created_at", "updated_at", "status", "partial_history", "activity_type", "trigger")}
+            row["execution"] = entry.get("execution", {}) | thread["execution"]
+            row["metadata_only"] = bool(thread.get("metadata_only"))
+            row["status_source"] = "session_lifecycle" if thread.get("task_time") else "catalog_status" if entry.get("status") else None
+            row["status_backfill_pending"] = thread["thread_id"] in pending_status
+            row["context_updated_at"] = thread.get("context_time") or None
+            environment = entry.get("environment", "unknown")
+            if environment == "unknown" and not thread.get("metadata_only"):
+                environment = "local"
+            row.update({"thread_name": entry.get("thread_name"), "environment": environment, "project_id": entry.get("project_id"), "project_name": entry.get("project_name"), "project_scope": entry.get("project_scope", "unknown"), "has_schedule": entry.get("has_schedule", False)})
+            for key in ("activity_type", "trigger", "model", "reasoning_effort", "created_at", "updated_at", "status"):
+                if key in entry and (not row.get(key) or row[key] in ("unknown", "observed") or thread.get("metadata_only")):
+                    row[key] = entry[key]
+            if entry.get("trigger") in ("dot", "schedule", "heartbeat"):
+                row["trigger"] = entry["trigger"]
+            if self.features["errors"]:
+                error_events.extend(event | {"thread_id": thread["thread_id"], "thread_name": row["thread_name"]} for event in thread.get("errors", []))
             counts = Counter(call["tool"] for call in thread["calls"].values())
             tools.update(counts)
-            rows.append({key: thread[key] for key in ("thread_id", "model", "tokens", "updated_at", "status", "partial_history")} | {"tool_calls": sum(counts.values()), "tools": dict(counts)})
+            nested_counts = Counter()
+            events, jev_calls, file_changes, file_reads = [], [], [], []
+            for identity, call in thread["calls"].items():
+                duration = None
+                if any(self.features[key] for key in ("tool_events", "git", "checks", "mcp", "web", "files")) and call["timestamp"] and call.get("completed_at"):
+                    duration = max(0, round((datetime.fromisoformat(call["completed_at"].replace("Z", "+00:00"))-datetime.fromisoformat(call["timestamp"].replace("Z", "+00:00"))).total_seconds()*1000))
+                if self.features["errors"] and call.get("error"):
+                    mcp = call.get("mcp", [])
+                    event = mcp[0] if call.get("isolated") and len(mcp) == 1 else None
+                    if event is None or self.mcp_sources.get(event["server"], True):
+                        error_events.append(call["error"] | {"timestamp": call.get("completed_at") or call["timestamp"], "category": "mcp" if event and event["server"] != "web" else "tool", "server": event["server"] if event else None, "tool": event["tool"] if event else call["tool"], "thread_id": thread["thread_id"], "thread_name": row["thread_name"], "call_id": identity, "source": "tool_result", "severity": "error"})
+                if self.features["tool_events"]:
+                    nested_counts.update(call.get("nested_tools", {}))
+                    events.append({"call_id": identity, "tool": call["tool"], "nested_tools": call.get("nested_tools", {}), "timestamp": call["timestamp"], "completed_at": call.get("completed_at"), "duration_ms": duration})
+                if call["timestamp"]:
+                    series[call["timestamp"][:16]+":00Z"] += 1
+                    tool_series[(call["timestamp"][:16]+":00Z", call["tool"])] += 1
+                for index, operation in enumerate(call.get("git", []) if self.features["git"] else []):
+                    git_events.append(operation | {"thread_id": thread["thread_id"], "thread_name": row["thread_name"], "call_id": identity, "index": index, "timestamp": call["timestamp"], "completed_at": call.get("completed_at"), "duration_ms": duration})
+                for index, operation in enumerate(call.get("jev", []) if self.features["jev_calls"] else []):
+                    jev_calls.append(operation | {"thread_id": thread["thread_id"], "call_id": identity, "index": index, "timestamp": call["timestamp"], "completed_at": call.get("completed_at")})
+                context = {"thread_id": thread["thread_id"], "thread_name": row["thread_name"], "call_id": identity, "timestamp": call["timestamp"], "completed_at": call.get("completed_at"), "duration_ms": duration}
+                if self.features["files"]:
+                    for change in call.get("files", []):
+                        event = context | change
+                        if event["nested"]:
+                            event["container_duration_ms"], event["duration_ms"] = duration, None
+                        file_events.append(event)
+                        (file_reads if change["operation"] == "read" else file_changes).append(event)
+                if self.features["mcp"] or self.features["web"]:
+                    for index, event in enumerate(call.get("mcp", [])):
+                        if self.features["web" if event["server"] == "web" else "mcp"]:
+                            mcp_events.append(event | context | {"index": index, "result": event.get("result", {}), "duration_ms": None if event["nested"] else duration, "container_duration_ms": duration if event["nested"] else None})
+                if self.features["skills"]:
+                    skill_events.extend(context | {"skill": skill["skill"], "has_document": bool(skill.get("doc_path"))} for skill in call.get("skills", []))
+                if self.features["checks"]:
+                    check_events.extend(context | operation for operation in call.get("checks", []))
+            events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
+            jev_calls.sort(key=lambda event: event["timestamp"] or "", reverse=True)
+            nested_tools.update(nested_counts)
+            row.update(token_updated_at=thread["token_time"] or None, tool_calls=None if thread.get("metadata_only") else sum(counts.values()), tools=dict(counts), nested_tools=dict(nested_counts), tool_events=events[:100] if self.features["tool_events"] else [], jev_calls=jev_calls[:100] if self.features["jev_calls"] else [])
+            row["file_changes"] = sorted(file_changes, key=lambda event: event["timestamp"] or "", reverse=True)[:200]
+            row["file_reads"] = sorted(file_reads, key=lambda event: event["timestamp"] or "", reverse=True)[:200]
+            intervals = dict(thread.get("task_intervals", {}))
+            if thread.get("task_start") and thread["task_start"] not in intervals and row["status"] == "running":
+                intervals[thread["task_start"]] = now()
+            row["task_duration_ms"] = sum(max(0, round((datetime.fromisoformat(end.replace("Z", "+00:00"))-datetime.fromisoformat(start.replace("Z", "+00:00"))).total_seconds()*1000)) for start, end in intervals.items()) if intervals else None
+            row["task_runs"] = len(intervals) if intervals else None
+            rows.append(row)
         rows.sort(key=lambda item: item["updated_at"] or "", reverse=True)
-        return {"source": "codex", "health": self.health, "started_at": self.started_at, "scope": "recent_file_tail_and_new_records", "max_files": self.max_files, "files": len(self.files), "bytes_read": self.read_bytes, "malformed_lines": self.malformed, "threads": rows, "tools": dict(tools), "observed_tool_calls": sum(tools.values())}
+        git_events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
+        skill_events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
+        check_events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
+        file_events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
+        return {"source": "codex", "health": self.health, "started_at": self.started_at, "scope": "recent_file_tail_and_new_records", "track_all": self.track_all, "max_files": self.max_files, "files": len(self.files), "bytes_read": self.read_bytes, "malformed_lines": self.malformed, "threads": rows, "tools": dict(tools), "nested_tools": dict(nested_tools), "observed_tool_calls": sum(tools.values()), "activity_series": [{"time": key, "calls": value} for key, value in sorted(series.items())[-10080:]], "tool_series": [{"time": key[0], "tool": key[1], "calls": value} for key, value in sorted(tool_series.items())[-20000:]], "mcp_events": mcp_events, "error_events": error_events if self.features["errors"] else [], "file_activity": {"events": file_events[:1000], "total": len(file_events), "operations": dict(Counter(event["operation"] for event in file_events))}, "git": {"events": git_events[:500] if self.features["git"] else [], "operations": dict(Counter(event["operation"] for event in git_events)) if self.features["git"] else {}, "total": len(git_events) if self.features["git"] else 0}, "skills": {"events": skill_events[:500] if self.features["skills"] else [], "counts": dict(Counter(event["skill"] for event in skill_events)) if self.features["skills"] else {}}, "checks": check_events[:500] if self.features["checks"] else []}

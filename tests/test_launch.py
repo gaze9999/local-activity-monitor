@@ -75,6 +75,17 @@ class LaunchTests(unittest.TestCase):
         prompt.assert_not_called()
         self.assertTrue((self.root / ".venv").exists())
 
+    def test_platform_interpreter_and_space_paths_preserve_arguments(self):
+        for platform in ('win32','linux','darwin'):
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory(prefix='monitor platform ') as folder:
+                root=Path(folder);python=root/'.venv'/('Scripts/python.exe' if platform=='win32' else 'bin/python')
+                python.parent.mkdir(parents=True);python.touch()
+                with patch.object(launch,'__file__',str(root/'launch.py')),patch.object(launch.sys,'platform',platform),patch.object(launch.subprocess,'run',return_value=subprocess.CompletedProcess([],0)) as run,patch('builtins.input') as prompt:
+                    self.assertEqual(launch.main(['--codex-home',str(root/'home with spaces')]),0)
+                prompt.assert_not_called()
+                self.assertTrue(all(call.args[0][0]==str(python) and call.kwargs['cwd']==root for call in run.call_args_list))
+                self.assertEqual(run.call_args.args[0][-2:],['--codex-home',str(root/'home with spaces')])
+
 
 if __name__ == "__main__":
     unittest.main()
