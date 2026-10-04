@@ -12,6 +12,8 @@ try:
 except ImportError:
     tomllib = None
 
+EVENT_LIMIT = 1000
+TOOL_LIMIT = 30
 SOURCE = re.compile(r"[A-Za-z0-9_.-]{1,80}\Z")
 CATEGORIES = {"documents": "文件 / OCR", "workspace": "環境 / 驗證", "runtime": "Runtime / 瀏覽器", "workflow": "Codex 工作流程", "review": "Review / Security", "deployment": "部署", "apps": "App / 成果", "jev": "Jev", "web": "網路參考", "other": "其他 MCP"}
 PLUGIN_SOURCES = {"codex-app-tools": "codex_app", "code-review": "code_review", "codex-security": "codex_security", "unified-computer-use": "cua_repl"}
@@ -364,7 +366,7 @@ def connection_state(events, enabled=True, diagnostics=()):
     return {"state": state, "observed_at": time, "last_response_at": latest_reply, "pending_calls": len(pending), "error_code": failure.get("code") if failure and state == "error" else None, "method": "local_records"}
 
 
-def summarize(sources, events, enabled=None, overrides=None):
+def summarize(sources, events, enabled=None, overrides=None, diagnostics=()):
     enabled, overrides = enabled or {}, overrides or {}
     catalog = dict(sources)
     for event in events:
@@ -387,6 +389,14 @@ def summarize(sources, events, enabled=None, overrides=None):
             p99 = round(durations[lower]+(durations[min(len(durations)-1, lower+1)]-durations[lower])*(position-lower), 2)
         servers.append({"server": server, "origin": origin, "category": category(server, overrides=overrides), "enabled": enabled.get(server, True), "calls": len(direct), "recognized": len(rows)-len(direct), "returned": sum(bool(item.get("completed_at")) for item in direct), "known_status": len(known), "errors": errors, "average_ms": round(sum(durations)/len(durations)) if durations else None, "p99_ms": p99, "p95_ms": durations[min(len(durations)-1, int(len(durations)*.95))] if durations else None, "last_at": max((item.get("completed_at") or item["timestamp"] or "" for item in rows), default=None)})
     for server in servers:
-        server["connection"] = connection_state([event for event in visible if event["server"] == server["server"]], server["enabled"])
+        rows = [event for event in visible if event["server"] == server["server"]]
+        server["tools"] = sorted({event["tool"] for event in rows})[:TOOL_LIMIT]
+        server["connection"] = connection_state(rows, server["enabled"], [event for event in diagnostics if event.get("server") == server["server"]])
+    recording = {}
+    for event in sorted(visible, key=lambda item: item.get("completed_at") or item.get("timestamp") or ""):
+        result = event.get("result", {})
+        for key, item in result.items():
+            if key.endswith(("recording_enabled", "telemetry_enabled")) and type(item) is bool:
+                recording[event["server"]] = {"enabled": item, "health": result.get("status"), "observed_at": event.get("completed_at") or event.get("timestamp")}
     visible.sort(key=lambda item: item["timestamp"] or "", reverse=True)
-    return {"servers": servers, "events": visible[:1000], "total_events": len(visible), "categories": CATEGORIES}
+    return {"servers": servers, "events": visible[:EVENT_LIMIT], "total_events": len(visible), "categories": CATEGORIES, "recording_status": recording}

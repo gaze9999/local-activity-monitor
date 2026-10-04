@@ -5,13 +5,14 @@ let preferences={};try{preferences=JSON.parse(localStorage.getItem(preferenceKey
 function editableCopy(value){return typeof value==="string"&&value===value.trim()&&value.length>=2&&value.length<=400&&/[A-Za-z\u3400-\u9fff]/.test(value)&&!/^(?:ms|px|bytes|tokens|分鐘|小時|秒鐘|\d+\s*(?:筆|項|秒|分鐘|小時|天))$/i.test(value);}
 preferences.copy=Object.fromEntries(Object.entries(preferences.copy||{}).filter(([key,value])=>editableCopy(key)&&typeof value==="string"&&value.length<=400).slice(0,500));
 function validDisplay(value){return value&&Array.isArray(value.options)&&value.options.length>=1&&value.options.length<=8&&value.options.every(n=>Number.isInteger(n)&&n>=1&&n<=200)&&new Set(value.options).size===value.options.length&&[...value.options,"all"].includes(value.ranking)&&[...value.options,"all"].includes(value.table);}
-let display=validDisplay(preferences.display)?preferences.display:{options:[5,10,20],ranking:10,table:20};
+const displayDefaults={options:[5,10,20],ranking:5,table:10};
+let display=validDisplay(preferences.display)?preferences.display:{...displayDefaults,options:[...displayDefaults.options]};
 const copyCatalog=new Set(),copyTargets=[];
-let locale=["zh-TW","en","ja"].includes(preferences.locale)?preferences.locale:"zh-TW",translations={},translatedValues=new Set();
+let locale=["zh-TW","en","ja"].includes(preferences.locale)?preferences.locale:"zh-TW",translations={},translatedValues=new Set(),tagIdentities=new Map();
 const defaultCopy={"資料保留與讀取":"監測資料與保存狀況","工作觀察台":"工作監測台","對話, 工具與專案操作":"對話與工具活動監測","程式狀態":"監測程式","Log 紀錄":"來源 Log","工具使用情況":"工具活動","Log 觀察與程式事件保存":"來源 Log 讀取與歷史回補","整理狀態":"資料更新狀態","本輪整理耗時":"本次資料更新耗時","每輪讀取上限":"每次讀取上限","保留效能樣本":"效能樣本數","保留狀態事件":"執行事件數","待完成的紀錄片段 (bytes)":"待解析資料 (bytes)","片段保留上限 (bytes)":"資料暫存上限 (bytes)","累計移除的舊工具紀錄":"已清理工具紀錄","累計 session 讀取量 (bytes)":"累計讀取量 (bytes)","損壞紀錄 (行)":"無法解析的紀錄 (行)","上次資料大小 (bytes)":"最近回應大小 (bytes)","上次傳輸大小 (bytes)":"最近傳輸大小 (bytes)","Model":"模型","Model 設定更新時間":"模型設定時間","Model 分布":"模型分布","Model Token 分布":"模型 Token 分布","Model 用量分析":"模型用量分析","Reasoning 等級":"推理等級","Input":"輸入 Token","Cached input":"快取輸入 Token","Output":"輸出 Token","Reasoning output":"推理輸出 Token","Total":"Token 合計","手動對話":"一般對話","exec 辨識":"程式碼辨識","exec 內辨識到的工具":"程式碼中辨識到的工具","原始文案":"預設文字","顯示文字":"自訂文字","用途說明":"工具用途","位置":"執行位置","過長紀錄 (行)":"超過長度上限 (行)","工具回傳狀態":"紀錄狀態","Session 讀取量 (bytes)":"檔案讀取量 (bytes)","Session 讀取量趨勢":"檔案讀取量趨勢"};
 function preset(value){const base=defaultCopy[value]||value;return translations[locale]?.[base]||translations[locale]?.[value]||base;}
 function ui(value){if(editableCopy(value)&&!translatedValues.has(value))copyCatalog.add(value);return Object.hasOwn(preferences.copy,value)?preferences.copy[value]:preset(value);}
-const fieldDescriptions={"資料狀態":"額度取自最後讀取的來源紀錄, 不會隨時間推估用量. 到達重設時間後等待新的來源回報","Low 1% (P1)":"第 1 百分位數, 約有 1% 樣本不超過此值. 使用線性內插, 搭配平均值與 P99 觀察分布","統計範圍":"平均值, P99 與 Low 1% 使用的資料範圍, 同時列出實際參與統計的樣本數","Credits 餘額":"來源最近回報的 credits 餘額","已使用":"來源回報的額度使用百分比, 保留原始視窗長度與觀測時間","剩餘比例":"以 100 減去來源回報的使用百分比, 快照超過重設時間後需等來源更新","重設時間":"來源提供的額度視窗重設時間, 依目前語系與本機時區顯示","快取命中比例 (%)":"已載入對話的快取輸入除以輸入 Token","來源檔案":"可用來對照原始紀錄的檔名, 搭配時間與紀錄 ID 追查","Request ID":"來源提供的請求識別碼, 用來對照相同請求的診斷事件","Trace ID":"來源提供的追蹤或關聯識別碼, 用來查找同一操作的事件","Model":"目前來源提供的模型名稱","Reasoning 等級":"來源提供的推理強度設定","Input":"對話最新累計輸入 Token, 包含來源計入的快取輸入","Cached input":"已包含在輸入 Token 中的快取部分, 不再額外加總","Output":"來源提供的累計輸出 Token","Reasoning output":"來源提供的推理輸出 Token, 是否包含在輸出量中依來源定義","Total":"來源提供的最新累計 Token, 不加總歷次更新數值","狀態":"來源提供的對話狀態. 未提供時不推測是否仍在執行","工作總耗時 (秒)":"已觀察到開始與結束的工作時間加總. 尚在執行的工作持續計時","SQL 耗時 (ms)":"只顯示 SQL 診斷來源提供的個別操作耗時. 不以外層工具時間代替","影響列數":"SQL 診斷來源提供的 rows_affected. 不從查詢內容推算","回傳列數":"SQL 診斷來源提供的 rows_returned","工具整次耗時 (ms)":"整次外層工具呼叫的時間, 不代表其中單一 SQL 或內層操作的耗時","工具回傳狀態":"工具紀錄顯示外層回傳狀態. 診斷紀錄顯示來源是否回報錯誤, 不推測 SQL 是否成功","紀錄方式":"區分直接工具呼叫與程式碼中辨識的操作. 程式碼辨識不代表已執行成功","CPU 時間":"此監測程式更新資料時使用的 CPU 時間","平均值":"目前圖表區間內有效樣本的算術平均. 活動次數以每個時間格計算, 包含零活動格","P99":"第 99 百分位數, 約有 99% 樣本不超過此值. 使用線性內插, 少量樣本時需搭配樣本數判讀","樣本數":"目前統計區間內有效的資料筆數或時間格數","資料庫位置":"紀錄中能確認的 SQLite 檔案位置","SQL 操作":"從工具參數或 literal 程式碼辨識的 SQL 指令, 點開操作明細可查看來源記錄的內容","Log 等級":"沿用來源提供的 error, warn, info, debug, trace 等等級. 未知的新等級保留原值","已讀取 (bytes)":"此來源自啟動至今累計讀取的位元組數, 包含歷史回補","未辨識 (行)":"來源格式與目前解析方式不相符的行數, 可用來判斷是否需要更新解析器","歷史回補":"分批讀取程式啟動前的來源紀錄, 補上最近 24 小時可取得的錯誤摘要","資料來源與讀取範圍":"列出此頁使用的實際來源位置, 讀取方式與涵蓋範圍","每頁筆數":"每頁顯示的資料列數. 修改後立即套用並保存在此瀏覽器","觀察項目":"啟用或停用指定資料的讀取與辨識, 不會修改來源紀錄"};
+const fieldDescriptions={"資料狀態":"額度取自最後讀取的來源紀錄, 不會隨時間推估用量. 到達重設時間後等待新的來源回報","Low 1% (P1)":"第 1 百分位數, 約有 1% 樣本不超過此值. 使用線性內插, 搭配平均值與 P99 觀察分布","統計範圍":"平均值, P99 與 Low 1% 使用的資料範圍, 同時列出實際參與統計的樣本數","Credits 餘額":"來源最近回報的 credits 餘額","已使用":"來源回報的額度使用百分比, 保留原始視窗長度與觀測時間","剩餘比例":"以 100 減去來源回報的使用百分比, 快照超過重設時間後需等來源更新","重設時間":"來源提供的額度視窗重設時間, 依目前語系與本機時區顯示","快取命中比例 (%)":"已載入對話的快取輸入除以輸入 Token","來源檔案":"可用來對照原始紀錄的檔名, 搭配時間與紀錄 ID 追查","Request ID":"來源提供的請求識別碼, 用來對照相同請求的診斷事件","Trace ID":"來源提供的追蹤或關聯識別碼, 用來查找同一操作的事件","Model":"目前來源提供的模型名稱","Reasoning 等級":"來源提供的推理強度設定","Input":"對話最新累計輸入 Token, 包含來源計入的快取輸入","Cached input":"已包含在輸入 Token 中的快取部分, 不再額外加總","Output":"來源提供的累計輸出 Token","Reasoning output":"來源提供的推理輸出 Token, 是否包含在輸出量中依來源定義","Total":"來源提供的最新累計 Token, 不加總歷次更新數值","狀態":"來源提供的對話狀態. 未提供時不推測是否仍在執行","工作總耗時 (秒)":"已觀察到開始與結束的工作時間加總. 尚在執行的工作持續計時","SQL 耗時 (ms)":"只顯示 SQL 診斷來源提供的個別操作耗時. 不以外層工具時間代替","影響列數":"SQL 診斷來源提供的 rows_affected. 不從查詢內容推算","回傳列數":"SQL 診斷來源提供的 rows_returned","工具整次耗時 (ms)":"整次外層工具呼叫的時間, 不代表其中單一 SQL 或內層操作的耗時","工具回傳狀態":"工具紀錄顯示外層回傳狀態. 診斷紀錄顯示來源是否回報錯誤, 不推測 SQL 是否成功","紀錄方式":"區分直接工具呼叫與程式碼中辨識的操作. 程式碼辨識不代表已執行成功","CPU 時間":"此監測程式更新資料時使用的 CPU 時間","平均值":"目前統計範圍內有效樣本的算術平均. 活動次數以每個時間格計算, 包含零活動格","P99":"第 99 百分位數, 約有 99% 樣本不超過此值. 使用線性內插, 少量樣本時需搭配樣本數判讀","樣本數":"目前統計區間內有效的資料筆數或時間格數","資料庫位置":"紀錄中能確認的 SQLite 檔案位置","SQL 操作":"從工具參數或 literal 程式碼辨識的 SQL 指令, 點開操作明細可查看來源記錄的內容","Log 等級":"沿用來源提供的 error, warn, info, debug, trace 等等級. 未知的新等級保留原值","已讀取 (bytes)":"此來源自啟動至今累計讀取的位元組數, 包含歷史回補","未辨識 (行)":"來源格式與目前解析方式不相符的行數, 可用來判斷是否需要更新解析器","歷史回補":"分批讀取程式啟動前的來源紀錄, 補上最近 24 小時可取得的錯誤摘要","資料來源與讀取範圍":"列出此頁使用的實際來源位置, 讀取方式與涵蓋範圍","每頁筆數":"每頁顯示的資料列數. 修改後立即套用並保存在此瀏覽器","觀察項目":"啟用或停用指定資料的讀取與辨識, 不會修改來源紀錄"};
 for(const [key,text]of Object.entries(fieldDescriptions)){ui(key);ui(text);}
 function fieldDescription(label){const entry=Object.entries(fieldDescriptions).find(([key])=>key===label||ui(key)===label);return entry?ui(entry[1]):null;}
 function editableLabels(values){return Object.defineProperties({},Object.fromEntries(Object.entries(values).map(([key,text])=>{ui(text);return [key,{enumerable:true,get:()=>ui(text)}];})));}
@@ -22,7 +23,7 @@ function discoverCopy(){
 }
 function applyCopy(){for(const target of copyTargets)if(target.text)target.text.textContent=target.before+ui(target.base)+target.after;else target.el.setAttribute(target.attribute,ui(target.base));}
 async function loadLocales(){try{const response=await request("/locales.json",{cache:"no-store"});if(!response.ok||!response.data?.en||!response.data?.ja)throw new Error();translations=response.data;translatedValues=new Set(Object.values(translations).flatMap(Object.values));}catch{locale="zh-TW";$("action-message").textContent="語言檔無法讀取, 使用繁體中文";}}
-function applyLanguage(){preferences.locale=locale;document.documentElement.lang=locale;numberFormat=new Intl.NumberFormat(locale);dateFormat=new Intl.DateTimeFormat(locale,{year:"numeric",month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});applyCopy();applyAppearance();document.querySelector(".settings-layout>.modal-tabs")?.setAttribute("aria-label",ui("設定分類"));$("language-select").value=locale;for(const input of document.querySelectorAll(".pagination input"))input.setAttribute("aria-label",ui(" 頁碼").trim());for(const tab of document.querySelectorAll(".modal-tabs button[data-copy-base]"))tab.textContent=ui(tab.dataset.copyBase);if(data)render(data);syncHelp();}
+function applyLanguage(){tagIdentities=new Map(Object.entries(translations[locale]||{}).map(([key,value])=>[value,defaultCopy[key]||key]));for(const [key,value]of Object.entries(preferences.copy||{}))tagIdentities.set(value,defaultCopy[key]||key);preferences.locale=locale;document.documentElement.lang=locale;numberFormat=new Intl.NumberFormat(locale);dateFormat=new Intl.DateTimeFormat(locale,{year:"numeric",month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});applyCopy();applyAppearance();document.querySelector(".settings-layout>.modal-tabs")?.setAttribute("aria-label",ui("設定分類"));$("language-select").value=locale;for(const input of document.querySelectorAll(".pagination input"))input.setAttribute("aria-label",ui(" 頁碼").trim());for(const tab of document.querySelectorAll(".modal-tabs button[data-copy-base]"))tab.textContent=ui(tab.dataset.copyBase);if(data)render(data);syncHelp();}
 const $ = id => document.getElementById(id);
 let numberFormat=new Intl.NumberFormat(locale),dateFormat=new Intl.DateTimeFormat(locale,{year:"numeric",month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
 const fmt = value => value == null ? "--" : numberFormat.format(value);
@@ -53,7 +54,13 @@ function node(tag,text,cls){const el=document.createElement(tag);if(text!=null)e
 function button(text,action,cls){const el=node("button",text,cls);el.type="button";el.addEventListener("click",action);return el;}
 function cell(row,text,cls){const el=node("td",text==null?null:text===ui("未知")||text===ui("--")?"--":text,cls);el.dataset.columnIndex=row.children.length;row.append(el);return el;}
 function valueCell(row,value,cls){const el=cell(row,value==null?"--":fmt(value),cls);if(Number.isFinite(value))el.dataset.heatValue=String(value);el.dataset.sortValue=value==null?"":String(value);return el;}
-function tag(text,cls=""){return node("span",text===ui("未知")?"--":text,"badge "+cls);}
+function tag(text,cls=""){
+  const value=text===ui("未知")?"--":text,el=node("span",value,"badge "+cls),key=tagIdentities.get(value)||value||"--";
+  const success=["完成","已完成","通過","已設定","已啟用","就緒","有紀錄","正常","最近有回應"],failure=["錯誤","失敗","逾時","連線錯誤","無法存取","設定無效","讀取失敗"],pending=["等待中","排隊中","回補中","部分完成","等待讀取","未找到","尚未設定","格式未支援","超過讀取上限","部分無法存取"],inactive=["--","已停用","已暫停","已關閉","未提供結果"];
+  let hash=0;for(const char of String(key))hash=(Math.imul(hash,31)+char.codePointAt(0))>>>0;
+  el.dataset.tagTone=success.includes(key)?"success":failure.includes(key)?"error":pending.includes(key)?"warning":inactive.includes(key)?"neutral":"category";
+  el.style.setProperty("--badge-hue",String(({success:155,error:0,warning:38})[el.dataset.tagTone]??[210,275,165,35,325,135][hash%6]));return el;
+}
 function clickableRow(row,action,label){row.classList.add("clickable-row");row.title=label||ui("開啟明細");row.tabIndex=0;row.addEventListener("click",event=>{if(!event.target.closest("button,a,input,select"))action();});row.addEventListener("keydown",event=>{if(event.target===row&&["Enter"," "].includes(event.key)){event.preventDefault();action();}});return row;}
 const notice=node("div",null,"notification"),noticeText=node("span"),noticeClose=button("×",()=>hideNotice(),"notice-close");notice.id="setting-notification";notice.setAttribute("popover","manual");notice.setAttribute("role","status");notice.setAttribute("aria-live","polite");notice.setAttribute("aria-atomic","true");noticeClose.setAttribute("aria-label",ui("關閉通知"));notice.append(noticeText,noticeClose);notice.hidden=true;document.body.append(notice);let noticeTimer,noticeOpen=false;
 function hideNotice(){clearTimeout(noticeTimer);if(noticeOpen){notice.hidePopover();noticeOpen=false;}notice.hidden=true;}
@@ -127,7 +134,7 @@ function statistics(values){const samples=values.filter(Number.isFinite).sort((a
 function measure(value,unit){if(unit==="bytes"){const scale=value>=1024**3?1024**3:value>=1024**2?1024**2:value>=1024?1024:1;return fmt(Math.round(value/scale*100)/100)+" "+({1:"B",1024:"KiB",1048576:"MiB",1073741824:"GiB"}[scale]);}return fmt(Math.round(value*100)/100)+" "+unit;}
 function statisticLabels(stats,unit,basis){const text=node("span",null,"chart-statistics");for(const [label,value]of [["平均值",stats?.mean],["P99",stats?.p99],["Low 1% (P1)",stats?.p1],["統計範圍",basis?basis+" · "+fmt(stats?.size??0)+ui(" 筆樣本"):"--"]]){const item=node("span",null,"statistic-item");item.append(node("span",ui(label),"statistic-label"),node("b",label==="統計範圍"?value:Number.isFinite(value)?measure(value,unit):"--","statistic-value"));const help=fieldDescription(label);if(help){bindHelp(item,help);item.tabIndex=0;}text.append(item);}return text;}
 function bars(id,counts,names,onClick,unit=ui("次"),segments){
-  const s=chartViews.get(id)?.settings||{},entries=sorted(counts).slice(0,s.top===0?undefined:s.top||Number(display.ranking)||10),peak=Math.max(...entries.map(item=>item[1]),1),max=s.maximum||peak;
+  const s=chartViews.get(id)?.settings||{},entries=sorted(counts).slice(0,rankingSize(s.top??display.ranking)),peak=Math.max(...entries.map(item=>item[1]),1),max=s.maximum||peak;
   if(["column","stacked"].includes(s.shape)){columnChart(id,entries,names,onClick,unit,s,segments);return;}
   if(["donut","pie"].includes(s.shape)){shareChart(id,counts,entries,names,onClick,unit,s.shape);return;}
   $(id).replaceChildren(...entries.map(([key,value])=>{
@@ -158,7 +165,7 @@ function columnChart(id,entries,names,onClick,unit,settings,series){
   }
   for(const tick of svg.querySelectorAll(".column-label"))if(slant)labelBottom=Math.max(labelBottom,260+textSize(tick.textContent)*Math.sin(35*Math.PI/180)+font);
   const fittedHeight=Math.ceil(labelBottom+12);svg.setAttribute("viewBox","0 0 "+width+" "+fittedHeight);svg.style.height=fittedHeight+"px";
-  wrap.append(svg);root.append(wrap);if(settings.shape==="stacked"){const legend=node("div",null,"column-legend");for(const label of categories){const item=node("span");item.append(node("span",null,"pie-swatch palette-"+colors.get(label)),node("span",ui(label)));legend.append(item);}bindHelp(legend,ui("缺少完整分類時以未分類總量顯示, 不補估 Token"));root.append(legend);}
+  wrap.append(svg);root.append(wrap);if(settings.shape==="stacked"){const legend=node("div",null,"column-legend");for(const label of categories){const item=node("span");item.append(node("span",null,"pie-swatch palette-"+colors.get(label)),node("span",ui(label)));if(label==="未分類")bindHelp(item,ui("來源未提供完整分類, 或分類合計與總量不一致, 此項顯示已回報的總量"));legend.append(item);}root.append(legend);}
   if(settings.statistics!==0)root.append(statisticLabels(statistics(entries.map(item=>item[1])),unit,ui("目前顯示項目")));
 }
 
@@ -211,11 +218,11 @@ function timeline(id,noteId,series,unit=ui("次"),average=false){
 }
 function hourly(events){const counts=Object.create(null);for(const event of events)if(event.timestamp){const key=event.timestamp.slice(0,13)+":00:00Z";counts[key]=(counts[key]||0)+1;}return Object.entries(counts).sort().map(([time,calls])=>({time,calls}));}
 const overviewShapes={"activity-chart":["line","折線圖"],"source-chart":["bar","橫條圖"],"model-chart":["column","直條圖"],"environment-chart":["bar","橫條圖"],"trigger-chart":["bar","橫條圖"],"overview-tools-chart":["bar","橫條圖"],"overview-token-chart":["bar","橫條圖"],"overview-error-chart":["bar","橫條圖"],"overview-file-chart":["column","直條圖"],"overview-sql-chart":["column","直條圖"],"overview-cpu-chart":["line","折線圖"],"overview-source-column":["column","直條圖"],"overview-model-ring":["donut","環圈圖"],"overview-model-pie":["pie","圓餅圖"],"overview-token-stack":["stacked","堆疊直條圖"],"overview-web-chart":["line","折線圖"],"overview-error-time-chart":["line","折線圖"],"overview-refresh-chart":["line","折線圖"],"overview-read-chart":["line","折線圖"],"overview-git-chart":["bar","橫條圖"],"overview-skill-chart":["bar","橫條圖"],"overview-check-chart":["bar","橫條圖"],"overview-quota-chart":["bar","橫條圖"],"overview-dot-chart":["bar","橫條圖"]};
+function rankingSize(value){return value===0||value==="all"?undefined:Number.isInteger(value)&&value>0?value:displayDefaults.ranking;}
 function chartControls(id,trend=false){
   const controls=node("div",null,"chart-options"),form=node("div",null,"chart-controls");let saved=preferences.charts?.[id]||{};
-  if(id==="mcp-source-chart"&&preferences.chartDefaultsVersion!==1){if(saved.top==null||saved.top===0)saved={...saved,top:5};preferences.chartDefaultsVersion=1;}
   const localDate=time=>new Date(time-new Date(time).getTimezoneOffset()*60000).toISOString().slice(0,16);
-  const settings={range:trend?"recent":"all",length:id.startsWith("monitor-")?60:24,unit:id.startsWith("monitor-")?60000:3600000,interval:id.startsWith("monitor-")?60000:3600000,top:id==="mcp-source-chart"?5:display.ranking==="all"?0:display.ranking,maximum:0,statistics:trend?1:0,shape:"bar",start:localDate(Date.now()-86400000),end:localDate(Date.now())};
+  const settings={range:trend?"recent":"all",length:id.startsWith("monitor-")?60:24,unit:id.startsWith("monitor-")?60000:3600000,interval:id.startsWith("monitor-")?60000:3600000,top:display.ranking==="all"?0:display.ranking,maximum:0,statistics:trend?1:0,shape:"bar",start:localDate(Date.now()-86400000),end:localDate(Date.now())};
   const fields={};
   function copyNode(tag,text){const el=node(tag,ui(text));if(editableCopy(text))copyTargets.push({text:el.firstChild,base:text,before:"",after:""});return el;}
   function select(key,label,items){const el=node("select");for(const [value,text]of items){const option=copyNode("option",text);option.value=value;el.append(option);}fields[key]=el;const wrap=copyNode("label",label);wrap.append(el);form.append(wrap);}
@@ -224,7 +231,7 @@ function chartControls(id,trend=false){
   input("length","最近","number",1,365);select("unit","時間單位",[[60000,"分鐘"],[3600000,"小時"],[86400000,"天"]]);
   input("start","開始時間","datetime-local");input("end","結束時間","datetime-local");
   if(trend)select("interval","時間間隔",[[60000,"1 分鐘"],[300000,"5 分鐘"],[900000,"15 分鐘"],[3600000,"1 小時"],[21600000,"6 小時"],[86400000,"1 天"]]);
-  else select("top","顯示項目",[...(id==="mcp-source-chart"?[...new Set([5,...display.options])]:display.options).map(value=>[value,"前 "+value+" 項"]),[0,"全部"]]);
+  else {select("top","顯示項目",[]);fillDisplayOptions(fields.top,saved.top??settings.top,true);form.prepend(fields.top.parentElement);}
   const types=overviewShapes[id]?[overviewShapes[id]]:trend?[["bar","長條圖"],["line","折線圖"]]:[["bar","橫條圖"],["column","直條圖"],...(["usage-model-chart","overview-token-chart"].includes(id)?[["stacked","堆疊直條圖"]]:[]),["donut","環圈圖"],["pie","圓餅圖"]],shape=saved.shape;
   if(overviewShapes[id])settings.shape=overviewShapes[id][0];else if(types.some(([key])=>key===shape))settings.shape=shape;
   input("maximum",trend?"Y 軸上限 (0 = 自動)":"數值上限 (0 = 自動)","number",0,1000000000);
@@ -233,8 +240,8 @@ function chartControls(id,trend=false){
   function showFields(){fields.maximum.parentElement.hidden=!trend&&["donut","pie"].includes(settings.shape);for(const key of ["length","unit"])fields[key].parentElement.hidden=settings.range!=="recent";for(const key of ["start","end"])fields[key].parentElement.hidden=settings.range!=="custom";}
   form.addEventListener("change",event=>{const key=Object.entries(fields).find(([,el])=>el===event.target)?.[0];if(!key)return;if(key==="length")roundNumber(event.target);const next={...settings,[key]:["length","unit","interval","top","maximum","statistics"].includes(key)?Number(event.target.value):event.target.value};if(!event.target.checkValidity()||next.range==="custom"&&(!next.start||!next.end||new Date(next.start)>=new Date(next.end))){event.target.setAttribute("aria-invalid","true");feedback("chart-settings-message",ui("請檢查時間起訖或數值"),"error");return;}event.target.removeAttribute("aria-invalid");Object.assign(settings,next);showFields();saveView();if(data)renderCharts();feedback("chart-settings-message",ui("圖表已更新"));});
   showFields();controls.append(form);controls.hidden=true;const heading=$(id).previousElementSibling,head=node("div",null,"panel-head chart-head"),actions=node("div",null,"chart-actions"),open=button("⚙",()=>openChartSettings(id),"chart-setting-button"),cycle=button("",()=>{settings.shape=types[(types.findIndex(([key])=>key===settings.shape)+1)%types.length][0];showFields();saveView();renderCharts();},"chart-type-button");
-  let inlineTop=null;if(id==="mcp-source-chart"){inlineTop=node("select");inlineTop.id="mcp-ranking-size";inlineTop.setAttribute("aria-label",ui("MCP 呼叫排行")+" · "+ui("顯示項目"));actions.append(inlineTop);inlineTop.addEventListener("change",()=>{settings.top=Number(inlineTop.value);fillDisplayOptions(fields.top,settings.top,true);saveView();if(data)renderCharts();});}
-  function updateType(){const index=types.findIndex(([key])=>key===settings.shape),label=ui(types[index][1]),next=ui(types[(index+1)%types.length][1]);cycle.textContent=label+" ↻";cycle.setAttribute("aria-label",ui(heading.dataset.copyBase||heading.textContent)+ui(" · 切換圖表類型, 目前 ")+label);cycle.title=ui("下一個: ")+next;if(inlineTop){fillDisplayOptions(inlineTop,settings.top,true);inlineTop.setAttribute("aria-label",ui("MCP 呼叫排行")+" · "+ui("顯示項目"));}}
+
+  function updateType(){const index=types.findIndex(([key])=>key===settings.shape),label=ui(types[index][1]),next=ui(types[(index+1)%types.length][1]);cycle.textContent=label+" ↻";cycle.setAttribute("aria-label",ui(heading.dataset.copyBase||heading.textContent)+ui(" · 切換圖表類型, 目前 ")+label);cycle.title=ui("下一個: ")+next;}
   updateType();cycle.hidden=!!overviewShapes[id];cycle.dataset.chartType=id;open.setAttribute("aria-label",heading.textContent+ui(" 圖表設定"));heading.replaceWith(head);actions.append(cycle,open);head.append(heading,actions);$(id).before(controls);chartViews.set(id,{settings,fields,controls,title:heading.dataset.copyBase||heading.textContent,updateType});
 }
 function openChartSettings(id){$("chart-settings-message").textContent="";chartSelection=id;const view=chartViews.get(id);$("chart-settings-title").textContent=ui(view.title)+ui(" · 圖表設定");view.controls.hidden=false;$("chart-settings-content").replaceChildren(view.controls);if(!$("chart-dialog").open)openDialog($("chart-dialog"));}
@@ -284,7 +291,7 @@ function applyAppearance(){
   $("theme-select").value=appearance.theme;$("accent-select").value=appearance.accent;$("font-size").value=appearance.font;if(data)for(const view of tableViews.values())adaptTable(view);syncHelp();
 }
 let diagnosticSource=preferences.tab==="logs"?"logs":preferences.diagnosticSource||"errors",activitySource=["git","checks"].includes(preferences.tab)?preferences.tab:["git","checks"].includes(preferences.activitySource)?preferences.activitySource:"git";
-function selectSubPage(parent,key,navId,entries){for(const [value,tabId,panelId]of entries){const active=value===key;$(tabId).setAttribute("aria-selected",String(active));$(tabId).tabIndex=active?0:-1;$(panelId).hidden=!active;}if(parent==="errors"){diagnosticSource=key;preferences.diagnosticSource=key;if(key==="logs"&&data&&!$("view-errors").hidden)loadLogs();}else{activitySource=key;preferences.activitySource=key;}if(data){renderCharts();saveView();}}
+function selectSubPage(parent,key,navId,entries){for(const [value,tabId,panelId]of entries){const active=value===key;$(tabId).setAttribute("aria-selected",String(active));$(tabId).tabIndex=active?0:-1;$(panelId).hidden=!active;}if(parent==="errors"){diagnosticSource=key;preferences.diagnosticSource=key;if(key==="logs"&&data&&!$("view-errors").hidden)loadLogs();}else{activitySource=key;preferences.activitySource=key;}if(data){renderCharts();renderSources();saveView();}}
 const diagnosticPages=[["errors","diagnostic-errors","error-content"],["logs","tab-logs","view-logs"]],activityPages=[["git","tab-git","view-git"],["checks","tab-checks","view-checks"]];
 function bindSubPages(parent,navId,entries,selected){for(const [index,[key,tabId]]of entries.entries()){$(tabId).addEventListener("click",()=>selectSubPage(parent,key,navId,entries));$(tabId).addEventListener("keydown",event=>{if(event.altKey||!["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","Home","End"].includes(event.key))return;event.preventDefault();const next=event.key==="Home"?0:event.key==="End"?entries.length-1:(index+(["ArrowRight","ArrowDown"].includes(event.key)?1:entries.length-1))%entries.length;$(entries[next][1]).click();$(entries[next][1]).focus();});}selectSubPage(parent,selected,navId,entries);}
 function switchTab(name){
@@ -292,7 +299,7 @@ function switchTab(name){
   if(["git","checks","workflow"].includes(name)){selectSubPage("workflow",name==="workflow"?activitySource:name,"activity-tabs",activityPages);name="workflow";}
   if(name==="jev"){name="mcp";mcpSource="jev";if(data)renderMcp();}
   for(const tab of document.querySelectorAll("[data-tab]")){const active=tab.dataset.tab===name;tab.setAttribute("aria-selected",String(active));tab.tabIndex=active?0:-1;$("view-"+tab.dataset.tab).hidden=!active;}
-  if(data){renderCharts();saveView();}
+  if(data){renderCharts();renderSources();saveView();}
   if(name==="errors"&&diagnosticSource==="logs"&&data)loadLogs();
 }
 function scrollToSection(id){requestAnimationFrame(()=>{const target=$(id);if(target&&!target.hidden)target.scrollIntoView({block:"start",behavior:"instant"});else window.scrollTo({top:0,behavior:"instant"});});}
@@ -376,12 +383,15 @@ function renderTools(){
   if(!Object.keys(tools).length)$("tools").append(node("p","--","empty"));
   $("nested-tools").replaceChildren(...sorted(nested).map(([tool,count])=>{const el=toolButton(tool,()=>openDetail({kind:"nested-tool",tool}),count);return el;}));
   if(!Object.keys(nested).length)$("nested-tools").append(node("p","--","empty"));
+  const statistics=[...sorted(tools).map(([tool,count])=>({tool,count,kind:"tool",label:ui("直接呼叫")})),...sorted(nested).map(([tool,count])=>({tool,count,kind:"nested-tool",label:ui("exec 辨識")}))];
+  replaceRows("tool-stat-rows",...statistics.map(item=>{const row=node("tr"),name=node("td"),count=node("td",fmt(item.count));name.append(toolButton(item.tool,()=>openDetail({kind:item.kind,tool:item.tool})));count.dataset.sortValue=String(item.count);row.append(name,node("td",item.label),count);return row;}));
+  $("tool-stat-empty").textContent=statistics.length?"":ui("尚無工具紀錄");
   attachTables();
 }
 let mcpSource=typeof preferences.mcpSource==="string"?preferences.mcpSource:preferences.tab==="jev"?"jev":"all";
 function selectMcpSource(source){
   mcpSource=source;preferences.mcpSource=source;mcpPage=1;$("filter-mcp-server").value=source;$("filter-mcp-category").value="all";$("filter-mcp-result").value="all";
-  if(data){renderMcp();renderCharts();attachTables();saveView();}
+  if(data){renderMcp();renderCharts();attachTables();renderSources();saveView();}
 }
 
 function dragSubTabs(nav,key,identity){
@@ -571,7 +581,7 @@ function renderErrors(){
 }
 $("errors-quick").addEventListener("click",()=>{diagnosticSource="errors";switchTab("errors");const view=tableViews.get("error-rows");if(view){tableStates["error-rows"]={...tableStates["error-rows"],page:1,filters:{[ui("等級")]:"error"}};renderTableFilters("error-rows");paginateTable("error-rows");persistTables();}scrollToSection("view-errors");});
 const monitorEventLabels=editableLabels({started:"程式啟動",settings_applied:"設定已套用",recording_enabled:"Jev 紀錄已啟用",recording_disabled:"Jev 紀錄已停用",refresh_failed:"資料整理失敗",recovered:"資料整理恢復",http_response_error:"HTTP 回應錯誤"});
-const logHealthLabels=editableLabels({ok:"正常",ready:"就緒",enabled:"已啟用",missing:"未找到",config_missing:"尚未設定",waiting:"等待讀取",disabled:"已停用",paused:"已暫停",memory:"記憶體保存",unsupported:"格式未支援",unavailable:"無法存取",partly_unavailable:"部分無法存取",invalid_config:"設定無效",error:"讀取失敗"});
+const logHealthLabels=editableLabels({ok:"正常",ready:"就緒",enabled:"已啟用",missing:"未找到",config_missing:"尚未設定",waiting:"等待讀取",disabled:"已停用",paused:"已暫停",memory:"記憶體保存",unsupported:"格式未支援",oversized:"超過讀取上限",unavailable:"無法存取",partly_unavailable:"部分無法存取",invalid_config:"設定無效",error:"讀取失敗"});
 const logLevelLabels={error:"error",warning:"warn",warn:"warn",info:"info",debug:"debug",trace:"trace",fatal:"fatal",critical:"critical"};
 function logSource(source){return errorSources[source]||source;}
 function severityTag(level){const name=String(level||"unknown").toLowerCase(),kind=["error","fatal","critical"].includes(name)?"error":["warning","warn"].includes(name)?"warning":["info","debug","trace"].includes(name)?name:"unknown";return tag(logLevelLabels[name]||level||"--","log-level level-"+kind);}
@@ -591,16 +601,53 @@ function renderSQLite(){
   $("sqlite-empty").textContent=events.length?"":ui("無");
   const measured=events.filter(event=>Number.isFinite(event.duration_ms));$("sqlite-measured").replaceChildren(node("h4",ui("SQL 耗時統計")),measured.length?statisticLabels(statistics(measured.map(event=>event.duration_ms)),"ms",ui("僅統計來源有提供耗時的 SQL 紀錄")):node("p","--","muted"));
 }
+const sourceScopes=editableLabels({
+  recent_tail_and_incremental_metadata:"先讀取各 session 的近期尾端, 再增量讀取新增紀錄. 工作起訖與錯誤紀錄依讀取預算分批回補, 表格與圖表使用已載入的資料",
+  titles_classification_and_local_thread_metadata:"從實際可讀取的 catalog, session index 與 app state 補充對話名稱, 專案, 模型與執行設定. 下方列出各檔案的讀取結果與選取欄位",
+  recent_metadata_and_24h_error_backfill:"增量讀取診斷檔案與資料庫, 選取 Log, 錯誤與 SQL 操作的 metadata. 各讀取器的預算, 已讀取數量與回補進度分別列出, SQL 文字在點開明細時讀取",
+  completed_operations_in_local_database:"唯讀查詢來源已寫入的完成操作. 摘要依目前時間範圍計算, 明細與趨勢受各自的讀取上限限制, 用量與 Credits 沿用來源回報的欄位",
+  runtime_samples_and_bounded_event_metadata:"收集此監測程式的效能樣本與執行事件. 效能樣本存於記憶體, 程式事件與錯誤摘要依容量循環保存, 下方列出目前保留量與上限",
+  confirmed_lifecycle_and_skill_checkpoints:"保存已確認的工作起訖與 Skills 讀取識別資料. 更新與重啟時沿用 checkpoint 並去重, 超過保存上限後移除較舊資料",
+  configured_sources_and_purposes:"從目前 MCP 設定取得啟用的來源名稱與用途, 再合併已觀察到的呼叫來源. 只選取顯示需要的欄位, 不顯示啟動參數與憑證",
+  reported_telemetry:"來源已載入的觀測資料. 下方列出可取得的欄位, 讀取結果與上限"
+});
+const sourceLimitLabels=editableLabels({file_limit:"追蹤檔案上限",sql_event_limit:"SQL 明細上限",git_event_limit:"Git 明細上限",check_event_limit:"驗證明細上限",file_event_limit:"檔案明細上限",skill_event_limit:"Skills 明細上限",tool_limit:"每個 MCP 的工具摘要上限",file_count:"已追蹤檔案",read_limit:"每次讀取上限",tail_bytes:"首次尾端讀取 (bytes)",scan_seconds:"檔案盤點間隔 (秒)",call_limit:"工具紀錄上限",buffer_limit:"片段暫存上限 (bytes)",history_pending_files:"待回補檔案",listed_file_limit:"列出來源檔案上限",read_bytes:"累計讀取量 (bytes)",unsupported_lines:"無法解析的紀錄 (行)",retained:"保留紀錄",skills:"Skills 紀錄",entry_limit:"Checkpoint 紀錄上限",skill_limit:"Skills 紀錄上限",byte_limit:"保存上限 (bytes)",row_limit:"讀取列數上限",rows_read:"已讀取列數",selected_threads:"查詢對話數",matched_threads:"符合的對話數",event_limit:"事件上限",configured_sources:"設定的來源數",loaded_sources:"已載入來源數",loaded_records:"已載入明細",series_points:"趨勢資料點",record_limit:"明細讀取上限",series_limit:"趨勢資料點上限",history_limit:"效能樣本上限",retained_samples:"保留效能樣本",retained_events:"保留執行事件",error_history_limit:"錯誤摘要上限",error_history_byte_limit:"錯誤摘要容量 (bytes)",history_hours:"錯誤回補範圍 (小時)",backfill_pending:"待回補資料",read_lines:"已讀取 (行)",parsed_lines:"已辨識 (行)",oversized_lines:"超過長度上限 (行)"});
+function sourceMetrics(values){return Object.entries(values||{}).filter(([,value])=>value!=null&&["number","boolean"].includes(typeof value)).map(([key,value])=>[sourceLimitLabels[key]||metricLabel(key),typeof value==="boolean"?ui(value?"是":"否"):fmt(value)+(key==="read_limit"?" "+(values.read_unit||"bytes"):"")]);}
+function sourceFeature(tab){const id=tab.id.slice(5);return id==="codex"?(conversationSource==="conversations"?"codex":conversationSource):id==="errors"?diagnosticSource:id==="workflow"?activitySource:id;}
+const sourceWindowLabels=editableLabels({"1h":"最近 1 小時","24h":"最近 24 小時","7d":"最近 7 天",all:"全部本機紀錄"});
+const sourceReaderNames=editableLabels({"Checkpoint load":"Checkpoint 載入","Checkpoint save":"Checkpoint 保存"});
+function sourceReader(reader){
+  const group=node("section",null,"source-reader"),head=node("h4",sourceReaderNames[reader.name]||reader.name||logSource(reader.source)||reader.source);
+  if(reader.health)head.append(document.createTextNode(" "),tag(logHealthLabels[reader.health]||reader.health));
+  group.append(head,metadataList(sourceMetrics(reader)));
+  if(reader.fields?.length){const fields=node("div",null,"source-fields");fields.append(...reader.fields.map(field=>tag(field)));group.append(fields);}
+  for(const query of reader.queries||[])group.append(sourceReader(query));
+  return group;
+}
+function sourceDetails(key,source,opened){
+  const item=node("details"),summary=node("summary",source.name);item.dataset.source=key;item.open=opened.has(key);
+  if(source.health)summary.append(tag(logHealthLabels[source.health]||source.health));item.append(summary,node("p",sourceScopes[source.scope]||source.scope||"--","source-description"));
+  const modes=editableLabels({read_only:"唯讀",bounded_metadata_cache:"循環保存"});item.append(metadataList([[ui("讀取方式"),modes[source.mode]||source.mode],...(source.window?[[ui("資料時間範圍"),sourceWindowLabels[source.window]||source.window]]:[]),...sourceMetrics(source.limits)]));
+  if(source.locations?.length){item.append(node("h4",ui("來源位置")));for(const location of source.locations)item.append(node("p",location,"mono source-location"));}
+  if(source.observations?.length){const fields=node("div",null,"source-fields");fields.append(...source.observations.map(field=>tag(observationLabels[field]||metricLabel(field))));item.append(node("h4",ui("觀察項目")),fields);}
+  if(source.fields?.length){const fields=node("div",null,"source-fields");fields.append(...source.fields.map(field=>tag(field)));item.append(node("h4",ui("選取欄位")),fields);}
+  for(const reader of source.readers||[])item.append(sourceReader(reader));
+  return item;
+}
 function renderSources(){
-  const scopes=editableLabels({recent_tail_and_incremental_metadata:"讀取近期 session 尾端與新增紀錄, 並補回最近 24 小時的錯誤摘要",titles_classification_and_local_thread_metadata:"讀取本機 catalog 的對話名稱, 專案與執行設定",recent_metadata_and_24h_error_backfill:"讀取近期診斷 metadata, 分批回補最近 24 小時的錯誤摘要",opt_in_telemetry:"讀取使用者啟用的 Jev telemetry 紀錄",runtime_samples_and_bounded_event_metadata:"效能樣本保存在記憶體. 程式事件與最近 24 小時錯誤摘要採循環保存",confirmed_lifecycle_and_skill_checkpoints:"保存最近確認的對話狀態與 Skills 讀取紀錄",interface_copy_and_tool_descriptions:"介面偏好保存在此瀏覽器, 工具用途由觀察設定管理"}),modes=editableLabels({read_only:"唯讀",bounded_metadata_cache:"循環保存",user_preferences:"使用者設定"});
   for(const tab of document.querySelectorAll('main>section[role="tabpanel"]')){
-    const id=tab.id.slice(5),sources=Object.entries(data.sources||{}).filter(([,source])=>id==="overview"||source.features?.includes(id)||id==="mcp"&&source.features?.includes("jev")||id==="errors"&&source.features?.includes("logs")||id==="workflow"&&source.features?.some(feature=>["git","workflow","checks"].includes(feature)));let footer=tab.querySelector(":scope>.source-reference");
-    if(!footer){footer=node("section",null,"panel source-reference");tab.append(footer);}const opened=new Set([...footer.querySelectorAll("details[open]")].map(el=>el.dataset.source));
-    const heading=node("h3",ui("資料來源與讀取範圍"));heading.title=fieldDescription("資料來源與讀取範圍");
-    footer.replaceChildren(heading,...sources.map(([key,source])=>{const el=node("details"),summary=node("summary",source.name+" · "+(modes[source.mode]||source.mode));el.dataset.source=key;el.open=opened.has(key);el.append(summary,node("p",scopes[source.scope]||source.scope,"muted"));for(const location of source.locations||[])el.append(node("p",location,"mono source-location"));if(!source.locations?.length)el.append(node("p",ui("尚無已設定的來源位置"),"muted"));if(source.health)el.append(node("p",ui("來源狀態: ")+(logHealthLabels[source.health]||source.health),"muted"));return el;}));
-    if(!sources.length)footer.append(node("p",ui("此頁使用目前已載入的觀測資料"),"muted"));
+    const id=tab.id.slice(5),feature=sourceFeature(tab),sources=Object.entries(data.sources||{}).filter(([key,source])=>(id==="overview"||source.features?.includes(feature))&&(id!=="mcp"||mcpSource==="all"||!key.startsWith("telemetry:")||key==="telemetry:"+mcpSource));let footer=tab.querySelector(":scope>.source-reference");
+    if(!footer){footer=node("details",null,"panel source-reference");footer.dataset.sourceTab=id;footer.open=preferences.sectionCollapsed?.["source:"+id]===false;tab.append(footer);footer.addEventListener("toggle",event=>{if(event.target!==footer)return;preferences.sectionCollapsed={...preferences.sectionCollapsed,["source:"+id]:!footer.open};if(footer.open)populateSourceReference(footer);saveView();});}
+    footer.sourceItems=sources;let summary=footer.querySelector(":scope>summary");if(!summary){summary=node("summary");footer.prepend(summary);}const meta=node("span",null,"source-summary-meta"),updated=node("time",when(data.updated_at));if(data.updated_at)updated.dateTime=data.updated_at;meta.append(node("span",ui("最近更新時間")+": "),updated,node("span",fmt(sources.length)+ui(" 個來源"),"source-count"));summary.replaceChildren(node("span",ui("資料來源與讀取範圍")),meta);
+    if(footer.open&&!tab.hidden)populateSourceReference(footer);
   }
 }
+function populateSourceReference(footer){
+  const old=footer.querySelector(":scope>.source-reference-content"),opened=new Set([...(old?.querySelectorAll("details[open]")||[])].map(item=>item.dataset.source)),content=node("div",null,"source-reference-content"),grid=node("div",null,"source-read-grid");
+  content.append(node("p",ui("下方列出此頁讀取器的實際設定與載入結果. 圖表時間範圍與表格篩選可另行設定"),"source-description"));
+  grid.append(...footer.sourceItems.map(([key,source])=>sourceDetails(key,source,opened)));content.append(grid);if(old)old.replaceWith(content);else footer.append(content);
+}
+
 function renderLogSummary(){
   const logs=data.logs||{},sources=logData?.sources||logs.sources||[],problems=sources.filter(source=>["missing","config_missing","unsupported","unavailable","partly_unavailable","invalid_config","error"].includes(source.health));
   cards("log-cards",[[ui("保留 Log 事件"),fmt(logData?.entries?.length??logs.retained),ui("點整列查看紀錄明細")],[ui("觀察來源"),fmt(sources.length),ui("來源診斷與歷史回補")],[ui("需要檢查的來源"),fmt(problems.length),ui("點來源列查看原因")],[ui("程式 Log 容量"),measure(sources.find(source=>source.source==="monitor")?.bytes,"bytes"),ui("最多 128 KiB, 自動輪替")]]);
@@ -1109,7 +1156,7 @@ function groupSettings(){
   modalTabs(content,groups,"settings-sections","外觀");const nav=content.previousElementSibling,layout=node("div",null,"settings-layout");nav.setAttribute("aria-label",ui("設定分類"));nav.setAttribute("aria-orientation","vertical");content.before(layout);layout.append(nav,content);status.className="settings-feedback";layout.before(status);
 }
 let conversationSource=["conversations","usage","dots"].includes(preferences.conversationSource)?preferences.conversationSource:"conversations";
-function selectConversationSource(key){conversationSource=key;preferences.conversationSource=key;for(const item of ["conversations","usage","dots"]){const selected=item===key,tab=$("codex-"+item);tab.setAttribute("aria-selected",String(selected));tab.tabIndex=selected?0:-1;$(item==="conversations"?"conversation-content":item+"-content").hidden=!selected;}if(data){attachTables();renderCharts();saveView();}}
+function selectConversationSource(key){conversationSource=key;preferences.conversationSource=key;for(const item of ["conversations","usage","dots"]){const selected=item===key,tab=$("codex-"+item);tab.setAttribute("aria-selected",String(selected));tab.tabIndex=selected?0:-1;$(item==="conversations"?"conversation-content":item+"-content").hidden=!selected;}if(data){attachTables();renderCharts();renderSources();saveView();}}
 for(const [index,key]of ["conversations","usage","dots"].entries()){const tab=$("codex-"+key);tab.addEventListener("click",()=>selectConversationSource(key));tab.addEventListener("keydown",event=>{if(event.altKey)return;if(!["ArrowLeft","ArrowRight","Home","End"].includes(event.key))return;event.preventDefault();const items=["conversations","usage","dots"],next=event.key==="Home"?0:event.key==="End"?2:(index+(event.key==="ArrowRight"?1:2))%3;selectConversationSource(items[next]);$("codex-"+items[next]).focus();});}selectConversationSource(conversationSource);dragSubTabs($("conversation-tabs"),"codex",tab=>tab.id);
 function usageWindow(minutes){return minutes==null?"--":minutes%1440===0?fmt(minutes/1440)+ui(" 天"):minutes%60===0?fmt(minutes/60)+ui(" 小時"):fmt(minutes)+ui(" 分鐘");}
 let usageModelCounts={},usageModelSegments={};

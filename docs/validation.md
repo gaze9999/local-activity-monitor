@@ -1,5 +1,27 @@
 # 驗證紀錄
 
+## 2026-10-04 至 2026-10-05, 0.2.2
+
+Windows, Python 3.14.7 與 Codex in-app browser. 使用隔離的 85 個 session, 11 個 MCP 來源, Jev 與 SQL 示範資料. 沒有使用正式對話內容或改寫正式來源設定
+
+- 125 項 unittest 通過, 1 項大型 HTTP debug 測試因標準函式庫對照服務的傳輸逾時而跳過. 新增 7 項來源測試, 覆蓋實際 schema / 路徑 / 讀取量, 缺少及不支援格式, 未知 telemetry 來源, 0 值, 停用狀態, MCP 暫停讀取不使快照失敗, 來源資訊不額外讀取檔案內容與不包含私人欄位. 重現並修正低頻 MCP 回應 / 工具 / 紀錄狀態被 1,000 筆表格上限遮掉, automation 查詢未限定範圍與未報告讀取量, checkpoint 0 筆無法區分讀取失敗
+- Node 語法, Python 3.10 AST 與文件相對連結通過. en / ja 的 1321 個 key 一致, 新增來源描述保留日文標點
+- 依最新決定, 實際確認新偏好為 14 px, 有效的 16 px 自訂偏好保留, 還原設定後實際回到 14 px, 排行 5 項, 表格每頁 10 筆. 所有主頁表格在資料充足時顯示 10 筆. MCP 排行的 5 / 10 / 20 / 全部位於齒輪內, 原先卡片上的數量選單已移除. 實際切換全部及重整後保留選擇
+- 各主頁的來源說明初始收合且未建立詳細 DOM, 標題持續顯示最近更新時間. 各來源全寬排列且獨立展開, 更新後保留各自展開狀態. Catalog 實際顯示 85 列主查詢, automation_runs / automations 各 1 列與 85 個選取 Thread IDs, checkpoint 分列載入 / 保存狀態. 展開後顯示實際位置, 欄位 / 觀察項目, 程式上限, 讀取結果與保留量. 單一 MCP 頁不列其他來源的 telemetry. Jev 範圍從 24 小時切換為 1 小時後, 來源區塊顯示實際範圍及 0 筆明細 / 趨勢點
+- 實際切換 zh-TW / en / ja, 檢查設定與詳細來源文案. 1280 px 桌面與 390 px 窄螢幕沒有頁面橫向溢出. 390 px 使用 18 px 字級時, 圖表設定採單欄且 modal 沒有橫向溢出, 長來源路徑可換行. 保留原有表格容器內捲動
+- 工具頁新增統計表格, 直接呼叫與程式碼辨識分列, 實際確認每頁 10 筆, 數值排序與篩選為程式碼辨識後的 2 筆紀錄. 1280 / 390 px 逐一檢查 11 個主頁完成渲染後的表格筆數與 SVG 文字邊界, 沒有頁面橫向溢出或 SVG 文字越界
+- Tag 使用共用分類色與狀態色, 已完成 / 已設定 / 正常使用成功色, 缺值使用中性色, 保留文字. 修改後的測試頁面沒有新增 console error
+
+textlint MCP 兩次檢查 8 份 Markdown, 台灣規則提示從 20 項降至 8 項, 剩下是 inline code 邊界的斷句誤判, 已逐項核對. 新增資料盤點文件回傳 0 項提示. 繁中 UI literals 與英文語系檔抽取文字的通用規則回傳 0 項提示, 不代表英文完整文法檢查. 日文全部字串抽成段落時產生大量標籤句尾誤報, 保留短標籤, 人工核對非句尾規則並修正冗詞與標點. 針對來源, 額度, 傳輸, 未分類, 平均及 P1 等 6 段完整 tooltip 再使用日文規則檢查, 回傳 0 項提示
+
+大型回應 debug 使用大於 64 KiB 的合成內容, 比較標準 HTTP 服務與實際 handler 的未壓縮 / gzip 完整性. 此環境的標準服務先發生 TimeoutError, 因此 handler 大型回應驗證跳過, 不能記為通過. 既有本機服務的 /api/instance 正常, /api/snapshot 回應標頭可取得, 內容接收逾時, 完整即時資料盤點受此限制. 沒有據此修改壓縮策略或停止既有服務
+
+重跑 debug: Windows 設定 `$env:PYTHONPATH="src"` 後, 執行 `python -m unittest discover -s tests -p test_http_snapshot.py -v`. 其他系統設定 `PYTHONPATH=src` 再執行相同測試. 此測試只啟動與關閉自己的 loopback 合成服務
+
+效能比較使用相同 85 個 session fixture, 修改前程式取自 ae8bdc4, 每次初始化後量測 20 次 refresh + snapshot. 最終程式的兩組量測改變先後順序, 更新耗時中位數為修改前 66.8 / 66.9 ms, 修改後 97.4 / 60.2 ms, CPU 中位數為修改前 62.5 ms, 修改後 62.5 / 46.9 ms. 最後一組冷啟動各為單次樣本, 修改前 209 ms / 125 ms CPU, 修改後 199 ms / 156 ms CPU. 波動不足以判定加速或退步. session 增量讀取皆為 0 bytes, 最後一次 snapshot gzip 大小從 34,596 增至 36,495 bytes, 增量約 1.9 KiB, 來自來源與摘要 metadata. 未重跑 5000 個 session 的效能測試
+
+設計依據與後續驗收規則見 [維護與驗收](maintenance.md). 版本與套件驗證依既有 release workflow 執行, 各平台結果見 [Actions](https://github.com/gaze9999/local-activity-monitor/actions/workflows/release.yml), 實際發佈產物見 [v0.2.2](https://github.com/gaze9999/local-activity-monitor/releases/tag/v0.2.2). v0.2.1 的已發佈驗證保留如下
+
 ## 2026-10-04, 0.2.1
 
 Windows, Python 3.14.7 與 Codex in-app browser. 沿用隔離 session / Jev fixture, 新增可提供 credits 的未知 MCP 與 SQL 診斷紀錄. 沒有讀取正式對話內容或改寫來源設定

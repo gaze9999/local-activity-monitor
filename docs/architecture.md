@@ -62,7 +62,7 @@ Jev payload 仍只在指定呼叫點開時讀取, 遮蔽 credentials 並保留�
 - 工具趨勢保留最近 10080 個分鐘 bucket, 工具 / 時間排行最多 20000 個 bucket
 - 對話工具與 Jev 明細各 100 筆, 檔案修改與讀取各 200 筆, 全部檔案操作列表最多 1000 筆. Git / Skills / 驗證列表最多 500 筆, MCP 列表最多 1000 筆
 - Catalog 最多 2000 個對話 metadata, Jev 趨勢最多 168 個小時 bucket
-- 對話全部顯示每批建立 50 列 DOM, 全部新表格預設每頁 20 筆, 排行 10 項, 顯示選項預設 5 / 10 / 20, 可自訂最多 8 個 1 - 200 選項. 圖表最多 240 格
+- 對話全部顯示每批建立 50 列 DOM, 全部新表格預設每頁 10 筆, 排行 5 項, 顯示選項預設 5 / 10 / 20, 可自訂最多 8 個 1 - 200 選項. 圖表最多 240 格
 
 `monitoring/thread-state.json` 保存最多 1000 個已確認 lifecycle checkpoint 與 500 筆 Skills 選定 metadata, 總上限 512 KiB. 保存狀態時間, 開始時間, Thread ID, 檔名與讀取 offset. Skills 保存 Thread / Call ID, Skill 與時間, 不保存 command 或文件位置. lifecycle / Skills 改變時保存, offset 最多每 30 秒更新. 使用原子替換, 拒絕 symlink, 保存失敗保留記憶體觀察
 
@@ -85,7 +85,7 @@ Jev payload 仍只在指定呼叫點開時讀取, 遮蔽 credentials 並保留�
 
 設定先完整驗證再變更. map 各最多 64 個自訂項目, 工具說明最多 400 字元. `/api/settings` body 上限 256 KiB. 觀察設定只存在目前後端程序, 網頁使用 localStorage 保存並在重新連線後套用. 外觀, 圖表, 表格排序 / 分頁, Tab 順序與介面文案屬於前端. 介面文字由 HTML 純文字與 ui() 標籤集中登錄, 略過數字, 單獨單位與帶有拼接空白的片段. data-copy="ignore" 可排除整個元件. 圖表動態控制項保留原始標籤供即時套用, 不修改原始紀錄值或 ID. 新 UI 元件沿用 ui() 與通用表格控制, 新 Tab 會自動接到目前排序尾端
 
-Snapshot 額外提供 `default_settings` 與各 Tab 的來源讀取範圍. MCP 回傳只投影最多 40 個符合用量, credits, 次數或耗時語意的數值, 排除 credentials 與任意帳戶欄位. Token 用量採 thread 最新累計, 額度保留來源視窗, 剩餘百分比與時間, 不推估帳單金額
+Snapshot 額外提供 `default_settings` 與讀取器的來源資訊. `sources` 根據當次 collector 結果組合實際位置, health, 選取欄位與上限, 各讀取器保留實際讀取數量與回補狀態. 上限與執行讀取共用 constants, 不額外重掃來源或載入 payload. 頁面依主 / 子 Tab 的資料相依篩選來源, 詳細內容只在展開區塊時建立 DOM. MCP 回傳只投影最多 40 個符合用量, credits, 次數或耗時語意的數值, 排除 credentials 與任意帳戶欄位. Token 用量採 thread 最新累計, 額度保留來源視窗, 剩餘百分比與時間, 不推估帳單金額
 
 Snapshot 的 monitor 欄位提供 runtime, uptime, refresh / process CPU 耗時, 本輪 session bytes, 資料保留量, HTTP 回應大小與錯誤計數. 360 個效能樣本及 200 個狀態事件使用 bounded deque, 重新啟動後清空. 整理失敗保留前次 cache, poll 繼續重試, 紀錄只保存例外類型
 
@@ -103,6 +103,6 @@ HTML 內嵌目前 CSS / script 並提供精確 CSP SHA-256, 換行先統一為 L
 
 ## 原生發布
 
-`tools/portable.py` 直接啟動 server, 不使用原始碼 watcher 或安裝流程. `tools/build_release.py` 在各原生系統使用固定版 PyInstaller 建置資料夾套件, 收入完整 web assets, 說明與 runtime 授權文件. `tools/smoke_release.py` 以暫存 CODEX_HOME 與 loopback 隨機 port 啟動該執行檔, 核對 HTTP, CSP, 資產, 版本與任意檔案存取邊界.
+`tools/portable.py` 直接啟動 server, 不使用原始碼 watcher 或安裝流程. `tools/build_release.py` 在各原生系統使用固定版 PyInstaller 建置資料夾套件, 收入完整 web assets, 說明與 runtime 授權文件. `tools/smoke_release.py` 以暫存 CODEX_HOME 與 loopback 隨機 port 啟動該執行檔, 核對 HTTP, CSP, 資產, 版本與任意檔案存取邊界
 
-`.github/workflows/release.yml` 由 workflow_dispatch 對指定 commit 執行 Windows x64, macOS Intel / ARM64, Linux x64 / ARM64 建置, 測試失敗不進入 release 上傳. 原始碼 zip, sdist, wheel 與 SHA-256 一起附加到 draft release, 確認產物後再公開. Build 工具列在 requirements-build.txt, 不加入 runtime 相依.
+`.github/workflows/release.yml` 由 workflow_dispatch 對指定 commit 執行 Windows x64, macOS Intel / ARM64, Linux x64 / ARM64 建置, 測試失敗不進入 release 上傳. 原始碼 zip, sdist, wheel 與 SHA-256 一起附加到 draft release, 確認產物後再公開. Build 工具列在 requirements-build.txt, 不加入 runtime 相依

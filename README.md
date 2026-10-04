@@ -2,7 +2,7 @@
 
 Codex 活動監測, 包含 Jev 與 MCP. 使用 Python 標準函式庫與原生網頁, 不需 Node, GPU, API Key 或雲端服務
 
-操作方式見 [使用說明](docs/usage.md), 資料來源與擴充方式見 [程式架構](docs/architecture.md), [設定檔格式](docs/settings-format.md) 與 [錯誤觀察](docs/error-observation.md). 維護與修改原則見 [維護與驗收](docs/maintenance.md). [活動匯出規劃](docs/export-plan.md) 保存後續功能需求. 本輪檢查見 [驗證紀錄](docs/validation.md)
+操作方式見 [使用說明](docs/usage.md), 資料來源與擴充方式見 [程式架構](docs/architecture.md), [設定檔格式](docs/settings-format.md) 與 [錯誤觀察](docs/error-observation.md). 維護與修改原則見 [維護與驗收](docs/maintenance.md). [活動匯出規劃](docs/export-plan.md) 保存後續功能需求. 可觀測欄位與取得限制見 [資料盤點](docs/data-inventory.md), 本輪檢查見 [驗證紀錄](docs/validation.md)
 
 ## 下載即用
 
@@ -58,7 +58,7 @@ macOS 若下載的檔案未保留執行權限, 在 repo 執行一次 `chmod +x S
 
 預設頁面是 `http://127.0.0.1:8787/`. 只能從本機連線. `--port 8790` 可指定其他 port. 終端按 Ctrl+C 停止, 關閉瀏覽器分頁不會停止服務
 
-也可安裝已建置的 `local_activity_monitor-0.2.1-py3-none-any.whl`, 並從任意資料夾呼叫環境中的 `local-activity-monitor`. 不必保留 checkout
+也可安裝已建置的 `local_activity_monitor-0.2.2-py3-none-any.whl`, 並從任意資料夾呼叫環境中的 `local-activity-monitor`. 不必保留 checkout
 
 ## MCP 來源紀錄
 
@@ -103,7 +103,7 @@ Request bytes 是每次 HTTP 嘗試的 JSON body 大小. response bytes 只計�
 
 Codex collector 從 JSONL, 本機 thread SQLite catalog, session index 與指定 app state 欄位選取 metadata, 不將完整原始紀錄, 一般對話文字或完整指令送到頁面. 不讀 `auth.json`, 憑證檔或 shell history. `exec` 中只辨識明確 literal 的 Git / Jev / Skills / 驗證操作, 不執行程式碼. 工具明細另外列出 `exec` 內辨識到的工具名稱, 包含動態參數的呼叫. 數量是程式碼出現位置, 不推論迴圈或條件分支的實際執行次數. 對話名稱優先取本機 catalog 的側邊欄顯示名稱, 缺少時才使用 session title / index. 分類依已記錄欄位, 缺少資料顯示未知
 
-主頁整合總覽, 對話, 錯誤與 Log, 工具, MCP, 網路, 檔案, SQL, Skills, 專案活動與監測程式. 用量 / My dots, 錯誤 / Log, Git / 驗證與各 MCP 使用子 Tab. 左上版本與標題分開, 右上集中更新, 啟動與執行時間. 每頁最下方列出資料來源與讀取範圍
+主頁整合總覽, 對話, 錯誤與 Log, 工具, MCP, 網路, 檔案, SQL, Skills, 專案活動與監測程式. 用量 / My dots, 錯誤 / Log, Git / 驗證與各 MCP 使用子 Tab. 左上版本與標題分開, 右上集中更新, 啟動與執行時間. 每頁最下方的資料來源與讀取範圍預設收合, 展開可查看實際檔案位置, 選取欄位, 讀取結果, 目前保留量與程式上限. 內容由當次讀取結果產生, 不列固定檔名樣板
 
 總覽依重要性預設顯示活動, 帳戶用量, 剩餘額度, Token 與錯誤等 12 個區塊, 可個別設定顯示與順序. 直條, 堆疊, 圓餅與環圈各自顯示, 與活動摘要分開. 圖表有刻度 / 單位, 耗時與趨勢提供平均值 / P99 / Low 1% (P1) 及含樣本數的範圍. 分類與額度不顯示分布統計. 長標籤統一傾斜並提供完整 tooltip. 桌面多欄表格在表格範圍內橫向捲動, 手機改成資料卡. 可選數值熱度, 同欄顏色依目前頁面數值比較
 
@@ -111,9 +111,9 @@ Codex collector 從 JSONL, 本機 thread SQLite catalog, session index 與指定
 
 對話與 MCP 來源頁可點開特定 Jev 呼叫, 從該 session 尾端取得可觀察的送出 / 回傳內容, 在送至頁面前遮蔽 credentials, 不另存內容資料庫. 使用動態參數或多個工具共用回傳時可能沒有獨立的 Jev request / response. 缺少內容顯示 --. 不從 metadata 統計重建 payload
 
-右上設定集中外觀, 顯示, 更新與追蹤, 介面與說明, 監測項目, MCP 來源, 來源紀錄與設定檔. 來源紀錄顯示來源實際狀態, 不改寫來源開關. 提供繁體中文, English 與日本語, 更新預設 10 秒 (1 - 3600), session 1 - 5000, 字體 12 - 18 px. 數量設定四捨五入為整數. 設定結果使用短暫浮動通知
+右上設定集中外觀, 顯示, 更新與追蹤, 介面與說明, 監測項目, MCP 來源, 來源紀錄與設定檔. 來源紀錄顯示來源實際狀態, 不改寫來源開關. 提供繁體中文, English 與日本語, 更新預設 10 秒 (1 - 3600), session 1 - 5000, 介面字級預設 14 px (12 - 18). 數量設定四捨五入為整數. 設定結果使用短暫浮動通知
 
-介面與說明分工具, 介面文字與指標 tooltip, 有搜尋 / 分類, 有變更才顯示還原. 共用 tooltip 會避開邊緣並在 modal 開關時隱藏. 偏好保存於瀏覽器, 可匯入 / 匯出 JSON. 全部還原需先確認, 已有活動紀錄保留. 全域顯示選項預設 5 / 10 / 20 / 全部, 排行 10 項, 表格 20 筆
+介面與說明分工具, 介面文字與指標 tooltip, 有搜尋 / 分類, 有變更才顯示還原. 共用 tooltip 會避開邊緣並在 modal 開關時隱藏. 偏好保存於瀏覽器, 可匯入 / 匯出 JSON. 全部還原需先確認, 已有活動紀錄保留. 全域顯示選項預設 5 / 10 / 20 / 全部, 排行 5 項, 表格 10 筆. 各排行榜的數量選擇在卡片右上角齒輪內, 每張圖表與表格可獨立保存設定. 既有有效自訂值保留, 還原預設後套用新數量與字級. Tag 以顏色區分狀態與分類, 同時保留文字
 
 用量頁顯示來源提供的額度視窗, 剩餘比例, 重設時間與 credits, Token 分析依 thread 最新快照. MCP 用途取設定 / README 或自訂說明, 各來源動態列出工具與選定用量 / credits 指標. My dots 顯示可取得的產出類型與關聯對話. 名稱依來源可取得欄位套用
 
@@ -123,7 +123,7 @@ Token 使用每個 thread 最新累計快照. 不將每次快照或 last-turn co
 
 ## 錯誤與常駐狀態
 
-右上角「錯誤」顯示最近 24 小時已載入的錯誤數, 錯誤摘要在重整與重啟後保留, 點擊直接進入錯誤紀錄並篩選錯誤. 也可查看警告, 對話送出失敗, 連線重試, MCP / 工具回報錯誤, 命令非零代碼與觀察程式錯誤. 點整列可看原因分類, 時間, 模組, 代碼, Request / Trace / Call ID, 來源紀錄 ID 與相關事件. 不保存原始診斷訊息, stack 或私人對話內容
+右上角"錯誤"顯示最近 24 小時已載入的錯誤數, 錯誤摘要在重整與重啟後保留, 點擊直接進入錯誤紀錄並篩選錯誤. 也可查看警告, 對話送出失敗, 連線重試, MCP / 工具回報錯誤, 命令非零代碼與觀察程式錯誤. 點整列可看原因分類, 時間, 模組, 代碼, Request / Trace / Call ID, 來源紀錄 ID 與相關事件. 不保存原始診斷訊息, stack 或私人對話內容
 
 純 ChatGPT 雲端對話由本機 catalog 提供名稱, 時間與分類. 沒有 Codex session 或來源未提供的 Model / token / Reasoning 維持未知, 明細列出資料來源. 長時間工作的開始事件若超出尾端, 會分輪回查並補回狀態及可取得的起訖耗時
 
@@ -170,6 +170,6 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 python3 -m pip wheel --no-deps --wheel-dir dist .
 ```
 
-測試 checkout 時需先將 `src` 加入 `PYTHONPATH`, 避免載入其他已安裝版本. 測試使用臨時 metadata, 不呼叫付費 API. HTTP guard 直接測試實際 handler, watcher 測試僅操作自己建立的 mock 子程序. 本機 Codex 來源可唯讀檢查, 頁面開關與 Jev payload 使用隔離 fixture 驗證. macOS / Apple Silicon / Linux 尚未在原生環境驗證
+測試 checkout 時需先將 `src` 加入 `PYTHONPATH`, 避免載入其他已安裝版本. 測試使用臨時 metadata, 不呼叫付費 API. HTTP guard 直接測試實際 handler, watcher 測試僅操作自己建立的 mock 子程序. 本機 Codex 來源可唯讀檢查, 頁面開關與 Jev payload 使用隔離 fixture 驗證. 原生套件由各平台 CI 建置並執行隔離啟動檢查, macOS / Linux 的正式 Codex App log 格式仍需在目標環境確認, 結果見 [驗證紀錄](docs/validation.md)
 
 Jev usage 欄位來源見 [TypeSafe API 文件](https://docs.typesafe.ai/api). 本工具只觀察 client 回應, 不實作 Provider 帳戶用量查詢

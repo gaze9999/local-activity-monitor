@@ -52,8 +52,22 @@ def execution_metadata(values):
     return result
 
 
-def read_metadata(home, identities, dots=None):
+CATALOG_LIMIT = 2000
+INDEX_TAIL_LIMIT = 1024*1024
+APP_STATE_LIMIT = 16*1024*1024
+
+
+def read_metadata(home, identities, dots=None, source_info=None):
     entries = {}
+    def report(path, health, fields=(), **limits):
+        if source_info is not None:
+            source_info[str(path)] = {"name": path.name, "location": str(path), "health": health, "fields": list(fields), **limits}
+    def failed(path):
+        try:
+            health = "unavailable" if path.is_file() else "missing"
+        except OSError:
+            health = "unavailable"
+        report(path, health)
     try:
         path = home/"sqlite/codex-dev.db"
         with closing(sqlite3.connect(path.as_uri()+"?mode=ro", uri=True, timeout=.08)) as db:
@@ -63,7 +77,9 @@ def read_metadata(home, identities, dots=None):
             optional = [key for key in ("model", "reasoning_effort", "model_provider", "chatgpt_async_status") if key in columns]
             wanted = (*required, *optional)
             if set(required) <= columns:
-                for row in db.execute("SELECT "+",".join(wanted)+" FROM local_thread_catalog ORDER BY source_updated_at DESC LIMIT 2000"):
+                rows_read = 0
+                for row in db.execute("SELECT "+",".join(wanted)+f" FROM local_thread_catalog ORDER BY source_updated_at DESC LIMIT {CATALOG_LIMIT}"):
+                    rows_read += 1
                     host, identity, title, created, updated, source, trigger, project = row[:8]
                     if not isinstance(identity, str) or len(identity) > 160:
                         continue
@@ -81,17 +97,35 @@ def read_metadata(home, identities, dots=None):
                     status = values.get("chatgpt_async_status")
                     if isinstance(status, str) and re.fullmatch(r"[a-z][a-z_]{0,39}", status):
                         entries[identity]["status"] = status
-            try:
-                for identity, kind in db.execute("SELECT r.thread_id,a.kind FROM automation_runs r JOIN automations a ON a.id=r.automation_id"):
-                    if identity in entries:
-                        entries[identity]["trigger"] = "heartbeat" if kind == "heartbeat" else "schedule"
-                for identity, kind in db.execute("SELECT target_thread_id,kind FROM automations WHERE target_thread_id IS NOT NULL AND status='ACTIVE'"):
-                    if identity in entries:
-                        entries[identity]["has_schedule"] = True
-            except sqlite3.Error:
-                pass
+                report(path, "ok", wanted, rows_read=rows_read, row_limit=CATALOG_LIMIT)
+            else:
+                report(path, "unsupported")
+            selected = sorted(entries)
+            queries = []
+            specifications = (
+                ("automation_runs", ("automation_runs.thread_id", "automations.kind"),
+                 "SELECT r.thread_id,MAX(CASE WHEN a.kind='heartbeat' THEN 1 ELSE 0 END) FROM automation_runs r JOIN automations a ON a.id=r.automation_id WHERE r.thread_id IN ({}) GROUP BY r.thread_id"),
+                ("automations", ("target_thread_id", "status"),
+                 "SELECT target_thread_id FROM automations WHERE status='ACTIVE' AND target_thread_id IN ({}) GROUP BY target_thread_id"),
+            )
+            for name, fields, query in specifications:
+                query_info = {"name": name, "health": "ok", "fields": list(fields), "rows_read": 0, "selected_threads": len(selected), "row_limit": len(selected)}
+                try:
+                    for start in range(0, len(selected), 400):
+                        batch = selected[start:start+400]
+                        for row in db.execute(query.format(",".join("?" for _ in batch)), batch):
+                            query_info["rows_read"] += 1
+                            if name == "automation_runs":
+                                entries[row[0]]["trigger"] = "heartbeat" if row[1] else "schedule"
+                            else:
+                                entries[row[0]]["has_schedule"] = True
+                except sqlite3.Error:
+                    query_info["health"] = "unsupported"
+                queries.append(query_info)
+            if source_info is not None:
+                source_info[str(path)]["queries"] = queries
     except (OSError, sqlite3.Error):
-        pass
+        failed(home/"sqlite/codex-dev.db")
     databases = []
     try:
         for path in home.glob("state_*.sqlite"):
@@ -106,11 +140,14 @@ def read_metadata(home, identities, dots=None):
                     columns = {row[1] for row in db.execute("PRAGMA table_info(threads)")}
                     wanted = [key for key in ("id", "title", "model", "reasoning_effort", "originator", "thread_source", "model_provider", "cli_version", "approval_mode", "sandbox_policy", "git_branch", "git_sha", "agent_nickname", "agent_role", "history_mode") if key in columns]
                     if not {"id", "title"} <= set(wanted):
+                        report(path, "unsupported")
                         continue
+                    rows_read = 0
                     for start in range(0, len(selected), 400):
                         batch = sorted(selected)[start:start+400]
                         placeholders = ",".join("?" for _ in batch)
                         for row in db.execute("SELECT "+",".join(wanted)+f" FROM threads WHERE id IN ({placeholders})", batch):
+                            rows_read += 1
                             values = dict(zip(wanted, row))
                             entry = entries.setdefault(values["id"], {})
                             if not entry.get("thread_name") and text(values.get("title")):
@@ -127,8 +164,10 @@ def read_metadata(home, identities, dots=None):
                                 entry["activity_type"] = "codex"
                             if values.get("thread_source") in ("user", "subagent", "guardian_review"):
                                 entry["trigger"] = values["thread_source"]
+                    report(path, "ok", wanted, rows_read=rows_read, selected_threads=len(selected))
                 break
             except sqlite3.Error:
+                failed(path)
                 continue
     except OSError:
         pass
@@ -136,7 +175,7 @@ def read_metadata(home, identities, dots=None):
         path = home/"session_index.jsonl"
         with path.open("rb") as stream:
             stream.seek(0, 2)
-            offset = max(0, stream.tell()-1024*1024)
+            offset = max(0, stream.tell()-INDEX_TAIL_LIMIT)
             stream.seek(offset)
             if offset:
                 stream.readline()
@@ -152,11 +191,12 @@ def read_metadata(home, identities, dots=None):
                 entry = entries.setdefault(identity, {})
                 if not entry.get("thread_name"):
                     entry["thread_name"] = title
+            report(path, "ok", ("id", "thread_name"), tail_bytes=INDEX_TAIL_LIMIT, matched_threads=len(indexed))
     except OSError:
-        pass
+        failed(home/"session_index.jsonl")
     try:
         path = home/".codex-global-state.json"
-        if path.stat().st_size <= 16*1024*1024:
+        if path.stat().st_size <= APP_STATE_LIMIT:
             state = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(state, dict):
                 projects = state.get("local-projects", {})
@@ -191,6 +231,13 @@ def read_metadata(home, identities, dots=None):
                             entries[output["threadId"]]["trigger"] = "dot"
                     if dots is not None:
                         dots["events"] = sorted(dots["events"], key=lambda item:item["timestamp"] or "", reverse=True)[:500]
-    except (OSError, ValueError, RecursionError):
-        pass
+                report(path, "ok", ("project_name", "project_membership", "dot_thread_id", "artifact_type", "produced_at"), byte_limit=APP_STATE_LIMIT)
+            else:
+                report(path, "unsupported", byte_limit=APP_STATE_LIMIT)
+        else:
+            report(path, "oversized", byte_limit=APP_STATE_LIMIT)
+    except (ValueError, RecursionError):
+        report(home/".codex-global-state.json", "unsupported", byte_limit=APP_STATE_LIMIT)
+    except OSError:
+        failed(home/".codex-global-state.json")
     return entries

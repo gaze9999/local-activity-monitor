@@ -8,28 +8,39 @@ import time
 
 class ThreadState:
     LIMIT = 1000
+    SKILL_LIMIT = 500
     BYTE_LIMIT = 512*1024
 
     def __init__(self, path):
         self.path, self.entries = path, {}
         self.skills = []
         self.saved, self.next_save = None, 0
+        self.load_health, self.write_health = "missing", None
         try:
             if path.is_symlink():
+                self.load_health = "unavailable"
                 return
             if path.exists():
                 with path.open('rb') as stream:
                     raw = stream.read(self.BYTE_LIMIT+1)
-                value = json.loads(raw) if len(raw) <= self.BYTE_LIMIT else {}
-                if value.get('version') == 1 and isinstance(value.get('entries'), dict):
+                if len(raw) > self.BYTE_LIMIT:
+                    self.load_health = "oversized"
+                    return
+                value = json.loads(raw)
+                if isinstance(value, dict) and value.get('version') == 1 and isinstance(value.get('entries'), dict):
                     for key, entry in list(value['entries'].items())[:self.LIMIT]:
                         clean = self.project(key, entry)
                         if clean:
                             self.entries[key] = clean
                     if isinstance(value.get('skills'), list):
-                        self.skills = [clean for entry in value['skills'][:500] if (clean := self.project_skill(entry))]
-        except (OSError, ValueError, TypeError, AttributeError, RecursionError):
-            pass
+                        self.skills = [clean for entry in value['skills'][:self.SKILL_LIMIT] if (clean := self.project_skill(entry))]
+                    self.load_health = "ok"
+                else:
+                    self.load_health = "unsupported"
+        except OSError:
+            self.load_health = "unavailable"
+        except (ValueError, TypeError, AttributeError, RecursionError):
+            self.load_health = "unsupported"
 
     def project(self, key, entry):
         if not isinstance(key, str) or not re.fullmatch(r'rollout-[A-Za-z0-9_.-]{1,180}\.jsonl', key) or not isinstance(entry, dict):
@@ -91,7 +102,7 @@ class ThreadState:
             if clean:
                 lifecycle_changed |= self.entries.get(key, {}).get('task_time') != clean['task_time']
                 self.entries[key] = clean
-        recent = sorted(skills.values(), key=lambda entry:entry['timestamp'], reverse=True)[:500]
+        recent = sorted(skills.values(), key=lambda entry:entry['timestamp'], reverse=True)[:self.SKILL_LIMIT]
         lifecycle_changed |= recent != self.skills
         self.skills = recent
         if not lifecycle_changed and time.monotonic() < self.next_save:
@@ -108,11 +119,13 @@ class ThreadState:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             if self.path.is_symlink() or temporary.is_symlink():
+                self.write_health = "unavailable"
                 return
             temporary.write_bytes(raw)
             if os.name != 'nt':
                 temporary.chmod(0o600)
             os.replace(temporary, self.path)
             self.saved = raw
+            self.write_health = "ok"
         except OSError:
-            pass
+            self.write_health = "unavailable"

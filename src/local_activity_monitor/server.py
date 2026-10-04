@@ -22,7 +22,7 @@ from urllib.request import ProxyHandler, build_opener
 import webbrowser
 
 from .collectors import CodexCollector, JevCollector, WINDOWS, monitor_config, name as tool_name, now
-from .mcp_records import CATEGORIES, SOURCE, category, connection_state, discover_sources, summarize
+from .mcp_records import CATEGORIES, EVENT_LIMIT as MCP_EVENT_LIMIT, TOOL_LIMIT as MCP_TOOL_LIMIT, SOURCE, category, discover_sources, summarize
 from .monitor_state import MonitorState
 from .error_records import DiagnosticCollector, error_summary, FAILURES
 from .error_history import ErrorHistory, error_identity
@@ -133,7 +133,7 @@ class Dashboard:
                 self.diagnostics.refresh()
             if self.observations["codex"] and self.observations["sqlite"]:
                 sql = codex.setdefault("sqlite", {"events": [], "total": 0, "operations": {}})
-                events = sorted(sql["events"]+list(self.diagnostics.sql_events), key=lambda event:event.get("timestamp") or "", reverse=True)[:500]
+                events = sorted(sql["events"]+list(self.diagnostics.sql_events), key=lambda event:event.get("timestamp") or "", reverse=True)[:CodexCollector.SQL_EVENT_LIMIT]
                 identity_fields = ("source", "thread_id", "call_id", "index", "file", "record_id", "record_offset", "record_hash", "timestamp", "statement")
                 events = [event | {"id": hashlib.sha256(json.dumps([event.get(key) for key in identity_fields]).encode()).hexdigest()} for event in events]
                 sql.update(events=events, total=len(events), operations=dict(Counter(event["operation"] for event in events)))
@@ -143,34 +143,28 @@ class Dashboard:
             sources = discover_sources(self.home, descriptions, self.mcp_document_cache)
             if len(self.mcp_document_cache) > 256:
                 self.mcp_document_cache.clear()
-            mcp = summarize(sources, codex.pop("mcp_events", []), self.mcp_sources, self.mcp_categories)
+            mcp = summarize(sources, codex.pop("mcp_events", []), self.mcp_sources, self.mcp_categories, errors)
+            mcp["configuration"] = {"location": str(self.home/"config.toml"), "configured_sources": len(sources)}
             for source in mcp["servers"]:
                 source.update(descriptions.get(source["server"], {}))
                 source["default_description"] = source.get("description", "")
                 if source["server"] in self.mcp_descriptions:
                     source.update(description=self.mcp_descriptions[source["server"]], description_source="custom")
-                source["tools"] = sorted({event["tool"] for event in mcp["events"] if event["server"] == source["server"]})[:30]
                 source["default_category"] = category(source["server"], " ".join(source["tools"])+" "+source.get("default_description", ""))
                 source["category"] = self.mcp_categories.get(source["server"]) or source["default_category"]
                 if source["server"] in self.mcp_tags:
                     source["tags"] = list(self.mcp_tags[source["server"]])
-                source["connection"] = connection_state([event for event in mcp["events"] if event["server"] == source["server"]], source["enabled"], [event for event in errors if event.get("server") == source["server"]])
             availability = {"jev": "jev" in sources or database is not None or any(item["server"] == "jev" for item in mcp["servers"])}
             settings = self.settings()
             assets = Path(__file__).parent/"web"
             revision = self.code_revision+"-"+hashlib.sha256(b"".join((assets/name).read_bytes() for name in ("index.html", "app.js", "style.css", "locales.json"))).hexdigest()[:12]
-            cache = {window: {"version": 1, "revision": revision, "label": "本機觀察統計", "started_at": self.started_at, "updated_at": now(), "settings": settings, "default_settings": self.default_settings, "availability": availability, "mcp": dict(mcp), "jev": self.jev.snapshot(window) if self.observations["jev"] and self.observations["mcp"] and self.mcp_sources.get("jev", True) else {"source": "jev", "health": "paused", "enabled": enabled, "enabled_at": since, "summary": {}, "recent": [], "series": []}, "codex": codex} for window in WINDOWS}
+            cache = {window: {"version": 1, "revision": revision, "label": "本機觀察統計", "started_at": self.started_at, "updated_at": now(), "settings": settings, "default_settings": self.default_settings, "availability": availability, "mcp": dict(mcp), "jev": self.jev.snapshot(window) if self.observations["jev"] and self.observations["mcp"] and self.mcp_sources.get("jev", True) else {"source": "jev", "health": "paused", "scope": self.jev.SCOPE, "enabled": enabled, "enabled_at": since, "summary": {}, "recent": [], "series": []}, "codex": codex} for window in WINDOWS}
             for snapshot in cache.values():
-                statuses = {}
-                for event in sorted(mcp["events"], key=lambda item: item.get("completed_at") or item.get("timestamp") or ""):
-                    result = event.get("result", {})
-                    for key, item in result.items():
-                        if key.endswith(("recording_enabled", "telemetry_enabled")) and type(item) is bool:
-                            statuses[event["server"]] = {"enabled": item, "health": result.get("status"), "observed_at": event.get("completed_at") or event.get("timestamp")}
+                statuses = dict(mcp["recording_status"])
                 if availability["jev"]:
                     statuses["jev"] = {"enabled": snapshot["jev"]["enabled"] if snapshot["jev"]["health"] != "invalid_config" else None, "health": snapshot["jev"]["health"]}
                 snapshot["mcp"]["recording_status"] = statuses
-                snapshot["mcp"]["telemetry"] = {"jev": {key: snapshot["jev"][key] for key in ("enabled", "enabled_at", "health", "scope", "summary", "recent", "series")}} if availability["jev"] else {}
+                snapshot["mcp"]["telemetry"] = {"jev": {key: snapshot["jev"][key] for key in ("enabled", "enabled_at", "health", "scope", "summary", "recent", "series")} | {"window": snapshot["jev"].get("window"), "reader": {"locations": [str(database)] if database else [], "record_limit": self.jev.RECENT_LIMIT, "series_limit": self.jev.SERIES_LIMIT}}} if availability["jev"] else {}
                 jev_errors = []
                 if self.observations["errors"]:
                     for event in snapshot["jev"]["recent"]:
@@ -345,20 +339,61 @@ class Dashboard:
         merged = {error_identity(event):event for event in history+errors["events"]+program_errors}
         errors.update(error_summary(list(merged.values())))
         errors["history"] = {"health": self.error_history.health, "error_type": self.error_history.error_type, "retained": len(history), "limit": self.error_history.LIMIT, "hours": 24}
-        result["sources"] = self.sources()
+        result["sources"] = self.sources(result)
         return result
 
-    def sources(self):
-        enabled, database, _ = monitor_config(self.home)
-        return {
-            "session": {"name": "Codex session", "locations": [str(self.home/"sessions")], "mode": "read_only", "health": self.codex.health if self.codex and self.observations["codex"] else "disabled", "features": ["codex", "tools", "git", "workflow", "skills", "checks", "files", "sqlite", "mcp", "web", "errors", "logs", "usage", "dots"], "scope": "recent_tail_and_incremental_metadata"},
-            "catalog": {"name": "Codex / ChatGPT catalog", "locations": [str(self.home/name) for name in ("sqlite/codex-dev.db", "state_*.sqlite", "session_index.jsonl", ".codex-global-state.json")], "mode": "read_only", "features": ["codex", "overview"], "scope": "titles_classification_and_local_thread_metadata"},
-            "thread_state": {"name": "Thread lifecycle / Skills", "locations": [str(self.home/"monitoring/thread-state.json")], "mode": "bounded_metadata_cache", "features": ["codex", "workflow", "skills", "overview"], "scope": "confirmed_lifecycle_and_skill_checkpoints"},
-            "diagnostics": {"name": "Codex diagnostics", "locations": [str(root) for root in self.diagnostics.roots]+[str(self.diagnostics.sql_path) if self.diagnostics.sql_path else str(self.home/"logs_*.sqlite")], "mode": "read_only", "features": ["errors", "logs", "sqlite"], "scope": "recent_metadata_and_24h_error_backfill"},
-            "jev": {"name": "Jev telemetry", "locations": [str(database)] if database else [], "mode": "read_only", "features": ["jev", "errors", "logs"], "scope": "opt_in_telemetry"},
-            "monitor": {"name": "Local Activity Monitor", "locations": [str(self.monitor.journal), str(self.error_history.path)], "mode": "bounded_metadata_cache", "features": ["monitor", "errors", "logs"], "scope": "runtime_samples_and_bounded_event_metadata"},
-            "interface": {"name": "Browser preferences", "locations": ["localStorage: local-activity-monitor.preferences.v1"], "mode": "user_preferences", "features": ["interface"], "scope": "interface_copy_and_tool_descriptions"},
-        }
+    def sources(self, snapshot=None):
+        """Describe loaded readers without another scan or reading source bodies."""
+        snapshot = snapshot or {}
+        codex, mcp = snapshot.get("codex", {}), snapshot.get("mcp", {})
+        read = codex.get("read_state", {})
+        active = self.observations["codex"]
+        registry = {}
+        def add(key, name, features, scope, locations=(), health=None, fields=(), limits=None, readers=()):
+            registry[key] = {"name": name, "features": features, "scope": scope, "locations": list(locations),
+                             "mode": "read_only", "fields": list(fields), "limits": limits or {}, "readers": list(readers)}
+            if health is not None:
+                registry[key]["health"] = health
+        add("session", "Codex session", ["codex", "tools", "git", "workflow", "skills", "checks", "files", "sqlite", "mcp", "web", "errors", "logs", "usage", "dots"],
+            "recent_tail_and_incremental_metadata", [str(self.home/"sessions"), *read.get("locations", [])],
+            codex.get("health", "waiting") if active else "disabled", (),
+            {key: value for key, value in read.items() if isinstance(value, (int, bool))} | {"read_bytes": codex.get("bytes_read"), "unsupported_lines": codex.get("malformed_lines")})
+        registry["session"]["observations"] = read.get("enabled_features", [])
+        readers = codex.get("metadata_sources", [])
+        loaded = [reader for reader in readers if reader["health"] == "ok"]
+        catalog_health = "disabled" if not active or not self.observations["metadata"] else "ok" if loaded and len(loaded) == len(readers) else "partly_unavailable" if loaded else "waiting" if not readers else "unavailable"
+        add("catalog", "Codex / ChatGPT catalog", ["codex", "usage", "dots", "workflow", "skills"],
+            "titles_classification_and_local_thread_metadata", [reader["location"] for reader in readers], catalog_health,
+            sorted({field for reader in loaded for field in reader.get("fields", [])}), readers=readers)
+        checkpoint = read.get("checkpoint", {})
+        add("thread_state", "Thread lifecycle / Skills", ["codex", "workflow", "skills"], "confirmed_lifecycle_and_skill_checkpoints",
+            [checkpoint["location"]] if checkpoint.get("location") else [], "disabled" if not active else checkpoint.get("write_health") or checkpoint.get("load_health"),
+            ["thread_id", "status", "task_time", "task_start", "offset", "skill", "call_id"],
+            {key: value for key, value in checkpoint.items() if type(value) is int},
+            [{"name": "Checkpoint " + phase, "health": checkpoint[key]} for phase, key in (("load", "load_health"), ("save", "write_health")) if checkpoint.get(key)])
+        registry["thread_state"]["mode"] = "bounded_metadata_cache"
+        diagnostic_readers = self.diagnostics.log_sources(active and any(self.observations[key] for key in ("errors", "logs", "sqlite")))
+        add("diagnostics", "Codex diagnostics", ["errors", "logs", "sqlite"], "recent_metadata_and_24h_error_backfill",
+            [str(path) for path in self.diagnostics.files]+([str(self.diagnostics.sql_path)] if self.diagnostics.sql_path else []),
+            "disabled" if not active or not any(self.observations[key] for key in ("errors", "logs", "sqlite")) else None,
+            ["timestamp", "severity", "module", "code", "thread_id", "call_id", "request_id", "trace_id", "sql"],
+            {"event_limit": self.diagnostics.EVENT_LIMIT, "file_limit": self.diagnostics.FILE_LIMIT}, diagnostic_readers)
+        configuration = mcp.get("configuration", {})
+        if configuration:
+            add("mcp_config", "MCP configuration", ["mcp", "tools"], "configured_sources_and_purposes", [configuration["location"]],
+                fields=["server", "enabled", "description", "category", "tags"], limits={"configured_sources": configuration.get("configured_sources"), "loaded_sources": len(mcp.get("servers", [])), "event_limit": MCP_EVENT_LIMIT, "tool_limit": MCP_TOOL_LIMIT})
+        for server, telemetry in mcp.get("telemetry", {}).items():
+            reader = telemetry.get("reader", {})
+            add("telemetry:"+server, server+" telemetry", ["mcp", "errors", "logs"], telemetry.get("scope") or "reported_telemetry",
+                reader.get("locations", []), telemetry.get("health"),
+                sorted(telemetry.get("summary", {})), {"loaded_records": len(telemetry.get("recent", [])), "series_points": len(telemetry.get("series", [])), **{key: value for key, value in reader.items() if type(value) is int}})
+            registry["telemetry:"+server]["window"] = telemetry.get("window")
+        monitor = snapshot.get("monitor", {})
+        add("monitor", "Local Activity Monitor", ["monitor", "errors", "logs"], "runtime_samples_and_bounded_event_metadata",
+            [str(self.monitor.journal), str(self.error_history.path)], monitor.get("health"),
+            sorted(self.monitor.runtime), {"history_limit": monitor.get("history_limit"), "event_limit": monitor.get("event_limit"), "retained_samples": len(monitor.get("history", [])), "retained_events": len(monitor.get("events", [])), "byte_limit": self.monitor.JOURNAL_LIMIT*2, "error_history_limit": self.error_history.LIMIT, "error_history_byte_limit": self.error_history.BYTE_LIMIT})
+        registry["monitor"]["mode"] = "bounded_metadata_cache"
+        return registry
 
 
 def handler(dashboard, port):
