@@ -10,6 +10,44 @@ from local_activity_monitor.server import Dashboard, configure
 
 
 class MonitorStateTests(unittest.TestCase):
+    def test_default_settings_are_stable_and_restore_customizations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dashboard=Dashboard(Path(directory),codex=True,max_files=100)
+            defaults=dashboard.snapshot('24h')['default_settings']
+            dashboard.set_settings({'interval':3,'max_files':50,'track_all':True,'observations':{'codex':False},'mcp_descriptions':{'future_server':'Custom description'}})
+            snapshot=dashboard.snapshot('24h')
+            self.assertEqual(snapshot['default_settings'],defaults)
+            snapshot['default_settings']['observations']['codex']=False
+            self.assertTrue(dashboard.snapshot('24h')['default_settings']['observations']['codex'])
+            dashboard.set_settings({**defaults,'replace_customizations':True})
+            self.assertEqual(dashboard.settings(),defaults)
+
+    def test_program_log_survives_restart_and_rotates_with_fixed_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'monitor.jsonl'
+            with patch.object(MonitorState,'JOURNAL_LIMIT',1024):
+                state=MonitorState(path)
+                state.failed(OSError('PRIVATE_SECRET'))
+                restarted=MonitorState(path)
+                self.assertTrue(any(e['kind']=='refresh_failed' for e in restarted.logs))
+                self.assertEqual(len(restarted.events),1)
+                for _ in range(100):restarted.event('settings_applied')
+                self.assertLessEqual(path.stat().st_size,1024)
+                self.assertLessEqual(path.with_name(path.name+'.1').stat().st_size,1024)
+                self.assertEqual(len(list(Path(directory).iterdir())),2)
+                self.assertNotIn('PRIVATE',path.read_text())
+
+    def test_program_log_write_failure_does_not_stop_metrics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'monitor.jsonl';state=MonitorState(path)
+            with patch.object(Path,'open',side_effect=PermissionError('PRIVATE_PATH')):
+                state.failed(ValueError('PRIVATE_EXCEPTION'))
+            state.refreshed({'refresh_ms':1,'cpu_ms':1,'read_bytes':0})
+            self.assertEqual(state.snapshot()['health'],'ok')
+            self.assertEqual(state.log_snapshot()['health'],'ok')
+            self.assertTrue(any(e['kind']=='refresh_failed' for e in state.logs))
+            self.assertNotIn('PRIVATE',json.dumps(state.log_snapshot()))
+
     def test_history_events_and_error_text_are_bounded(self):
         state=MonitorState()
         for index in range(500):

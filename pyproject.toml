@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-activity-monitor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Loopback-only local Jev and Codex activity dashboard"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,4 +17,4 @@ local-activity-monitor = "local_activity_monitor.server:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-local_activity_monitor = ["web/*.html", "web/*.js", "web/*.css"]
+local_activity_monitor = ["web/*.html", "web/*.js", "web/*.css", "web/*.json"]

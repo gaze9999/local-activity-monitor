@@ -1,4 +1,5 @@
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sqlite3
@@ -15,6 +16,126 @@ TIME = "2026-10-04T03:32:58Z"
 
 
 class ErrorRecordTests(unittest.TestCase):
+    def test_sql_diagnostics_desktop_core_and_reenable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory);path = home/'logs_10.sqlite'
+            stamp = datetime.now(timezone.utc).timestamp()
+            with closing(sqlite3.connect(path)) as db, db:
+                db.execute('CREATE TABLE logs(id INTEGER PRIMARY KEY,ts REAL,level TEXT,target TEXT,feedback_log_body TEXT)')
+                db.execute('INSERT INTO logs VALUES(1,?,\'DEBUG\',\'sqlx::query\',?)', (stamp, 'summary="SELECT PRIVATE" elapsed=2.5ms rows_returned=4'))
+                db.execute('INSERT INTO logs VALUES(2,?,\'INFO\',\'codex_core\',?)', (stamp, 'SELECT PRIVATE elapsed=999ms'))
+            dashboard = Dashboard(home, codex=True);dashboard.refresh()
+            events = dashboard.snapshot('all')['codex']['sqlite']['events']
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]['duration_ms'], 2.5)
+            self.assertEqual(events[0]['rows_returned'], 4)
+            self.assertNotIn('PRIVATE', json.dumps(events))
+            dashboard.diagnostics.desktop_line(f'{TIME} trace [rusqlite] PRIVATE elapsed_secs=0.01')
+            self.assertEqual(dashboard.diagnostics.sql_events[-1]['duration_ms'], 10)
+            dashboard.set_settings({'observations': {'sqlite': False}})
+            with closing(sqlite3.connect(path)) as db, db:
+                db.execute('INSERT INTO logs VALUES(3,?,\'ERROR\',\'sqlite\',?)', (stamp, 'summary="UPDATE PRIVATE" rows_affected=1'))
+            dashboard.refresh()
+            self.assertEqual(dashboard.snapshot('all')['codex']['sqlite']['events'], [])
+            dashboard.set_settings({'observations': {'sqlite': True}})
+            events = dashboard.snapshot('all')['codex']['sqlite']['events']
+            self.assertEqual(len(events), 2)
+            self.assertTrue(any(event['result'] == 'log_error' for event in events))
+
+    def test_session_backfills_failures_without_overwriting_latest_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory);path = root/f'rollout-{THREAD}.jsonl'
+            stamp = datetime.now(timezone.utc).isoformat()
+            old = (datetime.now(timezone.utc)-timedelta(hours=25)).isoformat()
+            def record(kind, payload, date=stamp):return json.dumps({'timestamp': date, 'type': kind, 'payload': payload})+'\n'
+            content = record('session_meta', {'id': THREAD}, old)
+            content += record('event_msg', {'type': 'turn_failed', 'error_code': 'historical_failure'})
+            content += record('response_item', {'type': 'function_call_output', 'call_id': 'call_old', 'output': {'exit_code': 2, 'message': 'PRIVATE'}})
+            content += record('event_msg', {'type': 'token_count', 'info': {'total_token_usage': {'input_tokens': 99}}})
+            content += record('event_msg', {'type': 'ignored', 'message': 'PRIVATE'*60})*800
+            content += record('event_msg', {'type': 'token_count', 'info': {'total_token_usage': {'input_tokens': 123}}})
+            content += record('event_msg', {'type': 'task_started', 'turn_id': 'turn_current'})
+            path.write_text(content, encoding='utf-8')
+            collector = CodexCollector(root, tail_bytes=65536)
+            for _ in range(4):collector.refresh()
+            state = collector.files[path]
+            self.assertEqual(state['tokens']['input_tokens'], 123)
+            self.assertIsNotNone(state['task_start'])
+            self.assertEqual({row['code'] for row in state['errors']}, {'historical_failure', 'process_exit'})
+            self.assertFalse(state.get('error_cursor'))
+            self.assertNotIn('PRIVATE', json.dumps(collector.snapshot()))
+
+    def test_desktop_backfills_24h_errors_before_initial_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory);root = home/'desktop-logs';root.mkdir()
+            stamp = datetime.now(timezone.utc).isoformat()
+            expired = (datetime.now(timezone.utc)-timedelta(hours=25)).isoformat()
+            path = root/'codex-desktop-fixture.log'
+            path.write_text(f'{expired} error [mcp] OLD_ERROR\n{stamp} error [mcp] PRIVATE errorCode=HISTORICAL\n'+(f'{stamp} info [module] '+('PRIVATE'*20)+'\n')*5000, encoding='utf-8')
+            collector = DiagnosticCollector(home)
+            for _ in range(6):collector.refresh()
+            self.assertTrue(any(row['code'] == 'HISTORICAL' for row in collector.events))
+            self.assertFalse(any(row['timestamp'].startswith(expired[:19]) for row in collector.events))
+            self.assertEqual(collector.backfill_pending['desktop'], 0)
+            self.assertNotIn('PRIVATE', json.dumps(collector.snapshot()))
+            before = collector.read_bytes;collector.refresh();self.assertEqual(collector.read_bytes, before)
+
+    def test_core_backfill_and_forward_paging_do_not_skip_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory);path=home/'logs_10.sqlite';stamp=datetime.now(timezone.utc).timestamp()
+            with closing(sqlite3.connect(path)) as db, db:
+                db.execute('CREATE TABLE logs(id INTEGER PRIMARY KEY,ts REAL,level TEXT,target TEXT)')
+                db.executemany('INSERT INTO logs VALUES(?,?,?,?)',[(index,stamp,'ERROR' if index==1000 else 'INFO','mcp_client') for index in range(1,7001)])
+            collector=DiagnosticCollector(home)
+            for _ in range(4):collector.refresh()
+            self.assertEqual(len(collector.events), 1)
+            self.assertFalse(collector.backfill_pending['core'])
+            with closing(sqlite3.connect(path)) as db, db:
+                db.executemany('INSERT INTO logs VALUES(?,?,?,?)',[(index,stamp,'ERROR' if index in (7001,11000) else 'INFO','mcp_client') for index in range(7001,12001)])
+            for _ in range(3):collector.refresh()
+            self.assertEqual({row['record_id'] for row in collector.events}, {1000,7001,11000})
+            self.assertEqual(collector.sql_cursor, 12000)
+
+    def test_general_logs_and_format_failures_are_visible_without_body(self):
+        with tempfile.TemporaryDirectory() as directory:
+            collector = DiagnosticCollector(Path(directory))
+            collector.desktop_line(f'{TIME} info [future-module] PRIVATE_PROMPT method=refresh conversationId={THREAD}')
+            collector.desktop_line(f'{TIME} notice [future-module] PRIVATE_SECRET')
+            collector.desktop_line(f'{TIME} critical [future-module] PRIVATE_SECRET')
+            collector.desktop_line('unknown format PRIVATE_SECRET')
+            self.assertEqual([event['severity'] for event in collector.logs], ['info', 'notice', 'critical'])
+            self.assertEqual([event['severity'] for event in collector.events], ['error'])
+            self.assertEqual(collector.stats['desktop']['unsupported_lines'], 1)
+            self.assertNotIn('PRIVATE', json.dumps(list(collector.logs)))
+            self.assertNotIn('PRIVATE', json.dumps(collector.log_sources(True)))
+
+    def test_core_optional_columns_and_all_levels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with closing(sqlite3.connect(home/'logs_10.sqlite')) as db, db:
+                db.execute('CREATE TABLE logs(id INTEGER PRIMARY KEY,ts INTEGER,level TEXT,target TEXT)')
+                db.execute("INSERT INTO logs VALUES(1,1791084778,'DEBUG','future_module')")
+            collector = DiagnosticCollector(home);collector.refresh();collector.refresh()
+            self.assertEqual(collector.health['core'], 'ok')
+            self.assertEqual(len(collector.logs), 1)
+            self.assertEqual(collector.logs[0]['severity'], 'debug')
+            self.assertEqual(list(collector.events), [])
+
+    def test_logs_are_optional_and_do_not_disable_error_observation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dashboard = Dashboard(Path(directory), codex=True)
+            dashboard.diagnostics.desktop_line(f'{TIME} info [future-module] PRIVATE')
+            self.assertTrue(dashboard.logs()['entries'])
+            dashboard.set_settings({'observations': {'logs': False}})
+            before = (Path(directory)/'monitoring/local-activity-monitor.jsonl').read_bytes()
+            dashboard.monitor.failed(ValueError('PRIVATE'))
+            self.assertEqual(dashboard.logs()['entries'], [])
+            self.assertEqual((Path(directory)/'monitoring/local-activity-monitor.jsonl').read_bytes(), before)
+            self.assertEqual(dashboard.snapshot('all')['errors']['categories']['monitor'], 1)
+            dashboard.set_settings({'observations': {'logs': True}})
+            self.assertTrue(dashboard.logs()['entries'])
+            self.assertNotIn('PRIVATE', json.dumps(dashboard.logs()))
+
     def test_error_projection_never_returns_private_output(self):
         value = tool_error({"isError": True, "error": {"code": "new_provider_error", "message": "PRIVATE_SECRET"}, "content": [{"text": "PRIVATE_PROMPT"}]})
         self.assertEqual(value["code"], "new_provider_error")

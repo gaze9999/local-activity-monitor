@@ -1,0 +1,101 @@
+name: Build release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: windows-x64
+          - os: macos-15-intel
+            target: macos-x64
+          - os: macos-15
+            target: macos-arm64
+          - os: ubuntu-22.04
+            target: linux-x64
+          - os: ubuntu-22.04-arm
+            target: linux-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test source
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests
+      - name: Install isolated build tools
+        run: python -m pip install -r requirements-build.txt
+      - name: Build and smoke test native bundle
+        run: python tools/build_release.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  source:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --check src/local_activity_monitor/web/app.js
+      - run: python -m pip install -r requirements-build.txt
+      - run: python -m build
+      - name: Source archive with launchers
+        env:
+          PYTHONPATH: src
+        run: |
+          RELEASE_VERSION=$(python -c 'import local_activity_monitor as m; print(m.__version__)')
+          git archive --format=zip --prefix=local-activity-monitor/ HEAD -o "dist/local-activity-monitor-$RELEASE_VERSION-source.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source
+          path: dist/*
+          if-no-files-found: error
+
+  assets:
+    needs: [native, source]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Checksums
+        run: cd assets && sha256sum * > SHA256SUMS.txt
+      - name: Attach to draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ github.sha }}
+          PYTHONPATH: src
+        run: |
+          RELEASE_TAG=v$(python3 -c 'import local_activity_monitor as m; print(m.__version__)')
+          if gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' > draft-state; then
+            test "$(cat draft-state)" = true || { echo 'Published releases are not overwritten'; exit 1; }
+          else
+            gh release create "$RELEASE_TAG" --target "$RELEASE_SHA" --draft --title "$RELEASE_TAG" --notes '原生執行檔與原始碼套件. 各系統建置及啟動檢查結果請見 Actions.'
+          fi
+          gh release upload "$RELEASE_TAG" assets/* --clobber

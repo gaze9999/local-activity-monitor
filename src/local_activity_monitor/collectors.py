@@ -1,5 +1,6 @@
 """Read selected metadata only; never return raw records to HTTP callers."""
 from __future__ import annotations
+from .thread_state import ThreadState
 
 from collections import Counter
 from contextlib import closing
@@ -15,6 +16,8 @@ from .codex_metadata import execution_metadata, read_metadata
 from .error_records import identifier, tool_error
 from .mcp_records import mcp_operations, response_metadata
 from .operation_records import file_operations, invocations, operations, qualified_tool, redact, workflow_operations
+from .sqlite_records import sqlite_operations
+from .usage_records import allowance
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 UUID_IN_NAME = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -70,6 +73,8 @@ class JevCollector:
     def snapshot(self, window="24h"):
         enabled, database, since = monitor_config(self.home)
         result = {"source": "jev", "enabled": enabled, "enabled_at": since, "health": "waiting" if enabled else "disabled", "scope": "completed_operations_in_local_database", "window": window, "summary": {}, "recent": [], "series": []}
+        if database is None and (self.home/"monitoring/jev-monitor.json").exists():
+            result["health"] = "invalid_config"
         if database is None or not database.is_file():
             return result
         hours = WINDOWS[window]
@@ -79,23 +84,24 @@ class JevCollector:
                 db.execute("PRAGMA query_only=ON")
                 row = db.execute("SELECT count(*), min(timestamp), sum(http_attempts), sum(max(http_attempts-1,0)), sum(input_tokens), sum(output_tokens), count(input_tokens), count(output_tokens), sum(request_bytes), sum(response_bytes), sum(response_unknown_attempts), avg(latency_ms) FROM jev_events WHERE timestamp>=?", (cutoff,)).fetchone()
                 count = row[0]
-                result["summary"] = dict(calls=count, since=timestamp(row[1]), http_attempts=row[2] or 0, retries=row[3] or 0, input_tokens=row[4], output_tokens=row[5], input_known_calls=row[6], output_known_calls=row[7], input_unknown_calls=count-row[6], output_unknown_calls=count-row[7], request_body_bytes=row[8] or 0, known_response_bytes=row[9] or 0, response_unknown_attempts=row[10] or 0, average_latency_ms=round(row[11] or 0))
-                result["summary"]["statuses"] = {status: n for status, n in db.execute("SELECT status,count(*) FROM jev_events WHERE timestamp>=? GROUP BY status", (cutoff,)) if status in ("ok", "fallback", "skipped", "dry_run")}
+                result["summary"] = dict(calls=count, since=timestamp(row[1]), http_attempts=row[2] or 0, retries=row[3] or 0, input_tokens=row[4], output_tokens=row[5], input_known_calls=row[6], output_known_calls=row[7], input_unknown_calls=count-row[6], output_unknown_calls=count-row[7], request_body_bytes=row[8] or 0, known_response_bytes=row[9] or 0, response_unknown_attempts=row[10] or 0, average_latency_ms=round(row[11]) if row[11] is not None else None)
+                result["summary"]["statuses"] = {status: n for status, n in db.execute("SELECT status,count(*) FROM jev_events WHERE timestamp>=? GROUP BY status LIMIT 40", (cutoff,)) if name(status)}
                 for when, n in db.execute("SELECT substr(timestamp,1,13),count(*) FROM jev_events WHERE timestamp>=? GROUP BY 1 ORDER BY 1 DESC LIMIT 168", (cutoff,)):
                     if isinstance(when, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d", when):
                         result["series"].append({"time": when+":00:00Z", "calls": n})
                 result["series"].reverse()
                 for raw, in db.execute("SELECT metadata FROM jev_events WHERE timestamp>=? ORDER BY timestamp DESC LIMIT 80", (cutoff,)):
-                    if len(raw) > 65536:
+                    if not isinstance(raw, str) or len(raw) > 65536:
                         continue
                     try:
                         event = json.loads(raw)
                         status, operation = event.get("status"), event.get("operation")
-                        if status not in ("ok", "fallback", "skipped", "dry_run") or operation not in ("rank", "evaluate", "doctor_local", "doctor_online"):
+                        if not name(status) or not name(operation):
                             continue
                         attempts = event.get("attempts", [])
                         attempts = attempts if isinstance(attempts, list) else []
-                        result["recent"].append({"timestamp": timestamp(event.get("timestamp")), "operation": operation, "status": status, "source": event.get("source") if event.get("source") in ("mcp", "cli", "python") else "python", "model": name(event.get("resolved_model")) or name(event.get("requested_model")), "input_tokens": integer(event.get("input_tokens")), "output_tokens": integer(event.get("output_tokens")), "latency_ms": integer(event.get("latency_ms")), "http_attempts": len(attempts), "attempts": [{"status": a.get("status") if a.get("status") in ("ok", "http_error", "network_unavailable", "invalid_response", "response_too_large") else "other", "http_status": integer(a.get("http_status")), "latency_ms": integer(a.get("latency_ms"))} for a in attempts[:2] if isinstance(a, dict)]})
+                        result["recent"].append({"timestamp": timestamp(event.get("timestamp")), "operation": operation, "status": status, "source": name(event.get("source")), "model": name(event.get("resolved_model")) or name(event.get("requested_model")), "input_tokens": integer(event.get("input_tokens")), "output_tokens": integer(event.get("output_tokens")), "latency_ms": integer(event.get("latency_ms")), "request_bytes": integer(event.get("request_bytes")), "response_bytes": integer(event.get("response_bytes")), "http_attempts": len(attempts), "attempts": [{"status": name(a.get("status")) or "unknown", "http_status": integer(a.get("http_status")), "latency_ms": integer(a.get("latency_ms"))} for a in attempts[:16] if isinstance(a, dict)]})
+                        result["recent"][-1].update({key: value for key, value in response_metadata("jev", event).items() if type(value) in (int, float, bool)})
                     except (ValueError, TypeError, AttributeError):
                         continue
             result["health"] = "ok"
@@ -119,10 +125,11 @@ class CodexCollector:
         self.malformed = 0
         self.health = "waiting"
         self.track_all = False
-        self.features = {"metadata": True, "git": True, "jev_calls": True, "skills": True, "checks": True, "tool_events": True, "mcp": True, "web": True, "files": True, "errors": True}
+        self.features = {"usage": True, "metadata": True, "git": True, "jev_calls": True, "skills": True, "checks": True, "tool_events": True, "mcp": True, "web": True, "files": True, "errors": True, "sqlite": True}
         self.mcp_sources = {}
         self.trimmed_calls = 0
         self.read_cursor = 0
+        self.thread_state = ThreadState((root.parent if root.name == "sessions" else root)/"monitoring/thread-state.json")
 
     def scan(self):
         if time.monotonic() < self.next_scan:
@@ -147,7 +154,7 @@ class CodexCollector:
 
     def new_file(self, path):
         ids = UUID_IN_NAME.findall(path.name)
-        return {"offset": None, "buffer": b"", "discard": False, "thread_id": ids[-1] if ids else None, "model": None, "reasoning_effort": None, "execution": {}, "context_time": "", "tokens": {}, "token_time": "", "token_priority": 0, "created_at": None, "updated_at": None, "status": "observed", "activity_type": "unknown", "trigger": "unknown", "calls": {}, "partial_history": True, "bytes": 0, "task_start": None, "task_intervals": {}, "errors": [], "task_time": "", "history_cursor": None}
+        return {"source_file": path.name, "offset": None, "buffer": b"", "discard": False, "thread_id": ids[-1] if ids else None, "model": None, "reasoning_effort": None, "execution": {}, "context_time": "", "tokens": {}, "token_time": "", "token_priority": 0, "created_at": None, "updated_at": None, "status": "observed", "activity_type": "unknown", "trigger": "unknown", "calls": {}, "partial_history": True, "bytes": 0, "task_start": None, "task_intervals": {}, "errors": [], "task_time": "", "history_cursor": None}
 
     def consume(self, state, record):
         payload = record.get("payload")
@@ -162,8 +169,8 @@ class CodexCollector:
             if event_type and (event_type in ("error", "turn_aborted", "turn_failed") or event_type.endswith("_failed")):
                 error = payload.get("error")
                 code = identifier(error.get("code")) if isinstance(error, dict) else None
-                state["errors"].append({"timestamp": when, "category": "conversation", "code": code or identifier(payload.get("error_code")) or event_type, "reason": event_type, "source": "session", "severity": "warning" if event_type == "turn_aborted" else "error"})
-                state["errors"] = state["errors"][-50:]
+                state["errors"].append({"timestamp": when, "category": "conversation", "code": code or identifier(payload.get("error_code")) or event_type, "reason": event_type, "file": state.get("source_file"), "source": "session", "severity": "warning" if event_type == "turn_aborted" else "error"})
+                state["errors"] = sorted(state["errors"], key=lambda event:event["timestamp"] or "", reverse=True)[:50]
         if kind == "session_meta":
             identity = payload.get("id")
             if isinstance(identity, str) and UUID.fullmatch(identity):
@@ -187,7 +194,7 @@ class CodexCollector:
         elif kind == "response_item" and payload.get("type") in ("function_call", "custom_tool_call"):
             tool, identity = name(qualified_tool(payload)), payload.get("call_id") or payload.get("id")
             if tool and isinstance(identity, str) and len(identity) <= 160:
-                calls = invocations(payload) if any(self.features[key] for key in ("git", "jev_calls", "skills", "checks", "tool_events", "mcp", "web", "files")) else []
+                calls = invocations(payload) if any(self.features[key] for key in ("git", "jev_calls", "skills", "checks", "tool_events", "mcp", "web", "files", "sqlite")) else []
                 git, jev = operations(payload, self.features["git"], self.features["jev_calls"], calls)
                 skills, checks = workflow_operations(payload, self.features["skills"], self.features["checks"], calls, include_paths=True)
                 previous = state["calls"].get(identity, {})
@@ -197,6 +204,7 @@ class CodexCollector:
                         event["metadata"] = {}
                 state["calls"][identity] = {"tool": tool, "timestamp": when, "completed_at": previous.get("completed_at"), "error": previous.get("error"), "nested_tools": dict(Counter(tool for tool, _, nested in calls if nested and name(tool))) if self.features["tool_events"] else {}, "git": git if self.features["git"] else [], "skills": skills if self.features["skills"] else [], "checks": checks if self.features["checks"] else [], "jev": [{"operation": item["operation"], "nested": item["nested"]} for item in jev] if self.features["jev_calls"] else [], "mcp": mcp, "isolated": len(calls) == 1}
                 state["calls"][identity]["files"] = file_operations(calls) if self.features["files"] else []
+                state["calls"][identity]["sqlite"] = sqlite_operations(calls) if self.features["sqlite"] else []
                 if len(state["calls"]) > 8192:
                     del state["calls"][next(iter(state["calls"]))]
                     self.trimmed_calls += 1
@@ -205,7 +213,7 @@ class CodexCollector:
             if isinstance(identity, str) and identity in state["calls"]:
                 call = state["calls"][identity]
                 call["completed_at"] = when
-                if self.features["errors"]:
+                if self.features["errors"] or self.features["sqlite"]:
                     call["error"] = tool_error(payload.get("output"))
                 if call.get("isolated") and len(call.get("mcp", [])) == 1:
                     event = call["mcp"][0]
@@ -216,6 +224,7 @@ class CodexCollector:
             if latest:
                 state["status"] = "running" if payload["type"] == "task_started" else "completed"
                 state["task_time"] = when
+                state["status_cached"] = False
             if payload["type"] == "task_started" and when and latest:
                 state["task_start"] = timestamp(payload.get("started_at")) or when
             elif payload["type"] == "task_complete" and when:
@@ -241,6 +250,10 @@ class CodexCollector:
                 state.update(tokens=clean, token_time=when, token_priority=priority)
         if kind == "event_msg" and payload.get("type") == "token_count" and isinstance(payload.get("info"), dict):
             state["execution"].update(execution_metadata({"context_window": payload["info"].get("model_context_window")}))
+        if self.features["usage"] and kind == "event_msg" and payload.get("type") == "token_count" and when and when >= (state.get("allowance") or {}).get("updated_at", ""):
+            limits = allowance(payload.get("rate_limits"), when)
+            if limits:
+                state["allowance"] = limits
 
     def refresh(self):
         self.scan()
@@ -265,6 +278,14 @@ class CodexCollector:
                             self.parse(state, head)
                         state["offset"] = max(len(head), size-self.tail_bytes)
                         state["partial_history"] = state["offset"] > len(head)
+                        cached = self.thread_state.entries.get(path.name)
+                        if cached and cached['thread_id'] == state['thread_id'] and cached['offset'] <= size:
+                            state['cached_status'] = cached
+                            if state['offset'] <= cached['offset']:
+                                for key in ('task_time', 'task_start', 'status'):
+                                    state[key] = cached[key]
+                                state['status_cached'] = True
+                        state["error_cursor"] = state["offset"] if state["partial_history"] and self.features["errors"] else None
                         if state["partial_history"] and not state["task_time"]:
                             state["history_cursor"] = state["offset"]
                         state["discard"] = state["partial_history"]
@@ -281,6 +302,8 @@ class CodexCollector:
                     skipped = lines.pop(0)
                     if state["history_cursor"] is not None:
                         state["history_cursor"] += len(skipped)+1
+                    if state.get("error_cursor") is not None:
+                        state["error_cursor"] += len(skipped)+1
                     state["discard"] = False
                 for line in lines:
                     self.parse(state, line)
@@ -320,6 +343,50 @@ class CodexCollector:
                             continue
                 if state["task_time"] or not raw:
                     state["history_cursor"] = None
+        if self.features["errors"]:
+            cutoff = datetime.now(timezone.utc)-timedelta(hours=24)
+            for path, state in entries[start:]+entries[:start]:
+                end = state.get("error_cursor")
+                if not end or budget <= 0:
+                    continue
+                begin = max(0, end-min(budget, 256*1024))
+                try:
+                    with path.open("rb") as stream:
+                        stream.seek(begin)
+                        raw = stream.read(end-begin)
+                except OSError:
+                    self.health = "partly_unavailable"
+                    continue
+                budget -= len(raw)
+                self.read_bytes += len(raw)
+                state["bytes"] += len(raw)
+                lines = raw.split(b"\n")
+                first = lines.pop(0) if begin else b""
+                state["error_cursor"] = min(end-1, begin+len(first)+1) if begin and lines else begin
+                for line in reversed(lines):
+                    if not line or len(line) > 1024*1024:
+                        continue
+                    try:
+                        record = json.loads(line)
+                        if not isinstance(record, dict) or not isinstance(record.get("payload"), dict):
+                            continue
+                        date = datetime.fromisoformat(record.get("timestamp", "").replace("Z", "+00:00"))
+                        if not date.tzinfo:
+                            continue
+                        if date < cutoff:
+                            state["error_cursor"] = None
+                            break
+                        payload, kind = record["payload"], record.get("type")
+                        event_type = identifier(payload.get("type"))
+                        if kind == "event_msg" and event_type and (event_type in ("error", "turn_aborted", "turn_failed") or event_type.endswith("_failed")):
+                            self.consume(state, record)
+                        elif kind == "response_item" and payload.get("type") in ("function_call_output", "custom_tool_call_output"):
+                            failure = tool_error(payload.get("output"))
+                            if failure:
+                                state["errors"].append({"timestamp": record["timestamp"], "source": "tool_result", "category": "tool", "severity": "error", "call_id": identifier(payload.get("call_id")), **failure})
+                                state["errors"] = sorted(state["errors"], key=lambda event:event["timestamp"] or "", reverse=True)[:50]
+                    except (ValueError, TypeError, AttributeError, RecursionError):
+                        continue
         retained = sum(len(state["calls"]) for state in self.files.values())
         if retained > self.CALL_LIMIT:
             oldest = sorted((call.get("timestamp") or "", str(path), identity, state) for path, state in self.files.items() for identity, call in state["calls"].items())
@@ -339,6 +406,9 @@ class CodexCollector:
             if buffered > self.BUFFER_LIMIT:
                 buffered -= len(state["buffer"])
                 state["buffer"], state["discard"] = b"", True
+
+        if self.root.is_dir():
+            self.thread_state.update(self.files.values())
 
     def parse(self, state, raw):
         if not raw or len(raw) > 1024*1024:
@@ -481,9 +551,13 @@ class CodexCollector:
                 continue
             target = threads.setdefault(identity, {"thread_id": identity, "model": None, "reasoning_effort": None, "execution": {}, "context_time": "", "tokens": {}, "token_time": "", "created_at": None, "updated_at": None, "status": "observed", "activity_type": "unknown", "trigger": "unknown", "calls": {}, "partial_history": False, "task_intervals": {}, "task_start": None, "errors": [], "task_time": ""})
             target["task_intervals"].update(state["task_intervals"])
+            cached = state.get('cached_status')
+            if cached and cached['task_time'] > target.get('cached_status', {}).get('task_time', ''):
+                target['cached_status'] = cached
             target["errors"].extend(state["errors"])
             if state["task_time"] > target["task_time"]:
                 target["task_time"], target["status"], target["task_start"] = state["task_time"], state["status"], state["task_start"]
+                target["status_cached"] = state.get("status_cached", False)
             if state["task_start"] and (not target["task_start"] or state["task_start"] > target["task_start"]):
                 target["task_start"] = state["task_start"]
             if state["created_at"] and (not target["created_at"] or state["created_at"] < target["created_at"]):
@@ -498,10 +572,11 @@ class CodexCollector:
                 target.update(updated_at=state["updated_at"], activity_type=state["activity_type"], trigger=state["trigger"])
             target["calls"].update(state["calls"])
             target["partial_history"] |= state["partial_history"]
-        metadata = read_metadata(self.root.parent, threads) if self.features["metadata"] else {}
+        dots = {}
+        metadata = read_metadata(self.root.parent, threads, dots) if self.features["metadata"] else {}
         pending_status = {state["thread_id"] for state in self.files.values() if state.get("history_cursor")}
         rows, tools, nested_tools, git_events, skill_events, check_events, series, mcp_events, tool_series = [], Counter(), Counter(), [], [], [], Counter(), [], Counter()
-        file_events, error_events = [], []
+        file_events, error_events, sqlite_events = [], [], []
         for identity, entry in metadata.items():
             if identity not in threads:
                 threads[identity] = {"thread_id": identity, "model": None, "reasoning_effort": None, "execution": {}, "tokens": {}, "token_time": "", "created_at": None, "updated_at": None, "status": "observed", "activity_type": "unknown", "trigger": "unknown", "calls": {}, "partial_history": True, "metadata_only": True}
@@ -510,7 +585,11 @@ class CodexCollector:
             row = {key: thread[key] for key in ("thread_id", "model", "reasoning_effort", "tokens", "created_at", "updated_at", "status", "partial_history", "activity_type", "trigger")}
             row["execution"] = entry.get("execution", {}) | thread["execution"]
             row["metadata_only"] = bool(thread.get("metadata_only"))
-            row["status_source"] = "session_lifecycle" if thread.get("task_time") else "catalog_status" if entry.get("status") else None
+            cached = thread.get('cached_status', {})
+            if not thread.get('task_time') and not entry.get('status') and cached:
+                row['status'] = cached['status']
+            row['status_updated_at'] = thread.get('task_time') or (entry.get('updated_at') if entry.get('status') else cached.get('task_time'))
+            row['status_source'] = ('cached_lifecycle' if thread.get('status_cached') else 'session_lifecycle') if thread.get('task_time') else 'catalog_status' if entry.get('status') else 'cached_lifecycle' if cached else None
             row["status_backfill_pending"] = thread["thread_id"] in pending_status
             row["context_updated_at"] = thread.get("context_time") or None
             environment = entry.get("environment", "unknown")
@@ -530,7 +609,7 @@ class CodexCollector:
             events, jev_calls, file_changes, file_reads = [], [], [], []
             for identity, call in thread["calls"].items():
                 duration = None
-                if any(self.features[key] for key in ("tool_events", "git", "checks", "mcp", "web", "files")) and call["timestamp"] and call.get("completed_at"):
+                if any(self.features[key] for key in ("tool_events", "git", "checks", "mcp", "web", "files", "sqlite")) and call["timestamp"] and call.get("completed_at"):
                     duration = max(0, round((datetime.fromisoformat(call["completed_at"].replace("Z", "+00:00"))-datetime.fromisoformat(call["timestamp"].replace("Z", "+00:00"))).total_seconds()*1000))
                 if self.features["errors"] and call.get("error"):
                     mcp = call.get("mcp", [])
@@ -548,6 +627,9 @@ class CodexCollector:
                 for index, operation in enumerate(call.get("jev", []) if self.features["jev_calls"] else []):
                     jev_calls.append(operation | {"thread_id": thread["thread_id"], "call_id": identity, "index": index, "timestamp": call["timestamp"], "completed_at": call.get("completed_at")})
                 context = {"thread_id": thread["thread_id"], "thread_name": row["thread_name"], "call_id": identity, "timestamp": call["timestamp"], "completed_at": call.get("completed_at"), "duration_ms": duration}
+                if self.features["sqlite"]:
+                    for operation in call.get("sqlite", []):
+                        sqlite_events.append(context | operation | {"duration_ms": None, "container_duration_ms": duration, "result": "failed" if call.get("error") else "returned" if call.get("completed_at") else "unknown"})
                 if self.features["files"]:
                     for change in call.get("files", []):
                         event = context | change
@@ -577,7 +659,13 @@ class CodexCollector:
             rows.append(row)
         rows.sort(key=lambda item: item["updated_at"] or "", reverse=True)
         git_events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
-        skill_events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
+        if self.features['skills']:
+            selected = {event['thread_id'] for event in rows}
+            retained = {(event['thread_id'], event['call_id'], event['skill']):event | {'thread_name':metadata.get(event['thread_id'], {}).get('thread_name')} for event in self.thread_state.skills if event['thread_id'] in selected}
+            retained.update({(event['thread_id'], event['call_id'], event['skill']):event for event in skill_events})
+            skill_events = sorted(retained.values(), key=lambda event:event['timestamp'] or '', reverse=True)[:500]
         check_events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
         file_events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
-        return {"source": "codex", "health": self.health, "started_at": self.started_at, "scope": "recent_file_tail_and_new_records", "track_all": self.track_all, "max_files": self.max_files, "files": len(self.files), "bytes_read": self.read_bytes, "malformed_lines": self.malformed, "threads": rows, "tools": dict(tools), "nested_tools": dict(nested_tools), "observed_tool_calls": sum(tools.values()), "activity_series": [{"time": key, "calls": value} for key, value in sorted(series.items())[-10080:]], "tool_series": [{"time": key[0], "tool": key[1], "calls": value} for key, value in sorted(tool_series.items())[-20000:]], "mcp_events": mcp_events, "error_events": error_events if self.features["errors"] else [], "file_activity": {"events": file_events[:1000], "total": len(file_events), "operations": dict(Counter(event["operation"] for event in file_events))}, "git": {"events": git_events[:500] if self.features["git"] else [], "operations": dict(Counter(event["operation"] for event in git_events)) if self.features["git"] else {}, "total": len(git_events) if self.features["git"] else 0}, "skills": {"events": skill_events[:500] if self.features["skills"] else [], "counts": dict(Counter(event["skill"] for event in skill_events)) if self.features["skills"] else {}}, "checks": check_events[:500] if self.features["checks"] else []}
+        sqlite_events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
+        sqlite_summary = {"events": sqlite_events[:500], "total": len(sqlite_events), "operations": dict(Counter(event["operation"] for event in sqlite_events))}
+        return {"usage": max((state["allowance"] for state in self.files.values() if state.get("allowance")), key=lambda item:item["updated_at"], default=None) if self.features["usage"] else None, "dots": dots, "sqlite": sqlite_summary, "source": "codex", "health": self.health, "started_at": self.started_at, "scope": "recent_file_tail_and_new_records", "track_all": self.track_all, "max_files": self.max_files, "files": len(self.files), "bytes_read": self.read_bytes, "error_backfill_pending": sum(state.get("error_cursor") or 0 for state in self.files.values()), "malformed_lines": self.malformed, "threads": rows, "tools": dict(tools), "nested_tools": dict(nested_tools), "observed_tool_calls": sum(tools.values()), "activity_series": [{"time": key, "calls": value} for key, value in sorted(series.items())[-10080:]], "tool_series": [{"time": key[0], "tool": key[1], "calls": value} for key, value in sorted(tool_series.items())[-20000:]], "mcp_events": mcp_events, "error_events": error_events if self.features["errors"] else [], "file_activity": {"events": file_events[:1000], "total": len(file_events), "operations": dict(Counter(event["operation"] for event in file_events))}, "git": {"events": git_events[:500] if self.features["git"] else [], "operations": dict(Counter(event["operation"] for event in git_events)) if self.features["git"] else {}, "total": len(git_events) if self.features["git"] else 0}, "skills": {"events": skill_events[:500] if self.features["skills"] else [], "counts": dict(Counter(event["skill"] for event in skill_events)) if self.features["skills"] else {}}, "checks": check_events[:500] if self.features["checks"] else []}

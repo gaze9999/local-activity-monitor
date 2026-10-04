@@ -15,6 +15,39 @@ def record(kind, payload, when="2026-10-04T00:00:00Z"):
 
 
 class LifecycleBackfillTests(unittest.TestCase):
+    def test_restart_keeps_confirmed_status_and_skill_count_without_recounting_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)/'sessions';root.mkdir()
+            path=root/f'rollout-{THREAD}.jsonl'
+            path.write_bytes(record('session_meta',{'id':THREAD})+record('event_msg',{'type':'task_started'})+record('response_item',{'type':'function_call','name':'exec_command','call_id':'skill_read','arguments':json.dumps({'cmd':'Get-Content /skills/example/SKILL.md'})}))
+            collector=CodexCollector(root,tail_bytes=8192);collector.refresh()
+            self.assertEqual(collector.snapshot()['skills']['counts'],{'example':1})
+            with path.open('ab') as stream:
+                for _ in range(20):stream.write(record('response_item',{'type':'message','content':'PRIVATE'*100}))
+            collector.refresh();collector.thread_state.next_save=0;collector.thread_state.update(collector.files.values())
+            restarted=CodexCollector(root,tail_bytes=8192);restarted.refresh()
+            value=restarted.snapshot();row=value['threads'][0]
+            self.assertEqual(row['status'],'running')
+            self.assertEqual(row['status_source'],'cached_lifecycle')
+            self.assertFalse(row['status_backfill_pending'])
+            self.assertEqual(value['skills']['counts'],{'example':1})
+            self.assertNotIn('PRIVATE',(root.parent/'monitoring/thread-state.json').read_text())
+            with path.open('ab') as stream:stream.write(record('event_msg',{'type':'task_complete'},'2026-10-04T00:02:00Z'))
+            restarted.refresh();self.assertEqual(restarted.snapshot()['threads'][0]['status'],'completed')
+
+    def test_checkpoint_gap_does_not_hide_a_newer_offline_completion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)/'sessions';root.mkdir();path=root/f'rollout-{THREAD}.jsonl'
+            path.write_bytes(record('session_meta',{'id':THREAD})+record('event_msg',{'type':'task_started'}))
+            collector=CodexCollector(root,tail_bytes=8192);collector.refresh()
+            with path.open('ab') as stream:
+                stream.write(record('event_msg',{'type':'task_complete'},'2026-10-04T00:02:00Z'))
+                for _ in range(10):stream.write(record('response_item',{'type':'message','content':'PRIVATE'*500}))
+            restarted=CodexCollector(root,tail_bytes=8192);restarted.refresh()
+            row=restarted.snapshot()['threads'][0]
+            self.assertEqual(row['status'],'completed')
+            self.assertEqual(row['status_source'],'session_lifecycle')
+
     def test_long_turn_recovers_status_with_shared_read_budget(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -38,6 +71,11 @@ class LifecycleBackfillTests(unittest.TestCase):
             self.assertFalse(row["status_backfill_pending"])
             self.assertEqual(row["tokens"]["total_tokens"], 123)
             self.assertNotIn("PRIVATE", json.dumps(row))
+            for _ in range(50):
+                if not any(state.get("error_cursor") for state in collector.files.values()):break
+                before = collector.read_bytes;collector.refresh()
+                self.assertLessEqual(collector.read_bytes-before, 8*1024*1024)
+            self.assertFalse(any(state.get("error_cursor") for state in collector.files.values()))
             before = collector.read_bytes;collector.refresh();self.assertEqual(collector.read_bytes, before)
 
     def test_complete_event_can_supply_duration_without_start_in_tail(self):

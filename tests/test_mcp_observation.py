@@ -6,7 +6,7 @@ from unittest.mock import patch
 from unittest.mock import MagicMock
 
 from local_activity_monitor.collectors import CodexCollector
-from local_activity_monitor.mcp_records import discover_sources, response_metadata
+from local_activity_monitor.mcp_records import category, connection_state, discover_sources, response_metadata
 from local_activity_monitor.server import Dashboard, handler
 
 THREAD = '00000000-0000-0000-0000-000000000001'
@@ -37,6 +37,62 @@ class McpObservationTests(unittest.TestCase):
             with patch('local_activity_monitor.mcp_records.tomllib', None) if compatibility else patch('local_activity_monitor.mcp_records.PLUGIN_SOURCES', {'code-review':'code_review'}):
                 self.assertEqual(discover_sources(self.home), {'future_service':'configured','code_review':'configured'})
 
+    def test_tags_for_new_source_are_validated_copied_and_restored(self):
+        self.call('mcp__future_service__read', {}, {'credits':5})
+        dashboard=Dashboard(self.home,codex=True)
+        dashboard.set_settings({'mcp_tags':{'future_service':[' Search ','Search','Docs']}})
+        snapshot=dashboard.snapshot('24h')
+        source=next(item for item in snapshot['mcp']['servers'] if item['server']=='future_service')
+        self.assertEqual(source['tags'],['Search','Docs'])
+        snapshot['settings']['mcp_tags']['future_service'].append('changed')
+        self.assertEqual(dashboard.settings()['mcp_tags']['future_service'],['Search','Docs'])
+        for value in (True,'tag',[''],['x'*41],['a']*5,['line\nbreak']):
+            with self.assertRaises(ValueError):dashboard.set_settings({'interval':1,'mcp_tags':{'future_service':value}})
+        self.assertEqual(dashboard.interval,10)
+        dashboard.set_settings({'mcp_tags':{'future_service':[]}})
+        self.assertNotIn('future_service',dashboard.settings()['mcp_tags'])
+        self.assertEqual(category('unfamiliar','browser_screenshot'),'runtime')
+        self.assertEqual(category('unfamiliar','extract_document'),'documents')
+
+    def test_connection_observation_uses_local_evidence_only(self):
+        event={'nested':False,'timestamp':'2026-10-04T00:00:00Z','completed_at':'2026-10-04T00:00:01Z'}
+        self.assertEqual(connection_state([])['state'],'unconfirmed')
+        self.assertEqual(connection_state([event|{'nested':True}])['state'],'unconfirmed')
+        self.assertEqual(connection_state([event])['state'],'response')
+        self.assertEqual(connection_state([event|{'completed_at':None}])['state'],'pending')
+        self.assertEqual(connection_state([event],False)['state'],'paused')
+        failure={'timestamp':'2026-10-04T00:00:02Z','code':'connection_closed'}
+        self.assertEqual(connection_state([event],diagnostics=[failure])['state'],'error')
+        self.assertEqual(connection_state([event],diagnostics=[failure|{'code':'error'}])['state'],'response')
+        concurrent=connection_state([event,event|{'completed_at':None}])
+        self.assertEqual(concurrent['state'],'response')
+        self.assertEqual(concurrent['pending_calls'],1)
+
+    def test_self_describing_metrics_and_unknown_tool_savings(self):
+        result=response_metadata('new_source',{'metrics':{'latency':{'value':12.5,'unit':'ms'},'secret':{'value':99,'unit':'tokens'}},'saved_tokens':200,'reduction_percent':37.5,'recording_enabled':True,'raw_html':'PRIVATE'})
+        self.assertEqual(result['metrics_latency_ms'],12.5)
+        self.assertEqual(result['saved_tokens'],200)
+        self.assertEqual(result['reduction_percent'],37.5)
+        self.assertTrue(result['recording_enabled'])
+        self.assertNotIn('secret',json.dumps(result));self.assertNotIn('PRIVATE',json.dumps(result))
+
+    def test_source_recording_choice_is_only_read(self):
+        from local_activity_monitor.collectors import monitor_config
+        self.home.joinpath('config.toml').write_text('[mcp_servers.jev]\ncommand="fixture"\n',encoding='utf-8')
+        Dashboard(self.home)
+        self.assertFalse((self.home/'monitoring/jev-monitor.json').exists())
+        with patch('local_activity_monitor.server.data_root',return_value=self.home/'data'):
+            from local_activity_monitor.server import configure
+            configure(self.home,True)
+            Dashboard(self.home)
+            self.assertTrue(monitor_config(self.home)[0])
+            configure(self.home,False)
+            Dashboard(self.home)
+            self.assertFalse(monitor_config(self.home)[0])
+        path=self.home/'monitoring/jev-monitor.json';path.write_text('{invalid',encoding='utf-8')
+        Dashboard(self.home)
+        self.assertEqual(path.read_text(),'{invalid')
+
     def test_document_result_projection_and_mixed_exec_isolation(self):
         self.call('mcp__local_documents__extract_document', {'source':'/private/report.pdf','ocr':'auto','query':'PRIVATE'}, {'content':[{'type':'text','text':json.dumps({'status':'partial','content':'SECRET','content_chars':123,'ocr':{'processed_items':2,'omitted_items':3,'errors':[{'reason':'PRIVATE'}]}})}]})
         self.write('response_item', {'type':'custom_tool_call','name':'exec','call_id':'mixed','input':'await tools.mcp__local_documents__extract_document({source:"/private/a.pdf"}); await tools.exec_command({cmd:"cat SECRET"});'})
@@ -63,6 +119,48 @@ class McpObservationTests(unittest.TestCase):
         self.assertFalse(data['availability']['jev'])
         self.assertNotIn('SECRET',json.dumps(data))
 
+    def test_unknown_mcp_metrics_are_bounded_and_exclude_private_fields(self):
+        result = response_metadata('future', {'status':'ok', 'recording_enabled':False,
+            'metrics': {'processed_count':7, 'latency_ms':12.5, 'private_text':'SECRET', 'api_key_count':99,
+                        'access_token_bytes':24, 'user_id_count':456, 'negative_count':-1, 'invalid_ms':float('inf')},
+            'private_number':123, 'text':'PRIVATE', 'raw_sql':'PRIVATE'})
+        self.assertEqual(result['metrics_processed_count'],7)
+        self.assertEqual(result['metrics_latency_ms'],12.5)
+        self.assertFalse(result['recording_enabled'])
+        self.assertEqual(set(result),{'status','recording_enabled','metrics_processed_count','metrics_latency_ms'})
+        self.assertNotIn('SECRET',json.dumps(result))
+        capped = response_metadata('future', {'metrics':{f'metric{i}_count':i for i in range(100)}})
+        self.assertLessEqual(len(capped),40)
+
+    def test_recording_status_is_read_from_supported_sources(self):
+        self.home.joinpath('config.toml').write_text('[mcp_servers.future]\ncommand="PRIVATE"\n',encoding='utf-8')
+        dashboard=Dashboard(self.home,codex=True);dashboard.refresh()
+        self.assertEqual(dashboard.snapshot('24h')['mcp']['recording_status'],{})
+        self.home.joinpath('config.toml').write_text('[mcp_servers.jev]\ncommand="PRIVATE"\n',encoding='utf-8')
+        dashboard.refresh()
+        self.assertEqual(dashboard.snapshot('24h')['mcp']['recording_status']['jev']['enabled'],False)
+        self.assertNotIn('PRIVATE',json.dumps(dashboard.snapshot('24h')['mcp']))
+
+    def test_mcp_usage_and_credit_snapshots_keep_units_and_exclude_private_fields(self):
+        result=response_metadata('future', {'usage':{'input_tokens':120, 'output_tokens':40,
+            'credits':{'balance':'18.125', 'remaining':0, 'used':False, 'limit':float('nan'),
+                'has_credits':False, 'unlimited':True, 'account_id':'PRIVATE', 'note':'SECRET'}},
+            'cost_credits':2.5, 'credits_used':3, 'secret_credits':9})
+        self.assertEqual(result['usage_input_tokens'],120)
+        self.assertEqual(result['usage_output_tokens'],40)
+        self.assertEqual(result['usage_credits_balance'],18.125)
+        self.assertEqual(result['usage_credits_remaining'],0)
+        self.assertFalse(result['usage_credits_has_credits'])
+        self.assertTrue(result['usage_credits_unlimited'])
+        self.assertEqual(result['cost_credits'],2.5)
+        self.assertEqual(result['credits_used'],3)
+        for key in ('usage_credits_used','usage_credits_limit','secret_credits'):
+            self.assertNotIn(key,result)
+        self.assertNotIn('PRIVATE',json.dumps(result));self.assertNotIn('SECRET',json.dumps(result))
+        capped=response_metadata('future', {'metrics':{f'metric{i}_count':i for i in range(100)},
+            'credits':{'balance':1,'remaining':0,'unlimited':False}})
+        self.assertLessEqual(len(capped),40)
+
     def test_source_switch_and_reenable_reparse(self):
         self.call('mcp__future__read', {}, {'status':'ok'})
         dashboard=Dashboard(self.home,codex=True);dashboard.refresh()
@@ -70,6 +168,30 @@ class McpObservationTests(unittest.TestCase):
         self.assertEqual(dashboard.snapshot('24h')['mcp']['events'],[])
         dashboard.set_settings({'mcp_sources':{'future':True}})
         self.assertEqual(dashboard.snapshot('24h')['mcp']['events'][0]['result']['status'],'ok')
+
+    def test_mcp_description_from_local_readme_and_custom_override(self):
+        directory=self.home/'future';directory.mkdir();directory.joinpath('server.py').write_text('PRIVATE_SOURCE',encoding='utf-8')
+        directory.joinpath('README.md').write_text('# Future\n\nProvides local document indexes\n\n```python\nPRIVATE_SOURCE\n```',encoding='utf-8')
+        self.home.joinpath('config.toml').write_text('[mcp_servers.future]\ncommand="python"\nargs=['+json.dumps(str(directory/'server.py'))+']\n[mcp_servers.future.env]\nKEY="SECRET"\n',encoding='utf-8')
+        dashboard=Dashboard(self.home,codex=True);dashboard.refresh()
+        source=dashboard.snapshot('24h')['mcp']['servers'][0]
+        self.assertEqual(source['description'],'Provides local document indexes')
+        self.assertEqual(source['description_source'],'README.md')
+        self.assertNotIn('SECRET',json.dumps(source));self.assertNotIn('PRIVATE_SOURCE',json.dumps(source))
+        dashboard.set_settings({'mcp_descriptions':{'future':'Custom purpose'}})
+        self.assertEqual(dashboard.snapshot('24h')['mcp']['servers'][0]['description'],'Custom purpose')
+        dashboard.set_settings({'mcp_descriptions':{'future':''}})
+        self.assertEqual(dashboard.snapshot('24h')['mcp']['servers'][0]['description_source'],'README.md')
+        with self.assertRaises(ValueError):dashboard.set_settings({'mcp_descriptions':{'../escape':'x'}})
+
+    def test_config_description_is_supported_without_tomllib(self):
+        self.home.joinpath('config.toml').write_text('[mcp_servers.future]\ndescription="Indexes local files"\ncommand="PRIVATE"\n',encoding='utf-8')
+        for parser in (None, __import__('local_activity_monitor.mcp_records',fromlist=['tomllib']).tomllib):
+            details={}
+            with patch('local_activity_monitor.mcp_records.tomllib',parser):
+                self.assertEqual(discover_sources(self.home,details),{'future':'configured'})
+            self.assertEqual(details['future']['description_source'],'config')
+            self.assertEqual(details['future']['description'],'Indexes local files')
 
     def test_namespace_keeps_identical_tool_names_on_separate_servers(self):
         for namespace, call in [('mcp__future_one','one'),('mcp__future_two','two')]:
