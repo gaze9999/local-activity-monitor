@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import base64
 import copy
 import gzip
@@ -21,9 +22,10 @@ from urllib.request import ProxyHandler, build_opener
 import webbrowser
 
 from .collectors import CodexCollector, JevCollector, WINDOWS, monitor_config, name as tool_name, now
-from .mcp_records import CATEGORIES, SOURCE, discover_sources, summarize
+from .mcp_records import CATEGORIES, SOURCE, category, connection_state, discover_sources, summarize
 from .monitor_state import MonitorState
 from .error_records import DiagnosticCollector, error_summary, FAILURES
+from .error_history import ErrorHistory, error_identity
 
 
 def data_root():
@@ -96,11 +98,14 @@ class Dashboard:
         self.interval = interval
         source = Path(__file__).parent
         self.code_revision = hashlib.sha256(b"".join(path.read_bytes() for path in sorted(source.glob("*.py")))).hexdigest()[:12]+"-"+uuid.uuid4().hex[:8]
-        self.observations = {"codex": codex, "jev": True, "metadata": True, "git": True, "jev_calls": True, "skills": True, "checks": True, "tool_events": True, "mcp": True, "web": True, "files": True, "errors": True}
-        self.mcp_sources, self.mcp_categories, self.tool_descriptions = {}, {}, {}
+        self.observations = {"usage": True, "codex": codex, "jev": True, "metadata": True, "git": True, "jev_calls": True, "skills": True, "checks": True, "tool_events": True, "mcp": True, "web": True, "files": True, "errors": True, "logs": True, "sqlite": True}
+        self.default_settings = {"interval": 10, "max_files": 20, "track_all": False, "observations": dict(self.observations), "mcp_sources": {}, "mcp_categories": {}, "tool_descriptions": {}, "mcp_descriptions": {}, "mcp_tags": {}}
+        self.mcp_sources, self.mcp_categories, self.tool_descriptions, self.mcp_descriptions, self.mcp_tags = {}, {}, {}, {}, {}
+        self.mcp_document_cache = {}
         self.started_at = now()
-        self.monitor = MonitorState()
+        self.monitor = MonitorState(home/"monitoring/local-activity-monitor.jsonl")
         self.diagnostics = DiagnosticCollector(home)
+        self.error_history = ErrorHistory(home/"monitoring/error-history.json")
         self.stop = threading.Event()
         self.lock = threading.Lock()
         self.refresh_lock = threading.RLock()
@@ -117,23 +122,53 @@ class Dashboard:
     def _refresh(self):
         with self.refresh_lock:
             began, cpu = time.perf_counter(), time.process_time()
-            before_bytes = self.codex.read_bytes if self.codex else 0
+            before_bytes = (self.codex.read_bytes if self.codex else 0)+self.diagnostics.read_bytes
             if self.codex and self.observations["codex"]:
                 self.codex.refresh()
             codex = self.codex.snapshot() if self.codex and self.observations["codex"] else {"source": "codex", "health": "disabled", "threads": [], "tools": {}}
             enabled, database, since = monitor_config(self.home)
-            if self.observations["codex"] and self.observations["errors"]:
+            self.diagnostics.capture_logs = self.observations["logs"]
+            self.diagnostics.capture_sql = self.observations["sqlite"]
+            if self.observations["codex"] and (self.observations["errors"] or self.observations["logs"] or self.observations["sqlite"]):
                 self.diagnostics.refresh()
+            if self.observations["codex"] and self.observations["sqlite"]:
+                sql = codex.setdefault("sqlite", {"events": [], "total": 0, "operations": {}})
+                events = sorted(sql["events"]+list(self.diagnostics.sql_events), key=lambda event:event.get("timestamp") or "", reverse=True)[:500]
+                sql.update(events=events, total=len(events), operations=dict(Counter(event["operation"] for event in events)))
             diagnostics = self.diagnostics.snapshot() if self.observations["codex"] and self.observations["errors"] else {"events": [], "health": {"desktop": "disabled", "core": "disabled"}}
             errors = codex.pop("error_events", [])+diagnostics.pop("events")
-            sources = discover_sources(self.home)
+            descriptions = {}
+            sources = discover_sources(self.home, descriptions, self.mcp_document_cache)
+            if len(self.mcp_document_cache) > 256:
+                self.mcp_document_cache.clear()
             mcp = summarize(sources, codex.pop("mcp_events", []), self.mcp_sources, self.mcp_categories)
+            for source in mcp["servers"]:
+                source.update(descriptions.get(source["server"], {}))
+                source["default_description"] = source.get("description", "")
+                if source["server"] in self.mcp_descriptions:
+                    source.update(description=self.mcp_descriptions[source["server"]], description_source="custom")
+                source["tools"] = sorted({event["tool"] for event in mcp["events"] if event["server"] == source["server"]})[:30]
+                source["default_category"] = category(source["server"], " ".join(source["tools"])+" "+source.get("default_description", ""))
+                source["category"] = self.mcp_categories.get(source["server"]) or source["default_category"]
+                if source["server"] in self.mcp_tags:
+                    source["tags"] = list(self.mcp_tags[source["server"]])
+                source["connection"] = connection_state([event for event in mcp["events"] if event["server"] == source["server"]], source["enabled"], [event for event in errors if event.get("server") == source["server"]])
             availability = {"jev": "jev" in sources or database is not None or any(item["server"] == "jev" for item in mcp["servers"])}
             settings = self.settings()
             assets = Path(__file__).parent/"web"
-            revision = self.code_revision+"-"+hashlib.sha256(b"".join((assets/name).read_bytes() for name in ("index.html", "app.js", "style.css"))).hexdigest()[:12]
-            cache = {window: {"version": 1, "revision": revision, "label": "本機觀察統計", "started_at": self.started_at, "updated_at": now(), "settings": settings, "availability": availability, "mcp": mcp, "jev": self.jev.snapshot(window) if self.observations["jev"] else {"source": "jev", "health": "paused", "enabled": enabled, "enabled_at": since, "summary": {}, "recent": [], "series": []}, "codex": codex} for window in WINDOWS}
+            revision = self.code_revision+"-"+hashlib.sha256(b"".join((assets/name).read_bytes() for name in ("index.html", "app.js", "style.css", "locales.json"))).hexdigest()[:12]
+            cache = {window: {"version": 1, "revision": revision, "label": "本機觀察統計", "started_at": self.started_at, "updated_at": now(), "settings": settings, "default_settings": self.default_settings, "availability": availability, "mcp": dict(mcp), "jev": self.jev.snapshot(window) if self.observations["jev"] and self.observations["mcp"] and self.mcp_sources.get("jev", True) else {"source": "jev", "health": "paused", "enabled": enabled, "enabled_at": since, "summary": {}, "recent": [], "series": []}, "codex": codex} for window in WINDOWS}
             for snapshot in cache.values():
+                statuses = {}
+                for event in sorted(mcp["events"], key=lambda item: item.get("completed_at") or item.get("timestamp") or ""):
+                    result = event.get("result", {})
+                    for key, item in result.items():
+                        if key.endswith(("recording_enabled", "telemetry_enabled")) and type(item) is bool:
+                            statuses[event["server"]] = {"enabled": item, "health": result.get("status"), "observed_at": event.get("completed_at") or event.get("timestamp")}
+                if availability["jev"]:
+                    statuses["jev"] = {"enabled": snapshot["jev"]["enabled"] if snapshot["jev"]["health"] != "invalid_config" else None, "health": snapshot["jev"]["health"]}
+                snapshot["mcp"]["recording_status"] = statuses
+                snapshot["mcp"]["telemetry"] = {"jev": {key: snapshot["jev"][key] for key in ("enabled", "enabled_at", "health", "scope", "summary", "recent", "series")}} if availability["jev"] else {}
                 jev_errors = []
                 if self.observations["errors"]:
                     for event in snapshot["jev"]["recent"]:
@@ -141,13 +176,16 @@ class Dashboard:
                             if attempt.get("status") in FAILURES:
                                 jev_errors.append({"timestamp": event["timestamp"], "category": "mcp", "source": "jev_telemetry", "severity": "error", "server": "jev", "tool": event["operation"], "code": attempt["status"], "http_status": attempt.get("http_status"), "attempt": index+1})
                 snapshot["errors"] = error_summary(errors+jev_errors) | {"diagnostics": diagnostics, "enabled": self.observations["errors"]}
+            history = [event for snapshot in cache.values() for event in snapshot["errors"]["events"]]
+            history += [{"timestamp": event["timestamp"], "category": "monitor", "source": "monitor", "severity": "error", "code": event.get("error_type") or "http_error", "http_status": event.get("http_status"), "reason": event["kind"]} for event in self.monitor.log_snapshot()["entries"] if event["kind"] in ("refresh_failed", "http_response_error")]
+            self.error_history.update(history)
             database_bytes = None
             if database is not None:
                 try:
                     database_bytes = database.stat().st_size
                 except OSError:
                     pass
-            self.monitor.refreshed({"refresh_ms": round((time.perf_counter()-began)*1000, 2), "cpu_ms": round((time.process_time()-cpu)*1000, 2), "read_bytes": (self.codex.read_bytes if self.codex else 0)-before_bytes, "retained_calls": sum(len(state["calls"]) for state in self.codex.files.values()) if self.codex else 0, "buffer_bytes": sum(len(state["buffer"]) for state in self.codex.files.values()) if self.codex else 0, "trimmed_calls": self.codex.trimmed_calls if self.codex else 0, "call_limit": CodexCollector.CALL_LIMIT, "file_limit": CodexCollector.FILE_LIMIT, "buffer_limit": CodexCollector.BUFFER_LIMIT, "jev_database_bytes": database_bytes})
+            self.monitor.refreshed({"refresh_ms": round((time.perf_counter()-began)*1000, 2), "cpu_ms": round((time.process_time()-cpu)*1000, 2), "read_bytes": (self.codex.read_bytes if self.codex else 0)+self.diagnostics.read_bytes-before_bytes, "retained_calls": sum(len(state["calls"]) for state in self.codex.files.values()) if self.codex else 0, "buffer_bytes": sum(len(state["buffer"]) for state in self.codex.files.values()) if self.codex else 0, "trimmed_calls": self.codex.trimmed_calls if self.codex else 0, "call_limit": CodexCollector.CALL_LIMIT, "file_limit": CodexCollector.FILE_LIMIT, "buffer_limit": CodexCollector.BUFFER_LIMIT, "jev_database_bytes": database_bytes})
             with self.lock:
                 self.cache = cache
 
@@ -160,10 +198,10 @@ class Dashboard:
             return {"enabled": current["enabled"], "enabled_at": current["enabled_at"]}
 
     def settings(self):
-        return {"interval": self.interval, "max_files": self.max_files, "track_all": self.codex.track_all if self.codex else False, "observations": dict(self.observations), "mcp_sources": dict(self.mcp_sources), "mcp_categories": dict(self.mcp_categories), "tool_descriptions": dict(self.tool_descriptions)}
+        return {"interval": self.interval, "max_files": self.max_files, "track_all": self.codex.track_all if self.codex else False, "observations": dict(self.observations), "mcp_sources": dict(self.mcp_sources), "mcp_categories": dict(self.mcp_categories), "tool_descriptions": dict(self.tool_descriptions), "mcp_descriptions": dict(self.mcp_descriptions), "mcp_tags": {key: list(tags) for key, tags in self.mcp_tags.items()}}
 
     def set_settings(self, value):
-        allowed = {"interval", "max_files", "track_all", "observations", "mcp_sources", "mcp_categories", "tool_descriptions", "replace_customizations", "recording"}
+        allowed = {"interval", "max_files", "track_all", "observations", "mcp_sources", "mcp_categories", "tool_descriptions", "mcp_descriptions", "mcp_tags", "replace_customizations", "recording"}
         if not isinstance(value, dict) or not value or set(value)-allowed:
             raise ValueError()
         observations = value.get("observations", {})
@@ -182,9 +220,19 @@ class Dashboard:
         descriptions = value.get("tool_descriptions", {})
         if not isinstance(descriptions, dict) or len(descriptions) > 64 or any(not tool_name(key) or not isinstance(text, str) or len(text) > 400 for key, text in descriptions.items()):
             raise ValueError()
+        purposes = value.get("mcp_descriptions", {})
+        if not isinstance(purposes, dict) or len(purposes) > 64 or any(not isinstance(key, str) or not SOURCE.fullmatch(key) or not isinstance(text, str) or len(text) > 400 for key, text in purposes.items()):
+            raise ValueError()
+        tags = value.get("mcp_tags", {})
+        if not isinstance(tags, dict) or len(tags) > 64 or any(not isinstance(key, str) or not SOURCE.fullmatch(key) or not isinstance(items, list) or len(items) > 4 or any(not isinstance(text, str) or not text.strip() or len(text.strip()) > 40 or any(ord(char) < 32 for char in text) for text in items) for key, items in tags.items()):
+            raise ValueError()
         with self.refresh_lock:
             replace = value.get("replace_customizations", False)
             next_descriptions = {key: text for key, text in (descriptions if replace else self.tool_descriptions | descriptions).items() if text.strip()}
+            next_purposes = {key: text for key, text in (purposes if replace else self.mcp_descriptions | purposes).items() if text.strip()}
+            next_tags = {key: list(dict.fromkeys(text.strip() for text in items)) for key, items in (tags if replace else self.mcp_tags | tags).items() if items}
+            if len(next_purposes) > 64 or len(next_tags) > 64:
+                raise ValueError()
             if not replace and any(len(set(existing)|set(value.get(key, {}))) > 64 for key, existing in (("mcp_sources", self.mcp_sources), ("mcp_categories", self.mcp_categories))) or len(next_descriptions) > 64:
                 raise ValueError()
             if "recording" in value:
@@ -197,13 +245,28 @@ class Dashboard:
                 self.codex = CodexCollector(self.home/"sessions", self.max_files)
             self.interval = interval
             self.max_files = value.get("max_files", self.max_files)
+            restart_diagnostics = any(observations.get(key) and not self.observations[key] for key in ("codex", "errors", "logs", "sqlite"))
             self.observations.update(observations)
+            if restart_diagnostics:
+                self.diagnostics.files.clear()
+                self.diagnostics.next_scan = 0
+                self.diagnostics.sql_cursor = self.diagnostics.sql_history = None
+                self.diagnostics.events.clear()
+                self.diagnostics.logs.clear()
+                self.diagnostics.sql_events.clear()
+            self.monitor.log_enabled = self.observations["logs"]
+            if observations.get("logs") is False:
+                self.diagnostics.logs.clear()
+            if observations.get("sqlite") is False:
+                self.diagnostics.sql_events.clear()
             source_changes = value.get("mcp_sources", {})
             next_sources = dict(source_changes) if replace else self.mcp_sources | source_changes
             reenable = any(next_sources.get(name, True) and enabled is False for name, enabled in self.mcp_sources.items())
             self.mcp_sources = next_sources
             self.mcp_categories = dict(value.get("mcp_categories", {})) if replace else self.mcp_categories | value.get("mcp_categories", {})
             self.tool_descriptions = next_descriptions
+            self.mcp_descriptions = next_purposes
+            self.mcp_tags = next_tags
             if self.codex:
                 if reenable or any(enabled and not self.codex.features[key] for key, enabled in observations.items() if key in self.codex.features):
                     self.codex.files.clear()
@@ -232,6 +295,22 @@ class Dashboard:
                 return None
             return self.codex.skill_detail(skill, document)
 
+    def logs(self):
+        """Only selected metadata, collected once; no arbitrary path or log body API."""
+        with self.refresh_lock:
+            monitor = self.monitor.log_snapshot()
+            entries = list(self.diagnostics.logs) if self.observations["logs"] and self.observations["codex"] else []
+            entries += monitor.pop("entries")
+            with self.lock:
+                cached = self.cache.get("all", {})
+                codex, jev = cached.get("codex", {}), cached.get("jev", {})
+                errors = cached.get("errors", {}).get("events", [])+self.error_history.snapshot()
+                if self.observations["logs"]:
+                    entries += errors
+            entries = list({error_identity(event): event for event in entries}.values())
+            entries.sort(key=lambda event: event.get("timestamp") or "", reverse=True)
+            return {"enabled": self.observations["logs"], "entries": copy.deepcopy(entries[:2000]), "total": len(entries), "limit": 2000, "trimmed": self.diagnostics.log_trimmed, "sources": self.diagnostics.log_sources(self.observations["codex"] and self.observations["logs"])+[monitor, {"source": "session", "health": codex.get("health", "waiting"), "files": [], "file_count": codex.get("files"), "checked_at": cached.get("updated_at"), "read_bytes": codex.get("bytes_read"), "unsupported_lines": codex.get("malformed_lines"), "backfill_pending": codex.get("error_backfill_pending")}, {"source": "jev_telemetry", "health": jev.get("health", "waiting"), "files": [], "checked_at": cached.get("updated_at")}]}
+
     def poll(self):
         while not self.stop.is_set():
             try:
@@ -245,16 +324,35 @@ class Dashboard:
         with self.lock:
             cached = self.cache.get(window)
             result = copy.deepcopy(cached) if cached is not None else {"label": "本機觀察統計", "health": "starting", "started_at": self.started_at, "updated_at": None, "settings": self.settings(), "availability": {}, "mcp": {"servers": [], "events": [], "categories": CATEGORIES}, "codex": {"health": "waiting", "threads": [], "tools": {}}, "jev": {"health": "disabled", "enabled": False, "summary": {}, "recent": [], "series": []}}
+        result["default_settings"] = copy.deepcopy(self.default_settings)
         result["monitor"] = self.monitor.snapshot()
+        logs = self.monitor.log_snapshot(False)
+        result["logs"] = {"enabled": self.observations["logs"], "sources": self.diagnostics.log_sources(self.observations["codex"] and self.observations["logs"])+[logs], "retained": len(self.diagnostics.logs)+logs["retained"], "trimmed": self.diagnostics.log_trimmed}
         errors = result.setdefault("errors", {"events": [], "diagnostics": {}, "enabled": self.observations["errors"]})
         program_errors = [{"timestamp": event["timestamp"], "category": "monitor", "source": "monitor", "severity": "error", "code": event.get("error_type") or "http_error", "http_status": event.get("http_status"), "reason": event["kind"]} for event in result["monitor"]["events"] if event["kind"] in ("refresh_failed", "http_response_error")]
-        errors.update(error_summary(errors["events"]+program_errors))
+        history = self.error_history.snapshot() if self.observations["errors"] else []
+        merged = {error_identity(event):event for event in history+errors["events"]+program_errors}
+        errors.update(error_summary(list(merged.values())))
+        errors["history"] = {"health": self.error_history.health, "error_type": self.error_history.error_type, "retained": len(history), "limit": self.error_history.LIMIT, "hours": 24}
+        result["sources"] = self.sources()
         return result
+
+    def sources(self):
+        enabled, database, _ = monitor_config(self.home)
+        return {
+            "session": {"name": "Codex session", "locations": [str(self.home/"sessions")], "mode": "read_only", "health": self.codex.health if self.codex and self.observations["codex"] else "disabled", "features": ["codex", "tools", "git", "workflow", "skills", "checks", "files", "sqlite", "mcp", "web", "errors", "logs", "usage", "dots"], "scope": "recent_tail_and_incremental_metadata"},
+            "catalog": {"name": "Codex / ChatGPT catalog", "locations": [str(self.home/name) for name in ("sqlite/codex-dev.db", "state_*.sqlite", "session_index.jsonl", ".codex-global-state.json")], "mode": "read_only", "features": ["codex", "overview"], "scope": "titles_classification_and_local_thread_metadata"},
+            "thread_state": {"name": "Thread lifecycle / Skills", "locations": [str(self.home/"monitoring/thread-state.json")], "mode": "bounded_metadata_cache", "features": ["codex", "workflow", "skills", "overview"], "scope": "confirmed_lifecycle_and_skill_checkpoints"},
+            "diagnostics": {"name": "Codex diagnostics", "locations": [str(root) for root in self.diagnostics.roots]+[str(self.diagnostics.sql_path) if self.diagnostics.sql_path else str(self.home/"logs_*.sqlite")], "mode": "read_only", "features": ["errors", "logs", "sqlite"], "scope": "recent_metadata_and_24h_error_backfill"},
+            "jev": {"name": "Jev telemetry", "locations": [str(database)] if database else [], "mode": "read_only", "features": ["jev", "errors", "logs"], "scope": "opt_in_telemetry"},
+            "monitor": {"name": "Local Activity Monitor", "locations": [str(self.monitor.journal), str(self.error_history.path)], "mode": "bounded_metadata_cache", "features": ["monitor", "errors", "logs"], "scope": "runtime_samples_and_bounded_event_metadata"},
+            "interface": {"name": "Browser preferences", "locations": ["localStorage: local-activity-monitor.preferences.v1"], "mode": "user_preferences", "features": ["interface"], "scope": "interface_copy_and_tool_descriptions"},
+        }
 
 
 def handler(dashboard, port):
     hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
-    assets = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"), "/style.css": ("style.css", "text/css; charset=utf-8")}
+    assets = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"), "/style.css": ("style.css", "text/css; charset=utf-8"), "/locales.json": ("locales.json", "application/json; charset=utf-8")}
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -305,7 +403,12 @@ def handler(dashboard, port):
             if not self.local_request():
                 return
             url = urlsplit(self.path)
-            if url.path == "/api/codex/jev":
+            if url.path == "/api/logs":
+                if url.query:
+                    self.reply(400, b"Invalid log query")
+                    return
+                self.reply(200, json.dumps(dashboard.logs(), ensure_ascii=False, allow_nan=False).encode("utf-8"), "application/json; charset=utf-8")
+            elif url.path == "/api/codex/jev":
                 if len(url.query) > 512:
                     self.reply(400, b"Invalid query")
                     return

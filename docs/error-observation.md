@@ -1,6 +1,6 @@
 # 錯誤觀察
 
-右上角「錯誤」顯示最近 24 小時已載入的 error 事件數, 點擊進入錯誤紀錄 Tab 並選擇錯誤等級; 警告另列, 可切換等級查看
+右上角「錯誤」顯示最近 24 小時已載入的 error 事件數, 點擊進入錯誤與 Log 的錯誤紀錄子頁 並選擇錯誤等級; 警告另列, 可切換等級查看
 
 ## 來源與判定
 
@@ -19,7 +19,7 @@
 
 ## 資料邊界
 
-不保存 errorMessage, errorStack, 完整命令, prompt, response 或 HTTP error body. 明細顯示已選取的 metadata 與通用中文說明, 未知 code 保留原始識別名稱; 找得到對話 / MCP 操作時提供查看按鈕, 不從私人字串補出未知欄位
+不保存 errorMessage, errorStack, 完整命令, prompt, response 或 HTTP error body. 明細顯示原因分類, 已選取的 metadata, 錯誤類型, HTTP / exit code, Request / Trace / Call ID, 來源檔名 / 紀錄 ID 與相關事件, 未知 code 保留原始識別名稱; 找得到對話 / MCP 操作時提供查看按鈕, 不從私人字串補出未知欄位
 
 Desktop log 只從級別與固定 key-value 欄位取值, 排除引號內的 errorMessage / stack 內容, 避免把內文中的 ID 當成對話 ID. Core body 僅短暫讀取片段供分類, 不加入 snapshot 或其他資料庫
 
@@ -30,14 +30,21 @@ Desktop log 只從級別與固定 key-value 欄位取值, 排除引號內的 err
 - Linux: `$XDG_STATE_HOME/Codex/Logs` 或 `$XDG_CONFIG_HOME/Codex/logs`, 缺少環境變數時使用 `~/.local/state` / `~/.config`
 - Core: 目前 CODEX_HOME 下的 `logs_*.sqlite`, 動態選取檔案並驗證 logs schema
 
-Desktop 最多追蹤 8 個近期 log, 初始每份 256 KiB 尾端, 後續增量讀取, 每輪最多 1 MiB, 未完成片段每檔最多 64 KiB. Core 每輪選取最近最多 2000 列 ID, 不搜尋整個歷史 body; 輸出的診斷事件最多 1000 筆. 完整錯誤清單也最多 1000 筆, 超過保留最新事件
+Desktop 最多追蹤 8 個近期 log, 初始每份 256 KiB 尾端, 後續增量讀取, 增量與歷史回補每輪各最多 1 MiB, 未完成片段每檔最多 64 KiB. Core 每輪選取最近最多 2000 列 ID, 歷史分批回讀每輪最多 2000 列並限制在最近 24 小時; SQLite 讀取預算為 0.08 秒; 輸出的診斷事件最多 1000 筆. 完整錯誤清單也最多 1000 筆, 超過保留最新事件
 
 找不到目錄顯示「未找到」, DB schema 改變顯示「格式未支援」, 權限 / SQLite 讀取失敗顯示「無法讀取」; 不寫入或修改 Codex log. 平台目錄探索與 fixture 已驗證, 原生 macOS / Linux App log 的實際格式仍需在目標環境確認
 
-「對話與工具錯誤」switch 停止診斷讀取與 session / tool error 解析; 重新啟用時回補目前選取尾端, 觀察程式本身的錯誤仍保留. 診斷事件存在記憶體, 重新啟動後從有限範圍重新建立, 不另外寫入歷史 DB
+「對話與工具錯誤」switch 停止診斷讀取與 session / tool error 解析; 重新啟用時回補目前選取尾端, 觀察程式本身的錯誤仍保留. 診斷事件最多 1000 筆保存在記憶體. 最近 24 小時錯誤摘要另外保存至 `monitoring/error-history.json`, 上限 1000 筆 / 512 KiB, 原子替換, 不保存原始訊息; 重整 / 重啟後保留, 新事件依識別去重. 本程式 Log 只寫啟動, 設定, 失敗 / 恢復等事件, 每份 64 KiB 與一份輪替檔, 最多 128 KiB
 
 ## 對話狀態與雲端缺值
 
-Codex 工作狀態由 task_started / task_complete 判定. 開始事件超出初始尾端時, 在 session 每輪 8 MiB 共用預算內反向回查, 找到最近 lifecycle 後停止; 明細標示回查中或工作事件來源. 完成事件自身帶 started_at / completed_at 時可補出耗時, 不需從對話建立時間估算
+Codex 工作狀態由 task_started / task_complete 判定. 開始事件超出初始尾端時, 在 session 每輪 8 MiB 共用預算內反向回查, 找到最近 lifecycle 後停止; 最近確認狀態與 offset 保存於 `monitoring/thread-state.json`, 重啟後沿用, 未涵蓋的離線區間繼續回補; 明細標示回查中或工作事件來源. 完成事件自身帶 started_at / completed_at 時可補出耗時, 不需從對話建立時間估算
 
 純 ChatGPT 雲端對話由本機 catalog 提供名稱, 時間與分類. catalog 若有 Model / Reasoning / async status 欄位就依有效型別讀取, 沒有 Codex session 或來源未提供的 token / 工具資料維持未知, 不呼叫 Provider API 估算
+
+
+## SQL 診斷與來源 Log
+
+來源 Log 子頁透過 `GET /api/logs` 列出選定事件 metadata, 含原有 info / debug / trace 等級與來源讀取狀態. 原始 Log 留在來源位置, 明細提供對照所需的時間, 模組, 識別碼與原因分類
+
+Core Log 若提供可辨識的 SQL / SQLite 模組, 可選取操作類型, 個別耗時, 影響 / 回傳列數與錯誤; SQL 操作頁合併工具與診斷紀錄. 工具中的 sqlite3 命令, literal Python SQLite 與 MCP SQL 參數也可辨識, 不保存 SQL 本文 / 查詢結果, 不執行來源程式碼. 沒有可辨識紀錄時 0 表示目前觀察到的操作數

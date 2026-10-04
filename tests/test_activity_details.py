@@ -271,7 +271,7 @@ class ActivityDetailsTests(unittest.TestCase):
         self.assertEqual(self.request(dashboard,{"enabled":True},headers={"Content-Length":"9999"})[0],400)
         self.assertEqual(self.request(dashboard,{"enabled":True},headers={"Transfer-Encoding":"chunked"})[0],400)
         self.assertEqual(self.request(dashboard,{"enabled":True},path="/api/arbitrary")[0],405)
-        self.assertFalse((self.home/"monitoring").exists())
+        self.assertFalse((self.home/"monitoring/jev-monitor.json").exists())
 
     def test_http_compression_preserves_payload_and_declared_length(self):
         for encoding in ("gzip, deflate", "identity", "gzip;q=0"):
@@ -300,6 +300,30 @@ class ActivityDetailsTests(unittest.TestCase):
         self.assertNotIn(b'href="/style.css"',content)
         self.assertNotIn(b'src="/boot.js"',content)
         self.assertIn(b"AbortController",script)
+
+    def test_log_endpoint_and_locale_asset_keep_request_boundaries(self):
+        self.write("session_meta", {"id": THREAD})
+        dashboard = Dashboard(self.home, codex=True);dashboard.refresh()
+        instance = object.__new__(handler(dashboard, 8787))
+        for path, headers, code in [
+            ("/api/logs", {"Host": "127.0.0.1:8787"}, 200),
+            ("/api/logs?path=auth.json", {"Host": "127.0.0.1:8787"}, 400),
+            ("/api/logs", {"Host": "external.example:8787"}, 403),
+            ("/locales.json", {"Host": "127.0.0.1:8787"}, 200),
+            ("/../error_records.py", {"Host": "127.0.0.1:8787"}, 404),
+        ]:
+            instance.headers, instance.path, instance.reply = headers, path, MagicMock()
+            instance.do_GET()
+            self.assertEqual(instance.reply.call_args.args[0], code)
+            if path == "/api/logs" and code == 200:
+                data = json.loads(instance.reply.call_args.args[1])
+                source = next(row for row in data["sources"] if row["source"] == "session")
+                self.assertEqual(source["file_count"], 1)
+                self.assertLessEqual(len(data["entries"]), 2000)
+            if path == "/locales.json":
+                packs = json.loads(instance.reply.call_args.args[1])
+                self.assertEqual(set(packs["en"]), set(packs["ja"]))
+                self.assertEqual(packs["en"]["設定"], "Settings")
 
     def test_http_reuses_connection_and_closes_rejected_request(self):
         class Socket:

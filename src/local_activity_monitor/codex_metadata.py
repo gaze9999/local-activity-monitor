@@ -52,7 +52,7 @@ def execution_metadata(values):
     return result
 
 
-def read_metadata(home, identities):
+def read_metadata(home, identities, dots=None):
     entries = {}
     try:
         path = home/"sqlite/codex-dev.db"
@@ -169,11 +169,28 @@ def read_metadata(home, identities):
                     if isinstance(project, dict):
                         entry["project_name"] = text(project.get("name"))
                 atom = state.get("electron-persisted-atom-state", {})
-                outputs = atom.get("orbit-outputs-v1", []) if isinstance(atom, dict) else []
+                outputs = atom.get("orbit-outputs-v1") if isinstance(atom, dict) else None
+                if dots is not None:
+                    snapshots = atom.get("orbit-activity-snapshots-v1") if isinstance(atom, dict) else None
+                    dots.update(events=[] if isinstance(outputs, list) else None, activity_items=sum(len(item["data"]) for item in snapshots[:2000] if isinstance(item, dict) and isinstance(item.get("data"), list)) if isinstance(snapshots, list) else None)
                 if isinstance(outputs, list):
-                    for output in outputs:
+                    seen = set()
+                    for output in outputs[:2000]:
+                        if dots is not None and isinstance(output, dict) and isinstance(output.get("threadId"), str) and re.fullmatch(r"[a-fA-F0-9-]{36}", output["threadId"]):
+                            artifact = output.get("artifact")
+                            if isinstance(artifact, dict):
+                                produced = artifact.get("producedAtMs")
+                                when = date(produced/1000) if type(produced) in (int, float) else None
+                                kind = artifact.get("type")
+                                kind = kind if isinstance(kind, str) and re.fullmatch(r"[a-zA-Z0-9_.:-]{1,80}", kind) else None
+                                identity = (output["threadId"], output.get("turnId") if isinstance(output.get("turnId"), str) else None, when, kind)
+                                if identity not in seen:
+                                    seen.add(identity)
+                                    dots["events"].append({"thread_id": output["threadId"], "timestamp": when, "artifact_type": kind})
                         if isinstance(output, dict) and isinstance(output.get("threadId"), str) and output["threadId"] in entries:
                             entries[output["threadId"]]["trigger"] = "dot"
+                    if dots is not None:
+                        dots["events"] = sorted(dots["events"], key=lambda item:item["timestamp"] or "", reverse=True)[:500]
     except (OSError, ValueError, RecursionError):
         pass
     return entries
