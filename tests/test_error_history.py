@@ -32,11 +32,12 @@ class ErrorHistoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             history = ErrorHistory(Path(folder)/"history.json")
             history.LIMIT = 3
-            history.update([event(index=index) for index in range(8)])
+            stamp = datetime.now(timezone.utc)
+            history.update([event(timestamp=(stamp-timedelta(seconds=8-index)).isoformat(), index=index) for index in range(8)])
             self.assertEqual(len(history.snapshot()), 3)
             self.assertLessEqual(history.path.stat().st_size, history.BYTE_LIMIT)
             with patch("local_activity_monitor.error_history.os.replace", side_effect=PermissionError("PRIVATE")):
-                history.update([event(index=99)])
+                history.update([event(timestamp=stamp.isoformat(), index=99)])
             self.assertEqual(history.health, "unavailable")
             self.assertTrue(any(value["index"] == 99 for value in history.snapshot()))
             self.assertNotIn("PRIVATE", history.error_type)
