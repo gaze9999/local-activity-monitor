@@ -1,5 +1,18 @@
 # 驗證紀錄
 
+## 2026-10-04, 0.2.1
+
+Windows, Python 3.14.7 與 Codex in-app browser. 沿用隔離 session / Jev fixture, 新增可提供 credits 的未知 MCP 與 SQL 診斷紀錄. 沒有讀取正式對話內容或改寫來源設定
+
+- 118 項 unittest 通過, 2.528 秒. 包含按需 SQL 身份 / 路徑 / HTTP 邊界, literal 解析, 多筆 INSERT 憑證遮蔽, 內容上限與 snapshot 不保存 SQL
+- Python 3.10 AST, en / ja 1264 個 key, README 與治理文件連結通過. 三個角色 TOML 符合必要欄位及 sandbox 設定, 保留 model / effort 繼承. 本機角色檔解析不代表目前對話已重新載入
+- 實際頁面確認 SQL 內容按需顯示 SELECT 1, MCP 使用明細涵蓋 11 個來源, 舊排行設定更新為前 5 名, 5 / 10 / 20 / 全部可直接選擇並保存
+- 觀察來源位於四張摘要卡下方, 預設收合, 展開選擇可在重整後保留. 卡片, 排行及 modal 的內部連結定位來源頁首. 未觀察到連線狀態時不顯示尚未確認 tag
+- 動態模型篩選實際只保留選定模型, 重整後保留. error / info 與 xhigh 使用英文及不同顏色. 其餘等級的顏色以共用 CSS 規則檢查
+- 主頁排序關閉時不顯示拖曳提示, 開啟後顯示, 關閉後隱藏. modal 開關維持獨立. 實際切換 en / ja, 檢查數量單位, 設定分類與分頁控制, 修正保留舊語言及錯誤單位
+- 1280 px / 390 px 與來回縮放檢查 MCP 卡片, 數量選單, 來源摘要及監測卡片, 沒有頁面橫向溢出或卡片重疊. 多欄配置固定欄位順序, 不因卡片高度變更交換左右. 桌面表格保留容器內橫捲
+- 測試頁面沒有新增 console error / warn. 這次沒有重跑 5000 個 session 效能測試或實際指標拖曳手勢
+
 ## 2026-10-04, 0.2.0
 
 本機使用 Windows, Python 3.14.7 與 Codex in-app browser. UI 使用隔離的 85 個 session fixture 與 4 筆 Jev telemetry, 預設載入 20 個近期檔案. 範例圖片只包含示範資料. 未變更正式 MCP 或 Jev 設定

@@ -10,7 +10,13 @@ dist/
 .env
 .env.*
 !.env.example
-.codex/
+.codex/*
+!.codex/agents/
+.codex/agents/*
+!.codex/agents/*.toml
+!.codex/agent-guidance/
+.codex/agent-guidance/*
+!.codex/agent-guidance/roles.md
 .agents/
 .local/
 state/

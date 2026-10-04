@@ -134,6 +134,8 @@ class Dashboard:
             if self.observations["codex"] and self.observations["sqlite"]:
                 sql = codex.setdefault("sqlite", {"events": [], "total": 0, "operations": {}})
                 events = sorted(sql["events"]+list(self.diagnostics.sql_events), key=lambda event:event.get("timestamp") or "", reverse=True)[:500]
+                identity_fields = ("source", "thread_id", "call_id", "index", "file", "record_id", "record_offset", "record_hash", "timestamp", "statement")
+                events = [event | {"id": hashlib.sha256(json.dumps([event.get(key) for key in identity_fields]).encode()).hexdigest()} for event in events]
                 sql.update(events=events, total=len(events), operations=dict(Counter(event["operation"] for event in events)))
             diagnostics = self.diagnostics.snapshot() if self.observations["codex"] and self.observations["errors"] else {"events": [], "health": {"desktop": "disabled", "core": "disabled"}}
             errors = codex.pop("error_events", [])+diagnostics.pop("events")
@@ -283,6 +285,15 @@ class Dashboard:
             self.refresh()
             return self.settings()
 
+    def sql_detail(self, identity):
+        with self.refresh_lock:
+            if not self.codex or not self.observations["codex"] or not self.observations["sqlite"]:
+                return None
+            event = next((event for event in self.cache.get("24h", {}).get("codex", {}).get("sqlite", {}).get("events", []) if event.get("id") == identity), None)
+            if event is None:
+                return None
+            return self.diagnostics.sql_detail(event) if event.get("recognition") == "diagnostic_log" else self.codex.sql_detail(event)
+
     def jev_detail(self, thread_id, call_id, index):
         with self.refresh_lock:
             if not self.codex or not self.observations["codex"] or not self.observations["jev_calls"]:
@@ -408,6 +419,13 @@ def handler(dashboard, port):
                     self.reply(400, b"Invalid log query")
                     return
                 self.reply(200, json.dumps(dashboard.logs(), ensure_ascii=False, allow_nan=False).encode("utf-8"), "application/json; charset=utf-8")
+            elif url.path == "/api/codex/sql":
+                query = parse_qs(url.query, keep_blank_values=True)
+                if len(url.query)>80 or set(query)!={"id"} or len(query["id"])!=1 or not re.fullmatch(r"[a-f0-9]{64}", query["id"][0]):
+                    self.reply(400, b"Invalid SQL record")
+                    return
+                result = dashboard.sql_detail(query["id"][0])
+                self.reply(200 if result is not None else 409, json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
             elif url.path == "/api/codex/jev":
                 if len(url.query) > 512:
                     self.reply(400, b"Invalid query")

@@ -47,4 +47,4 @@ Codex 工作狀態由 task_started / task_complete 判定. 開始事件超出初
 
 來源 Log 子頁透過 `GET /api/logs` 列出選定事件 metadata, 含原有 info / debug / trace 等級與來源讀取狀態. 原始 Log 留在來源位置, 明細提供對照所需的時間, 模組, 識別碼與原因分類
 
-Core Log 若提供可辨識的 SQL / SQLite 模組, 可選取操作類型, 個別耗時, 影響 / 回傳列數與錯誤; SQL 操作頁合併工具與診斷紀錄. 工具中的 sqlite3 命令, literal Python SQLite 與 MCP SQL 參數也可辨識, 不保存 SQL 本文 / 查詢結果, 不執行來源程式碼. 沒有可辨識紀錄時 0 表示目前觀察到的操作數
+Core Log 若提供可辨識的 SQL / SQLite 模組, 可選取操作類型, 個別耗時, 影響 / 回傳列數與錯誤; SQL 操作頁合併工具與診斷紀錄. 工具中的 sqlite3 命令, literal Python SQLite 與 MCP SQL 參數也可辨識, SQL 本文在點開操作明細時讀取並遮蔽可辨識的憑證, 不加入 snapshot 或內容資料庫, 不讀取查詢結果, 不執行來源程式碼. 沒有可辨識紀錄時 0 表示目前觀察到的操作數

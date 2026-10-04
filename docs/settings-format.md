@@ -11,10 +11,12 @@
 | highlightOrder / cardOrders | 活動摘要與各區卡片順序 |
 | conversationSource / diagnosticSource / activitySource / mcpSource | 對話, 錯誤與 Log, 專案活動與 MCP 選定子頁 |
 | filterCollapsed | 各篩選區收合狀態, 最多 500 個 boolean 項目 |
+| sectionCollapsed | 觀察來源等區塊的收合狀態, 最多 100 個 boolean 項目 |
 | inputs / page | 搜尋, 篩選, Jev window, 對話頁碼 |
 | appearance / locale | mode, theme, accent, font, zh-TW / en / ja |
 | display | options, ranking, table |
 | charts | 時間範圍, 長度 / 單位, 間隔, 項目數, 上限, statistics 與 shape |
+| chartDefaultsVersion | 圖表預設遷移版本, 目前為 1. 舊 MCP 全部顯示預設改為前 5 名, 保留已選定的正數 |
 | tables | size, page, sort, filters, hidden, columns, heatmap |
 | tableSchema | 欄位相容版本, 目前為 6 |
 | copy | 預設完整標籤 / tooltip → 自訂文字 |

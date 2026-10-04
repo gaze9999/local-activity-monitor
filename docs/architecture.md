@@ -76,6 +76,7 @@ Jev payload 仍只在指定呼叫點開時讀取, 遮蔽 credentials 並保留�
 | --- | --- |
 | `GET /api/snapshot?window=1h\|24h\|7d\|all` | 彙整 snapshot, window 作用於 Jev DB |
 | `GET /api/codex/jev?thread=...&call=...&index=...` | 指定呼叫的已遮蔽 Jev 內容 |
+| `GET /api/codex/sql?id=...` | 已觀察 SQL 操作的指令內容, 點開明細才讀取並遮蔽憑證 |
 | `GET /api/codex/skill?skill=...&file=...` | 已觀察 Skill 的檔案清單與文件 metadata. file 可省略, 指定時只讀取清單內的文字文件 |
 | `GET /api/logs` | 目前保留的來源事件 metadata 與來源健康狀態 |
 | `GET /api/instance` | 程式識別與 CODEX_HOME hash, 啟動時重用同一個 monitor |

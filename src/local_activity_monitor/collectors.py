@@ -16,7 +16,7 @@ from .codex_metadata import execution_metadata, read_metadata
 from .error_records import identifier, tool_error
 from .mcp_records import mcp_operations, response_metadata
 from .operation_records import file_operations, invocations, operations, qualified_tool, redact, workflow_operations
-from .sqlite_records import sqlite_operations
+from .sqlite_records import sql_content, sqlite_operations
 from .usage_records import allowance
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
@@ -507,6 +507,34 @@ class CodexCollector:
                 continue
         return {"skill": skill, "files": [], "files_truncated": False, "documents": []}
 
+    def sql_detail(self, event):
+        for path, state in self.files.items():
+            if state["thread_id"] != event.get("thread_id") or event.get("call_id") not in state["calls"]:
+                continue
+            try:
+                with path.open("rb") as stream:
+                    stream.seek(0, 2)
+                    offset = max(0, stream.tell()-self.tail_bytes)
+                    stream.seek(offset)
+                    tail = stream.read(self.tail_bytes)
+                    if offset:
+                        tail = tail.partition(b"\n")[2]
+                    for raw in tail.splitlines():
+                        try:
+                            record = json.loads(raw)
+                            payload = record.get("payload") if isinstance(record, dict) else None
+                            if not isinstance(payload, dict) or record.get("type") != "response_item" or payload.get("call_id") != event.get("call_id") or payload.get("type") not in ("function_call", "custom_tool_call"):
+                                continue
+                            calls = sqlite_operations(invocations(payload), include_sql=True)
+                            index = event.get("index", -1)
+                            if 0 <= index < len(calls) and calls[index]["statement"] == event["statement"]:
+                                return sql_content(calls[index].get("sql"))
+                        except (ValueError, AttributeError, RecursionError):
+                            continue
+            except OSError:
+                continue
+        return sql_content(None)
+
     def jev_detail(self, thread_id, call_id, index):
         request, output, nested, operation, isolated = None, None, False, None, True
         for path, state in self.files.items():
@@ -628,8 +656,8 @@ class CodexCollector:
                     jev_calls.append(operation | {"thread_id": thread["thread_id"], "call_id": identity, "index": index, "timestamp": call["timestamp"], "completed_at": call.get("completed_at")})
                 context = {"thread_id": thread["thread_id"], "thread_name": row["thread_name"], "call_id": identity, "timestamp": call["timestamp"], "completed_at": call.get("completed_at"), "duration_ms": duration}
                 if self.features["sqlite"]:
-                    for operation in call.get("sqlite", []):
-                        sqlite_events.append(context | operation | {"duration_ms": None, "container_duration_ms": duration, "result": "failed" if call.get("error") else "returned" if call.get("completed_at") else "unknown"})
+                    for index, operation in enumerate(call.get("sqlite", [])):
+                        sqlite_events.append(context | operation | {"index": index, "duration_ms": None, "container_duration_ms": duration, "result": "failed" if call.get("error") else "returned" if call.get("completed_at") else "unknown"})
                 if self.features["files"]:
                     for change in call.get("files", []):
                         event = context | change

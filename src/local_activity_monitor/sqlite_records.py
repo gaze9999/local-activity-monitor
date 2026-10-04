@@ -1,9 +1,45 @@
-"""Recognize recorded SQLite operations without executing code or retaining SQL."""
+"""Recognize SQLite metadata and read selected SQL without executing recorded code."""
 import ast
+import json
 import re
 import shlex
 
-from .operation_records import shell_parts
+from .operation_records import redact, shell_parts
+
+
+def sql_content(sql):
+    """Bound displayed SQL and mask recognizable credential literals."""
+    if not isinstance(sql, str):
+        return {"sql": None, "truncated": False}
+    # INSERT values need their column names to identify credential assignments
+    secret = r"(?:api[_-]?key|password|secret|credential|authorization|cookie|access[_-]?token|token)"
+    pattern = r"(?is)(\bINSERT\s+(?:OR\s+\w+\s+)?INTO\s+[\w.\"`\[\]]+\s*\(([^()]*)\)\s*VALUES\s*)((?:\((?:'(?:''|[^'])*'|[^'()])*\)\s*,?\s*)+)"
+    def insert(match):
+        columns = [column.strip(' \t\r\n"`[]') for column in match[2].split(",")]
+        indices = {index for index, column in enumerate(columns) if re.search(secret+r"$", column, re.I)}
+        def values(row):
+            parts = re.findall(r"(?:'(?:''|[^'])*'|[^,']+)+", row[1])
+            if len(parts) != len(columns):
+                return row[0]
+            return "("+",".join("'[已隱藏]'" if index in indices else value for index, value in enumerate(parts))+")"
+        return match[1]+re.sub(r"\(((?:'(?:''|[^'])*'|[^'()])*)\)", values, match[3])
+    bounded = sql[:65536]
+    clean = redact(re.sub(pattern, insert, bounded))
+    return {"sql": clean, "truncated": len(sql)>65536 or len(clean)==32768 and len(bounded)>32768}
+
+
+def diagnostic_content(module, body):
+    if sql_diagnostic(module, body) is None:
+        return sql_content(None)
+    for key in ("sql", "statement", "query", "summary"):
+        match = re.search(r'\b'+key+r'="((?:\\.|[^"\\])*)"', body[:65536])
+        if match:
+            try:
+                sql = json.loads('"'+match[1]+'"')
+            except ValueError:
+                sql = match[1]
+            return sql_content(sql) if sql_operations(sql) else sql_content(None)
+    return sql_content(None)
 
 
 def sql_diagnostic(module, body):
@@ -41,14 +77,17 @@ def database_path(value):
     return value if "?" not in value and not re.match(r"[a-zA-Z]+://", value) else None
 
 
-def sql_operations(sql):
+def sql_operations(sql, include_sql=False):
     if not isinstance(sql, str) or len(sql) > 65536:
         return []
     # Values, quoted identifiers and comments never participate in classification
-    clean = re.sub(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`|\[(?:\]\]|[^\]])*\]|--[^\n]*|/\*[\s\S]*?\*/", " ", sql)
+    clean = re.sub(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`|\[(?:\]\]|[^\]])*\]|--[^\n]*|/\*[\s\S]*?\*/", lambda match:" "*len(match[0]), sql)
     kinds = {"select": "read", "explain": "read", "insert": "write", "update": "write", "delete": "write", "replace": "write", "create": "schema", "alter": "schema", "drop": "schema", "pragma": "pragma", "vacuum": "maintenance", "analyze": "maintenance", "reindex": "maintenance", "begin": "transaction", "commit": "transaction", "rollback": "transaction", "savepoint": "transaction", "release": "transaction", "attach": "attach", "detach": "attach"}
     result = []
+    start = 0
     for statement in clean.split(";")[:80]:
+        original = sql[start:start+len(statement)].strip()
+        start += len(statement)+1
         depth = 0
         tokens = re.findall(r"[a-zA-Z_]+|[()]", statement)
         if not tokens or tokens[0].lower() not in kinds and tokens[0].lower() != "with":
@@ -59,12 +98,12 @@ def sql_operations(sql):
             elif token == ")":
                 depth -= 1
             elif depth == 0 and token.lower() in kinds:
-                result.append((token.upper(), kinds[token.lower()]))
+                result.append((token.upper(), kinds[token.lower()], original) if include_sql else (token.upper(), kinds[token.lower()]))
                 break
     return result
 
 
-def python_operations(code):
+def python_operations(code, include_sql=False):
     try:
         tree = ast.parse(code)
     except (SyntaxError, ValueError, RecursionError):
@@ -110,13 +149,13 @@ def python_operations(code):
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id in bindings:
             function, target = node.func.attr, bindings[node.func.value.id]
             if function in ("execute", "executemany", "executescript") and node.args and isinstance(node.args[0], ast.Constant):
-                result.extend({"database": target, "statement": statement, "operation": operation} for statement, operation in sql_operations(node.args[0].value))
+                result.extend({"database": target, "statement": item[0], "operation": item[1]} | ({"sql": item[2]} if include_sql else {}) for item in sql_operations(node.args[0].value, include_sql))
             elif function in ("commit", "rollback", "close"):
                 result.append({"database": target, "statement": function.upper(), "operation": "close" if function == "close" else "transaction"})
     return result[:80]
 
 
-def sqlite_operations(calls):
+def sqlite_operations(calls, include_sql=False):
     result = []
     for tool, args, nested in calls:
         if not isinstance(args, dict):
@@ -125,7 +164,7 @@ def sqlite_operations(calls):
         if "sqlite" in tool.lower():
             path = next((database_path(args[key]) for key in ("database", "db_path", "database_path", "path") if key in args), None)
             sql = args.get("query", args.get("sql"))
-            events = [{"database": path, "statement": statement, "operation": operation} for statement, operation in sql_operations(sql)]
+            events = [{"database": path, "statement": item[0], "operation": item[1]} | ({"sql": item[2]} if include_sql else {}) for item in sql_operations(sql, include_sql)]
             if not events:
                 suffix = tool.split("__")[-1]
                 events = [{"database": path, "statement": suffix, "operation": "operation"}]
@@ -154,9 +193,9 @@ def sqlite_operations(calls):
                         path = database_path(arguments[0])
                         events.append({"database": path, "statement": "CONNECT", "operation": "open"})
                         if len(arguments) > 1:
-                            events.extend({"database": path, "statement": statement, "operation": operation} for statement, operation in sql_operations(arguments[1]))
+                            events.extend({"database": path, "statement": item[0], "operation": item[1]} | ({"sql": item[2]} if include_sql else {}) for item in sql_operations(arguments[1], include_sql))
                 for code in dict.fromkeys(candidates):
-                    events.extend(python_operations(code))
+                    events.extend(python_operations(code, include_sql))
         for event in events[:80]:
             result.append(event | {"engine": "SQLite", "tool": tool, "nested": nested, "workdir": database_path(args.get("workdir")), "recognition": "mcp_call" if "sqlite" in tool.lower() and not nested else "recorded_code"})
         if len(result) >= 80:
