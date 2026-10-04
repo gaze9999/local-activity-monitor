@@ -16,6 +16,8 @@ Windows, Python 3.14.7, Codex in-app browser. 延續隔離 fixture, 擴充至 86
 
 效能使用相同 85 個 session fixture 與 ae8bdc4 的程式, 分別以兩種先後順序量測, 每組各 20 次 refresh + snapshot. 修改前增量中位數為 44.857 / 38.275 ms, 修改後為 59.267 / 47.681 ms, CPU 中位數各為 46.875 / 39.062 ms 與 62.5 / 46.875 ms. 新程式增加四個時間範圍與 metadata 投影, 這兩組量測增加約 9.4 至 14.4 ms, session 增量讀取仍皆為 0 bytes. 每組冷啟動只有單次樣本, 不用來判定加速. 最近一次 snapshot gzip 由 34,526 減為 26,574 bytes, 差異包含時間範圍語意與樣本數, 不代表壓縮效率改善. 未重跑 5,000 個 session 效能測試
 
+首次原生 CI 在 macOS 的兩項指示文件測試發現暫存 fixture 使用 `/var` 系統 symlink, 被保護規則拒絕. 測試改以解析後的實際 fixture 路徑建立資料, 保留原本拒絕 symlink 的程式與驗證. 本機重新執行 169 項測試, 168 項通過, 原有大型 HTTP 對照測試 1 項跳過, 耗時 6.087 秒
+
 發布前的原生平台建置與隔離啟動由既有 release workflow 驗證, 實際結果見 [Actions](https://github.com/gaze9999/local-activity-monitor/actions/workflows/release.yml). 以下保留先前階段的驗證資料, 筆數與頁面配置以本節最終驗收為準
 
 ## 2026-10-04 至 2026-10-05, 0.2.2
