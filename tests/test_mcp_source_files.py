@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +14,8 @@ class McpSourceFileTests(unittest.TestCase):
         self.directory=tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root=Path(self.directory.name)
+        if sys.platform=='darwin':
+            self.root=self.root.resolve()
         (self.root/'src').mkdir()
         (self.root/'src/server.mjs').write_text('',encoding='utf-8')
         self.rules=self.root/'terms.yml'

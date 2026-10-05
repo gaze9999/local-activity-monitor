@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 
 from local_activity_monitor.operation_records import file_operations
@@ -34,7 +35,10 @@ class FileDetailsTests(unittest.TestCase):
 
     def test_current_size_requires_observed_path_and_is_bounded(self):
         with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder);file = home/'a.txt';file.write_bytes(b'1234')
+            home = Path(folder)
+            if sys.platform == 'darwin':
+                home = home.resolve()
+            file = home/'a.txt';file.write_bytes(b'1234')
             app = Dashboard(home, True)
             event = {'thread_id':'1'*36, 'call_id':'call1', 'path':str(file)}
             app.cache = {'all':{'codex':{'file_activity':{'events':[event]*200}}}}
@@ -48,6 +52,8 @@ class FileDetailsTests(unittest.TestCase):
     def test_current_sizes_stop_at_100_observed_positions_and_use_window(self):
         with tempfile.TemporaryDirectory() as folder:
             home = Path(folder)
+            if sys.platform == 'darwin':
+                home = home.resolve()
             events = []
             for index in range(105):
                 path = home/(str(index)+'.txt')

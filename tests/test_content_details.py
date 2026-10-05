@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 from unittest.mock import MagicMock
 from urllib.parse import urlencode
@@ -16,6 +17,8 @@ class ContentDetailsTests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.home=Path(self.temp.name)
+        if sys.platform=='darwin':
+            self.home=self.home.resolve()
         self.root=self.home/'sessions'
         self.root.mkdir()
         self.path=self.root/('rollout-'+THREAD+'.jsonl')

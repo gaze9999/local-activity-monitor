@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 from unittest.mock import MagicMock
@@ -16,6 +17,8 @@ class McpObservationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.home = Path(self.temp.name)
+        if sys.platform == 'darwin':
+            self.home = self.home.resolve()
         self.root = self.home/'sessions'
         self.root.mkdir()
         self.path = self.root/f'rollout-{THREAD}.jsonl'
