@@ -22,9 +22,13 @@ macOS 套件在 macOS 15 建置, Linux 套件在 Ubuntu 22.04 建置, 需要 gli
 
 ## 從原始碼啟動
 
-需要先有 Python 3.10+. Windows 雙擊 `Start.cmd`, macOS 雙擊 `Start.command`, Linux 執行 `sh start.sh`
+Windows 雙擊 `Start.cmd`, macOS 雙擊 `Start.command`, Linux 執行 `sh start.sh`. 入口會先檢查 Python 3.10+ 與建立虛擬環境所需的模組
 
-首次啟動若尚未安裝, 入口會詢問 `Install and start now? [y/N]`. 輸入 `y` 後建立 repo 內的 `.venv`, 安裝 `requirements.txt`, 接著開啟監看頁面. Enter / `n` 取消且不安裝. 已安裝時直接啟動, 不重複安裝或自動升級. 不會自動下載 Python 本身
+缺少 Python 或必要模組時, 入口會先顯示安裝方式並詢問 `Install Python now? [y/N]`. Windows 使用既有 Python Install Manager 或 winget, 安裝至使用者帳戶. macOS 使用既有 Homebrew, Debian / Ubuntu 使用 apt 安裝 Python 與 venv, 系統套件安裝可能需要管理員授權. 找不到支援的安裝工具時會提供手動安裝資訊, 不會自行安裝套件管理工具. 安裝後再次檢查環境, 失敗時保留錯誤且不啟動
+
+安裝方式依 [Python Windows 文件](https://docs.python.org/3/using/windows.html), [Microsoft winget 說明](https://learn.microsoft.com/en-us/windows/dev-environment/python), [Homebrew Python formula](https://formulae.brew.sh/formula/python@3.14) 與 [Ubuntu Python 環境說明](https://ubuntu.com/developers/docs/howto/python-setup/). Windows / macOS 安裝目標為 Python 3.14, apt 使用系統套件庫提供的版本, 安裝後須符合 Python 3.10+ 要求. 已有可用環境時沿用, 偵測時不允許 Python Install Manager 自動下載 runtime
+
+首次啟動若尚未安裝此專案, 入口會詢問 `Install and start now? [y/N]`. 輸入 `y` 後建立 repo 內的 `.venv`, 安裝 `requirements.txt`, 接著開啟監看頁面. 兩階段提示皆預設取消, Enter / `n` 或無輸入時不安裝. 已安裝時直接啟動, 不重複安裝或自動升級
 
 若偏好手動安裝, 以下指令在此 repo 執行
 
