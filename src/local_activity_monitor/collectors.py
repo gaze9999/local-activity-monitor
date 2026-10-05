@@ -14,6 +14,7 @@ import sqlite3
 import time
 
 from .codex_metadata import execution_metadata, read_metadata
+from .codex_schedules import read_schedules
 from .payload_detail import bounded_payload, complete_payload
 from .error_records import identifier, tool_error
 from .mcp_records import mcp_operations, response_metadata, decoded_output
@@ -807,12 +808,13 @@ class CodexCollector:
         dots = {}
         metadata_sources = {}
         if metadata_cache is not None and "metadata" in metadata_cache:
-            metadata, dots, metadata_sources = metadata_cache["metadata"]
+            metadata, dots, metadata_sources, schedules = metadata_cache["metadata"]
         else:
             self.project_details = {}
             metadata = read_metadata(self.root.parent, threads, dots, metadata_sources, self.project_details) if self.features["metadata"] else {}
+            schedules = read_schedules(self.root.parent, metadata_sources) if self.features["metadata"] else {"items": [], "health": "disabled"}
             if metadata_cache is not None:
-                metadata_cache["metadata"] = metadata, dots, metadata_sources
+                metadata_cache["metadata"] = metadata, dots, metadata_sources, schedules
         dots = dict(dots)
         dot_events = dots.pop("_retained_events", dots.get("events"))
         if dot_events is not None:
@@ -962,7 +964,7 @@ class CodexCollector:
                 detail = getattr(self, "project_details", {}).get(project_id, {})
                 project = projects.setdefault(project_id, {"id": project_id, "name": row.get("project_name"), "icon": detail.get("icon"), "kind": detail.get("kind"), "thread_count": 0})
                 project["thread_count"] += 1
-        return {"projects": list(projects.values()), "activity_scope": {"window": window, "timestamp": "call_started_at", "unknown_timestamp": "all_only", "latest_state": ["tokens", "model", "status", "usage"]}, "tool_statistics": statistics, "metadata_sources": list(metadata_sources.values()), "read_state": {
+        return {"projects": list(projects.values()), "schedules": schedules, "activity_scope": {"window": window, "timestamp": "call_started_at", "unknown_timestamp": "all_only", "latest_state": ["tokens", "model", "status", "usage", "schedules"]}, "tool_statistics": statistics, "metadata_sources": list(metadata_sources.values()), "read_state": {
             "file_limit": self.FILE_LIMIT if self.track_all else self.max_files, "file_count": len(self.files),
             "read_limit": self.READ_LIMIT, "tail_bytes": self.tail_bytes, "scan_seconds": self.SCAN_INTERVAL,
             "call_limit": self.CALL_LIMIT, "buffer_limit": self.BUFFER_LIMIT,
