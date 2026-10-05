@@ -156,6 +156,61 @@ def invocations(payload):
     return [(tool, args if isinstance(args, dict) else raw if tool in ("apply_patch", "functions.apply_patch") and isinstance(raw, str) else None, False)]
 
 
+def invocation_expressions(payload):
+    """Return recorded argument expressions on demand, without resolving variables."""
+    raw = payload.get("arguments", payload.get("input"))
+    if qualified_tool(payload) not in ("exec", "functions.exec") or not isinstance(raw, str):
+        return []
+    result, index = [], 0
+    while index < len(raw):
+        if raw[index:index+2] in ("//", "/*"):
+            block = raw[index:index+2] == "/*"
+            end = raw.find("*/" if block else "\n", index+2)
+            index = len(raw) if end < 0 else end+(2 if block else 1)
+            continue
+        if raw[index] in "\"'`":
+            quote = raw[index]
+            index += 1
+            while index < len(raw):
+                if raw[index] == "\\":
+                    index += 2
+                elif raw[index] == quote:
+                    index += 1
+                    break
+                else:
+                    index += 1
+            continue
+        match = TOOL_CALL.match(raw, index)
+        if match:
+            start, end, depth, quote = match.end(), match.end(), 1, None
+            while end < len(raw) and depth:
+                char = raw[end]
+                if quote:
+                    if char == "\\":
+                        end += 2
+                        continue
+                    if char == quote:
+                        quote = None
+                elif char in "\"'`":
+                    quote = char
+                elif raw[end:end+2] in ("//", "/*"):
+                    block = raw[end:end+2] == "/*"
+                    stop = raw.find("*/" if block else "\n", end+2)
+                    end = len(raw) if stop < 0 else stop+(2 if block else 1)
+                    continue
+                elif char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+                end += 1
+            result.append((match[1], raw[start:end-1] if depth == 0 else raw[start:end]))
+            # Continue inside an expression to retain genuinely nested tool positions.
+            index = start
+        else:
+            index += 1
+    return result
+
+
 def file_operations(calls):
     changes = []
     def add(path, operation, tool, nested, workdir=None, metadata=None):

@@ -3,6 +3,7 @@ import ast
 import json
 import re
 import shlex
+import warnings
 
 from .operation_records import redact, shell_parts
 
@@ -107,7 +108,10 @@ def sql_operations(sql, include_sql=False):
 
 def python_operations(code, include_sql=False):
     try:
-        tree = ast.parse(code)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            warnings.simplefilter("ignore", DeprecationWarning)
+            tree = ast.parse(code)
     except (SyntaxError, ValueError, RecursionError):
         return []
     nodes = sorted(ast.walk(tree), key=lambda node:(getattr(node, "lineno", 0), getattr(node, "col_offset", 0)))

@@ -49,7 +49,22 @@ def execution_metadata(values):
     parent = values.get("parent_thread_id")
     if isinstance(parent, str) and re.fullmatch(r"[a-fA-F0-9-]{36}", parent):
         result["parent_thread_id"] = parent
+    path = values.get("agent_path")
+    if isinstance(path, str) and re.fullmatch(r"/root(?:/[A-Za-z0-9_.-]{1,160}){0,12}", path):
+        result["agent_path"] = path
     return result
+
+
+def spawn_metadata(value):
+    """Read the selected subagent source descriptor without retaining raw source."""
+    if isinstance(value, str) and len(value) <= 4096:
+        try:
+            value = json.loads(value)
+        except (ValueError, RecursionError):
+            return {}
+    subagent = value.get("subagent") if isinstance(value, dict) else None
+    spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+    return execution_metadata(spawn) if isinstance(spawn, dict) else {}
 
 
 CATALOG_LIMIT = 2000
@@ -57,6 +72,7 @@ INDEX_TAIL_LIMIT = 1024*1024
 APP_STATE_LIMIT = 16*1024*1024
 PROJECT_LIMIT = 2000
 PROJECT_ROOT_LIMIT = 5000
+SUBAGENT_LIMIT = 500
 
 
 def read_metadata(home, identities, dots=None, source_info=None, project_details=None):
@@ -143,10 +159,29 @@ def read_metadata(home, identities, dots=None, source_info=None, project_details
                 with closing(sqlite3.connect(path.as_uri()+"?mode=ro", uri=True, timeout=.08)) as db:
                     db.execute("PRAGMA query_only=ON")
                     columns = {row[1] for row in db.execute("PRAGMA table_info(threads)")}
-                    wanted = [key for key in ("id", "title", "model", "reasoning_effort", "originator", "thread_source", "model_provider", "cli_version", "approval_mode", "sandbox_policy", "git_branch", "git_sha", "agent_nickname", "agent_role", "history_mode", "archived", "project_id") if key in columns]
+                    wanted = [key for key in ("id", "title", "model", "reasoning_effort", "originator", "thread_source", "model_provider", "cli_version", "approval_mode", "sandbox_policy", "git_branch", "git_sha", "agent_nickname", "agent_role", "agent_path", "source", "history_mode", "archived", "project_id", "created_at", "updated_at", "created_at_ms", "updated_at_ms") if key in columns]
                     if not {"id", "title"} <= set(wanted):
                         report(path, "unsupported")
                         continue
+                    edges = {}
+                    edge_columns = {row[1] for row in db.execute("PRAGMA table_info(thread_spawn_edges)")}
+                    if {"parent_thread_id", "child_thread_id"} <= edge_columns:
+                        # Select children of known parents only, including bounded descendants.
+                        pending, visited = set(selected), set()
+                        while pending and len(edges) < SUBAGENT_LIMIT:
+                            batch = sorted(pending-visited)[:400]
+                            if not batch:
+                                break
+                            visited.update(batch)
+                            pending.difference_update(batch)
+                            placeholders = ",".join("?" for _ in batch)
+                            for parent, child in db.execute(f"SELECT parent_thread_id,child_thread_id FROM thread_spawn_edges WHERE parent_thread_id IN ({placeholders}) ORDER BY child_thread_id LIMIT {SUBAGENT_LIMIT-len(edges)}", batch):
+                                if not all(isinstance(value, str) and re.fullmatch(r"[a-fA-F0-9-]{36}", value) for value in (parent, child)):
+                                    continue
+                                edges[child] = parent
+                                if child not in visited:
+                                    pending.add(child)
+                        selected.update(edges)
                     rows_read = 0
                     for start in range(0, len(selected), 400):
                         batch = sorted(selected)[start:start+400]
@@ -166,7 +201,15 @@ def read_metadata(home, identities, dots=None, source_info=None, project_details
                             effort = values.get("reasoning_effort")
                             if isinstance(effort, str) and re.fullmatch(r"[a-zA-Z0-9_.:-]{1,80}", effort):
                                 entry["reasoning_effort"] = effort
-                            entry["execution"] = execution_metadata(values)
+                            entry["execution"] = spawn_metadata(values.get("source")) | execution_metadata(values)
+                            if values["id"] in edges:
+                                entry["execution"]["parent_thread_id"] = edges[values["id"]]
+                                entry["trigger"] = "subagent"
+                            for field in ("created_at", "updated_at"):
+                                milliseconds = values.get(field+"_ms")
+                                when = date(milliseconds/1000) if type(milliseconds) in (int, float) else date(values.get(field))
+                                if when and not entry.get(field):
+                                    entry[field] = when
                             if values.get("originator") == "codex_work_desktop":
                                 entry["activity_type"] = "work"
                             elif values.get("originator") == "Codex Desktop":
@@ -207,7 +250,8 @@ def read_metadata(home, identities, dots=None, source_info=None, project_details
                             detail = project_details.get(entry.get("project_id"), {})
                             if detail.get("name"):
                                 entry["project_name"] = detail["name"]
-                    report(path, "ok", (*wanted, *sorted(set(project_fields))), rows_read=rows_read, selected_threads=len(selected), project_rows=project_rows, project_root_rows=root_rows, project_limit=PROJECT_LIMIT, project_root_limit=PROJECT_ROOT_LIMIT)
+                    edge_fields = ("thread_spawn_edges.parent_thread_id", "thread_spawn_edges.child_thread_id") if {"parent_thread_id", "child_thread_id"} <= edge_columns else ()
+                    report(path, "ok", (*wanted, *edge_fields, *sorted(set(project_fields))), rows_read=rows_read, selected_threads=len(selected), subagent_rows=len(edges), subagent_limit=SUBAGENT_LIMIT, project_rows=project_rows, project_root_rows=root_rows, project_limit=PROJECT_LIMIT, project_root_limit=PROJECT_ROOT_LIMIT)
                 break
             except sqlite3.Error:
                 failed(path)

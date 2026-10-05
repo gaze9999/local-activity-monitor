@@ -88,6 +88,69 @@ class ContentDetailsTests(unittest.TestCase):
         self.assertEqual(result['response'][1]['second'],2)
         self.assertNotIn('"first": 1',json.dumps(self.app.snapshot('24h')))
 
+    def test_nested_dynamic_input_preserves_recorded_expression_without_evaluation(self):
+        source = 'const result = await tools.mcp__textlint__lintFile({filePath: file, language:"zh-TW", password:"PRIVATE"}); text(result);'
+        self.write('response_item', {'type':'custom_tool_call','name':'exec','call_id':'dynamic','input':source})
+        self.write('response_item', {'type':'custom_tool_call_output','call_id':'dynamic','output':'{"messages":[],"ok":false}'})
+        self.app.refresh()
+        detail = self.app.mcp_detail(THREAD, 'dynamic', 0)
+        self.assertEqual(detail['request_source'], 'recorded_expression')
+        self.assertIn('filePath: file', detail['request'])
+        self.assertIn('language:"zh-TW"', detail['request'])
+        self.assertNotIn('PRIVATE', json.dumps(detail))
+        self.assertEqual(detail['response']['ok'], False)
+        self.assertEqual(detail['response_scope'], 'containing_tool_call')
+        self.assertNotIn('filePath: file', json.dumps(self.app.snapshot('all')))
+
+    def test_observed_positions_keep_old_details_after_tail_moves_and_reject_changed_record(self):
+        self.app.codex.tail_bytes = 4096
+        self.write('response_item', {'type':'function_call','name':'mcp__future__evaluate','call_id':'old','arguments':'{"input":0}'})
+        self.write('response_item', {'type':'function_call_output','call_id':'old','output':'{"answer":false}'})
+        self.app.refresh()
+        for _ in range(10):
+            self.write('response_item', {'type':'message','content':'PRIVATE_PROMPT'*200})
+        self.app.refresh()
+        detail = self.app.mcp_detail(THREAD, 'old', 0)
+        self.assertEqual(detail['request'], {'input':0})
+        self.assertEqual(detail['response'], {'answer':False})
+        state = next(iter(self.app.codex.files.values()))
+        with self.path.open('r+b') as stream:
+            stream.seek(state['calls']['old']['request_offset'])
+            stream.write(b'{}\n')
+        self.assertIsNone(self.app.mcp_detail(THREAD, 'old', 0)['request'])
+
+    def test_restart_rebuilds_only_retained_call_positions_with_bounded_incremental_reads(self):
+        self.write('response_item', {'type':'function_call','name':'mcp__future__evaluate','call_id':'retained','arguments':'{"input":0}'})
+        self.write('response_item', {'type':'function_call_output','call_id':'retained','output':'{"answer":false}'})
+        self.write('response_item', {'type':'function_call','name':'exec_command','call_id':'sql-old','arguments':json.dumps({'cmd':'sqlite3 demo.db "SELECT 34"'})})
+        self.write('response_item', {'type':'function_call_output','call_id':'sql-old','output':'{"exit_code":0}'})
+        self.app.refresh()
+        sql = next(event for event in self.app.cache['all']['codex']['sqlite']['events'] if event['statement']=='SELECT')
+        for _ in range(100):
+            self.write('response_item', {'type':'message','content':'PRIVATE_PROMPT'*1000})
+        self.write('event_msg', {'type':'task_complete'})
+        self.app.refresh()
+        restarted = Dashboard(self.home,True,20)
+        restarted.codex.tail_bytes = 4096
+        restarted.codex.READ_LIMIT = 131072
+        restarted.codex.features['errors'] = False
+        restarted.refresh()
+        self.assertEqual(restarted.mcp_detail(THREAD,'retained',0)['content_status'],'pending')
+        for _ in range(20):
+            before = restarted.codex.read_bytes
+            restarted.refresh()
+            self.assertLessEqual(restarted.codex.read_bytes-before,restarted.codex.READ_LIMIT)
+            if restarted.mcp_detail(THREAD,'retained',0)['content_status']=='available':
+                break
+        detail = restarted.mcp_detail(THREAD,'retained',0)
+        self.assertEqual(detail['request'],{'input':0})
+        self.assertEqual(detail['response'],{'answer':False})
+        self.assertEqual(restarted.sql_detail(sql['id'])['sql'],'SELECT 34')
+        self.assertNotIn('PRIVATE_PROMPT',json.dumps(restarted.snapshot('all')))
+        before = restarted.codex.read_bytes
+        restarted.refresh()
+        self.assertEqual(restarted.codex.read_bytes,before)
+
     def test_local_document_allowlist_save_conflict_and_origin(self):
         directory=self.home/'unknown';directory.mkdir();entry=directory/'server.mjs';entry.write_text('',encoding='utf-8')
         settings=directory/'settings.json';settings.write_text('{"enabled":true}',encoding='utf-8')

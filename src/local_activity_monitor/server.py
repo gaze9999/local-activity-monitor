@@ -33,6 +33,7 @@ from .error_records import DiagnosticCollector, error_summary, FAILURES
 from .error_history import ErrorHistory, error_identity
 from .payload_detail import paged_content
 from .activity_history import ActivityHistory, sql_identity, mcp_identity, merge_event
+from .codex_account import CodexAccountSource
 
 
 def data_root():
@@ -102,12 +103,13 @@ class Dashboard:
         self.home, self.max_files = home, max_files
         self.jev = JevCollector(home)
         self.codex = CodexCollector(home/"sessions", max_files) if codex else None
+        self.account = CodexAccountSource(home)
         self.interval = interval
         self.idle_minutes = 5
         self.activity = IdleActivity(home)
         source = Path(__file__).parent
         self.code_revision = hashlib.sha256(b"".join(path.read_bytes() for path in sorted(source.glob("*.py")))).hexdigest()[:12]+"-"+uuid.uuid4().hex[:8]
-        self.observations = {"usage": True, "codex": codex, "jev": True, "metadata": True, "git": True, "jev_calls": True, "skills": True, "checks": True, "tool_events": True, "mcp": True, "web": True, "files": True, "errors": True, "logs": True, "sqlite": True}
+        self.observations = {"usage": True, "codex_account": False, "codex": codex, "jev": True, "metadata": True, "git": True, "jev_calls": True, "skills": True, "checks": True, "tool_events": True, "mcp": True, "web": True, "files": True, "errors": True, "logs": True, "sqlite": True}
         self.default_settings = {"interval": 10, "idle_minutes": 5, "activity_retention_days": ActivityHistory.DEFAULT_DAYS, "max_files": 20, "track_all": False, "observations": dict(self.observations), "mcp_sources": {}, "mcp_categories": {}, "tool_descriptions": {}, "mcp_descriptions": {}, "mcp_tags": {}}
         self.mcp_sources, self.mcp_categories, self.tool_descriptions, self.mcp_descriptions, self.mcp_tags = {}, {}, {}, {}, {}
         self.mcp_document_cache = {}
@@ -134,8 +136,18 @@ class Dashboard:
             began, cpu = time.perf_counter(), time.process_time()
             before_bytes = (self.codex.read_bytes if self.codex else 0)+self.diagnostics.read_bytes
             if self.codex and self.observations["codex"]:
+                self.codex.select_detail_targets((self.activity_history.snapshot("sql") if self.observations["sqlite"] else [])+(self.activity_history.snapshot("mcp") if self.observations["mcp"] else [])+(self.activity_history.snapshot("web") if self.observations["web"] else []))
                 self.codex.refresh()
             codex_windows = self.codex.snapshot_windows() if self.codex and self.observations["codex"] else {window: {"source": "codex", "health": "disabled", "threads": [], "tools": {}} for window in WINDOWS}
+            # This refresh worker may wait on the optional source, while readers
+            # continue receiving the last snapshot without holding self.lock.
+            account = self.account.snapshot(self.observations["codex_account"] and self.observations["usage"])
+            for projection in codex_windows.values():
+                projection["account"] = account
+                if account["methods"]["account/rateLimits/read"]["health"] == "ok" and account["limits"]:
+                    local = projection.get("usage") or {}
+                    bucket = account["limits"].get(local.get("limit_id")) or account["limits"].get("codex") or next(iter(account["limits"].values()))
+                    projection["usage"] = {"source": "codex_app_server", "updated_at": account["updated_at"], "limit_id": bucket["limit_id"], "plan_type": bucket.get("plan_type") or account.get("plan_type") or local.get("plan_type"), "credits": bucket.get("credits") if bucket.get("credits") is not None else account.get("credits"), "limits": [bucket[key] for key in ("primary", "secondary") if bucket.get(key) is not None]}
             codex_windows = {window: dict(projection) for window, projection in codex_windows.items()}
             codex = codex_windows["all"]
             enabled, database, since = monitor_config(self.home)
@@ -192,7 +204,7 @@ class Dashboard:
             availability = {"jev": "jev" in sources or database is not None or any(item["server"] == "jev" for item in mcp["servers"])}
             settings = self.settings()
             assets = Path(__file__).parent/"web"
-            revision = self.code_revision+"-"+hashlib.sha256(b"".join((assets/name).read_bytes() for name in ("index.html", "app.js", "style.css", "locales.json"))).hexdigest()[:12]
+            revision = self.code_revision+"-"+hashlib.sha256(b"".join((assets/name).read_bytes() for name in ("index.html", "app.js", "style.css", "locales.json", "workbench-ui.js", "workbench-ui.css"))).hexdigest()[:12]
             scoped_mcp = {}
             for window, projection in codex_windows.items():
                 report = summarize(sources, projection.pop("mcp_events", []), self.mcp_sources, self.mcp_categories)
@@ -388,7 +400,7 @@ class Dashboard:
             event = next((item for item in self.cache.get("all", {}).get("mcp", {}).get("events", []) if item.get("thread_id") == thread_id and item.get("call_id") == call_id and item.get("index") == index), None)
             if not event or not self.observations["web" if event["server"] == "web" else "mcp"] or self.mcp_sources.get(event["server"]) is False:
                 return None
-            return self.codex.mcp_detail(thread_id, call_id, index, full)
+            return self.codex.mcp_detail(thread_id, call_id, index, full, event)
 
     def mcp_documents(self, server, document=None):
         with self.refresh_lock:
@@ -550,9 +562,13 @@ class Dashboard:
         readers = codex.get("metadata_sources", [])
         loaded = [reader for reader in readers if reader["health"] == "ok"]
         catalog_health = "disabled" if not active or not self.observations["metadata"] else "ok" if loaded and len(loaded) == len(readers) else "partly_unavailable" if loaded else "waiting" if not readers else "unavailable"
-        add("catalog", "Codex / ChatGPT catalog", ["codex", "usage", "dots", "workflow", "skills"],
+        add("catalog", "Codex / ChatGPT catalog", ["codex", "usage", "dots", "workflow", "skills", "plugins"],
             "titles_classification_and_local_thread_metadata", [reader["location"] for reader in readers], catalog_health,
             sorted({field for reader in loaded for field in reader.get("fields", [])}), readers=readers)
+        account = codex.get("account", {})
+        add("account_api", "Codex account API", ["usage"], "official_account_read_only", (), account.get("health", "disabled"),
+            ["plan_type", "limits", "credits", "account_usage"], {"cache_seconds": 60, "timeout_seconds": 10, "output_bytes": 1048576},
+            [{"name": method, "health": state["health"]} for method, state in account.get("methods", {}).items()])
         checkpoint = read.get("checkpoint", {})
         add("thread_state", "Thread lifecycle / Skills", ["codex", "workflow", "skills"], "confirmed_lifecycle_and_skill_checkpoints",
             [checkpoint["location"]] if checkpoint.get("location") else [], "disabled" if not active else checkpoint.get("write_health") or checkpoint.get("load_health"),
@@ -593,7 +609,8 @@ class Dashboard:
 
 def handler(dashboard, port):
     hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
-    assets = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"), "/style.css": ("style.css", "text/css; charset=utf-8"), "/locales.json": ("locales.json", "application/json; charset=utf-8")}
+    assets = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"), "/style.css": ("style.css", "text/css; charset=utf-8"), "/locales.json": ("locales.json", "application/json; charset=utf-8"), "/workbench-ui.js": ("workbench-ui.js", "text/javascript; charset=utf-8"), "/workbench-ui.css": ("workbench-ui.css", "text/css; charset=utf-8")}
+    assets["/favicon.svg"] = ("favicon.svg", "image/svg+xml")
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -804,10 +821,11 @@ def handler(dashboard, port):
                 content, script_hash, style_hash = (root/file).read_bytes(), None, None
                 if file == "index.html":
                     # Keep startup assets in one response, with exact CSP hashes.
-                    script = (root/"app.js").read_text(encoding="utf-8").encode("utf-8").replace(b"</", b"<\\/")
-                    style = (root/"style.css").read_text(encoding="utf-8").encode("utf-8")
+                    script = ((root/"workbench-ui.js").read_text(encoding="utf-8")+";\n"+(root/"app.js").read_text(encoding="utf-8")).encode("utf-8").replace(b"</", b"<\\/")
+                    style = ((root/"workbench-ui.css").read_text(encoding="utf-8")+"\n"+(root/"style.css").read_text(encoding="utf-8")).encode("utf-8")
                     content = content.replace(b"</body>", b"<script>"+script+b"</script>\n</body>")
                     content = content.replace(b'<link rel="stylesheet" href="/style.css">', b"<style>"+style+b"</style>")
+                    content = content.replace(b'<link rel="stylesheet" href="/workbench-ui.css">', b"")
                     script_hash = base64.b64encode(hashlib.sha256(script).digest()).decode("ascii")
                     style_hash = base64.b64encode(hashlib.sha256(style).digest()).decode("ascii")
                 self.reply(200, content, mime, script_hash=script_hash, style_hash=style_hash)

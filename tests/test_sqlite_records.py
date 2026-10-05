@@ -5,6 +5,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+import warnings
 from unittest.mock import MagicMock
 
 from local_activity_monitor.sqlite_records import diagnostic_content, sql_content, sqlite_operations, sql_operations, sql_diagnostic
@@ -13,6 +14,13 @@ from local_activity_monitor.server import Dashboard, handler
 
 
 class SQLiteRecordTests(unittest.TestCase):
+    def test_recorded_escape_warning_does_not_escape_metadata_parser(self):
+        code = 'pattern = "' + chr(92) + '["\nimport sqlite3\nc=sqlite3.connect(":memory:")\nc.execute("SELECT 1")'
+        with warnings.catch_warnings(record=True) as emitted:
+            warnings.simplefilter("always")
+            rows = sqlite_operations([("exec_command", {"cmd": code}, False)], True)
+        self.assertEqual(emitted, [])
+        self.assertEqual(rows[-1]["sql"], "SELECT 1")
     def test_selected_statements_keep_literals_comments_and_multiline_sql(self):
         sql = "-- statement\nSELECT 'semi;colon', 'comma,value';\nUPDATE items SET value='it''s valid'"
         rows = sqlite_operations([("mcp__sqlite__query", {"sql": sql}, False)], include_sql=True)

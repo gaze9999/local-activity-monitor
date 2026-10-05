@@ -38,7 +38,8 @@
 - sourceWindows.global 與 tabs 值接受 1h / 24h / 7d / all. tabs 最多 64 個項目, key 為主頁或帶子頁的識別碼, 未設定者沿用全域範圍
 - charts 最多 256 項, tables 最多 500 項. 每張表 columns / hidden 最多 100 個欄名, heatmap / heatmapCustom / open 為 boolean. display.heatmap 提供全域預設, heatmapCustom 記錄個別覆寫, 全域 switch 立即套用到沿用設定的表格. 套用全部經確認後清除個別覆寫, open 省略時展開
 - 圖表最近長度 1 - 365, 單位分鐘 / 小時 / 天, interval 1 / 5 / 15 分鐘或 1 / 6 / 24 小時. top 最多 200, maximum 0 - 1000000000, 自訂起點需早於終點
-- shape 支援 bar / line / column / stacked / pie / donut. 卡片庫列出各圖表可用的形式, 趨勢可切換折線與長條圖, 固定形式的總覽卡片保留其預設
+- observations.codex_account 為 boolean, 預設 false, 控制選配官方帳戶唯讀查詢, usage 停用時一併停止查詢
+- shape 支援 bar / line / column / stacked / pie / donut / area. 卡片庫列出各圖表可用的形式, 趨勢可切換折線與長條圖, 固定形式的總覽卡片保留其預設
 - tool_descriptions / mcp_descriptions / mcp_tags 各最多 64 項, 說明每項 400 字元. 標籤每來源最多 4 個, 各 40 字元, 空陣列還原自動標籤. copy 最多 500 項, 每項 400 字元. MCP 分類與開關各最多 64 項
 - 主 Tab order 最多 50 項, 子頁 / 卡片順序 map 最多 100 個區域, 每區最多 100 個 ID. 無效或不存在的 ID 忽略
 

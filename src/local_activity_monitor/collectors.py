@@ -15,10 +15,11 @@ import time
 
 from .codex_metadata import execution_metadata, read_metadata
 from .codex_schedules import read_schedules
+from .codex_plugins import read_plugins
 from .payload_detail import bounded_payload, complete_payload
 from .error_records import identifier, tool_error
 from .mcp_records import mcp_operations, response_metadata, decoded_output
-from .operation_records import file_operations, git_commands, shell_parts, invocations, operations, qualified_tool, redact, workflow_operations
+from .operation_records import file_operations, git_commands, shell_parts, invocations, invocation_expressions, operations, qualified_tool, redact, workflow_operations
 from .sqlite_records import sql_content, sqlite_operations
 from .usage_records import allowance
 
@@ -128,6 +129,7 @@ class CodexCollector:
     GIT_EVENT_LIMIT = 500
     CHECK_EVENT_LIMIT = 500
     FILE_EVENT_LIMIT = 1000
+    SUBAGENT_TAIL_LIMIT = 65536
 
     def __init__(self, root, max_files=20, tail_bytes=1024*1024):
         self.root, self.max_files, self.tail_bytes = root, max_files, tail_bytes
@@ -143,6 +145,9 @@ class CodexCollector:
         self.trimmed_calls = 0
         self.read_cursor = 0
         self.thread_state = ThreadState((root.parent if root.name == "sessions" else root)/"monitoring/thread-state.json")
+        self.session_paths, self.related_lifecycle = {}, {}
+        self.related_budget = 0
+        self.detail_targets, self.detail_indexes = {}, {}
 
     def scan(self):
         if time.monotonic() < self.next_scan:
@@ -159,6 +164,11 @@ class CodexCollector:
                 except OSError:
                     continue
             ordered = sorted(paths, reverse=True)
+            self.session_paths = {}
+            for _, path in ordered[:self.FILE_LIMIT]:
+                identities = UUID_IN_NAME.findall(path.name)
+                if identities:
+                    self.session_paths.setdefault(identities[-1], path)
             active = [path for _, path in ordered[:self.FILE_LIMIT if self.track_all else self.max_files]]
             self.files = {path: self.files.get(path, self.new_file(path)) for path in active}
             self.health = "ok"
@@ -294,7 +304,7 @@ class CodexCollector:
                         state["bytes"] += len(head)
                         budget -= len(head)
                         if head.endswith(b"\n"):
-                            self.parse(state, head)
+                            self.parse(state, head, 0)
                         state["offset"] = max(len(head), size-self.tail_bytes)
                         state["partial_history"] = state["offset"] > len(head)
                         cached = self.thread_state.entries.get(path.name)
@@ -314,18 +324,21 @@ class CodexCollector:
                     state["bytes"] += len(raw)
                     budget -= len(raw)
                     self.read_bytes += len(raw)
+                line_offset = state["offset"]-len(raw)-len(state["buffer"])
                 data = state["buffer"] + raw
                 lines = data.split(b"\n")
                 state["buffer"] = lines.pop()
                 if state["discard"] and lines:
                     skipped = lines.pop(0)
+                    line_offset += len(skipped)+1
                     if state["history_cursor"] is not None:
                         state["history_cursor"] += len(skipped)+1
                     if state.get("error_cursor") is not None:
                         state["error_cursor"] += len(skipped)+1
                     state["discard"] = False
                 for line in lines:
-                    self.parse(state, line)
+                    self.parse(state, line, line_offset)
+                    line_offset += len(line)+1
                 if len(state["buffer"]) > 1024*1024:
                     state["buffer"] = b""
                     state["discard"] = True
@@ -428,14 +441,156 @@ class CodexCollector:
 
         if self.root.is_dir():
             self.thread_state.update(self.files.values())
+        self.related_budget = max(0, budget)
+        self.backfill_detail_index()
 
-    def parse(self, state, raw):
+    def select_detail_targets(self, events):
+        """Index only retained observed calls, never persist source content or offsets."""
+        targets = {}
+        for event in events[:2500]:
+            identity, call = event.get("thread_id"), event.get("call_id")
+            if isinstance(identity, str) and UUID.fullmatch(identity) and isinstance(call, str) and NAME.fullmatch(call):
+                targets.setdefault(identity, set()).add(call)
+        self.detail_targets = targets
+        self.detail_indexes = {identity: index for identity, index in self.detail_indexes.items() if identity in targets}
+
+    def backfill_detail_index(self):
+        for identity, targets in self.detail_targets.items():
+            path = self.session_paths.get(identity)
+            if not path or path.is_symlink():
+                continue
+            try:
+                stat = path.stat()
+                index = self.detail_indexes.setdefault(identity, {"cursor": stat.st_size, "size": stat.st_size, "modified": stat.st_mtime_ns, "positions": {}, "targets": set()})
+                if stat.st_size < index["size"] or stat.st_size == index["size"] and stat.st_mtime_ns != index["modified"]:
+                    index.update(cursor=stat.st_size, positions={})
+                if targets-index["targets"]:
+                    index["cursor"] = stat.st_size
+                index["size"] = stat.st_size
+                index["modified"] = stat.st_mtime_ns
+                index["targets"] = set(targets)
+                index["positions"] = {call: positions for call, positions in index["positions"].items() if call in targets}
+                for state in self.files.values():
+                    if state["thread_id"] == identity:
+                        for call in targets & state["calls"].keys():
+                            positions = {key: state["calls"][call][key] for key in ("request_offset", "response_offset") if key in state["calls"][call]}
+                            index["positions"].setdefault(call, {}).update(positions)
+                if all("request_offset" in index["positions"].get(call, {}) and "response_offset" in index["positions"].get(call, {}) for call in targets):
+                    continue
+                end = index["cursor"]
+                if end <= 0 or self.related_budget <= 0:
+                    continue
+                start = max(0, end-min(self.related_budget, self.READ_LIMIT))
+                with path.open("rb") as stream:
+                    stream.seek(start)
+                    body = stream.read(end-start)
+                self.related_budget -= len(body)
+                self.read_bytes += len(body)
+                lines = body.split(b"\n")
+                first = lines.pop(0) if start else b""
+                line_offset = start+len(first)+1 if start else 0
+                index["cursor"] = line_offset if line_offset < end else start
+                needles = [call.encode("utf-8") for call in targets]
+                for raw in lines:
+                    if len(raw) <= 1024*1024 and any(needle in raw for needle in needles):
+                        try:
+                            record = json.loads(raw)
+                            payload = record.get("payload") if isinstance(record, dict) else None
+                            call = payload.get("call_id") or payload.get("id") if isinstance(payload, dict) else None
+                            if record.get("type") == "response_item" and call in targets:
+                                kind = payload.get("type")
+                                if kind in ("function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"):
+                                    key = "request_offset" if kind in ("function_call", "custom_tool_call") else "response_offset"
+                                    index["positions"].setdefault(call, {}).setdefault(key, line_offset)
+                        except (ValueError, AttributeError, RecursionError):
+                            pass
+                    line_offset += len(raw)+1
+            except OSError:
+                continue
+
+    def detail_position(self, identity, call, observed=None):
+        state_call = observed or {}
+        indexed = self.detail_indexes.get(identity, {}).get("positions", {}).get(call, {})
+        return indexed | {key: state_call[key] for key in ("request_offset", "response_offset") if key in state_call}
+
+    def detail_status(self, identity, call):
+        path = self.session_paths.get(identity)
+        if path is None or not path.is_file() or path.is_symlink():
+            return "unavailable"
+        index = self.detail_indexes.get(identity)
+        return "pending" if identity in self.detail_targets and (index is None or index["cursor"] > 0) else "unavailable"
+
+    def subagent_lifecycle(self, metadata, source_info):
+        """Select lifecycle events from related session tails, cached by file signature."""
+        selected = {identity for identity, entry in metadata.items() if entry.get("execution", {}).get("parent_thread_id")}
+        self.related_lifecycle = {identity: value for identity, value in self.related_lifecycle.items() if identity in selected}
+        report = {"name": "subagent_lifecycle", "location": str(self.root), "health": "ok", "fields": ["thread_id", "task_started", "task_complete", "timestamp"], "file_limit": self.FILE_LIMIT, "tail_bytes": self.SUBAGENT_TAIL_LIMIT, "rows_read": 0, "bytes_read": 0, "missing_files": 0, "pending_files": 0}
+        loaded = {state["thread_id"] for state in self.files.values()}
+        for identity in sorted(selected):
+            if identity in loaded:
+                continue
+            path = self.session_paths.get(identity)
+            if path is None:
+                report["missing_files"] += 1
+                continue
+            try:
+                if path.is_symlink():
+                    report["health"] = "partly_unavailable"
+                    continue
+                stat = path.stat()
+                signature = (stat.st_size, stat.st_mtime_ns)
+                cached = self.related_lifecycle.get(identity)
+                if cached and cached["signature"] == signature:
+                    metadata[identity].update(cached["metadata"])
+                    continue
+                length = min(stat.st_size, self.SUBAGENT_TAIL_LIMIT)
+                if self.related_budget < length:
+                    report["pending_files"] += 1
+                    continue
+                with path.open("rb") as stream:
+                    offset = max(0, stat.st_size-length)
+                    stream.seek(offset)
+                    body = stream.read(length)
+                self.related_budget -= len(body)
+                self.read_bytes += len(body)
+                report["bytes_read"] += len(body)
+                if offset:
+                    body = body.partition(b"\n")[2]
+                status = {}
+                for line in body.splitlines():
+                    if b'"task_started"' not in line and b'"task_complete"' not in line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                        payload = record.get("payload") if isinstance(record, dict) else None
+                        if record.get("type") != "event_msg" or not isinstance(payload, dict) or payload.get("type") not in ("task_started", "task_complete"):
+                            continue
+                        when = timestamp(record.get("timestamp"))
+                        if when and when >= status.get("status_updated_at", ""):
+                            status = {"status": "running" if payload["type"] == "task_started" else "completed", "status_updated_at": when, "status_source": "session_lifecycle"}
+                            report["rows_read"] += 1
+                    except (ValueError, AttributeError, RecursionError):
+                        continue
+                self.related_lifecycle[identity] = {"signature": signature, "metadata": status}
+                metadata[identity].update(status)
+            except OSError:
+                report["health"] = "partly_unavailable"
+        source_info[str(self.root)+"#subagent_lifecycle"] = report
+
+    def parse(self, state, raw, offset=None):
         if not raw or len(raw) > 1024*1024:
             return
         try:
             record = json.loads(raw)
             if isinstance(record, dict):
                 self.consume(state, record)
+                payload = record.get("payload")
+                if offset is not None and record.get("type") == "response_item" and isinstance(payload, dict):
+                    identity = payload.get("call_id") or payload.get("id")
+                    call = state["calls"].get(identity)
+                    kind = payload.get("type")
+                    if call and kind in ("function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"):
+                        call["request_offset" if kind in ("function_call", "custom_tool_call") else "response_offset"] = offset
         except (ValueError, RecursionError):
             self.malformed += 1
 
@@ -620,32 +775,56 @@ class CodexCollector:
         return result
 
     def sql_detail(self, event, mask=True, full=False):
-        for path, state in self.files.items():
-            if state["thread_id"] != event.get("thread_id") or event.get("call_id") not in state["calls"]:
-                continue
+        for path, state in self.detail_states(event.get("thread_id")):
             try:
-                with path.open("rb") as stream:
-                    stream.seek(0, 2)
-                    offset = max(0, stream.tell()-self.tail_bytes)
-                    stream.seek(offset)
-                    tail = stream.read(self.tail_bytes)
-                    if offset:
-                        tail = tail.partition(b"\n")[2]
-                    for raw in tail.splitlines():
-                        try:
-                            record = json.loads(raw)
-                            payload = record.get("payload") if isinstance(record, dict) else None
-                            if not isinstance(payload, dict) or record.get("type") != "response_item" or payload.get("call_id") != event.get("call_id") or payload.get("type") not in ("function_call", "custom_tool_call"):
-                                continue
-                            calls = sqlite_operations(invocations(payload), include_sql=True)
-                            index = event.get("index", -1)
-                            if 0 <= index < len(calls) and calls[index]["statement"] == event["statement"]:
-                                return sql_content(calls[index].get("sql"), mask, full)
-                        except (ValueError, AttributeError, RecursionError):
+                if path.is_symlink():
+                    continue
+                positions = self.detail_position(event.get("thread_id"), event.get("call_id"), state["calls"].get(event.get("call_id")))
+                for raw in self.detail_lines(path, positions):
+                    try:
+                        record = json.loads(raw)
+                        payload = record.get("payload") if isinstance(record, dict) else None
+                        if not isinstance(payload, dict) or record.get("type") != "response_item" or payload.get("call_id") != event.get("call_id") or payload.get("type") not in ("function_call", "custom_tool_call"):
                             continue
+                        calls = sqlite_operations(invocations(payload), include_sql=True)
+                        index = event.get("index", -1)
+                        if 0 <= index < len(calls) and calls[index]["statement"] == event["statement"]:
+                            result = sql_content(calls[index].get("sql"), mask, full)
+                            return result | {"content_status": "available" if result["sql"] is not None else "unavailable"}
+                    except (ValueError, AttributeError, RecursionError):
+                        continue
             except OSError:
                 continue
-        return sql_content(None)
+        return sql_content(None) | {"content_status": self.detail_status(event.get("thread_id"), event.get("call_id"))}
+
+    def detail_states(self, identity):
+        loaded = [(path, state) for path, state in self.files.items() if state["thread_id"] == identity]
+        if loaded:
+            return loaded
+        path = self.session_paths.get(identity)
+        return [(path, {"calls": {}})] if path else []
+
+    def detail_lines(self, path, call):
+        """Read observed record positions and a bounded legacy tail, never scan a source."""
+        with path.open("rb") as stream:
+            seen, budget = set(), self.READ_LIMIT
+            for field in ("request_offset", "response_offset"):
+                offset = call.get(field)
+                if type(offset) is not int or offset < 0 or offset in seen or budget <= 0:
+                    continue
+                seen.add(offset)
+                stream.seek(offset)
+                raw = stream.readline(min(1024*1024+1, budget))
+                budget -= len(raw)
+                if raw.endswith(b"\n") and len(raw) <= 1024*1024:
+                    yield raw
+            stream.seek(0, 2)
+            offset = max(0, stream.tell()-min(self.tail_bytes, budget))
+            stream.seek(offset)
+            if offset:
+                stream.readline()
+            for raw in stream.read(min(self.tail_bytes, budget)).splitlines():
+                yield raw
 
     def jev_detail(self, thread_id, call_id, index, full=False):
         request, output, nested, operation, isolated = None, None, False, None, True
@@ -726,25 +905,18 @@ class CodexCollector:
                 return None
         return None
 
-    def mcp_detail(self, thread_id, call_id, index, full=False):
-        for path, state in self.files.items():
+    def mcp_detail(self, thread_id, call_id, index, full=False, observed_event=None):
+        for path, state in self.detail_states(thread_id):
             call = state["calls"].get(call_id)
             events = call.get("mcp", []) if call else []
-            if state["thread_id"] != thread_id or not 0 <= index < len(events) or path.is_symlink():
+            if path.is_symlink() or not 0 <= index < len(events) and observed_event is None:
                 continue
-            event = events[index]
+            event = events[index] if 0 <= index < len(events) else observed_event
             if self.mcp_sources.get(event["server"]) is False:
                 return None
-            request, output, observed = None, None, False
+            request, output, observed, request_source = None, None, False, None
             try:
-                with path.open("rb") as stream:
-                    stream.seek(0, 2)
-                    offset = max(0, stream.tell()-min(self.tail_bytes, self.READ_LIMIT))
-                    stream.seek(offset)
-                    tail = stream.read(min(self.tail_bytes, self.READ_LIMIT))
-                if offset:
-                    tail = tail.partition(b"\n")[2]
-                for raw in tail.splitlines():
+                for raw in self.detail_lines(path, self.detail_position(thread_id, call_id, call)):
                     try:
                         record = json.loads(raw)
                         payload = record.get("payload") if isinstance(record, dict) else None
@@ -757,6 +929,10 @@ class CodexCollector:
                                 continue
                             eligible = [(tool, args) for tool, args, _ in calls if mcp_operations([(tool, args, False)])]
                             request, observed = eligible[index][1], True
+                            if request is None and event["nested"]:
+                                expressions = [(tool, expression) for tool, expression in invocation_expressions(payload) if mcp_operations([(tool, None, False)])]
+                                if index < len(expressions) and expressions[index][0] == eligible[index][0]:
+                                    request, request_source = expressions[index][1], "recorded_expression"
                         elif payload.get("type") in ("function_call_output", "custom_tool_call_output"):
                             output = payload.get("output")
                     except (ValueError, TypeError, AttributeError, RecursionError):
@@ -765,6 +941,8 @@ class CodexCollector:
                 sent, returned = present(request), present(output)
                 return {"request": sent["value"] if observed else None, "response": returned["value"] if observed else None,
                         "response_scope": "containing_tool_call" if event["nested"] else "mcp_tool_call",
+                        "request_source": request_source,
+                        "content_status": "available" if observed else self.detail_status(thread_id, call_id),
                         "truncated": sent["truncated"] or returned["truncated"]}
             except OSError:
                 continue
@@ -808,13 +986,16 @@ class CodexCollector:
         dots = {}
         metadata_sources = {}
         if metadata_cache is not None and "metadata" in metadata_cache:
-            metadata, dots, metadata_sources, schedules = metadata_cache["metadata"]
+            metadata, dots, metadata_sources, schedules, plugins = metadata_cache["metadata"]
         else:
             self.project_details = {}
             metadata = read_metadata(self.root.parent, threads, dots, metadata_sources, self.project_details) if self.features["metadata"] else {}
+            if self.features["metadata"]:
+                self.subagent_lifecycle(metadata, metadata_sources)
             schedules = read_schedules(self.root.parent, metadata_sources) if self.features["metadata"] else {"items": [], "health": "disabled"}
+            plugins = read_plugins(self.root.parent, metadata_sources) if self.features["metadata"] else {"items": [], "health": "disabled"}
             if metadata_cache is not None:
-                metadata_cache["metadata"] = metadata, dots, metadata_sources, schedules
+                metadata_cache["metadata"] = metadata, dots, metadata_sources, schedules, plugins
         dots = dict(dots)
         dot_events = dots.pop("_retained_events", dots.get("events"))
         if dot_events is not None:
@@ -853,8 +1034,8 @@ class CodexCollector:
             cached = thread.get('cached_status', {})
             if not thread.get('task_time') and not entry.get('status') and cached:
                 row['status'] = cached['status']
-            row['status_updated_at'] = thread.get('task_time') or (entry.get('updated_at') if entry.get('status') else cached.get('task_time'))
-            row['status_source'] = ('cached_lifecycle' if thread.get('status_cached') else 'session_lifecycle') if thread.get('task_time') else 'catalog_status' if entry.get('status') else 'cached_lifecycle' if cached else None
+            row['status_updated_at'] = thread.get('task_time') or entry.get('status_updated_at') or (entry.get('updated_at') if entry.get('status') else cached.get('task_time'))
+            row['status_source'] = ('cached_lifecycle' if thread.get('status_cached') else 'session_lifecycle') if thread.get('task_time') else entry.get('status_source') or ('catalog_status' if entry.get('status') else 'cached_lifecycle' if cached else None)
             row["status_backfill_pending"] = thread["thread_id"] in pending_status
             row["context_updated_at"] = thread.get("context_time") or None
             environment = entry.get("environment", "unknown")
@@ -964,12 +1145,14 @@ class CodexCollector:
                 detail = getattr(self, "project_details", {}).get(project_id, {})
                 project = projects.setdefault(project_id, {"id": project_id, "name": row.get("project_name"), "icon": detail.get("icon"), "kind": detail.get("kind"), "thread_count": 0})
                 project["thread_count"] += 1
-        return {"projects": list(projects.values()), "schedules": schedules, "activity_scope": {"window": window, "timestamp": "call_started_at", "unknown_timestamp": "all_only", "latest_state": ["tokens", "model", "status", "usage", "schedules"]}, "tool_statistics": statistics, "metadata_sources": list(metadata_sources.values()), "read_state": {
+        return {"projects": list(projects.values()), "schedules": schedules, "plugins": plugins, "activity_scope": {"window": window, "timestamp": "call_started_at", "unknown_timestamp": "all_only", "latest_state": ["tokens", "model", "status", "usage", "schedules"]}, "tool_statistics": statistics, "metadata_sources": list(metadata_sources.values()), "read_state": {
             "file_limit": self.FILE_LIMIT if self.track_all else self.max_files, "file_count": len(self.files),
             "read_limit": self.READ_LIMIT, "tail_bytes": self.tail_bytes, "scan_seconds": self.SCAN_INTERVAL,
             "call_limit": self.CALL_LIMIT, "buffer_limit": self.BUFFER_LIMIT,
             "sql_event_limit": self.SQL_EVENT_LIMIT, "git_event_limit": self.GIT_EVENT_LIMIT, "check_event_limit": self.CHECK_EVENT_LIMIT, "file_event_limit": self.FILE_EVENT_LIMIT, "skill_event_limit": self.thread_state.SKILL_LIMIT,
             "history_pending_files": sum(bool(state.get("history_cursor")) for state in self.files.values()),
+            "detail_index_pending_bytes": sum(index["cursor"] for index in self.detail_indexes.values() if not all("request_offset" in index["positions"].get(call, {}) and "response_offset" in index["positions"].get(call, {}) for call in index["targets"])),
+            "detail_index_calls": sum(len(index["positions"]) for index in self.detail_indexes.values()),
             "locations": [str(path) for path in list(self.files)[:self.SOURCE_LOCATION_LIMIT]], "listed_file_limit": self.SOURCE_LOCATION_LIMIT,
             "enabled_features": [key for key, enabled in self.features.items() if enabled],
             "checkpoint": {"location": str(self.thread_state.path), "load_health": self.thread_state.load_health, "write_health": self.thread_state.write_health, "retained": len(self.thread_state.entries), "skills": len(self.thread_state.skills), "entry_limit": self.thread_state.LIMIT, "skill_limit": self.thread_state.SKILL_LIMIT, "byte_limit": self.thread_state.BYTE_LIMIT},

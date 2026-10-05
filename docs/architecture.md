@@ -19,6 +19,8 @@ Python 3.10+ 標準函式庫, 原生 HTML / JavaScript / CSS, setuptools package
 | `thread_state.py` | 已確認 lifecycle 與 Skills 讀取 checkpoint, 原子保存與去重 |
 | `sqlite_records.py` | literal SQLite 操作辨識, 不執行 SQL 或來源程式碼 |
 | `usage_records.py` | 額度視窗與 credits 白名單投影 |
+| `codex_account.py` | 選配的官方帳戶唯讀查詢, 有期限快取與獨立失敗處理 |
+| `codex_plugins.py` | 選取 Plugins 設定與快取版本 metadata, 不執行外掛 |
 | `web/locales.json` | English / 日本語介面與 tooltip |
 | `web/` | tab, 表格 / popup, lazy loading, 圖表, 外觀, 文件 / 文案編輯與通用表格排序 / 分頁 |
 
@@ -28,11 +30,19 @@ Python 3.10+ 標準函式庫, 原生 HTML / JavaScript / CSS, setuptools package
 
 Session 中出現 `mcp__server__tool` 時自動建立來源. 已啟用的 Codex App / Review / Security / CUA plugins 也會提供對應來源. 來源來自設定或既有紀錄, 不執行背景 API 探測. 缺少來源的電腦不會顯示其項目, 原有瀏覽器偏好也不會憑空建立來源
 
+Plugins 清單另選取設定與快取 manifest 的名稱, 供應商, 版本, 啟用狀態與技能 / MCP 數量, 快取存在不代表已載入. 子代理程式透過唯讀 thread_spawn_edges 補齊關聯 metadata, 最多 500 個相關對話, 每份狀態回查最多 64 KiB 並共用每輪 8 MiB 預算
+
+官方帳戶來源預設關閉, 啟用時建立自己的 Codex app-server stdio 子程序, 只發送 initialize / initialized 與三個 account 唯讀方法, 結束後釋放程序及串流. 使用既有登入, 不讀取 auth.json, 不將 email, 帳戶 ID 或 credentials 投影至頁面. 成功與失敗均快取至少 60 秒, 整次逾時 10 秒, stdout 上限 1 MiB. rateLimitsByLimitId 優先於 legacy rateLimits, primary / secondary 可為 null, 視窗名稱依 windowDurationMins, 不假設 primary 為短期額度. account/usage/read 的帳戶統計與本機對話累計分開
+
+雲端 Work, My dots 與排程清單尚無已串接來源. 既有桌面工具能列出部分雲端對話不等於 LAM 擁有可攜式 API, 也未加入 HTTPS 攔截, 帳戶憑證擷取或未公開 endpoint
+
 已知來源使用分類預設, 新來源使用通用分類. 來源分類與工具說明可以在頁面修改. 呼叫若將 namespace 與 name 分開儲存, 會合併完整識別名稱. 不同 MCP 的同名工具分開統計. 新工具沒有特定 adapter 時仍顯示名稱, 操作, 時間, 資源 ID 及可辨識的結果
 
 ## 輸入 / 回傳資料
 
 Snapshot 不包含 prompt, 完整命令, 任意 MCP input / output 或文件本文. MCP request 只保留白名單 metadata, 例如檔案副檔名, OCR 模式, 寫入開關與資源 ID. response 只保留狀態, 數值 / boolean 與明確的數量摘要
+
+已保存操作的 MCP / SQL 明細可按需透過來源 offset 讀取, 舊操作索引依每輪讀取預算向前回補, 索引不保存本文. 巢狀呼叫含動態參數時保留遮蔽後的記錄程式碼, 不執行 expression. 多個工具共用的回傳標示為外層工具回覆, 不分配成個別工具結果. 解析記錄中的 Python 不將其字串跳脫警告輸出為 LAM 程式警告
 
 對話的 Model 與 Reasoning 等級依最新 turn context 或 thread_settings_applied 時間合併, 多份相同 thread 的 session 不以工具紀錄時間覆蓋 Model 設定. `reasoning_effort` 缺少時可由本機 catalog 補齊. `execution` 只保存 Provider, CLI 版本, context window, 審核 / Sandbox / 協作模式, Agent 資訊, 上層 Thread ID 與 Git 分支 / commit, 服務等級, Reasoning 摘要與審核來源. Sandbox JSON 僅取 mode, 不回傳 writable roots. 新的 reasoning 名稱依有效字串保留, 前端動態建立篩選選項
 
