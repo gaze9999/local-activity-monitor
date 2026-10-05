@@ -7,10 +7,12 @@ import shlex
 from .operation_records import redact, shell_parts
 
 
-def sql_content(sql):
+def sql_content(sql, mask=True, full=False):
     """Bound displayed SQL and mask recognizable credential literals."""
     if not isinstance(sql, str):
         return {"sql": None, "truncated": False}
+    if not mask:
+        return {"sql": sql if full else sql[:32768], "truncated": not full and len(sql)>32768}
     # INSERT values need their column names to identify credential assignments
     secret = r"(?:api[_-]?key|password|secret|credential|authorization|cookie|access[_-]?token|token)"
     pattern = r"(?is)(\bINSERT\s+(?:OR\s+\w+\s+)?INTO\s+[\w.\"`\[\]]+\s*\(([^()]*)\)\s*VALUES\s*)((?:\((?:'(?:''|[^'])*'|[^'()])*\)\s*,?\s*)+)"
@@ -23,22 +25,22 @@ def sql_content(sql):
                 return row[0]
             return "("+",".join("'[已隱藏]'" if index in indices else value for index, value in enumerate(parts))+")"
         return match[1]+re.sub(r"\(((?:'(?:''|[^'])*'|[^'()])*)\)", values, match[3])
-    bounded = sql[:65536]
-    clean = redact(re.sub(pattern, insert, bounded))
-    return {"sql": clean, "truncated": len(sql)>65536 or len(clean)==32768 and len(bounded)>32768}
+    bounded = sql if full else sql[:65536]
+    clean = redact(re.sub(pattern, insert, bounded), limit=None if full else 32768)
+    return {"sql": clean, "truncated": not full and (len(sql)>65536 or len(clean)==32768 and len(bounded)>32768)}
 
 
-def diagnostic_content(module, body):
+def diagnostic_content(module, body, mask=True, full=False):
     if sql_diagnostic(module, body) is None:
         return sql_content(None)
     for key in ("sql", "statement", "query", "summary"):
-        match = re.search(r'\b'+key+r'="((?:\\.|[^"\\])*)"', body[:65536])
+        match = re.search(r'\b'+key+r'="((?:\\.|[^"\\])*)"', body if full else body[:65536])
         if match:
             try:
                 sql = json.loads('"'+match[1]+'"')
             except ValueError:
                 sql = match[1]
-            return sql_content(sql) if sql_operations(sql) else sql_content(None)
+            return sql_content(sql, mask, full) if sql_operations(sql) else sql_content(None)
     return sql_content(None)
 
 
@@ -78,7 +80,7 @@ def database_path(value):
 
 
 def sql_operations(sql, include_sql=False):
-    if not isinstance(sql, str) or len(sql) > 65536:
+    if not isinstance(sql, str):
         return []
     # Values, quoted identifiers and comments never participate in classification
     clean = re.sub(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`|\[(?:\]\]|[^\]])*\]|--[^\n]*|/\*[\s\S]*?\*/", lambda match:" "*len(match[0]), sql)

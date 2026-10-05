@@ -55,13 +55,13 @@ class ErrorHistory:
             except (KeyError, ValueError, TypeError, AttributeError):
                 continue
             event = {"timestamp": date.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")}
-            for key in ("source", "category", "severity", "code", "reason", "cause", "error_type", "module", "method", "server", "tool", "call_id", "thread_id", "file", "request_id", "trace_id"):
+            for key in ("source", "category", "severity", "code", "reason", "cause", "error_type", "module", "method", "server", "tool", "call_id", "thread_id", "file", "request_id", "trace_id", "record_hash", "content_id"):
                 item = identifier(value.get(key))
                 if item is not None:
                     event[key] = item
             if not {"source", "category", "severity"} <= event.keys():
                 continue
-            for key in ("exit_code", "http_status", "attempt", "index", "record_id"):
+            for key in ("exit_code", "http_status", "attempt", "index", "record_id", "record_offset"):
                 item = value.get(key)
                 if type(item) is int and -2**31 <= item <= 2**31-1:
                     event[key] = item

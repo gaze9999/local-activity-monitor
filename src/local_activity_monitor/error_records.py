@@ -11,6 +11,7 @@ import sys
 import time
 
 from .mcp_records import decoded_output
+from .operation_records import redact
 from .sqlite_records import diagnostic_content, sql_content, sql_diagnostic
 
 IDENTIFIER = re.compile(r"[a-zA-Z0-9_./:-]{1,160}\Z")
@@ -106,6 +107,11 @@ def classify(source, text):
     return "codex", "codex_diagnostic"
 
 
+def diagnostic_id(event):
+    fields = {key: event.get(key) for key in ('source', 'timestamp', 'module', 'file', 'record_id', 'record_hash')}
+    return hashlib.sha256(repr(fields).encode()).hexdigest()
+
+
 class DiagnosticCollector:
     EVENT_LIMIT = 1000
     READ_LIMIT = 1024*1024
@@ -173,7 +179,8 @@ class DiagnosticCollector:
         heading = re.split(r"\s[a-zA-Z_][a-zA-Z0-9_]*=", body, maxsplit=1)[0]
         category, code = classify(source, heading[:512])
         event = {"timestamp": when, "category": category, "code": fields.get("errorCode") or code, "reason": code, "error_type": fields.get("errorName"), "method": fields.get("method"), "source": "codex_desktop", "module": source, "thread_id": thread, "severity": "warning" if level in ("warn", "warning") else level}
-        event.update(diagnostic_details(body), file=file)
+        event.update(diagnostic_details(body), file=file, record_offset=offset, record_hash=hashlib.sha256(line.encode()).hexdigest())
+        event["content_id"] = diagnostic_id(event)
         stats["parsed_lines"] += 1
         sql = sql_diagnostic(source, body) if self.capture_sql and not historical else None
         if sql:
@@ -265,11 +272,16 @@ class DiagnosticCollector:
                 lines = raw.split(b"\n")
                 first = lines.pop(0) if begin else b""
                 state["history_cursor"] = min(end-1, begin+len(first)+1) if begin and lines else begin
-                for line in reversed(lines):
+                position = begin+len(first)+1 if begin else 0
+                indexed = []
+                for line in lines:
+                    indexed.append((position, line))
+                    position += len(line)+1
+                for line_offset, line in reversed(indexed):
                     if len(line) > 65536:
                         stats["oversized_lines"] += 1
                         continue
-                    if self.desktop_line(line.decode("utf-8", errors="replace"), path.name, True) == "expired":
+                    if self.desktop_line(line.decode("utf-8", errors="replace"), path.name, True, offset=line_offset) == "expired":
                         state["history_cursor"] = 0
                         break
             except OSError as error:
@@ -277,22 +289,23 @@ class DiagnosticCollector:
                 stats["error_type"] = type(error).__name__
         self.backfill_pending["desktop"] = sum(state.get("history_cursor", 0) for state in self.files.values())
 
-    def sql_detail(self, event):
+    def diagnostic_body(self, event, full=False):
         if event.get("source") == "codex_core" and self.sql_path and self.sql_path.name == event.get("file") and type(event.get("record_id")) is int:
             try:
                 stat = self.sql_path.stat()
                 if (stat.st_dev, stat.st_ino) != self.sql_file_id:
-                    return sql_content(None)
+                    return None
                 with closing(sqlite3.connect(self.sql_path.as_uri()+"?mode=ro", uri=True, timeout=.08)) as db:
                     db.execute("PRAGMA query_only=ON")
-                    row = db.execute("SELECT ts,target,substr(feedback_log_body,1,65536) FROM logs WHERE id=?", (event["record_id"],)).fetchone()
+                    body_column = "feedback_log_body" if full else "substr(feedback_log_body,1,65537)"
+                    row = db.execute("SELECT ts,target,"+body_column+" FROM logs WHERE id=?", (event["record_id"],)).fetchone()
                 if row and row[1] == event.get("module") and datetime.fromtimestamp(row[0], timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z") == event.get("timestamp"):
-                    return diagnostic_content(row[1], row[2])
+                    return row[2] if isinstance(row[2], str) else None
             except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError):
                 pass
-        elif event.get("source") == "codex_desktop" and type(event.get("record_offset")) is int:
+        elif event.get("source") == "codex_desktop" and type(event.get("record_offset")) is int and event["record_offset"] >= 0:
             for path, state in self.files.items():
-                if path.name != event.get("file"):
+                if path.name != event.get("file") or path.is_symlink():
                     continue
                 try:
                     stat = path.stat()
@@ -303,11 +316,19 @@ class DiagnosticCollector:
                         line = stream.readline(65537).rstrip(b"\n").decode("utf-8", errors="replace")
                     if hashlib.sha256(line.encode()).hexdigest() == event.get("record_hash"):
                         match = re.match(r"^\S+ \S+ \[([^]]+)\] (.*)", line)
-                        if match:
-                            return diagnostic_content(match[1], match[2])
+                        if match and match[1] == event.get("module"):
+                            return match[2]
                 except OSError:
                     continue
-        return sql_content(None)
+        return None
+
+    def sql_detail(self, event, mask=True, full=False):
+        body = self.diagnostic_body(event, full)
+        return diagnostic_content(event.get("module"), body, mask, full) if body is not None else sql_content(None)
+
+    def error_detail(self, event, full=False):
+        body = self.diagnostic_body(event, full)
+        return {"text": redact(body, limit=None if full else 32768) if body is not None else None, "truncated": not full and isinstance(body, str) and len(body)>32768}
 
     def refresh_core(self):
         stats = self.stats["core"]
@@ -371,6 +392,7 @@ class DiagnosticCollector:
                     category, code = classify(source, body or "")
                     event = {"timestamp": when, "category": category, "code": code, "reason": code, "source": "codex_core", "module": source, "thread_id": thread if isinstance(thread, str) and re.fullmatch(UUID, thread) else None, "severity": "warning" if level in ("warn", "warning") else level, "file": path.name, "record_id": identity}
                     event.update(diagnostic_details(body))
+                    event["content_id"] = diagnostic_id(event)
                     stats["parsed_lines"] += 1
                     sql = sql_diagnostic(source, body) if self.capture_sql and not past else None
                     if sql:

@@ -1,12 +1,15 @@
 """Discover MCP sources and retain bounded operation metadata, never raw payloads."""
 from collections import Counter
 import json
+import ast
 import ipaddress
 import re
 import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from .operation_records import redact
+from .mcp_source_files import source_roots, local_introduction, safe_path
+import hashlib
 try:
     import tomllib
 except ImportError:
@@ -22,49 +25,50 @@ ERRORS = {"error", "failed", "timeout", "cancelled", "canceled", "missing_depend
 
 
 def source_description(value, cache):
-    """Read a declared description or the introduction of a local server README."""
+    """Read declared purpose, package metadata, or a bounded local introduction."""
     text = value.get("description")
     if isinstance(text, str) and text.strip():
         return {"description": redact(text.strip()[:400]), "description_source": "config"}
-    candidates = [value.get("command"), *(value.get("args", [])[:20] if isinstance(value.get("args"), list) else [])]
-    for candidate in candidates:
-        if not isinstance(candidate, str) or len(candidate) > 512 or not Path(candidate).is_absolute():
-            continue
-        script = Path(candidate)
-        if script.suffix.lower() not in (".py", ".js", ".mjs", ".cjs", ".exe") or not script.is_file():
-            continue
-        directory = script.parent
-        roots = [directory, directory.parent] if directory.name.lower() in ("scripts", "src", "bin") else [directory]
-        for root in roots:
+    key = "purpose:"+hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
+    cached = cache.get(key)
+    if cached and time.monotonic()-cached[0]<60:
+        return dict(cached[1])
+    try:
+        result = local_introduction(value)
+        for root in source_roots(value) if not result else []:
             for name in ("README.md", "readme.md"):
                 path = root/name
-                key = str(path)
-                cached = cache.get(key)
-                if cached and time.monotonic()-cached[0] < 60:
-                    if cached[1]:
-                        return dict(cached[1])
-                    continue
-                result = {}
                 try:
-                    if not path.is_symlink() and path.is_file() and path.stat().st_size <= 65536:
-                        body = path.read_text(encoding="utf-8-sig")
-                        body = re.sub(r"```[\s\S]*?```|~~~[\s\S]*?~~~|<!--[\s\S]*?-->", "", body)
-                        for paragraph in re.split(r"\n\s*\n", body):
-                            paragraph = paragraph.strip()
-                            if not paragraph or paragraph.startswith(("#", "!", "[![", "|", "- ", "* ", ">", "<")):
-                                continue
-                            text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", paragraph)
-                            result = {"description": redact(" ".join(text.split())[:400]), "description_source": name}
-                            break
+                    if not safe_path(path):
+                        continue
+                    with path.open("rb") as stream:
+                        body = stream.read(65536).decode("utf-8-sig")
+                    if re.search(r"(?m)^# Node\.js\s*$", body):
+                        continue
+                    body = re.sub(r"^---\n[\s\S]*?\n---\n", "", body)
+                    body = re.sub(r"```[\s\S]*?```|~~~[\s\S]*?~~~|<!--[\s\S]*?-->", "", body)
+                    for paragraph in re.split(r"\n\s*\n", body):
+                        paragraph = paragraph.strip()
+                        if not paragraph or paragraph.startswith(("#", "!", "[![", "|", "- ", "* ", ">", "<")) or " · " in paragraph and len(paragraph)<100:
+                            continue
+                        text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", paragraph)
+                        if text.startswith(("Node.js is an open-source", "For information on using Node.js")):
+                            continue
+                        result = {"description": redact(" ".join(text.split())[:400]), "description_source": name, "description_file": str(path)}
+                        break
                 except (OSError, UnicodeError):
-                    pass
-                cache[key] = (time.monotonic(), result)
+                    continue
                 if result:
-                    return result
-    return {}
+                    break
+            if result:
+                break
+    except OSError:
+        result = {}
+    cache[key] = (time.monotonic(), result)
+    return result
 
 
-def discover_sources(home, details=None, document_cache=None):
+def discover_sources(home, details=None, document_cache=None, configurations=None):
     """Select source names, switches and bounded purpose text; omit launch arguments."""
     sources = {}
     try:
@@ -80,6 +84,8 @@ def discover_sources(home, details=None, document_cache=None):
             servers = config.get("mcp_servers", {})
             if isinstance(servers, dict):
                 sources.update({name: "configured" for name, value in servers.items() if SOURCE.fullmatch(name) and isinstance(value, dict) and value.get("enabled", True) is True})
+                if configurations is not None:
+                    configurations.update({name: value for name, value in list(servers.items())[:64] if name in sources})
                 if details is not None:
                     cache = document_cache if document_cache is not None else {}
                     for name, value in list(servers.items())[:64]:
@@ -95,6 +101,8 @@ def discover_sources(home, details=None, document_cache=None):
         def finish():
             if section and enabled:
                 sources[section] = "configured"
+                if configurations is not None:
+                    configurations[section] = dict(values)
                 if details is not None:
                     details[section] = source_description(values, document_cache if document_cache is not None else {})
 
@@ -120,11 +128,19 @@ def discover_sources(home, details=None, document_cache=None):
                 match = re.fullmatch(r"\s*enabled\s*=\s*(true|false)\s*(?:#.*)?", line)
                 if match:
                     enabled = match[1] == "true"
-                text = re.fullmatch(r'\s*description\s*=\s*("(?:[^"\\]|\\.)*"|\'[^\']*\')\s*(?:#.*)?', line)
+                text = re.fullmatch(r'\s*(description|command|cwd)\s*=\s*("(?:[^"\\]|\\.)*"|\'[^\']*\')\s*(?:#.*)?', line)
                 if text:
                     try:
-                        values["description"] = json.loads(text[1]) if text[1].startswith('"') else text[1][1:-1]
+                        values[text[1]] = json.loads(text[2]) if text[2].startswith('"') else text[2][1:-1]
                     except ValueError:
+                        pass
+                args = re.fullmatch(r'\s*args\s*=\s*(\[.*\])\s*(?:#.*)?', line)
+                if args:
+                    try:
+                        parsed = ast.literal_eval(args[1])
+                        if isinstance(parsed, list) and len(parsed)<=32 and all(isinstance(item, str) for item in parsed):
+                            values['args'] = parsed
+                    except (SyntaxError, ValueError, RecursionError):
                         pass
         finish()
     except (OSError, UnicodeError):

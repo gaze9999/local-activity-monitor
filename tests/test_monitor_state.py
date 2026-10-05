@@ -10,6 +10,18 @@ from local_activity_monitor.server import Dashboard, configure
 
 
 class MonitorStateTests(unittest.TestCase):
+    def test_history_tracks_last_response_sizes_and_preserves_unknown_metrics(self):
+        state=MonitorState()
+        state.snapshot_bytes=1234
+        state.transfer_bytes=345
+        state.refreshed({'read_bytes':0,'activity_cache_bytes':None,'sql_records':0,'web_records':2,'mcp_records':3})
+        sample=state.snapshot()['history'][-1]
+        self.assertEqual(sample['snapshot_bytes'],1234)
+        self.assertEqual(sample['transfer_bytes'],345)
+        self.assertEqual(sample['read_bytes'],0)
+        self.assertIsNone(sample['activity_cache_bytes'])
+        self.assertEqual(sample['sql_records'],0)
+
     def test_runtime_metadata_is_local_and_collected_once(self):
         with patch('local_activity_monitor.monitor_state.platform.release', return_value='test-release') as release, \
              patch('local_activity_monitor.monitor_state.platform.version', return_value='test-version'), \
@@ -30,7 +42,21 @@ class MonitorStateTests(unittest.TestCase):
             cpus.assert_called_once_with()
         self.assertEqual(set(state.runtime), {'python', 'platform', 'architecture', 'pid', 'version',
                                              'system_release', 'system_version', 'python_implementation',
-                                             'process_bits', 'logical_cpus'})
+                                             'process_bits', 'logical_cpus', 'processor', 'gpus'})
+
+    def test_memory_capacity_and_available_memory_use_bounded_refresh(self):
+        values = {'physical_memory_bytes': 16*1024**3, 'available_memory_bytes': 5*1024**3}
+        with patch('local_activity_monitor.monitor_state.memory_info', return_value=values) as memory, \
+             patch('local_activity_monitor.monitor_state.platform.system', return_value='Windows'), \
+             patch('local_activity_monitor.monitor_state.processor_name', return_value='Fixture CPU'):
+            state = MonitorState()
+            self.assertEqual(state.snapshot()['physical_memory_bytes'], values['physical_memory_bytes'])
+            self.assertEqual(state.snapshot()['available_memory_bytes'], values['available_memory_bytes'])
+            self.assertEqual(state.snapshot()['processor'], 'Fixture CPU')
+            memory.assert_called_once_with()
+            state.memory_checked -= 5
+            state.snapshot()
+            self.assertEqual(memory.call_count, 2)
 
     def test_runtime_cpu_count_falls_back_and_preserves_unknown(self):
         for fallback in (6, None):

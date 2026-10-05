@@ -23,11 +23,16 @@ import webbrowser
 
 from .collectors import CodexCollector, JevCollector, WINDOWS, monitor_config, name as tool_name, now
 from .activity_windows import cutoff, contains
-from .project_instructions import instructions
+from .project_instructions import instructions, observed_file_metadata
+from .codex_connection import connection_status
+from .idle_activity import IdleActivity
+from .mcp_source_files import documents as source_documents, read_document, write_document
 from .mcp_records import CATEGORIES, EVENT_LIMIT as MCP_EVENT_LIMIT, TOOL_LIMIT as MCP_TOOL_LIMIT, SOURCE, category, discover_sources, summarize
 from .monitor_state import MonitorState
 from .error_records import DiagnosticCollector, error_summary, FAILURES
 from .error_history import ErrorHistory, error_identity
+from .payload_detail import paged_content
+from .activity_history import ActivityHistory, sql_identity, mcp_identity, merge_event
 
 
 def data_root():
@@ -98,16 +103,19 @@ class Dashboard:
         self.jev = JevCollector(home)
         self.codex = CodexCollector(home/"sessions", max_files) if codex else None
         self.interval = interval
+        self.idle_minutes = 5
+        self.activity = IdleActivity(home)
         source = Path(__file__).parent
         self.code_revision = hashlib.sha256(b"".join(path.read_bytes() for path in sorted(source.glob("*.py")))).hexdigest()[:12]+"-"+uuid.uuid4().hex[:8]
         self.observations = {"usage": True, "codex": codex, "jev": True, "metadata": True, "git": True, "jev_calls": True, "skills": True, "checks": True, "tool_events": True, "mcp": True, "web": True, "files": True, "errors": True, "logs": True, "sqlite": True}
-        self.default_settings = {"interval": 10, "max_files": 20, "track_all": False, "observations": dict(self.observations), "mcp_sources": {}, "mcp_categories": {}, "tool_descriptions": {}, "mcp_descriptions": {}, "mcp_tags": {}}
+        self.default_settings = {"interval": 10, "idle_minutes": 5, "activity_retention_days": ActivityHistory.DEFAULT_DAYS, "max_files": 20, "track_all": False, "observations": dict(self.observations), "mcp_sources": {}, "mcp_categories": {}, "tool_descriptions": {}, "mcp_descriptions": {}, "mcp_tags": {}}
         self.mcp_sources, self.mcp_categories, self.tool_descriptions, self.mcp_descriptions, self.mcp_tags = {}, {}, {}, {}, {}
         self.mcp_document_cache = {}
         self.started_at = now()
         self.monitor = MonitorState(home/"monitoring/local-activity-monitor.jsonl")
         self.diagnostics = DiagnosticCollector(home)
         self.error_history = ErrorHistory(home/"monitoring/error-history.json")
+        self.activity_history = ActivityHistory(home/"monitoring/activity-history.json")
         self.stop = threading.Event()
         self.lock = threading.Lock()
         self.refresh_lock = threading.RLock()
@@ -135,10 +143,28 @@ class Dashboard:
             self.diagnostics.capture_sql = self.observations["sqlite"]
             if self.observations["codex"] and (self.observations["errors"] or self.observations["logs"] or self.observations["sqlite"]):
                 self.diagnostics.refresh()
+            if self.observations["codex"]:
+                sql = codex.get("sqlite", {}).get("_retained_events", codex.get("sqlite", {}).get("events", []))+list(self.diagnostics.sql_events) if self.observations["sqlite"] else []
+                web = [event for event in codex.get("mcp_events", []) if event["server"]=="web"] if self.observations["web"] else []
+                mcp = [event for event in codex.get("mcp_events", []) if event["server"]!="web"] if self.observations["mcp"] else []
+                self.activity_history.update(sql, web, mcp)
+                history = (self.activity_history.snapshot("web") if self.observations["web"] else [])+(self.activity_history.snapshot("mcp") if self.observations["mcp"] else [])
+                for window, projection in codex_windows.items():
+                    retained = {}
+                    for event in [item for item in history if contains(item, cutoff(window))]+projection.get("mcp_events", []):
+                        identity = mcp_identity(event)
+                        retained[identity] = merge_event(retained.get(identity, {}), event)
+                    projection["mcp_events"] = list(retained.values())
             if self.observations["codex"] and self.observations["sqlite"]:
+                history_sql = self.activity_history.snapshot("sql")
                 for window, projection in codex_windows.items():
                     sql = projection.setdefault("sqlite", {"events": [], "total": 0, "operations": {}})
-                    retained = sql.pop("_retained_events", sql["events"])+[event for event in self.diagnostics.sql_events if contains(event, cutoff(window))]
+                    retained = [event for event in history_sql if contains(event, cutoff(window))]+sql.pop("_retained_events", sql["events"])+[event for event in self.diagnostics.sql_events if contains(event, cutoff(window))]
+                    merged = {}
+                    for event in retained:
+                        identity = sql_identity(event)
+                        merged[identity] = merge_event(merged.get(identity, {}), event)
+                    retained = list(merged.values())
                     events = sorted(retained, key=lambda event:event.get("timestamp") or "", reverse=True)[:CodexCollector.SQL_EVENT_LIMIT]
                     identity_fields = ("source", "thread_id", "call_id", "index", "file", "record_id", "record_offset", "record_hash", "timestamp", "statement")
                     events = [event | {"id": hashlib.sha256(json.dumps([event.get(key) for key in identity_fields]).encode()).hexdigest()} for event in events]
@@ -178,6 +204,9 @@ class Dashboard:
                 report["configuration"] = mcp["configuration"]
                 report["recording_status"] = mcp["recording_status"]
                 scoped_mcp[window] = report
+            connection = connection_status(codex.get("threads", []), codex.get("error_events", [])+diagnostic_events, self.observations["codex"])
+            for projection in codex_windows.values():
+                projection["connection"] = connection
             cache = {window: {"version": 1, "revision": revision, "label": "本機觀察統計", "started_at": self.started_at, "updated_at": now(), "settings": settings, "default_settings": self.default_settings, "availability": availability, "mcp": scoped_mcp[window], "jev": self.jev.snapshot(window) if self.observations["jev"] and self.observations["mcp"] and self.mcp_sources.get("jev", True) else {"source": "jev", "health": "paused", "scope": self.jev.SCOPE, "enabled": enabled, "enabled_at": since, "summary": {}, "recent": [], "series": []}, "codex": projection} for window, projection in codex_windows.items()}
             for window, snapshot in cache.items():
                 statuses = dict(mcp["recording_status"])
@@ -210,7 +239,7 @@ class Dashboard:
                     database_bytes = database.stat().st_size
                 except OSError:
                     pass
-            self.monitor.refreshed({"refresh_ms": round((time.perf_counter()-began)*1000, 2), "cpu_ms": round((time.process_time()-cpu)*1000, 2), "read_bytes": (self.codex.read_bytes if self.codex else 0)+self.diagnostics.read_bytes-before_bytes, "retained_calls": sum(len(state["calls"]) for state in self.codex.files.values()) if self.codex else 0, "buffer_bytes": sum(len(state["buffer"]) for state in self.codex.files.values()) if self.codex else 0, "trimmed_calls": self.codex.trimmed_calls if self.codex else 0, "call_limit": CodexCollector.CALL_LIMIT, "file_limit": CodexCollector.FILE_LIMIT, "buffer_limit": CodexCollector.BUFFER_LIMIT, "jev_database_bytes": database_bytes})
+            self.monitor.refreshed({"refresh_ms": round((time.perf_counter()-began)*1000, 2), "cpu_ms": round((time.process_time()-cpu)*1000, 2), "read_bytes": (self.codex.read_bytes if self.codex else 0)+self.diagnostics.read_bytes-before_bytes, "retained_calls": sum(len(state["calls"]) for state in self.codex.files.values()) if self.codex else 0, "buffer_bytes": sum(len(state["buffer"]) for state in self.codex.files.values()) if self.codex else 0, "trimmed_calls": self.codex.trimmed_calls if self.codex else 0, "call_limit": CodexCollector.CALL_LIMIT, "file_limit": CodexCollector.FILE_LIMIT, "buffer_limit": CodexCollector.BUFFER_LIMIT, "jev_database_bytes": database_bytes, "activity_cache_bytes": len(self.activity_history.saved) if self.activity_history.saved is not None else None, "sql_records": len(self.activity_history.sql), "web_records": len(self.activity_history.web), "mcp_records": len(self.activity_history.mcp)})
             with self.lock:
                 self.cache = cache
 
@@ -223,16 +252,20 @@ class Dashboard:
             return {"enabled": current["enabled"], "enabled_at": current["enabled_at"]}
 
     def settings(self):
-        return {"interval": self.interval, "max_files": self.max_files, "track_all": self.codex.track_all if self.codex else False, "observations": dict(self.observations), "mcp_sources": dict(self.mcp_sources), "mcp_categories": dict(self.mcp_categories), "tool_descriptions": dict(self.tool_descriptions), "mcp_descriptions": dict(self.mcp_descriptions), "mcp_tags": {key: list(tags) for key, tags in self.mcp_tags.items()}}
+        return {"interval": self.interval, "idle_minutes": self.idle_minutes, "activity_retention_days": self.activity_history.retention_days, "max_files": self.max_files, "track_all": self.codex.track_all if self.codex else False, "observations": dict(self.observations), "mcp_sources": dict(self.mcp_sources), "mcp_categories": dict(self.mcp_categories), "tool_descriptions": dict(self.tool_descriptions), "mcp_descriptions": dict(self.mcp_descriptions), "mcp_tags": {key: list(tags) for key, tags in self.mcp_tags.items()}}
 
     def set_settings(self, value):
-        allowed = {"interval", "max_files", "track_all", "observations", "mcp_sources", "mcp_categories", "tool_descriptions", "mcp_descriptions", "mcp_tags", "replace_customizations", "recording"}
+        allowed = {"interval", "idle_minutes", "activity_retention_days", "max_files", "track_all", "observations", "mcp_sources", "mcp_categories", "tool_descriptions", "mcp_descriptions", "mcp_tags", "replace_customizations", "recording"}
         if not isinstance(value, dict) or not value or set(value)-allowed:
             raise ValueError()
         observations = value.get("observations", {})
         if "interval" in value and (type(value["interval"]) is not int or not 1 <= value["interval"] <= 3600) or "track_all" in value and type(value["track_all"]) is not bool or not isinstance(observations, dict) or set(observations)-set(self.observations) or any(type(item) is not bool for item in observations.values()):
             raise ValueError()
         if "max_files" in value and (type(value["max_files"]) is not int or not 1 <= value["max_files"] <= 5000):
+            raise ValueError()
+        if "idle_minutes" in value and (type(value["idle_minutes"]) is not int or not 0 <= value["idle_minutes"] <= 1440):
+            raise ValueError()
+        if "activity_retention_days" in value and (type(value["activity_retention_days"]) is not int or not 1 <= value["activity_retention_days"] <= 365):
             raise ValueError()
         if any(key in value and type(value[key]) is not bool for key in ("replace_customizations", "recording")):
             raise ValueError()
@@ -269,6 +302,11 @@ class Dashboard:
             if observations.get("codex") and not self.codex:
                 self.codex = CodexCollector(self.home/"sessions", self.max_files)
             self.interval = interval
+            self.idle_minutes = value.get("idle_minutes", self.idle_minutes)
+            if "activity_retention_days" in value:
+                self.activity_history.retention_days = value["activity_retention_days"]
+                self.activity_history.update([], [], [])
+            self.activity.wake()
             self.max_files = value.get("max_files", self.max_files)
             restart_diagnostics = any(observations.get(key) and not self.observations[key] for key in ("codex", "errors", "logs", "sqlite"))
             self.observations.update(observations)
@@ -308,26 +346,73 @@ class Dashboard:
             self.refresh()
             return self.settings()
 
-    def sql_detail(self, identity):
+    def sql_detail(self, identity, mask=True, full=False):
         with self.refresh_lock:
             if not self.codex or not self.observations["codex"] or not self.observations["sqlite"]:
                 return None
-            event = next((event for event in self.cache.get("24h", {}).get("codex", {}).get("sqlite", {}).get("events", []) if event.get("id") == identity), None)
+            event = next((event for event in self.cache.get("all", {}).get("codex", {}).get("sqlite", {}).get("events", []) if event.get("id") == identity), None)
             if event is None:
                 return None
-            return self.diagnostics.sql_detail(event) if event.get("recognition") == "diagnostic_log" else self.codex.sql_detail(event)
+            return self.diagnostics.sql_detail(event, mask, full) if event.get("recognition") == "diagnostic_log" else self.codex.sql_detail(event, mask, full)
 
-    def jev_detail(self, thread_id, call_id, index):
+    def error_detail(self, identity, full=False):
+        with self.refresh_lock:
+            if not self.observations["codex"] or not (self.observations["errors"] or self.observations["logs"]):
+                return None
+            observed = list(self.diagnostics.events)+list(self.diagnostics.logs)+self.error_history.snapshot()
+            event = next((item for item in observed if item.get("content_id") == identity), None)
+            return self.diagnostics.error_detail(event, full) if event else None
+
+    def jev_detail(self, thread_id, call_id, index, full=False):
         with self.refresh_lock:
             if not self.codex or not self.observations["codex"] or not self.observations["jev_calls"]:
                 return None
-            return self.codex.jev_detail(thread_id, call_id, index)
+            return self.codex.jev_detail(thread_id, call_id, index, full)
 
-    def git_detail(self, thread_id, call_id, operation):
+    def git_detail(self, thread_id, call_id, operation, full=False):
         with self.refresh_lock:
             if not self.codex or not self.observations["codex"] or not self.observations["git"]:
                 return None
-            return self.codex.git_detail(thread_id, call_id, operation)
+            return self.codex.git_detail(thread_id, call_id, operation, full)
+
+    def tool_detail(self, thread_id, call_id, full=False):
+        with self.refresh_lock:
+            if not self.codex or not self.observations['codex'] or not self.observations['tool_events']:
+                return None
+            return self.codex.tool_detail(thread_id, call_id, full)
+
+    def mcp_detail(self, thread_id, call_id, index, full=False):
+        with self.refresh_lock:
+            if not self.codex or not self.observations["codex"]:
+                return None
+            event = next((item for item in self.cache.get("all", {}).get("mcp", {}).get("events", []) if item.get("thread_id") == thread_id and item.get("call_id") == call_id and item.get("index") == index), None)
+            if not event or not self.observations["web" if event["server"] == "web" else "mcp"] or self.mcp_sources.get(event["server"]) is False:
+                return None
+            return self.codex.mcp_detail(thread_id, call_id, index, full)
+
+    def mcp_documents(self, server, document=None):
+        with self.refresh_lock:
+            configurations = {}
+            discover_sources(self.home, configurations=configurations)
+            value = configurations.get(server)
+            if value is None:
+                return None
+            if document:
+                return read_document(value, document)
+            return {"server": server, "files": list(source_documents(value).values())}
+
+    def save_mcp_document(self, server, document, text, expected):
+        with self.refresh_lock:
+            configurations = {}
+            discover_sources(self.home, configurations=configurations)
+            value = configurations.get(server)
+            if value is None:
+                raise ValueError()
+            result = write_document(value, document, text, expected)
+            self.mcp_document_cache.clear()
+            self.activity.wake()
+            self.refresh()
+            return result
 
     def skill_detail(self, skill, document=None, thread_id=None, call_id=None):
         with self.refresh_lock:
@@ -345,6 +430,27 @@ class Dashboard:
             threads = [{key: row.get(key) for key in ("thread_id", "thread_name", "environment", "status", "archived", "model", "updated_at")} for row in codex.get("threads", []) if row.get("project_id") == project_id]
             return copy.deepcopy(project | {"project_id": project_id, "folders": detail.get("folders", []), "source": detail.get("source"), "threads": threads})
 
+    def file_detail(self, thread_id, call_id, path):
+        with self.lock:
+            if not self.observations["codex"] or not self.observations["files"]:
+                return None
+            codex = self.cache.get("all", {}).get("codex", {})
+            event = next((item for item in codex.get("file_activity", {}).get("events", []) if item.get("thread_id") == thread_id and item.get("call_id") == call_id and item.get("path") == path), None)
+        return observed_file_metadata(event) if event else None
+
+    def file_summary(self, window):
+        with self.lock:
+            if not self.observations["codex"] or not self.observations["files"]:
+                return None
+            events = self.cache.get(window, {}).get('codex', {}).get('file_activity', {}).get('events', [])
+            selected = {}
+            for event in events:
+                selected.setdefault((event.get('workdir'), event['path']), dict(event))
+            total = len(selected)
+            selected = list(selected.values())[:100]
+        files = [event | observed_file_metadata(event) for event in selected]
+        return {'files': files, 'checked_at': now(), 'limit': 100, 'total': total}
+
     def instruction_detail(self, scope, project_id=None):
         if scope == "global" and project_id is None:
             return instructions([self.home]) | {"scope": "global"}
@@ -355,7 +461,7 @@ class Dashboard:
         return None
 
     def logs(self, window="all"):
-        """Only selected metadata, collected once; no arbitrary path or log body API."""
+        """List selected metadata; known diagnostic bodies are read separately on demand."""
         with self.refresh_lock:
             monitor = self.monitor.log_snapshot()
             entries = list(self.diagnostics.logs) if self.observations["logs"] and self.observations["codex"] else []
@@ -371,20 +477,39 @@ class Dashboard:
             entries.sort(key=lambda event: event.get("timestamp") or "", reverse=True)
             return {"enabled": self.observations["logs"], "entries": copy.deepcopy(entries[:2000]), "total": len(entries), "limit": 2000, "trimmed": self.diagnostics.log_trimmed, "sources": self.diagnostics.log_sources(self.observations["codex"] and self.observations["logs"])+[monitor, {"source": "session", "health": codex.get("health", "waiting"), "files": [], "file_count": codex.get("files"), "checked_at": cached.get("updated_at"), "read_bytes": codex.get("bytes_read"), "unsupported_lines": codex.get("malformed_lines"), "backfill_pending": codex.get("error_backfill_pending")}, {"source": "jev_telemetry", "health": jev.get("health", "waiting"), "files": [], "checked_at": cached.get("updated_at")}]}
 
+    def activity_status(self):
+        with self.refresh_lock:
+            return self.activity.snapshot(self.idle_minutes, self.interval) | {"code_revision": self.code_revision}
+
+    def resume_refresh(self):
+        with self.refresh_lock:
+            self.activity.wake()
+            self.refresh()
+            return self.activity_status()
+
+    def poll_once(self):
+        with self.refresh_lock:
+            self.activity.check(self.codex if self.observations["codex"] else None, self.idle_minutes, self.observations["metadata"])
+            if self.activity.paused:
+                return False
+            self.refresh()
+            return True
+
     def poll(self):
         while not self.stop.is_set():
             try:
-                self.refresh()
+                self.poll_once()
             except Exception:
                 # Collector errors cannot expose record content or exception paths
                 pass
-            self.stop.wait(self.interval)
+            self.stop.wait(self.activity_status()["check_interval"])
 
     def snapshot(self, window):
         with self.lock:
             cached = self.cache.get(window)
             result = copy.deepcopy(cached) if cached is not None else {"label": "本機觀察統計", "health": "starting", "started_at": self.started_at, "updated_at": None, "settings": self.settings(), "availability": {}, "mcp": {"servers": [], "events": [], "categories": CATEGORIES}, "codex": {"health": "waiting", "threads": [], "tools": {}}, "jev": {"health": "disabled", "enabled": False, "summary": {}, "recent": [], "series": []}}
         result["default_settings"] = copy.deepcopy(self.default_settings)
+        result["activity"] = self.activity_status()
         result["monitor"] = self.monitor.snapshot()
         monitor_boundary = cutoff(window)
         result["monitor"]["history"] = [sample for sample in result["monitor"]["history"] if contains({"timestamp": sample.get("time")}, monitor_boundary)]
@@ -435,6 +560,13 @@ class Dashboard:
             {key: value for key, value in checkpoint.items() if type(value) is int},
             [{"name": "Checkpoint " + phase, "health": checkpoint[key]} for phase, key in (("load", "load_health"), ("save", "write_health")) if checkpoint.get(key)])
         registry["thread_state"]["mode"] = "bounded_metadata_cache"
+        add('activity_history', 'Activity history', ['sqlite', 'web', 'mcp'], 'retained_activity_metadata',
+            [str(self.activity_history.path)], self.activity_history.health if active else 'disabled',
+            ['timestamp', 'thread_id', 'call_id', 'operation', 'status', 'duration_ms', 'reference_url'],
+            {'sql_limit': self.activity_history.SQL_LIMIT, 'web_limit': self.activity_history.WEB_LIMIT, 'mcp_limit': self.activity_history.MCP_LIMIT,
+             'byte_limit': self.activity_history.BYTE_LIMIT, 'retention_days': self.activity_history.retention_days,
+             'sql_records': len(self.activity_history.sql), 'web_records': len(self.activity_history.web), 'mcp_records': len(self.activity_history.mcp)})
+        registry['activity_history']['mode'] = 'bounded_metadata_cache'
         diagnostic_readers = self.diagnostics.log_sources(active and any(self.observations[key] for key in ("errors", "logs", "sqlite")))
         add("diagnostics", "Codex diagnostics", ["errors", "logs", "sqlite"], "recent_metadata_and_24h_error_backfill",
             [str(path) for path in self.diagnostics.files]+([str(self.diagnostics.sql_path)] if self.diagnostics.sql_path else []),
@@ -508,10 +640,46 @@ def handler(dashboard, port):
                 return False
             return True
 
+        def content_request(self, url):
+            query = parse_qs(url.query, keep_blank_values=True)
+            kind = url.path.rsplit("/", 1)[-1]
+            base = {"sql": {"id"}, "error": {"id"}, "tool": {"thread_id", "call_id"}, "mcp": {"thread_id", "call_id", "index"}, "jev": {"thread", "call", "index"}, "git": {"thread_id", "call_id", "operation"}}[kind]
+            extra = {"lazy"} | ({"mask"} if kind == "sql" and "mask" in query else set())
+            page = {"field", "offset", "revision"} if "field" in query else set()
+            patterns = {"id": r"[a-f0-9]{64}", "thread": r"[a-fA-F0-9-]{36}", "call": r"[A-Za-z0-9_.:-]{1,160}", "thread_id": r"[a-fA-F0-9-]{36}", "call_id": r"[A-Za-z0-9_.:-]{1,160}", "index": r"\d{1,2}", "operation": r"[a-z-]{1,40}", "lazy": "1", "mask": "[01]", "field": "(?:request|response|output|sql|text)", "offset": r"\d{1,12}", "revision": r"[a-f0-9]{64}"}
+            if len(url.query)>1024 or set(query)!=base|extra|page or any(len(items)!=1 or not re.fullmatch(patterns.get(key, r"(?!)"), items[0]) for key, items in query.items()):
+                self.reply(400, b"Invalid content page")
+                return
+            values = {key: items[0] for key, items in query.items()}
+            if kind == "sql":
+                result = dashboard.sql_detail(values["id"], values.get("mask", "1") == "1", full=True)
+            elif kind == "error":
+                result = dashboard.error_detail(values["id"], full=True)
+            elif kind == "tool":
+                result = dashboard.tool_detail(values["thread_id"], values["call_id"], full=True)
+            elif kind == "jev":
+                result = dashboard.jev_detail(values["thread"], values["call"], int(values["index"]), full=True)
+            elif kind == "mcp":
+                result = dashboard.mcp_detail(values["thread_id"], values["call_id"], int(values["index"]), full=True)
+            else:
+                result = dashboard.git_detail(values["thread_id"], values["call_id"], values["operation"], full=True)
+            status = 200 if result is not None else 409
+            if result is not None:
+                try:
+                    result = paged_content(result, values.get("field"), int(values.get("offset", 0)), values.get("revision"))
+                except KeyError:
+                    status, result = 400, None
+                except ValueError:
+                    status, result = 409, None
+            self.reply(status, json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8"), "application/json; charset=utf-8")
+
         def do_GET(self):
             if not self.local_request():
                 return
             url = urlsplit(self.path)
+            if url.path in ("/api/codex/tool", "/api/codex/mcp", "/api/codex/git", "/api/codex/sql", "/api/codex/error", "/api/codex/jev") and "lazy" in parse_qs(url.query, keep_blank_values=True):
+                self.content_request(url)
+                return
             if url.path == "/api/logs":
                 query = parse_qs(url.query, keep_blank_values=True)
                 window = query.get("window", ["all"])[0]
@@ -521,10 +689,17 @@ def handler(dashboard, port):
                 self.reply(200, json.dumps(dashboard.logs(window), ensure_ascii=False, allow_nan=False).encode("utf-8"), "application/json; charset=utf-8")
             elif url.path == "/api/codex/sql":
                 query = parse_qs(url.query, keep_blank_values=True)
-                if len(url.query)>80 or set(query)!={"id"} or len(query["id"])!=1 or not re.fullmatch(r"[a-f0-9]{64}", query["id"][0]):
+                if query.get("mask", ["1"])[0] not in ("0", "1") or len(url.query)>80 or set(query) not in ({"id"}, {"id", "mask"}) or any(len(items)!=1 for items in query.values()) or not re.fullmatch(r"[a-f0-9]{64}", query["id"][0]):
                     self.reply(400, b"Invalid SQL record")
                     return
-                result = dashboard.sql_detail(query["id"][0])
+                result = dashboard.sql_detail(query["id"][0], query.get("mask", ["1"])[0] == "1")
+                self.reply(200 if result is not None else 409, json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            elif url.path == "/api/codex/error":
+                query = parse_qs(url.query, keep_blank_values=True)
+                if len(url.query)>256 or set(query)!={"id"} or any(len(items)!=1 for items in query.values()) or not re.fullmatch(r"[a-f0-9]{64}", query["id"][0]):
+                    self.reply(400, b"Invalid error identity")
+                    return
+                result = dashboard.error_detail(query["id"][0])
                 self.reply(200 if result is not None else 409, json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
             elif url.path == "/api/codex/jev":
                 if len(url.query) > 512:
@@ -548,6 +723,20 @@ def handler(dashboard, port):
                     self.reply(400, b"Invalid Git event")
                     return
                 result = dashboard.git_detail(query["thread_id"][0], query["call_id"][0], query["operation"][0])
+                self.reply(200 if result is not None else 409, json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            elif url.path == "/api/codex/file-summary":
+                query = parse_qs(url.query, keep_blank_values=True)
+                if len(url.query)>30 or set(query)!={'window'} or len(query['window'])!=1 or query['window'][0] not in WINDOWS:
+                    self.reply(400, b'Invalid file window')
+                    return
+                result = dashboard.file_summary(query['window'][0])
+                self.reply(200 if result is not None else 409, json.dumps(result, ensure_ascii=False).encode('utf-8'), 'application/json; charset=utf-8')
+            elif url.path == "/api/codex/file":
+                query = parse_qs(url.query, keep_blank_values=True)
+                if len(url.query)>8192 or set(query)!={"thread_id", "call_id", "path"} or any(len(value)!=1 for value in query.values()) or not re.fullmatch(r"[a-fA-F0-9-]{36}", query["thread_id"][0]) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", query["call_id"][0]) or not re.fullmatch(r"[^\x00-\x1f\x7f]{1,2048}", query["path"][0]):
+                    self.reply(400, b"Invalid file event")
+                    return
+                result = dashboard.file_detail(query["thread_id"][0], query["call_id"][0], query["path"][0])
                 self.reply(200 if result is not None else 409, json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
             elif url.path in ("/api/codex/project", "/api/codex/instructions"):
                 query = parse_qs(url.query, keep_blank_values=True)
@@ -575,6 +764,29 @@ def handler(dashboard, port):
                 self.reply(200 if result is not None else 409, json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
             elif url.path == "/api/instance":
                 self.reply(200, json.dumps({"application": "local-activity-monitor", "home_id": home_id(dashboard.home)}).encode("utf-8"), "application/json; charset=utf-8")
+            elif url.path == "/api/codex/tool":
+                query = parse_qs(url.query, keep_blank_values=True)
+                if len(url.query)>512 or set(query)!={'thread_id', 'call_id'} or any(len(items)!=1 for items in query.values()) or not re.fullmatch(r'[a-fA-F0-9-]{36}', query['thread_id'][0]) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,160}', query['call_id'][0]):
+                    self.reply(400, b'Invalid tool call')
+                    return
+                result = dashboard.tool_detail(query['thread_id'][0], query['call_id'][0])
+                self.reply(200 if result is not None else 409, json.dumps(result, ensure_ascii=False).encode('utf-8'), 'application/json; charset=utf-8')
+            elif url.path == "/api/codex/mcp":
+                query = parse_qs(url.query, keep_blank_values=True)
+                if len(url.query)>512 or set(query)!={"thread_id", "call_id", "index"} or any(len(items)!=1 for items in query.values()) or not re.fullmatch(r"[a-fA-F0-9-]{36}", query["thread_id"][0]) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", query["call_id"][0]) or not re.fullmatch(r"\d{1,2}", query["index"][0]):
+                    self.reply(400, b"Invalid MCP call")
+                    return
+                result = dashboard.mcp_detail(query["thread_id"][0], query["call_id"][0], int(query["index"][0]))
+                self.reply(200 if result is not None else 409, json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            elif url.path == "/api/mcp/files":
+                query = parse_qs(url.query, keep_blank_values=True)
+                if len(url.query)>256 or set(query) not in ({"server"}, {"server", "document"}) or any(len(items)!=1 for items in query.values()) or not SOURCE.fullmatch(query["server"][0]) or "document" in query and not re.fullmatch(r"[a-f0-9]{32}", query["document"][0]):
+                    self.reply(400, b"Invalid MCP document")
+                    return
+                result = dashboard.mcp_documents(query["server"][0], query.get("document", [None])[0])
+                self.reply(200 if result is not None else 409, json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            elif url.path == "/api/activity" and not url.query:
+                self.reply(200, json.dumps(dashboard.activity_status()).encode("utf-8"), "application/json; charset=utf-8")
             elif url.path == "/api/snapshot":
                 if len(url.query) > 128:
                     self.reply(400, b"Invalid query")
@@ -605,7 +817,7 @@ def handler(dashboard, port):
         def do_POST(self):
             if not self.local_request():
                 return
-            if self.path not in ("/api/jev/recording", "/api/settings"):
+            if self.path not in ("/api/jev/recording", "/api/settings", "/api/refresh", "/api/mcp/file"):
                 self.reply(405, b"Unsupported operation")
                 return
             if self.headers.get("Content-Type", "").split(";", 1)[0].strip() != "application/json" or self.headers.get("Transfer-Encoding"):
@@ -613,21 +825,27 @@ def handler(dashboard, port):
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
-                if not 0 < length <= (262144 if self.path == "/api/settings" else 512):
+                if not 0 < length <= (262144 if self.path in ("/api/settings", "/api/mcp/file") else 512):
                     raise ValueError()
                 value = json.loads(self.rfile.read(length))
                 if self.path == "/api/jev/recording" and (not isinstance(value, dict) or set(value) != {"enabled"} or type(value["enabled"]) is not bool):
+                    raise ValueError()
+                if self.path == "/api/refresh" and value != {}:
+                    raise ValueError()
+                if self.path == "/api/mcp/file" and (not isinstance(value, dict) or set(value)!={"server", "document", "sha256", "text"} or not isinstance(value["server"], str) or not SOURCE.fullmatch(value["server"]) or not isinstance(value["document"], str) or not re.fullmatch(r"[a-f0-9]{32}", value["document"]) or not isinstance(value["sha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", value["sha256"]) or not isinstance(value["text"], str)):
                     raise ValueError()
             except (ValueError, TypeError):
                 self.reply(400, b"Invalid recording setting")
                 return
             try:
-                result = dashboard.set_jev_recording(value["enabled"]) if self.path == "/api/jev/recording" else dashboard.set_settings(value)
+                result = dashboard.save_mcp_document(value["server"], value["document"], value["text"], value["sha256"]) if self.path == "/api/mcp/file" else dashboard.resume_refresh() if self.path == "/api/refresh" else dashboard.set_jev_recording(value["enabled"]) if self.path == "/api/jev/recording" else dashboard.set_settings(value)
                 code = 200
+            except FileExistsError:
+                result, code = {"error": "檔案已變更, 請重新讀取後再儲存"}, 409
             except ValueError:
-                result, code = {"error": "既有 Jev 設定無效, 請先檢查設定檔"} if self.path == "/api/jev/recording" else {"error": "觀察設定的格式或數值無效"}, 409
+                result, code = {"error": "檔案無法編輯或內容格式無效"} if self.path == "/api/mcp/file" else {"error": "既有 Jev 設定無效, 請先檢查設定檔"} if self.path == "/api/jev/recording" else {"error": "觀察設定的格式或數值無效"}, 409
             except OSError:
-                result, code = {"error": "無法寫入本機 Jev 設定, 請檢查存取權限"}, 500
+                result, code = {"error": "無法儲存檔案, 請檢查存取權限"} if self.path == "/api/mcp/file" else {"error": "無法寫入本機 Jev 設定, 請檢查存取權限"}, 500
             self.reply(code, json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 
     return Handler

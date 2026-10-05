@@ -2,6 +2,8 @@
 from collections import deque
 from datetime import datetime, timezone
 from . import __version__
+from .device_info import memory_info, processor_name, CpuUsage
+from .gpu_info import gpu_info
 import os
 import platform
 import json
@@ -41,7 +43,12 @@ class MonitorState:
         self.runtime = {"python": platform.python_version(), "platform": platform.system(), "architecture": platform.machine(), "pid": os.getpid(),
                         "system_release": platform.release(), "system_version": platform.version(),
                         "python_implementation": platform.python_implementation(), "process_bits": struct.calcsize("P")*8,
-                        "logical_cpus": cpu_count}
+                        "logical_cpus": cpu_count, "processor": processor_name(), "gpus": gpu_info()}
+        self.memory = memory_info()
+        self.cpu = CpuUsage()
+        self.cpu_percent = None
+        self.device_checked_at = stamp()
+        self.memory_checked = self.began
         self.runtime["version"] = __version__
         self.snapshot_bytes = self.transfer_bytes = 0
         self.load_journal()
@@ -127,7 +134,7 @@ class MonitorState:
                 self.append_event({"timestamp": stamp(), "kind": "recovered", "error_type": None})
             self.health, self.error_type = "ok", None
             self.refreshes += 1
-            self.history.append({"time": stamp(), **metrics})
+            self.history.append({"time": stamp(), "snapshot_bytes": self.snapshot_bytes, "transfer_bytes": self.transfer_bytes, **metrics})
 
     def requested(self, code, snapshot_bytes=None, transfer_bytes=None):
         with self.lock:
@@ -149,4 +156,10 @@ class MonitorState:
 
     def snapshot(self):
         with self.lock:
-            return {**self.runtime, "health": self.health, "uptime_seconds": round(time.monotonic()-self.began), "refreshes": self.refreshes, "errors": self.errors, "requests": self.requests, "http_errors": self.http_errors, "last_error_at": self.last_error_at, "error_type": self.error_type, **(self.history[-1] if self.history else {}), "snapshot_bytes": self.snapshot_bytes, "transfer_bytes": self.transfer_bytes, "history_limit": self.HISTORY_LIMIT, "event_limit": self.EVENT_LIMIT, "history": [dict(item) for item in self.history], "events": [dict(item) for item in self.events]}
+            if time.monotonic()-self.memory_checked >= 5:
+                if self.runtime["platform"] != "Darwin":
+                    self.memory = memory_info()
+                self.cpu_percent = self.cpu.sample()
+                self.device_checked_at = stamp()
+                self.memory_checked = time.monotonic()
+            return {**self.runtime, **self.memory, "cpu_usage_percent": self.cpu_percent, "cpu_scope": self.cpu.scope, "device_checked_at": self.device_checked_at, "health": self.health, "uptime_seconds": round(time.monotonic()-self.began), "refreshes": self.refreshes, "errors": self.errors, "requests": self.requests, "http_errors": self.http_errors, "last_error_at": self.last_error_at, "error_type": self.error_type, **(self.history[-1] if self.history else {}), "snapshot_bytes": self.snapshot_bytes, "transfer_bytes": self.transfer_bytes, "history_limit": self.HISTORY_LIMIT, "event_limit": self.EVENT_LIMIT, "history": [dict(item) for item in self.history], "events": [dict(item) for item in self.events]}

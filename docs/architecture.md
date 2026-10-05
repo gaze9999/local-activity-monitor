@@ -32,7 +32,7 @@ Session 中出現 `mcp__server__tool` 時自動建立來源. 已啟用的 Codex 
 
 ## 輸入 / 回傳資料
 
-Snapshot 不包含 prompt, 完整命令, 任意 MCP input / output 或文件本文. MCP request 只保留白名單 metadata, 例如文件副檔名, OCR 模式, 寫入開關與資源 ID. response 只保留狀態, 數值 / boolean 與明確的數量摘要
+Snapshot 不包含 prompt, 完整命令, 任意 MCP input / output 或文件本文. MCP request 只保留白名單 metadata, 例如檔案副檔名, OCR 模式, 寫入開關與資源 ID. response 只保留狀態, 數值 / boolean 與明確的數量摘要
 
 對話的 Model 與 Reasoning 等級依最新 turn context 或 thread_settings_applied 時間合併, 多份相同 thread 的 session 不以工具紀錄時間覆蓋 Model 設定. `reasoning_effort` 缺少時可由本機 catalog 補齊. `execution` 只保存 Provider, CLI 版本, context window, 審核 / Sandbox / 協作模式, Agent 資訊, 上層 Thread ID 與 Git 分支 / commit, 服務等級, Reasoning 摘要與審核來源. Sandbox JSON 僅取 mode, 不回傳 writable roots. 新的 reasoning 名稱依有效字串保留, 前端動態建立篩選選項
 
@@ -70,6 +70,10 @@ Jev payload 仍只在指定呼叫點開時讀取, 遮蔽 credentials 並保留�
 
 關閉觀察項目會停止對應解析或讀取. 來源開關會略過其摘要並隱藏事件, 開啟後重新解析 session 尾端. 來源名稱仍可供使用者重新開啟. 部分紀錄被截短或起訖缺漏時保持 null
 
+AGENTS.md 的最後修改時間取自實際開啟的檔案, 技能文件沿用既有 metadata 時間. 一般檔案時間只在開啟明細時 stat 已觀察路徑, 拒絕 UNC, symlink 與 credential 檔案, 不加入 snapshot 或 checkpoint
+
+右上 LAM 狀態依 snapshot 請求成敗顯示. Codex 狀態從既有對話用量回報及連線診斷 metadata 投影, 最近 5 分鐘顯示最近有回應或連線錯誤, 缺少近期資料時顯示待確認, 停用 Codex 觀察時顯示觀察停用. tooltip 提供依據及觀測時間, 不呼叫遠端探測 API
+
 ## HTTP 與設定
 
 | Endpoint | 用途 |
@@ -78,6 +82,13 @@ Jev payload 仍只在指定呼叫點開時讀取, 遮蔽 credentials 並保留�
 | `GET /api/codex/jev?thread=...&call=...&index=...` | 指定呼叫的已遮蔽 Jev 內容 |
 | `GET /api/codex/sql?id=...` | 已觀察 SQL 操作的指令內容, 點開明細才讀取並遮蔽憑證 |
 | `GET /api/codex/skill?skill=...&file=...` | 已觀察 Skill 的檔案清單與文件 metadata. file 可省略, 指定時只讀取清單內的文字文件 |
+| `GET /api/codex/file?thread_id=...&call_id=...&path=...` | 只對已觀察且識別相符的檔案操作按需查詢最後修改時間, 不讀取內容 |
+| `GET /api/codex/file-summary?window=...` | 對所選範圍的已取得檔案事件查詢最多 100 個位置的大小與更新時間 |
+| `GET /api/codex/tool?thread_id=...&call_id=...` | 已取得工具呼叫的 JS, patch 與輸入 / 輸出明細 |
+| `GET /api/codex/mcp?thread_id=...&call_id=...&index=...` | 可獨立識別的 MCP 呼叫輸入 / 輸出 |
+| `GET /api/mcp/files?server=...` | 來源設定, 套件 metadata 與已取得參數提供的本地文件清單 |
+| `GET /api/mcp/files?server=...&document=...` | 清單內檔案的已遮蔽文字, 格式與版本 hash |
+| `POST /api/mcp/file` | 白名單資料檔的格式檢查, hash 比對與原子儲存 |
 | `GET /api/logs` | 目前保留的來源事件 metadata 與來源健康狀態 |
 | `GET /api/instance` | 程式識別與 CODEX_HOME hash, 啟動時重用同一個 monitor |
 | `POST /api/settings` | interval, max_files, track_all, observations, mcp_sources, mcp_categories, tool_descriptions, mcp_descriptions, mcp_tags, recording, replace_customizations |
@@ -87,7 +98,7 @@ Jev payload 仍只在指定呼叫點開時讀取, 遮蔽 credentials 並保留�
 
 Snapshot 額外提供 `default_settings` 與讀取器的來源資訊. `sources` 根據當次 collector 結果組合實際位置, health, 選取欄位與上限, 各讀取器保留實際讀取數量與回補狀態. 上限與執行讀取共用 constants, 不額外重掃來源或載入 payload. 頁面依主 / 子 Tab 的資料相依篩選來源, 詳細內容只在展開區塊時建立 DOM. MCP 回傳只投影最多 40 個符合用量, credits, 次數或耗時語意的數值, 排除 credentials 與任意帳戶欄位. Token 用量採 thread 最新累計, 額度保留來源視窗, 剩餘百分比與時間, 不推估帳單金額
 
-Snapshot 的 monitor 欄位提供 runtime, uptime, refresh / process CPU 耗時, 本輪 session bytes, 資料保留量, HTTP 回應大小與錯誤計數. 360 個效能樣本及 200 個狀態事件使用 bounded deque, 重新啟動後清空. 整理失敗保留前次 cache, poll 繼續重試, 紀錄只保存例外類型
+Snapshot 的 monitor 欄位提供處理器名稱, 實體與可用記憶體容量, GPU 型號 / 專用容量 / 共享上限 / 驅動版本及 runtime, uptime, refresh / process CPU 耗時, 本輪 session bytes, 資料保留量, HTTP 回應大小與錯誤計數. GPU 於啟動時查詢, 最多 16 張. Windows 使用 System32 的 DXGI 唯讀 API, 區分專用容量與共享上限, 32 位元程序不提供容量, 不採用只有 uint32 的 WMI AdapterRAM. Linux 使用已安裝的 nvidia-smi 或 DRM sysfs, 型號按需由已安裝的 lspci 補充, 外部查詢合計預算 3 秒, 不安裝工具. macOS 使用 system_profiler 的顯示卡資料, Apple M 系列標示統一記憶體, 不將共享容量當成專用容量. 每個外部指令最多 2 秒, 接受輸出最多 128 KiB. 權限, 工具, schema 或驅動欄位不足時保留未知, 不使用 kernel 或 macOS 版本冒充 GPU 驅動版本. 記憶體容量最多每 5 秒查詢一次, macOS 可用容量目前保持未知. 360 個效能樣本及 200 個狀態事件使用 bounded deque, 重新啟動後清空. 整理失敗保留前次 cache, poll 繼續重試, 紀錄只保存例外類型
 
 錯誤觀察使用平台 log 目錄及 CODEX_HOME 的 logs_*.sqlite, 驗證 schema 後唯讀選取 metadata. Desktop 最多 8 個近期 log, 每份初始 256 KiB 尾端, 增量與歷史回補每輪各最多 1 MiB, 未完成行最多 64 KiB. Core 每輪最多最近 2000 列 ID, 歷史回補每輪最多 2000 列. 有 0.08 秒 SQLite 讀取預算, 投影診斷 / SQL metadata, body 只暫讀前 8192 字元供分類, 不保留. 診斷事件與輸出的錯誤清單各最多 1000 筆, source 缺少 / schema 不符顯示健康狀態. 詳細錯誤判定見 [錯誤觀察](error-observation.md)
 
@@ -106,3 +117,18 @@ HTML 內嵌目前 CSS / script 並提供精確 CSP SHA-256, 換行先統一為 L
 `tools/portable.py` 直接啟動 server, 不使用原始碼 watcher 或安裝流程. `tools/build_release.py` 在各原生系統使用固定版 PyInstaller 建置資料夾套件, 收入完整 web assets, 說明與 runtime 授權文件. `tools/smoke_release.py` 以暫存 CODEX_HOME 與 loopback 隨機 port 啟動該執行檔, 核對 HTTP, CSP, 資產, 版本與任意檔案存取邊界
 
 `.github/workflows/release.yml` 由 workflow_dispatch 對指定 commit 執行 Windows x64, macOS Intel / ARM64, Linux x64 / ARM64 建置, 測試失敗不進入 release 上傳. 原始碼 zip, sdist, wheel 與 SHA-256 一起附加到 draft release, 確認產物後再公開. Build 工具列在 requirements-build.txt, 不加入 runtime 相依
+
+GPU 容量語意依 [Microsoft DXGI](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/ns-dxgi-dxgi_adapter_desc), [NVIDIA SMI](https://docs.nvidia.com/deploy/nvidia-smi/), [Linux AMDGPU sysfs](https://docs.kernel.org/gpu/amdgpu/driver-misc.html) 與 [Apple silicon 架構](https://developer.apple.com/videos/play/wwdc2020/10686/) 處理
+## 活動保留與按需檔案資訊
+
+`activity_history.py` 循環保存 SQL, 網路與 MCP metadata, 預設 7 天, 可設定 1 - 365 天, 以 Thread / Call / index / timestamp 及來源識別資料去重, 合併更新時保留已取得的回傳與指標. 快取使用 version 3 並保存保留天數, 可讀取既有 version 1 / 2 的資料, 舊版省略保留天數時使用 7 天. SQL 最多 500 筆, 網路與 MCP 各最多 1,000 筆, 合計最多 1 MiB, 超過上限先移除較舊資料
+
+快取位於 `CODEX_HOME/monitoring/activity-history.json`, 選取操作分類, 計次, 耗時, 公開參考網址與來源提供的數值指標. 輸入, 輸出與 SQL 文字由明細 API 按需取得. 停用對應檢查時停止顯示該資料, 恢復後沿用仍在保存範圍內的摘要
+
+`/api/codex/file-summary` 只接收既有時間範圍, 對已取得的檔案事件選取最多 100 個不同位置讀取檔案 metadata. 單一檔案 API 仍使用 Thread / Call / 已取得路徑, 保留 UNC, symlink 與憑證檔拒絕規則. 檔案本文由既有文件明細與工具輸入輸出 API 按需提供
+
+## 共用卡片與內容呈現
+
+前端 cardLibrary 保存卡片的來源, 穩定識別碼, 類別, 支援的圖表形式與共用控制項. chartViews 保存各實例的參數與本輪資料投影, 總覽副本沿用同一呈現函式並套用自己的範圍. summaryLibrary 保存已載入的摘要指標, 顯示數量, 順序與名稱由瀏覽器偏好管理. 新卡片沿用既有 renderer 與設定保存流程, 不增加資料讀取來源
+
+payload_detail.py 完成遮蔽與結構投影後建立含 revision 的內容頁, 原有受限明細 API 加上 lazy=1 時回傳分頁. offset 與 revision 只用於已確認的同一工具或診斷紀錄, 前端逐頁建立語法顏色或 Markdown 預覽. Markdown 以文字節點與明確允許的連結建立 DOM, 不執行文件中的 HTML 或程式碼

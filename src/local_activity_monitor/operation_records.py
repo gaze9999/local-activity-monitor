@@ -158,11 +158,13 @@ def invocations(payload):
 
 def file_operations(calls):
     changes = []
-    def add(path, operation, tool, nested, workdir=None):
+    def add(path, operation, tool, nested, workdir=None, metadata=None):
         if isinstance(path, str) and 0 < len(path) <= 512 and not any(ord(char) < 32 for char in path) and not any(char in path for char in "$`*?<>|"):
             item = {"path": path, "operation": operation, "tool": tool, "nested": nested}
             if isinstance(workdir, str) and len(workdir) <= 512 and not any(ord(char) < 32 for char in workdir):
                 item["workdir"] = workdir
+            if metadata:
+                item.update(metadata)
             if item not in changes:
                 changes.append(item)
     for tool, args, nested in calls:
@@ -184,6 +186,21 @@ def file_operations(calls):
                 if not tokens or tokens[0].lower() not in ("get-content", "cat", "type", "more", "head", "tail", "sed", "set-content", "add-content", "out-file"):
                     continue
                 write = tokens[0].lower() in ("set-content", "add-content", "out-file")
+                metadata, ranges = {}, {}
+                for index, option in enumerate(tokens[:-1]):
+                    value = tokens[index+1]
+                    if value.isdecimal() and len(value)<=15:
+                        if option.lower() in ('-totalcount', '-tail'):
+                            ranges['first_lines' if option.lower()=='-totalcount' else 'last_lines'] = int(value)
+                        elif tokens[0].lower() in ('head', 'tail') and option in ('-n', '-c'):
+                            ranges[('first_' if tokens[0].lower()=='head' else 'last_')+('lines' if option=='-n' else 'bytes')] = int(value)
+                if tokens[0].lower()=='sed':
+                    for token in tokens[1:]:
+                        match = re.fullmatch(r'(\d+),(\d+)p', token)
+                        if match:
+                            ranges.update(start_line=int(match[1]), end_line=int(match[2]))
+                if ranges:
+                    metadata['range'] = ranges
                 sed, expression, index = tokens[0].lower() == "sed", False, 1
                 while index < len(tokens):
                     value = tokens[index]
@@ -208,7 +225,7 @@ def file_operations(calls):
                         expression = True
                         index += 1
                         continue
-                    add(value, "write" if write else "modified" if sed and any(item.startswith("-i") or item.startswith("--in-place") for item in tokens[1:]) else "read", tool, nested, args.get("workdir"))
+                    add(value, "write" if write else "modified" if sed and any(item.startswith("-i") or item.startswith("--in-place") for item in tokens[1:]) else "read", tool, nested, args.get("workdir"), metadata)
                     if write:
                         break
                     index += 1
@@ -216,9 +233,16 @@ def file_operations(calls):
             action = tool.rsplit("__", 1)[-1].rsplit(".", 1)[-1].split("_", 1)[0].lower()
             operation = "read" if action in ("read", "inspect", "extract", "load", "view") else "write" if action in ("write", "update", "append", "save") else None
             if operation:
+                ranges = {key: value for key in ('start_line', 'end_line', 'line_start', 'line_end', 'offset', 'limit', 'byte_offset', 'byte_length') if type(value:=args.get(key)) is int and 0<=value<=2**53}
+                if isinstance(args.get('pages'), str) and re.fullmatch(r'[0-9, -]{1,80}', args['pages']):
+                    ranges['pages'] = args['pages']
+                metadata = {'range': ranges} if ranges else {}
+                text = args.get('content', args.get('text'))
+                if operation=='write' and isinstance(text, str) and len(text)<=65536:
+                    metadata['submitted_utf8_bytes'] = len(text.encode('utf-8'))
                 for key in ("path", "file_path", "filename", "input_path" if operation == "read" else "output_path"):
                     if key in args:
-                        add(args[key], operation, tool, nested)
+                        add(args[key], operation, tool, nested, args.get('workdir'), metadata)
     return changes[:100]
 
 
@@ -311,28 +335,28 @@ def workflow_operations(payload, include_skills=True, include_checks=True, calls
     return skills[:40], checks[:40]
 
 
-def redact(value, depth=0):
-    if depth > 10:
+def redact(value, depth=0, limit=32768):
+    if depth > (64 if limit is None else 10):
         return "[內容過深]"
     if isinstance(value, dict):
         clean = {}
-        for key, item in list(value.items())[:100]:
-            label = str(key)[:160]
+        for key, item in (value.items() if limit is None else list(value.items())[:100]):
+            label = str(key) if limit is None else str(key)[:160]
             normalized = re.sub(r"[^a-z]", "", label.lower())
             sensitive = normalized.endswith(("apikey", "password", "secret", "credential", "authorization", "cookie", "header", "headers", "token"))
-            clean[label] = "[已隱藏]" if sensitive else redact(item, depth+1)
+            clean[label] = "[已隱藏]" if sensitive else redact(item, depth+1, limit)
         return clean
     if isinstance(value, list):
-        return [redact(item, depth+1) for item in value[:100]]
+        return [redact(item, depth+1, limit) for item in (value if limit is None else value[:100])]
     if isinstance(value, str):
-        if value.lstrip().startswith(("{", "[")) and len(value) <= 1024*1024:
+        if value.lstrip().startswith(("{", "[")) and (limit is None or len(value) <= 1024*1024):
             try:
                 decoded = json.loads(value)
                 if isinstance(decoded, (dict, list)):
-                    return json.dumps(redact(decoded, depth+1), ensure_ascii=False)[:32768]
+                    return json.dumps(redact(decoded, depth+1, limit), ensure_ascii=False)[:limit]
             except (ValueError, RecursionError):
                 pass
         value = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*|\bsk-[A-Za-z0-9_-]{12,}", "[已隱藏]", value)
         value = re.sub(r'''(?i)\b(?:api[_-]?key|password|secret|authorization|access[_-]?token|token)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)''', "[已隱藏]", value)
-        return value[:32768]
+        return value[:limit]
     return value if value is None or type(value) in (bool, int) or type(value) is float and math.isfinite(value) else None

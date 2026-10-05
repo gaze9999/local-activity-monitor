@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from contextlib import closing
 from pathlib import Path
 import sqlite3
@@ -40,7 +41,8 @@ class SQLiteRecordTests(unittest.TestCase):
             home = Path(folder);sessions=home/"sessions";sessions.mkdir()
             thread="00000000-0000-4000-8000-000000000001"
             path=sessions/("rollout-"+thread+".jsonl")
-            records=[{"timestamp":"2026-10-04T00:00:00Z", "type":"session_meta", "payload":{"id":thread}}, {"timestamp":"2026-10-04T00:00:01Z", "type":"response_item", "payload":{"type":"function_call", "name":"exec_command", "call_id":"sql-call", "arguments":json.dumps({"cmd":'sqlite3 demo.db "SELECT 12; SELECT 34"'})}}]
+            stamp=datetime.now(timezone.utc).isoformat()
+            records=[{"timestamp":stamp, "type":"session_meta", "payload":{"id":thread}}, {"timestamp":stamp, "type":"response_item", "payload":{"type":"function_call", "name":"exec_command", "call_id":"sql-call", "arguments":json.dumps({"cmd":'sqlite3 demo.db "SELECT 12; SELECT 34"'})}}]
             path.write_text("\n".join(json.dumps(row) for row in records)+"\n",encoding="utf-8")
             dashboard=Dashboard(home,codex=True);dashboard.refresh()
             events=dashboard.cache["24h"]["codex"]["sqlite"]["events"]
@@ -59,9 +61,10 @@ class SQLiteRecordTests(unittest.TestCase):
             home=Path(folder)
             with closing(sqlite3.connect(home/"logs_1.sqlite")) as db,db:
                 db.execute("CREATE TABLE logs(id INTEGER PRIMARY KEY, ts REAL, level TEXT, target TEXT, feedback_log_body TEXT)")
-                db.execute("INSERT INTO logs VALUES(1,1791072000,'INFO','sqlx::query',?)", ('sql="SELECT 45" elapsed=1ms',))
+                db.execute("INSERT INTO logs VALUES(1,?,'INFO','sqlx::query',?)", (datetime.now(timezone.utc).timestamp(), 'sql="SELECT 45" elapsed=1ms'))
             root=home/"logs";root.mkdir();path=root/"codex-desktop-test.log"
-            lines=['2026-10-04T00:00:01Z INFO [sqlite] sql="SELECT 67" elapsed=2ms', '2026-10-04T00:00:01Z INFO [sqlite] sql="SELECT 89" elapsed=3ms']
+            stamp=datetime.now(timezone.utc).isoformat()
+            lines=[stamp+' INFO [sqlite] sql="SELECT 67" elapsed=2ms', stamp+' INFO [sqlite] sql="SELECT 89" elapsed=3ms']
             path.write_text("\n".join(lines)+"\n",encoding="utf-8")
             dashboard=Dashboard(home,codex=True);dashboard.diagnostics.roots=[root];dashboard.refresh()
             events=dashboard.cache["24h"]["codex"]["sqlite"]["events"]
