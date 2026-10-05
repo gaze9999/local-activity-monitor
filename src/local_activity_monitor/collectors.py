@@ -14,8 +14,9 @@ import sqlite3
 import time
 
 from .codex_metadata import execution_metadata, read_metadata
+from .payload_detail import bounded_payload, complete_payload
 from .error_records import identifier, tool_error
-from .mcp_records import mcp_operations, response_metadata
+from .mcp_records import mcp_operations, response_metadata, decoded_output
 from .operation_records import file_operations, git_commands, shell_parts, invocations, operations, qualified_tool, redact, workflow_operations
 from .sqlite_records import sql_content, sqlite_operations
 from .usage_records import allowance
@@ -224,6 +225,12 @@ class CodexCollector:
             if isinstance(identity, str) and identity in state["calls"]:
                 call = state["calls"][identity]
                 call["completed_at"] = when
+                if self.features['files'] and call.get('isolated') and len(call.get('files', []))==1:
+                    output = decoded_output(payload.get('output'))
+                    for source, target in (('bytes_read', 'read_bytes'), ('bytes_written', 'write_bytes')):
+                        value = output.get(source)
+                        if type(value) is int and 0<=value<=2**53:
+                            call['files'][0][target] = value
                 if self.features["errors"] or self.features["sqlite"]:
                     call["error"] = tool_error(payload.get("output"))
                 if call.get("isolated") and len(call.get("mcp", [])) == 1:
@@ -555,13 +562,13 @@ class CodexCollector:
                         continue
                     limited = content[:262144]
                     text = limited.decode("utf-8-sig", errors="replace")
-                    documents.append({**entry, "text": redact(text[:32768]), "read_bytes": len(limited), "truncated": len(content)>262144 or len(text)>32768, "sha256": hashlib.sha256(limited).hexdigest()})
+                    documents.append({**entry, "text": redact(text, limit=None), "read_bytes": len(limited), "truncated": len(content)>262144, "sha256": hashlib.sha256(limited).hexdigest()})
                 return {"skill": skill, "root": str(root), "files": inventory, "files_truncated": truncated, "documents": documents}
             except (OSError, ValueError, RuntimeError):
                 continue
         return {"skill": skill, "files": [], "files_truncated": False, "documents": []}
 
-    def git_detail(self, thread_id, call_id, operation):
+    def git_detail(self, thread_id, call_id, operation, full=False):
         result = {"commands": [], "output": None, "output_scope": None, "truncated": False}
         budget = self.READ_LIMIT
         for path, state in self.files.items():
@@ -604,14 +611,14 @@ class CodexCollector:
                         continue
                 if commands:
                     command_text = "\n".join(commands)
-                    output_text = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False) if output is not None else None
-                    result.update(commands=[redact(command_text[:32768])], output=redact(output_text[:32768]) if output_text is not None else None, output_scope="outer_scope" if outer else "git_command", truncated=len(command_text)>32768 or output_text is not None and len(output_text)>32768)
+                    presented = (complete_payload if full else bounded_payload)(output)
+                    result.update(commands=[redact(command_text if full else command_text[:32768], limit=None if full else 32768)], output=presented["value"], output_scope="outer_scope" if outer else "git_command", truncated=not full and len(command_text)>32768 or presented["truncated"])
                     return result
             except (OSError, ValueError, RuntimeError):
                 continue
         return result
 
-    def sql_detail(self, event):
+    def sql_detail(self, event, mask=True, full=False):
         for path, state in self.files.items():
             if state["thread_id"] != event.get("thread_id") or event.get("call_id") not in state["calls"]:
                 continue
@@ -632,26 +639,26 @@ class CodexCollector:
                             calls = sqlite_operations(invocations(payload), include_sql=True)
                             index = event.get("index", -1)
                             if 0 <= index < len(calls) and calls[index]["statement"] == event["statement"]:
-                                return sql_content(calls[index].get("sql"))
+                                return sql_content(calls[index].get("sql"), mask, full)
                         except (ValueError, AttributeError, RecursionError):
                             continue
             except OSError:
                 continue
         return sql_content(None)
 
-    def jev_detail(self, thread_id, call_id, index):
+    def jev_detail(self, thread_id, call_id, index, full=False):
         request, output, nested, operation, isolated = None, None, False, None, True
         for path, state in self.files.items():
-            if state["thread_id"] != thread_id:
+            if state["thread_id"] != thread_id or full and (path.is_symlink() or not 0 <= index < len(state["calls"].get(call_id, {}).get("jev", []))):
                 continue
             try:
                 with path.open("rb") as stream:
                     stream.seek(0, 2)
-                    offset = max(0, stream.tell()-self.tail_bytes)
+                    offset = max(0, stream.tell()-min(self.tail_bytes, self.READ_LIMIT))
                     stream.seek(offset)
                     if offset:
                         stream.readline()
-                    for raw in stream:
+                    for raw in stream.read(min(self.tail_bytes, self.READ_LIMIT)).splitlines():
                         try:
                             record = json.loads(raw)
                             payload = record.get("payload") if isinstance(record, dict) else None
@@ -673,7 +680,94 @@ class CodexCollector:
                             continue
             except OSError:
                 continue
-        return {"operation": operation, "request": redact(request) if operation else None, "response": redact(output) if operation and isolated else None, "response_scope": "containing_tool_call" if nested else "jev_tool_call"}
+        if full and not operation:
+            return None
+        present = complete_payload if full else bounded_payload
+        sent, returned = present(request if operation else None), present(output if operation and isolated else None)
+        return {"operation": operation, "request": sent["value"], "response": returned["value"], "response_scope": "containing_tool_call" if nested else "jev_tool_call", "truncated": sent["truncated"] or returned["truncated"]}
+
+    def tool_detail(self, thread_id, call_id, full=False):
+        if not self.features.get('tool_events', True):
+            return None
+        for path, state in self.files.items():
+            call = state['calls'].get(call_id)
+            if state['thread_id']!=thread_id or not call or path.is_symlink():
+                continue
+            request, output, found = None, None, False
+            try:
+                with path.open('rb') as stream:
+                    stream.seek(0, 2)
+                    offset = max(0, stream.tell()-min(self.tail_bytes, self.READ_LIMIT))
+                    stream.seek(offset)
+                    body = stream.read(min(self.tail_bytes, self.READ_LIMIT))
+                if offset:
+                    body = body.partition(b'\n')[2]
+                for line in body.splitlines():
+                    try:
+                        record = json.loads(line)
+                        payload = record.get('payload') if isinstance(record, dict) else None
+                        if record.get('type')!='response_item' or not isinstance(payload, dict) or (payload.get('call_id') or payload.get('id'))!=call_id:
+                            continue
+                        if payload.get('type') in ('function_call', 'custom_tool_call') and name(qualified_tool(payload))==call.get('tool'):
+                            request = payload.get('arguments', payload.get('input'))
+                            found = True
+                        elif payload.get('type') in ('function_call_output', 'custom_tool_call_output'):
+                            output = payload.get('output')
+                    except (ValueError, TypeError, AttributeError, RecursionError):
+                        continue
+                if not found:
+                    return None
+                present = complete_payload if full else bounded_payload
+                sent, returned = present(request), present(output)
+                return {'tool': call.get('tool'), 'request': sent['value'], 'response': returned['value'],
+                        'truncated': sent['truncated'] or returned['truncated']}
+            except OSError:
+                return None
+        return None
+
+    def mcp_detail(self, thread_id, call_id, index, full=False):
+        for path, state in self.files.items():
+            call = state["calls"].get(call_id)
+            events = call.get("mcp", []) if call else []
+            if state["thread_id"] != thread_id or not 0 <= index < len(events) or path.is_symlink():
+                continue
+            event = events[index]
+            if self.mcp_sources.get(event["server"]) is False:
+                return None
+            request, output, observed = None, None, False
+            try:
+                with path.open("rb") as stream:
+                    stream.seek(0, 2)
+                    offset = max(0, stream.tell()-min(self.tail_bytes, self.READ_LIMIT))
+                    stream.seek(offset)
+                    tail = stream.read(min(self.tail_bytes, self.READ_LIMIT))
+                if offset:
+                    tail = tail.partition(b"\n")[2]
+                for raw in tail.splitlines():
+                    try:
+                        record = json.loads(raw)
+                        payload = record.get("payload") if isinstance(record, dict) else None
+                        if record.get("type") != "response_item" or not isinstance(payload, dict) or (payload.get("call_id") or payload.get("id")) != call_id:
+                            continue
+                        if payload.get("type") in ("function_call", "custom_tool_call"):
+                            calls = invocations(payload)
+                            found = mcp_operations(calls)
+                            if index >= len(found) or (found[index]["server"], found[index]["tool"]) != (event["server"], event["tool"]):
+                                continue
+                            eligible = [(tool, args) for tool, args, _ in calls if mcp_operations([(tool, args, False)])]
+                            request, observed = eligible[index][1], True
+                        elif payload.get("type") in ("function_call_output", "custom_tool_call_output"):
+                            output = payload.get("output")
+                    except (ValueError, TypeError, AttributeError, RecursionError):
+                        continue
+                present = complete_payload if full else bounded_payload
+                sent, returned = present(request), present(output)
+                return {"request": sent["value"] if observed else None, "response": returned["value"] if observed else None,
+                        "response_scope": "containing_tool_call" if event["nested"] else "mcp_tool_call",
+                        "truncated": sent["truncated"] or returned["truncated"]}
+            except OSError:
+                continue
+        return None
 
     def snapshot_windows(self):
         metadata_cache = {}

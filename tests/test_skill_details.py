@@ -43,6 +43,19 @@ class SkillDetailTests(unittest.TestCase):
         self.assertEqual(collector.skill_detail("example", thread_id=THREAD, call_id="unknown")["documents"], [])
         self.assertNotIn(str(self.home), json.dumps(collector.snapshot()["skills"]))
 
+    def test_markdown_keeps_loaded_text_beyond_display_chunk_and_masks_credentials(self):
+        document = self.add("first", "one")
+        text = "# Heading\n"+"Markdown paragraph\n"*3000+'\npassword="PRIVATE"\nFINAL_CONTENT'
+        document.write_text(text, encoding="utf-8")
+        collector = CodexCollector(self.root)
+        collector.refresh()
+        result = collector.skill_detail("example", thread_id=THREAD, call_id="one")["documents"][0]
+        self.assertGreater(len(result["text"]), 32768)
+        self.assertIn("FINAL_CONTENT", result["text"])
+        self.assertNotIn("PRIVATE", result["text"])
+        self.assertFalse(result["truncated"])
+        self.assertNotIn("FINAL_CONTENT", json.dumps(collector.snapshot()))
+
     def test_restart_checkpoint_restores_only_bounded_observed_invocation(self):
         document = self.add("first", "one")
         collector = CodexCollector(self.root)

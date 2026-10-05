@@ -1,4 +1,6 @@
 import json
+import os
+from datetime import datetime, timezone
 from contextlib import closing
 from pathlib import Path
 import sqlite3
@@ -133,6 +135,7 @@ class ProjectTests(unittest.TestCase):
         result = dashboard.instruction_detail('project', 'p1')
         self.assertEqual(len(result['documents']), 1)
         document = result['documents'][0]
+        self.assertEqual(document['modified_at'], datetime.fromtimestamp((self.root/'AGENTS.md').stat().st_mtime, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))
         self.assertEqual(document['read_bytes'], READ_LIMIT)
         self.assertTrue(document['truncated'])
         self.assertNotIn('PRIVATE_CREDENTIAL', document['text'])
@@ -150,6 +153,27 @@ class ProjectTests(unittest.TestCase):
         with patch.object(Path, 'is_symlink', return_value=True), patch.object(Path, 'open', side_effect=AssertionError('unexpected read')):
             self.assertEqual(instructions([self.root])['documents'][0]['health'], 'rejected')
         self.assertEqual(instructions(['//network/share'])['documents'][0]['health'], 'rejected')
+
+    def test_observed_file_metadata_is_on_demand_and_never_reads_content(self):
+        from local_activity_monitor.project_instructions import observed_file_metadata
+        path = self.root/'guide.md'
+        path.write_text('PRIVATE_FILE_CONTENT', encoding='utf-8')
+        os.utime(path, (1700000000, 1700000000))
+        event = {'thread_id': THREAD, 'call_id': 'read_1', 'path': 'guide.md', 'workdir': str(self.root), 'operation': 'read'}
+        dashboard = Dashboard(self.home, codex=True)
+        dashboard.refresh()
+        dashboard.cache['all']['codex']['file_activity'] = {'events': [event]}
+        with patch.object(Path, 'open', side_effect=AssertionError('file body accessed')):
+            self.assertEqual(dashboard.file_detail(THREAD, 'read_1', 'guide.md'), {'modified_at': '2023-11-14T22:13:20.000Z', 'bytes': 20, 'health': 'ok'})
+            self.assertIsNone(dashboard.file_detail(THREAD, 'other_call', 'guide.md'))
+            self.assertIsNone(dashboard.file_detail(THREAD, 'read_1', '../outside.md'))
+        self.assertNotIn('PRIVATE_FILE_CONTENT', json.dumps(dashboard.snapshot('all')))
+        for value in ('auth.json', '//network/guide.md'):
+            self.assertEqual(observed_file_metadata(event | {'path': value})['health'], 'rejected')
+        with patch.object(Path, 'is_symlink', return_value=True):
+            self.assertEqual(observed_file_metadata(event)['health'], 'rejected')
+        path.unlink()
+        self.assertEqual(observed_file_metadata(event)['health'], 'missing')
 
     def test_http_project_and_instruction_queries_reject_arbitrary_paths(self):
         self.database()
@@ -175,6 +199,21 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(json.loads(body)['folders'], [str(self.root)])
         self.assertEqual(request('/api/codex/project?project_id=unknown')[0], 409)
+        observed = {'thread_id': THREAD, 'call_id': 'read_1', 'path': 'guide.md', 'workdir': str(self.root)}
+        dashboard.cache['all']['codex']['file_activity'] = {'events': [observed]}
+        (self.root/'guide.md').write_text('PRIVATE_FILE_CONTENT', encoding='utf-8')
+        query = f'/api/codex/file?thread_id={THREAD}&call_id=read_1&path=guide.md'
+        code, body = request(query)
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(body)['health'], 'ok')
+        self.assertNotIn('PRIVATE_FILE_CONTENT', body.decode('utf-8'))
+        for invalid in (query+'&path=auth.json', query+'&extra=x', query.replace(THREAD, 'not-a-thread'), query.replace('read_1', '../read_1'), query.replace('guide.md', '%00')):
+            with self.subTest(query=invalid):
+                self.assertEqual(request(invalid)[0], 400)
+        self.assertEqual(request(query.replace('guide.md', '../outside.md'))[0], 409)
+        dashboard.observations['files'] = False
+        with patch('local_activity_monitor.server.observed_file_metadata', side_effect=AssertionError('disabled stat')):
+            self.assertEqual(request(query)[0], 409)
 
 
 if __name__ == '__main__':

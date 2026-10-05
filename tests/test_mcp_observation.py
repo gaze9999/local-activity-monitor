@@ -322,7 +322,7 @@ class McpObservationTests(unittest.TestCase):
         collector=CodexCollector(self.root);collector.refresh()
         document=collector.skill_detail('example','guide.txt')['documents'][0]
         self.assertTrue(document['truncated']);self.assertEqual(document['read_bytes'],262144)
-        self.assertLessEqual(len(document['text']),32768)
+        self.assertEqual(len(document['text']),262144)
 
     def test_file_reads_writes_and_nested_duration_keep_only_metadata(self):
         self.call('exec_command', {'cmd':'Get-Content -LiteralPath "src/a file.py" -TotalCount 10; Set-Content output.txt -Value "PRIVATE_CONTENT"', 'workdir':'D:/project'}, {})
@@ -342,7 +342,9 @@ class McpObservationTests(unittest.TestCase):
         for command, operation in [("sed -n '1,20p' src/a.py", 'read'), ("sed -i 's/PRIVATE/NEW/' src/a.py", 'modified'), ("sed -i '' -e 's/PRIVATE/NEW/' src/a.py", 'modified'), ("sed --expression='1,20p' src/a.py", 'read')]:
             with self.subTest(command=command):
                 events=file_operations([('exec_command', {'cmd':command}, False)])
-                self.assertEqual(events,[{'path':'src/a.py','operation':operation,'tool':'exec_command','nested':False}])
+                expected={'path':'src/a.py','operation':operation,'tool':'exec_command','nested':False}
+                if command=="sed -n '1,20p' src/a.py":expected['range']={'start_line':1,'end_line':20}
+                self.assertEqual(events,[expected])
         events=file_operations([('exec_command', {'cmd':'sed -f script.sed src/a.py'}, False)])
         self.assertEqual({(event['path'],event['operation']) for event in events},{('script.sed','read'),('src/a.py','read')})
 

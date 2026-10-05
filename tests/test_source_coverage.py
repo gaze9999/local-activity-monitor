@@ -90,7 +90,7 @@ class SourceCoverageTests(unittest.TestCase):
     def test_mcp_summary_keeps_infrequent_source_evidence_outside_table_limit(self):
         rare = {"server": "rare", "tool": "recording_status", "timestamp": "2026-10-04T00:00:00Z", "completed_at": "2026-10-04T00:00:01Z", "nested": False, "result": {"recording_enabled": False}, "duration_ms": 1000}
         busy = rare | {"server": "busy", "tool": "run", "timestamp": "2026-10-04T00:00:02Z", "completed_at": "2026-10-04T00:00:03Z", "result": {}}
-        events = [rare] + [busy]*1000
+        events = [rare | {"thread_id": THREAD, "call_id": "rare-call"}] + [busy | {"thread_id": THREAD, "call_id": "busy-"+str(index)} for index in range(1000)]
         dashboard = Dashboard(self.home, codex=True)
         with patch.object(dashboard.codex, "snapshot", return_value={"health": "ok", "threads": [], "tools": {}, "mcp_events": events}):
             dashboard.refresh()
