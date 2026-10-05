@@ -1,5 +1,23 @@
 # 驗證紀錄
 
+## 2026-10-06, 0.5.0
+
+Windows, Python 3.14.7, Node.js 22.19.0, Playwright CLI 0.1.22 與安裝的 Edge. 版面及設定使用 85 個合成對話的隔離服務, 真實本機資料只做唯讀來源與連線檢查
+
+- 完整 unittest 共 282 項, 281 項通過, 1 項因標準函式庫 HTTP 控制伺服器逾時而略過, 耗時 18.128 秒. 略過項目不列為通過
+- 1366 / 640 / 390 px, 三種語言與 14 / 18 px 字級, 共 432 組主頁與子頁, 2250 組設定分類檢查, 無頁面及設定控制項橫向溢出. 270 組圖表單位與頂端刻度檢查通過, 單位位於左側且不重疊. 切換主頁中位數 150 ms, P95 為 273.6 ms, 僅代表此合成資料與本機環境
+- 另有 53 項互動檢查通過, 涵蓋八個主頁與子頁保留捲動, 1100 / 900 / 640 / 390 px 的設定說明分類, Switch 44x24 / 20px 圓角與標籤不切換, 官方帳戶來源啟用, 重載保存與關閉. 刻意注入畫面錯誤時顯示「畫面更新失敗」, 恢復後可再次更新
+- 真實 8787 頁面重複更新三次均顯示已連線, monitor-environment 與 mcp-observations 容器存在. curl 取得 gzip 快照並完整解壓與解析, 951573 bytes, 183 個已載入對話, 版本 0.5.0. CSP 仍有 AdGuard 指令, 此結果未證明其造成標準函式庫連線問題
+- 本機唯讀來源補齊七個歷史子代理程式, 均有已完成事件. 七筆保存的 textlint lintText metadata 中, 三個呼叫 ID 可取得輸入來源及外層回傳. 動態參數顯示記錄程式碼, 不宣稱已取得當時執行值. 截圖指定的 lintFile Call ID 不在目前來源中, 以合成同格式呼叫驗證解析與頁面呈現
+- 合成 SQL INSERT 原文可按需讀取, 不執行 SQL, 未保存至 snapshot. 不具來源本文的 SQL 診斷保留無法取得狀態. Plugins 區分設定與快取, 真實本機取得 30 項 metadata, 不以快取存在判定已載入
+- 17 MiB 同一來源 fixture 的冷啟動與回補均遵守每輪 8 MiB 預算, 耗時依序約 107 / 23 / 9 ms, 完成後無新增資料的增量更新為 6 ms / 0 bytes. 回傳約 4.4 KiB, 僅代表該 fixture
+- 官方 Codex CLI 0.160.0 的三個帳戶唯讀方法實際取得回應, 確認額度與帳戶統計來源可用, 未顯示帳戶 ID 或憑證. API 設定流程與失敗隔離由合成回應驗證, 未連接雲端 Work / My dots / 排程清單
+- 本機 textlint 台灣用語規則及 prh 檢查文件與 33 組新增文案, 日文完整句子經技術寫作規則檢查, 均無提示. 英文與日文短標籤另人工複核, 沒有送至外部校對服務. JavaScript 語法與 diff 空白檢查通過, LAM 附帶的 Workbench UI JS/CSS 與獨立來源逐位元組一致
+
+共用介面參考 [Steam 商店](https://store.steampowered.com/), [SteamDB](https://steamdb.info/) 與 [Maximilian Lock 的社群設計案例](https://www.maximilianlock.co.uk/post/steam-redesign). 社群案例為作者研究, 本次檢查不等同完整可存取性或正式使用者研究
+
+五平台建置與原生啟動結果以本版本 [Actions](https://github.com/gaze9999/local-activity-monitor/actions/workflows/release.yml) 為準. 本機缺少 build 模組, 未宣稱本機套件建置通過
+
 ## 2026-10-05 至 2026-10-06, 0.4.0
 
 Windows, Python 3.14.7, Edge, 使用獨立測試服務與瀏覽器. 延續 85 個合成對話, 加入三個本機排程, 兩個額度視窗與 26 種程式碼辨識工具. 正式服務與來源設定未改寫, 未執行真實安裝或付費 API
