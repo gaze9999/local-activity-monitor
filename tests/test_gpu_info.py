@@ -111,9 +111,8 @@ class GPUInfoTests(unittest.TestCase):
             with patch('local_activity_monitor.gpu_info.sys.platform', 'linux'), patch('local_activity_monitor.gpu_info.shutil.which', return_value=None), patch('local_activity_monitor.gpu_info.Path', side_effect=lambda value:root if value == '/sys/class/drm' else source_path(value)), patch.object(Path, 'resolve', lambda path, strict=False:path.absolute()):
                 result = gpu_info()
         self.assertEqual(len(result), 3)
-        self.assertIsNone(result[0]['dedicated_memory_bytes'])
-        self.assertEqual(result[1]['dedicated_memory_bytes'], 0)
-        self.assertEqual(result[2]['dedicated_memory_bytes'], 24*1024**3)
+        capacities = {item['name']: item['dedicated_memory_bytes'] for item in result}
+        self.assertEqual(capacities, {'AMD GPU 0': None, 'AMD GPU 1': 0, 'AMD GPU 2': 24*1024**3})
         self.assertNotIn('PRIVATE_SERIAL', json.dumps(result))
 
     def test_queries_timeout_and_oversized_or_invalid_reports_are_unknown(self):
