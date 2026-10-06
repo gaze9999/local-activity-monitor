@@ -11,6 +11,52 @@ from urllib.request import Request, urlopen
 from local_activity_monitor.server import handler
 
 
+class ClientDisconnectTests(unittest.TestCase):
+    def request(self):
+        request = object.__new__(handler(MagicMock(), 8787))
+        request.headers = {}
+        request.send_response = MagicMock()
+        request.send_header = MagicMock()
+        request.end_headers = MagicMock()
+        request.wfile = MagicMock()
+        request.handle_one_request = lambda: request.reply(200, b"{}")
+        return request
+
+    def test_disconnect_during_headers_or_body_closes_the_request(self):
+        for error in (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            for phase in ("headers", "body"):
+                with self.subTest(error=error.__name__, phase=phase):
+                    request = self.request()
+                    target = request.end_headers if phase == "headers" else request.wfile.write
+                    target.side_effect = error("client disconnected")
+                    request.handle()
+                    self.assertTrue(request.close_connection)
+                    if phase == "headers":
+                        request.wfile.write.assert_not_called()
+
+    def test_keepalive_read_disconnect_closes_the_request(self):
+        request = self.request()
+        def read_request():
+            if request.handle_one_request.call_count == 1:
+                request.reply(200, b"{}")
+                request.close_connection = False
+            else:
+                raise ConnectionResetError("peer closed")
+        request.handle_one_request = MagicMock(side_effect=read_request)
+        request.handle()
+        self.assertTrue(request.close_connection)
+        self.assertEqual(request.handle_one_request.call_count, 2)
+        request.wfile.write.assert_called_once_with(b"{}")
+
+    def test_other_failures_are_not_hidden(self):
+        for error in (PermissionError, ValueError):
+            with self.subTest(error=error.__name__):
+                request = self.request()
+                request.end_headers.side_effect = error("unexpected failure")
+                with self.assertRaises(error):
+                    request.handle()
+
+
 class SnapshotTransportTests(unittest.TestCase):
     def test_large_snapshot_is_complete_with_and_without_gzip(self):
         payload = {"records": [{"id": index, "value": hashlib.sha256(str(index).encode()).hexdigest()} for index in range(3000)]}

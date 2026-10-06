@@ -151,6 +151,85 @@ class ContentDetailsTests(unittest.TestCase):
         restarted.refresh()
         self.assertEqual(restarted.codex.read_bytes,before)
 
+    def test_detail_backfill_keeps_progress_with_new_complete_and_pending_calls(self):
+        for call in ('old-first', 'old-second'):
+            self.write('response_item', {'type':'function_call','name':'mcp__future__evaluate','call_id':call,'arguments':'{"input":0}'})
+            self.write('response_item', {'type':'function_call_output','call_id':call,'output':'{"answer":false}'})
+        for _ in range(100):
+            self.write('event_msg', {'type':'ignored','message':'fixture padding'*20})
+        collector = self.app.codex
+        collector.tail_bytes = 1024
+        collector.features['errors'] = False
+        collector.refresh()
+        state = collector.files[self.path]
+        self.assertNotIn('old-first', state['calls'])
+        targets = [{'thread_id': THREAD, 'call_id': 'old-first'}]
+        collector.select_detail_targets(targets)
+        collector.related_budget = 512
+        collector.backfill_detail_index()
+        index = collector.detail_indexes[THREAD]
+        cursor = index['cursor']
+        self.assertGreater(cursor, 0)
+
+        def recent(payload):
+            offset = self.path.stat().st_size
+            self.write('response_item', payload)
+            with self.path.open('rb') as stream:
+                stream.seek(offset)
+                collector.parse(state, stream.readline(), offset)
+
+        for number in range(4):
+            call = 'recent-'+str(number)
+            recent({'type':'function_call','name':'mcp__future__evaluate','call_id':call,'arguments':'{"input":0}'})
+            recent({'type':'function_call_output','call_id':call,'output':'{"answer":false}'})
+            targets.append({'thread_id': THREAD, 'call_id': call})
+            collector.select_detail_targets(targets)
+            collector.related_budget = 0
+            before = collector.read_bytes
+            collector.backfill_detail_index()
+            self.assertEqual(index['cursor'], cursor)
+            self.assertEqual(collector.read_bytes, before)
+            self.assertIn('response_offset', index['positions'][call])
+            collector.related_budget = 512
+            collector.backfill_detail_index()
+            self.assertLess(index['cursor'], cursor)
+            self.assertLessEqual(collector.read_bytes-before, 512)
+            cursor = index['cursor']
+
+        recent({'type':'function_call','name':'mcp__future__evaluate','call_id':'pending','arguments':'{"input":0}'})
+        targets.append({'thread_id': THREAD, 'call_id': 'pending'})
+        collector.select_detail_targets(targets)
+        collector.related_budget = 0
+        collector.backfill_detail_index()
+        self.assertEqual(index['cursor'], cursor)
+        self.assertIn('request_offset', index['positions']['pending'])
+        self.assertNotIn('response_offset', index['positions']['pending'])
+        for _ in range(100):
+            before = collector.read_bytes
+            collector.related_budget = 1024
+            collector.backfill_detail_index()
+            self.assertLessEqual(collector.read_bytes-before, 1024)
+            if index['cursor'] == 0:
+                break
+        self.assertEqual(index['cursor'], 0)
+        self.assertIn('response_offset', index['positions']['old-first'])
+
+        targets.append({'thread_id': THREAD, 'call_id': 'old-second'})
+        collector.select_detail_targets(targets)
+        collector.related_budget = 0
+        collector.backfill_detail_index()
+        self.assertEqual(index['cursor'], self.path.stat().st_size)
+        for _ in range(100):
+            collector.related_budget = 1024
+            collector.backfill_detail_index()
+            if 'response_offset' in index['positions'].get('old-second', {}):
+                break
+        self.assertIn('response_offset', index['positions']['old-second'])
+        recent({'type':'function_call_output','call_id':'pending','output':'{"answer":true}'})
+        collector.related_budget = 0
+        collector.backfill_detail_index()
+        self.assertIn('response_offset', index['positions']['pending'])
+
     def test_local_document_allowlist_save_conflict_and_origin(self):
         directory=self.home/'unknown';directory.mkdir();entry=directory/'server.mjs';entry.write_text('',encoding='utf-8')
         settings=directory/'settings.json';settings.write_text('{"enabled":true}',encoding='utf-8')

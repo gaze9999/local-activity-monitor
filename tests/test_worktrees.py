@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -98,6 +99,10 @@ class WorktreeTests(unittest.TestCase):
             value = self.collector.refresh(self.projects, [], {})
             self.assertEqual(value["health"], "partly_unavailable")
             self.assertEqual(value["failed_queries"], 2)
+            self.assertIsNone(value["total"])
+            self.assertEqual(value["observed_total"], 0)
+            self.assertFalse(value["count_complete"])
+            self.assertTrue(all(item["reason"] == "timeout" for item in value["query_failures"]))
         with patch.object(self.collector, "read", side_effect=AssertionError("disabled read")):
             self.assertEqual(self.collector.refresh(self.projects, [], {}, False)["health"], "disabled")
         self.assertIsNone(self.collector.detail("unknown"))
@@ -124,12 +129,74 @@ class WorktreeTests(unittest.TestCase):
         with patch("local_activity_monitor.worktree_info.time.monotonic", side_effect=lambda: clock[0]), patch.object(self.collector, "git_list", side_effect=read) as query:
             first = self.collector.refresh(self.projects, [], {})
             self.assertTrue(first["limited"])
-            self.assertEqual(first["total"], 1)
+            self.assertIsNone(first["total"])
+            self.assertEqual(first["observed_total"], 1)
             self.collector.next_read = 0
             second = self.collector.refresh(self.projects, [], {})
             self.assertEqual(query.call_args.args[0], other)
-            self.assertEqual(second["total"], 2)
+            self.assertEqual(second["observed_total"], 2)
             self.assertTrue(any(item["name"] == self.repo.name for item in second["items"]))
+
+    def test_failed_refresh_preserves_observed_items_with_partial_count(self):
+        initial = self.collector.refresh(self.projects, [], {})
+        self.assertTrue(initial['count_complete'])
+        self.collector.next_read = 0
+        with patch.object(self.collector, 'git_list', return_value=(None, 'timeout')):
+            value = self.collector.refresh(self.projects, [], {})
+        self.assertIsNone(value['total'])
+        self.assertEqual(value['observed_total'], 2)
+        self.assertEqual(len(value['items']), 2)
+        self.assertFalse(value['count_complete'])
+        self.assertNotIn(str(self.repo), json.dumps(value['query_failures']))
+
+    def test_git_exit_projects_only_bounded_reason_and_code(self):
+        class FailedProcess:
+            returncode = 128
+            def wait(self, timeout=None):
+                return self.returncode
+        def launch(*args, **kwargs):
+            kwargs['stderr'].write(b"fatal: detected dubious ownership in repository PRIVATE_PATH TOKEN_SECRET")
+            return FailedProcess()
+        with patch('local_activity_monitor.worktree_info.subprocess.Popen', side_effect=launch):
+            value = self.collector.refresh(self.projects, [], {})
+        self.assertIsNone(value['total'])
+        self.assertEqual(value['query_failures'][0]['reason'], 'ownership_rejected')
+        self.assertEqual(value['query_failures'][0]['exit_code'], 128)
+        self.assertNotIn('PRIVATE_PATH', json.dumps(value))
+        self.assertNotIn('TOKEN_SECRET', json.dumps(value))
+        self.assertEqual(value['query_failures'][0]['project_ids'], ['p1'])
+
+    def test_git_query_completes_while_watch_stdin_remains_open(self):
+        script = '''import json, sys
+from pathlib import Path
+from threading import Thread
+sys.path.insert(0, sys.argv[1])
+from local_activity_monitor.worktree_info import WorktreeCollector
+Thread(target=lambda: sys.stdin.readline(), daemon=True).start()
+records, health = WorktreeCollector(Path(sys.argv[2])).git_list(Path(sys.argv[3]), 2)
+print(json.dumps({"health": health, "items": len(records or [])}))
+'''
+        process = subprocess.Popen([sys.executable, '-I', '-c', script, str(Path(__file__).resolve().parents[1]/'src'),
+                                    str(self.home), str(self.repo)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            process.wait(timeout=6)
+            self.assertEqual(process.returncode, 0, process.stderr.read(4096).decode('utf-8', 'replace'))
+            result = json.loads(process.stdout.read())
+            self.assertEqual(result, {'health': 'ok', 'items': 2})
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=3)
+            for stream in (process.stdin, process.stdout, process.stderr):
+                stream.close()
+
+    def test_temporary_file_error_remains_diagnostic_without_private_message(self):
+        with patch('local_activity_monitor.worktree_info.tempfile.TemporaryFile', side_effect=PermissionError(13, 'PRIVATE_PATH')):
+            value = self.collector.refresh(self.projects, [], {})
+        self.assertIsNone(value['total'])
+        self.assertEqual(value['query_failures'][0]['reason'], 'temporary_file_unavailable')
+        self.assertEqual(value['query_failures'][0]['error_code'], 13)
+        self.assertNotIn('PRIVATE_PATH', json.dumps(value))
 
     def test_dashboard_worktree_endpoint_preserves_path_boundary_and_observation_switch(self):
         sessions = self.home/"sessions"

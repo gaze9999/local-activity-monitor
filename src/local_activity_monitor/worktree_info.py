@@ -59,29 +59,53 @@ class WorktreeCollector:
         self.cursor = 0
         self.next_read = 0
         self.signature = None
+        self.query_failure = None
         self.result = {"health": "waiting", "items": [], "checked_at": None}
 
     def git_list(self, root, timeout):
+        self.query_failure = None
         git = shutil.which("git")
         if git is None:
+            self.query_failure = {"reason": "missing_git"}
             return None, "unavailable"
         environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
         environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
-        with tempfile.TemporaryFile() as output:
-            process = subprocess.Popen([git, "--no-optional-locks", "-C", str(root), "worktree", "list", "--porcelain", "-z"],
-                                       stdout=output, stderr=subprocess.DEVNULL, env=environment,
-                                       creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-            try:
-                process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-                return None, "timeout"
-            if process.returncode:
-                return None, "unavailable"
-            output.seek(0)
-            raw = output.read(self.BYTE_LIMIT+1)
-            return (None, "oversized") if len(raw) > self.BYTE_LIMIT else (parse_worktrees(raw), "ok")
+        stage = "temporary_file_unavailable"
+        try:
+            with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+                stage = "launch_failed"
+                process = subprocess.Popen([git, "--no-optional-locks", "-C", str(root), "worktree", "list", "--porcelain", "-z"],
+                                           stdin=subprocess.DEVNULL, stdout=output, stderr=errors, env=environment,
+                                           creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+                stage = "query_io_error"
+                try:
+                    process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                    self.query_failure = {"reason": "timeout"}
+                    return None, "timeout"
+                if process.returncode:
+                    errors.seek(0)
+                    diagnostic = errors.read(4096).lower()
+                    reason = "git_exit"
+                    for message, code in ((b"dubious ownership", "ownership_rejected"), (b"not a git repository", "not_repository"),
+                                          (b"unknown option", "unsupported_option"), (b"permission denied", "permission_denied"),
+                                          (b"invalid gitfile", "invalid_git_metadata")):
+                        if message in diagnostic:
+                            reason = code
+                            break
+                    self.query_failure = {"reason": reason, "exit_code": process.returncode}
+                    return None, "unavailable"
+                output.seek(0)
+                raw = output.read(self.BYTE_LIMIT+1)
+                if len(raw) > self.BYTE_LIMIT:
+                    self.query_failure = {"reason": "oversized"}
+                    return None, "oversized"
+                return parse_worktrees(raw), "ok"
+        except OSError as error:
+            self.query_failure = {"reason": stage, "error_code": error.errno}
+            return None, "unavailable"
 
     def refresh(self, projects, threads, workdirs, enabled=True):
         if not enabled:
@@ -129,6 +153,9 @@ class WorktreeCollector:
     def read(self, roots):
         checked = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         managed_health, managed_dirs, failures, limited = "missing", 0, 0, False
+        query_failures = []
+        def failure(root_key, project_ids, detail):
+            query_failures.append({"root_id": hashlib.sha256(root_key.encode("utf-8")).hexdigest()[:24], "project_ids": sorted(project_ids), **detail})
         try:
             managed = local_path(self.managed_root)
             if managed is None:
@@ -180,6 +207,7 @@ class WorktreeCollector:
                 marker = root/".git"
                 if marker.is_symlink():
                     failures += 1
+                    failure(key, project_ids, {"reason": "linked_git_metadata"})
                     continue
                 if not marker.exists() and not ((root/"HEAD").is_file() and (root/"objects").is_dir()):
                     removed = self.root_items.pop(key, set())
@@ -194,10 +222,12 @@ class WorktreeCollector:
                     self.cursor = index
                     limited = True
                     break
+                self.query_failure = None
                 records, health = self.git_list(root, remaining)
                 queries += 1
                 if health != "ok":
                     failures += 1
+                    failure(key, project_ids, self.query_failure or {"reason": health})
                     continue
                 previous = self.root_items.get(key, set())
                 for alias in [alias for alias, ids in self.root_items.items() if ids and ids == previous]:
@@ -228,11 +258,14 @@ class WorktreeCollector:
                     alias = os.path.normcase(os.path.normpath(seed))
                     if alias == key or alias in aliases:
                         self.root_items[alias] = set(identities)
-            except (OSError, ValueError):
+            except (OSError, ValueError) as error:
                 failures += 1
+                failure(key, project_ids, {"reason": "metadata_io_error", "error_code": error.errno if isinstance(error, OSError) else None})
+        complete = git_available and not failures and not limited and managed_health not in ("unavailable", "rejected")
         self.result = {"health": "missing_git" if not git_available else "partly_unavailable" if failures or managed_health in ("unavailable", "rejected") else "ok",
                        "checked_at": checked, "managed_root": str(self.managed_root), "managed_health": managed_health, "managed_directories": managed_dirs,
-                       "total": len(self.items), "queries": queries, "failed_queries": failures, "limited": limited,
+                       "total": len(self.items) if complete else None, "observed_total": len(self.items), "count_complete": complete,
+                       "queries": queries, "failed_queries": failures, "query_failures": query_failures, "limited": limited,
                        "root_limit": self.ROOT_LIMIT, "item_limit": self.ITEM_LIMIT, "byte_limit": self.BYTE_LIMIT,
                        "cache_seconds": self.CACHE_SECONDS, "association_scope": "loaded_thread_cwd"}
 

@@ -46,6 +46,35 @@ class ContentPageTests(unittest.TestCase):
         status, _ = self.get('/api/codex/tool?'+urlencode(query | {'lazy': '1', 'field': 'response', 'offset': old['next'], 'revision': old['revision']}))
         self.assertEqual(status, 409)
 
+    def test_check_detail_is_observed_masked_and_switch_gated(self):
+        command = 'python -m unittest'
+        self.write('response_item', {'type': 'function_call', 'name': 'exec_command', 'call_id': 'check', 'arguments': json.dumps({'cmd': command})})
+        self.write('response_item', {'type': 'function_call_output', 'call_id': 'check', 'output': 'password="PRIVATE" CHECK_BODY'})
+        self.app.refresh()
+        event = next(item for item in self.app.cache['all']['codex']['checks'] if item['call_id'] == 'check')
+        query = {'thread_id': THREAD, 'call_id': 'check', 'operation': event['operation']}
+        output, initial = self.pages('/api/codex/check', query, 'output')
+        self.assertIn('CHECK_BODY', output)
+        self.assertNotIn('PRIVATE', output)
+        self.assertNotIn('CHECK_BODY', json.dumps(self.app.snapshot('all')))
+        self.assertEqual(initial['commands'], [command])
+        status, unknown = self.get('/api/codex/check?'+urlencode(query | {'operation': 'unobserved', 'lazy': '1'}))
+        self.assertEqual(status, 200)
+        self.assertEqual(unknown['content_status'], 'unavailable')
+        for extra in ('&operation=duplicate', '&path=private'):
+            self.assertEqual(self.get('/api/codex/check?'+urlencode(query | {'lazy': '1'})+extra)[0], 400)
+        self.app.observations['checks'] = False
+        self.assertEqual(self.get('/api/codex/check?'+urlencode(query | {'lazy': '1'}))[0], 409)
+
+    def test_session_error_content_uses_observed_identity(self):
+        self.write('event_msg', {'type': 'error', 'message': 'password="PRIVATE" SESSION_ERROR_BODY'})
+        self.app.refresh()
+        event = next(item for item in self.app.cache['all']['_retained_error_events'] if item['source'] == 'session')
+        text, _ = self.pages('/api/codex/error', {'id': event['content_id']}, 'text')
+        self.assertIn('SESSION_ERROR_BODY', text)
+        self.assertNotIn('PRIVATE', text)
+        self.assertNotIn('SESSION_ERROR_BODY', json.dumps(self.app.snapshot('all')))
+
     def test_sql_mask_on_off_and_invalid_page_queries(self):
         sql = "UPDATE items SET password='PRIVATE', note='"+'x'*70000+"';"
         self.write('response_item', {'type': 'function_call', 'name': 'mcp__sqlite__query', 'call_id': 'sql', 'arguments': json.dumps({'database': 'demo.db', 'query': sql})})

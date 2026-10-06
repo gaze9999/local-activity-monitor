@@ -16,6 +16,43 @@ TIME = "2026-10-04T03:32:58Z"
 
 
 class ErrorRecordTests(unittest.TestCase):
+    def test_core_message_column_and_null_feedback_details_are_on_demand(self):
+        for feedback in (False, True):
+            with self.subTest(feedback=feedback), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory); path = home/'logs_10.sqlite'
+                stamp = datetime.now(timezone.utc).timestamp()
+                with closing(sqlite3.connect(path)) as db, db:
+                    db.execute('CREATE TABLE logs(id INTEGER PRIMARY KEY,ts REAL,level TEXT,target TEXT,message TEXT'+(',feedback_log_body TEXT' if feedback else '')+')')
+                    db.execute('INSERT INTO logs VALUES(1,?,?,?,?'+(',NULL' if feedback else '')+')', (stamp, 'INFO', 'codex_core', 'actual message password=PRIVATE'))
+                collector = DiagnosticCollector(home); collector.refresh()
+                event = collector.logs[0]
+                detail = collector.error_detail(event)
+                self.assertEqual(detail['content_status'], 'available')
+                self.assertIn('actual message', detail['text'])
+                self.assertNotIn('PRIVATE', detail['text'])
+                self.assertNotIn('actual message', json.dumps(list(collector.logs)))
+                self.assertNotIn('actual message', json.dumps(collector.snapshot()))
+
+    def test_session_failure_message_survives_tail_movement_and_rejects_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); path = root/f'rollout-{THREAD}.jsonl'
+            stamp = datetime.now(timezone.utc).isoformat()
+            event = {'timestamp': stamp, 'type': 'event_msg', 'payload': {'type': 'turn_failed', 'message': 'actual session error', 'error': {'code': 'failed', 'password': 'PRIVATE'}}}
+            path.write_text(json.dumps(event)+'\n', encoding='utf-8')
+            collector = CodexCollector(root, tail_bytes=4096); collector.refresh()
+            with path.open('a', encoding='utf-8') as stream:
+                stream.write(json.dumps({'type': 'event_msg', 'payload': {'type': 'ignored', 'message': 'PRIVATE_PROMPT'*1000}})+'\n')
+            collector.refresh()
+            observed = collector.snapshot()['error_events'][0]
+            self.assertIn('content_id', observed)
+            self.assertNotIn('actual session error', json.dumps(observed))
+            detail = collector.error_detail(observed)
+            self.assertEqual(detail['text']['message'], 'actual session error')
+            self.assertNotIn('PRIVATE', json.dumps(detail))
+            with path.open('r+b') as stream:
+                stream.seek(observed['record_offset']); stream.write(b'{}\n')
+            self.assertIsNone(collector.error_detail(observed)['text'])
+
     def test_sql_diagnostics_desktop_core_and_reenable(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory);path = home/'logs_10.sqlite'
@@ -64,6 +101,11 @@ class ErrorRecordTests(unittest.TestCase):
             self.assertEqual({row['code'] for row in state['errors']}, {'historical_failure', 'process_exit'})
             self.assertFalse(state.get('error_cursor'))
             self.assertNotIn('PRIVATE', json.dumps(collector.snapshot()))
+            observed = collector.snapshot()['error_events']
+            session = next(event for event in observed if event['source'] == 'session')
+            tool = next(event for event in observed if event['source'] == 'tool_result')
+            self.assertEqual(collector.error_detail(session)['text']['error_code'], 'historical_failure')
+            self.assertEqual(collector.error_detail(tool)['text']['message'], 'PRIVATE')
 
     def test_desktop_backfills_24h_errors_before_initial_tail(self):
         with tempfile.TemporaryDirectory() as directory:

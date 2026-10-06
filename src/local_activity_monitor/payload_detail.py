@@ -1,4 +1,5 @@
 """Preserve bounded structure when presenting on-demand tool content."""
+import ast
 import csv
 import hashlib
 from datetime import date, time
@@ -12,7 +13,135 @@ try:
 except ImportError:
     tomllib = None
 
-from .operation_records import redact
+from .operation_records import literal, redact
+
+
+def parse_literal(text):
+    """Read data literals only, with bounded size, node count and depth."""
+    if len(text) > 1024*1024:
+        return None
+    try:
+        tree = ast.parse(text, mode='eval')
+        if sum(1 for _ in ast.walk(tree)) <= 20000:
+            value = ast.literal_eval(tree)
+
+            def normalize(item, depth=0):
+                if depth > 64:
+                    raise ValueError()
+                if isinstance(item, dict):
+                    if any(not isinstance(key, (str, int, float, bool)) and key is not None for key in item):
+                        raise ValueError()
+                    return {str(key): normalize(child, depth+1) for key, child in item.items()}
+                if isinstance(item, (list, tuple)):
+                    return [normalize(child, depth+1) for child in item]
+                if item is None or isinstance(item, (str, int, float, bool)):
+                    return item
+                raise ValueError()
+
+            if isinstance(value, (dict, list, tuple)):
+                return {'format': 'Python literal', 'value': normalize(value)}
+    except (ValueError, SyntaxError, TypeError, RecursionError, OverflowError):
+        pass
+    try:
+        value, end = literal(text)
+        if end == len(text) and isinstance(value, (dict, list)):
+            return {'format': 'Object literal', 'value': value}
+    except (ValueError, RecursionError):
+        pass
+    return None
+
+
+def parse_yaml(text):
+    """Read an indentation-only YAML subset without tags, anchors or aliases."""
+    if len(text) > 1024*1024:
+        return None
+    lines = []
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith('#'):
+            continue
+        if '\t' in raw[:len(raw)-len(raw.lstrip())]:
+            return None
+        lines.append((len(raw)-len(raw.lstrip(' ')), raw.lstrip(' ')))
+    if not lines or len(lines) > 20000:
+        return None
+    index = 0
+
+    def scalar(value):
+        value = value.strip()
+        if value.startswith(('!', '&', '*', '|', '>')):
+            raise ValueError()
+        if value.startswith(('"', "'", '{', '[')):
+            parsed = parse_text(value)
+            if parsed:
+                return parsed['value']
+            if value.startswith("'") and value.endswith("'"):
+                return value[1:-1].replace("''", "'")
+            if value.startswith('"'):
+                return json.loads(value)
+            raise ValueError()
+        value = re.split(r'\s+#', value, maxsplit=1)[0].rstrip()
+        if value in ('null', 'Null', 'NULL', '~'):
+            return None
+        if value.lower() in ('true', 'false'):
+            return value.lower() == 'true'
+        if re.fullmatch(r'-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?', value):
+            return json.loads(value)
+        if ': ' in value or value.endswith(':'):
+            raise ValueError()
+        return value
+
+    def pair(body):
+        match = re.match(r'([^:{}\[\],]+):(?:\s+(.*)|$)', body)
+        if not match:
+            raise ValueError()
+        key = scalar(match[1])
+        if not isinstance(key, (str, int, float, bool)) or str(key) == '<<':
+            raise ValueError()
+        return str(key), match[2] or ''
+
+    def block(indent, depth=0):
+        nonlocal index
+        if depth > 12:
+            raise ValueError()
+        sequence = lines[index][1].startswith('- ') or lines[index][1] == '-'
+        result = [] if sequence else {}
+        while index < len(lines) and lines[index][0] == indent:
+            body = lines[index][1]
+            if sequence:
+                if body != '-' and not body.startswith('- '):
+                    raise ValueError()
+                body = body[1:].strip()
+                index += 1
+                if not body:
+                    child = block(lines[index][0], depth+1) if index < len(lines) and lines[index][0] > indent else None
+                elif re.match(r'[^:{}\[\],]+:(?:\s|$)', body):
+                    key, value = pair(body)
+                    child = {key: scalar(value) if value else block(lines[index][0], depth+1) if index < len(lines) and lines[index][0] > indent+2 else None}
+                    if index < len(lines) and lines[index][0] == indent+2:
+                        extra = block(indent+2, depth+1)
+                        if not isinstance(extra, dict) or child.keys() & extra.keys():
+                            raise ValueError()
+                        child.update(extra)
+                else:
+                    child = scalar(body)
+                result.append(child)
+            else:
+                key, value = pair(body)
+                if key in result:
+                    raise ValueError()
+                index += 1
+                if value in ('|', '>', '|-', '>-', '|+', '>+'):
+                    # Multiline scalars require whitespace preservation beyond this subset.
+                    raise ValueError()
+                result[key] = scalar(value) if value else block(lines[index][0], depth+1) if index < len(lines) and lines[index][0] > indent else None
+            if index < len(lines) and lines[index][0] > indent:
+                raise ValueError()
+        return result
+    try:
+        result = block(lines[0][0])
+        return {'format': 'YAML subset', 'value': result} if index == len(lines) else None
+    except (ValueError, RecursionError, TypeError):
+        return None
 
 
 def parse_text(text, format=None, full=False):
@@ -28,6 +157,10 @@ def parse_text(text, format=None, full=False):
                     return {'format': 'JSON', 'value': value}
             except ValueError:
                 pass
+        if text.startswith(('{', '[', '(')):
+            parsed = parse_literal(text)
+            if parsed:
+                return parsed
         lines = text.splitlines()
         if 1<len(lines) and all(line.lstrip().startswith(('{', '[')) for line in lines if line.strip()):
             return {'format': 'JSONL', 'value': [json.loads(line) for line in lines if line.strip()]}
@@ -63,6 +196,8 @@ def parse_text(text, format=None, full=False):
                 return {'format': 'TSV' if dialect.delimiter=='\t' else 'CSV', 'value': value}
     except (ValueError, RecursionError, ET.ParseError, csv.Error, TypeError):
         pass
+    if format in ('yaml', 'yml') or len(text.splitlines()) > 1 and re.match(r'(?:[^:{}\[\],]+:\s|[^:{}\[\],]+:$|- )', text.splitlines()[0]):
+        return parse_yaml(text)
     return None
 
 

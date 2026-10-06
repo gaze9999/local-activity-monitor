@@ -181,7 +181,15 @@ class Dashboard:
                 return
             before_bytes = (self.codex.read_bytes if self.codex else 0)+self.diagnostics.read_bytes
             if self.codex and self.observations["codex"]:
-                self.codex.select_detail_targets((self.activity_history.snapshot("sql") if self.observations["sqlite"] else [])+(self.activity_history.snapshot("mcp") if self.observations["mcp"] else [])+(self.activity_history.snapshot("web") if self.observations["web"] else []))
+                previous = self.cache.get("all", {}).get("codex", {})
+                targets = (self.activity_history.snapshot("sql") if self.observations["sqlite"] else [])+(self.activity_history.snapshot("mcp") if self.observations["mcp"] else [])+(self.activity_history.snapshot("web") if self.observations["web"] else [])
+                if self.observations["git"]:
+                    targets.extend(previous.get("git", {}).get("events", []))
+                if self.observations["checks"]:
+                    targets.extend(previous.get("checks", []))
+                if self.observations["tool_events"]:
+                    targets.extend(event | {"thread_id": thread["thread_id"]} for thread in previous.get("threads", []) for event in thread.get("tool_events", []))
+                self.codex.select_detail_targets(targets)
                 self.codex.refresh(pause=(lambda: self.stop.wait(.01)) if self.stagger else None)
                 if self.stop.is_set():
                     return
@@ -443,9 +451,11 @@ class Dashboard:
         with self.refresh_lock:
             if not self.observations["codex"] or not (self.observations["errors"] or self.observations["logs"]):
                 return None
-            observed = list(self.diagnostics.events)+list(self.diagnostics.logs)+self.error_history.snapshot()
+            observed = list(self.diagnostics.events)+list(self.diagnostics.logs)+self.error_history.snapshot()+self.cache.get("all", {}).get("_retained_error_events", [])
             event = next((item for item in observed if item.get("content_id") == identity), None)
-            return self.diagnostics.error_detail(event, full) if event else None
+            if not event:
+                return None
+            return self.codex.error_detail(event, full) if self.codex and event.get("source") in ("session", "tool_result") else self.diagnostics.error_detail(event, full)
 
     def jev_detail(self, thread_id, call_id, index, full=False):
         with self.refresh_lock:
@@ -464,6 +474,12 @@ class Dashboard:
             if not self.codex or not self.observations['codex'] or not self.observations['tool_events']:
                 return None
             return self.codex.tool_detail(thread_id, call_id, full)
+
+    def check_detail(self, thread_id, call_id, operation, full=False):
+        with self.refresh_lock:
+            if not self.codex or not self.observations["codex"] or not self.observations["checks"]:
+                return None
+            return self.codex.check_detail(thread_id, call_id, operation, full)
 
     def mcp_detail(self, thread_id, call_id, index, full=False):
         with self.refresh_lock:
@@ -713,6 +729,12 @@ def handler(dashboard, port):
             super().setup()
             self.connection.settimeout(15)
 
+        def handle(self):
+            try:
+                super().handle()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                self.close_connection = True
+
         def log_message(self, *args):
             pass
 
@@ -754,10 +776,12 @@ def handler(dashboard, port):
         def content_request(self, url):
             query = parse_qs(url.query, keep_blank_values=True)
             kind = url.path.rsplit("/", 1)[-1]
-            base = {"sql": {"id"}, "error": {"id"}, "tool": {"thread_id", "call_id"}, "mcp": {"thread_id", "call_id", "index"}, "jev": {"thread", "call", "index"}, "git": {"thread_id", "call_id", "operation"}}[kind]
+            base = {"sql": {"id"}, "error": {"id"}, "tool": {"thread_id", "call_id"}, "mcp": {"thread_id", "call_id", "index"}, "jev": {"thread", "call", "index"}, "git": {"thread_id", "call_id", "operation"}, "check": {"thread_id", "call_id", "operation"}}[kind]
             extra = {"lazy"} | ({"mask"} if kind == "sql" and "mask" in query else set())
             page = {"field", "offset", "revision"} if "field" in query else set()
             patterns = {"id": r"[a-f0-9]{64}", "thread": r"[a-fA-F0-9-]{36}", "call": r"[A-Za-z0-9_.:-]{1,160}", "thread_id": r"[a-fA-F0-9-]{36}", "call_id": r"[A-Za-z0-9_.:-]{1,160}", "index": r"\d{1,2}", "operation": r"[a-z-]{1,40}", "lazy": "1", "mask": "[01]", "field": "(?:request|response|output|sql|text)", "offset": r"\d{1,12}", "revision": r"[a-f0-9]{64}"}
+            if kind == "check":
+                patterns["operation"] = r"[^\x00-\x1f\x7f]{1,160}"
             if len(url.query)>1024 or set(query)!=base|extra|page or any(len(items)!=1 or not re.fullmatch(patterns.get(key, r"(?!)"), items[0]) for key, items in query.items()):
                 self.reply(400, b"Invalid content page")
                 return
@@ -772,6 +796,8 @@ def handler(dashboard, port):
                 result = dashboard.jev_detail(values["thread"], values["call"], int(values["index"]), full=True)
             elif kind == "mcp":
                 result = dashboard.mcp_detail(values["thread_id"], values["call_id"], int(values["index"]), full=True)
+            elif kind == "check":
+                result = dashboard.check_detail(values["thread_id"], values["call_id"], values["operation"], full=True)
             else:
                 result = dashboard.git_detail(values["thread_id"], values["call_id"], values["operation"], full=True)
             status = 200 if result is not None else 409
@@ -788,7 +814,7 @@ def handler(dashboard, port):
             if not self.local_request():
                 return
             url = urlsplit(self.path)
-            if url.path in ("/api/codex/tool", "/api/codex/mcp", "/api/codex/git", "/api/codex/sql", "/api/codex/error", "/api/codex/jev") and "lazy" in parse_qs(url.query, keep_blank_values=True):
+            if url.path in ("/api/codex/tool", "/api/codex/mcp", "/api/codex/git", "/api/codex/check", "/api/codex/sql", "/api/codex/error", "/api/codex/jev") and "lazy" in parse_qs(url.query, keep_blank_values=True):
                 self.content_request(url)
                 return
             if url.path == "/api/logs":
