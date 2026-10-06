@@ -130,21 +130,31 @@ Token 使用每個 thread 最新累計快照. 不將每次快照或 last-turn co
 
 ## 畫面範例
 
-以下使用隔離的示範資料, 顯示總覽, 對話明細, 錯誤紀錄與設定
+以下四個頁面使用隔離環境產生的示範資料, 對話與專案名稱、用量數值及錯誤內容皆為虛構, 不含真實活動紀錄
 
-![總覽](docs/images/overview-current.png)
+### 總覽
 
-![對話狀態](docs/images/conversations-current.png)
+彙整活動摘要、模型分布與工具趨勢, 可從卡片庫選擇要顯示的圖表
 
-![對話明細](docs/images/thread-current.png)
+![總覽的活動摘要與趨勢圖, 使用示範資料](docs/images/overview-current.png)
 
-![錯誤紀錄](docs/images/errors-current.png)
+### 對話
 
-![程式狀態](docs/images/monitor-current.png)
+查看對話狀態、Model 與 Token 統計, 表格可排序、篩選及開啟明細
 
-![MCP 來源設定](docs/images/settings-current.png)
+![對話頁面的統計圖與對話表格, 使用示範資料](docs/images/conversations-current.png)
 
-![MCP 來源與觀察摘要](docs/images/mcp-current.png)
+### MCP 觀察
+
+比較 MCP 來源的呼叫次數, 查看工具排行、操作類型與操作紀錄
+
+![MCP 來源的呼叫趨勢、排行與操作紀錄, 使用示範資料](docs/images/mcp-current.png)
+
+### 錯誤紀錄
+
+查看錯誤與警告的趨勢、類型分布及相關紀錄, 子分頁以 Badge 顯示錯誤數量
+
+![錯誤與警告的趨勢、分布與紀錄表格, 使用示範資料](docs/images/errors-current.png)
 
 ## 後續增加來源
 
