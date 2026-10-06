@@ -7,6 +7,7 @@ import base64
 import copy
 import gzip
 import hashlib
+from http.client import HTTPConnection, HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -18,7 +19,6 @@ import threading
 import time
 import uuid
 from urllib.parse import parse_qs, urlsplit
-from urllib.request import ProxyHandler, build_opener
 import webbrowser
 
 from .collectors import CodexCollector, JevCollector, WINDOWS, monitor_config, name as tool_name, now
@@ -29,11 +29,13 @@ from .idle_activity import IdleActivity
 from .mcp_source_files import documents as source_documents, read_document, write_document
 from .mcp_records import CATEGORIES, EVENT_LIMIT as MCP_EVENT_LIMIT, TOOL_LIMIT as MCP_TOOL_LIMIT, SOURCE, category, discover_sources, summarize
 from .monitor_state import MonitorState
+from .worktree_info import WorktreeCollector
 from .error_records import DiagnosticCollector, error_summary, FAILURES
 from .error_history import ErrorHistory, error_identity
 from .payload_detail import paged_content
 from .activity_history import ActivityHistory, sql_identity, mcp_identity, merge_event
 from .codex_account import CodexAccountSource
+from .ui_assets import load_ui_assets
 
 
 def data_root():
@@ -91,10 +93,18 @@ def existing_instance(port, home):
         return None
     url = f"http://127.0.0.1:{port}/"
     try:
-        with build_opener(ProxyHandler({})).open(url+"api/instance", timeout=2) as response:
+        connection = HTTPConnection("127.0.0.1", port, timeout=2)
+        try:
+            # Read the complete response before closing, as browsers do with HTTP/1.1.
+            connection.request("GET", "/api/instance")
+            response = connection.getresponse()
+            if response.status != 200:
+                return None
             value = json.loads(response.read(4097))
+        finally:
+            connection.close()
         return url if isinstance(value, dict) and value.get("application")=="local-activity-monitor" and value.get("home_id")==home_id(home) else None
-    except (OSError, ValueError):
+    except (OSError, ValueError, HTTPException):
         return None
 
 
@@ -109,12 +119,13 @@ class Dashboard:
         self.activity = IdleActivity(home)
         source = Path(__file__).parent
         self.code_revision = hashlib.sha256(b"".join(path.read_bytes() for path in sorted(source.glob("*.py")))).hexdigest()[:12]+"-"+uuid.uuid4().hex[:8]
-        self.observations = {"usage": True, "codex_account": False, "codex": codex, "jev": True, "metadata": True, "git": True, "jev_calls": True, "skills": True, "checks": True, "tool_events": True, "mcp": True, "web": True, "files": True, "errors": True, "logs": True, "sqlite": True}
+        self.observations = {"usage": True, "codex_account": False, "codex": codex, "jev": True, "metadata": True, "git": True, "worktrees": True, "jev_calls": True, "skills": True, "checks": True, "tool_events": True, "mcp": True, "web": True, "files": True, "errors": True, "logs": True, "sqlite": True}
         self.default_settings = {"interval": 10, "idle_minutes": 5, "activity_retention_days": ActivityHistory.DEFAULT_DAYS, "max_files": 20, "track_all": False, "observations": dict(self.observations), "mcp_sources": {}, "mcp_categories": {}, "tool_descriptions": {}, "mcp_descriptions": {}, "mcp_tags": {}}
         self.mcp_sources, self.mcp_categories, self.tool_descriptions, self.mcp_descriptions, self.mcp_tags = {}, {}, {}, {}, {}
         self.mcp_document_cache = {}
         self.started_at = now()
-        self.monitor = MonitorState(home/"monitoring/local-activity-monitor.jsonl")
+        self.monitor = MonitorState(home/"monitoring/local-activity-monitor.jsonl", defer_device=True)
+        self.worktrees = WorktreeCollector(home)
         self.diagnostics = DiagnosticCollector(home)
         self.error_history = ErrorHistory(home/"monitoring/error-history.json")
         self.activity_history = ActivityHistory(home/"monitoring/activity-history.json")
@@ -122,23 +133,71 @@ class Dashboard:
         self.lock = threading.Lock()
         self.refresh_lock = threading.RLock()
         self.cache = {}
+        self.activity_cache = self.activity.snapshot(self.idle_minutes, self.interval)
+        self.asset_signature, self.asset_revision = None, None
+        self.stagger = False
+        self.phase_times = {}
+        self.phase_started = None
         self.thread = threading.Thread(target=self.poll, name="metadata-collectors", daemon=True)
 
-    def refresh(self):
+    def refresh(self, stagger=False):
         try:
-            self._refresh()
+            with self.refresh_lock:
+                self.stagger = stagger
+                self.phase_times = {}
+                self.phase_started = None
+                self._refresh()
+                self.phase("idle")
         except Exception as error:
+            self.monitor.collecting("error")
             self.monitor.failed(error)
             raise
+
+    def phase(self, name):
+        if self.phase_started is not None:
+            previous, wall, cpu = self.phase_started
+            self.phase_times[previous] = {"elapsed_ms": round((time.perf_counter()-wall)*1000, 2), "cpu_ms": round((time.process_time()-cpu)*1000, 2)}
+        if self.stagger and self.stop.wait(.05):
+            self.monitor.collecting("stopped")
+            return False
+        self.phase_started = (name, time.perf_counter(), time.process_time())
+        self.monitor.collecting(name)
+        return True
+
+    def web_revision(self):
+        assets = Path(__file__).parent/"web"
+        library = load_ui_assets()
+        paths = [assets/name for name in ("index.html", "app.js", "style.css", "locales.json")]+[library.path(name) for name in ("workbench-ui.js", "workbench-ui.css")]
+        signature = [(str(path), path.stat().st_mtime_ns, path.stat().st_size) for path in paths]
+        if signature != self.asset_signature:
+            self.asset_revision = self.code_revision+"-"+hashlib.sha256(b"".join(path.read_bytes() for path in paths)).hexdigest()[:12]
+            self.asset_signature = signature
+        return self.asset_revision
 
     def _refresh(self):
         with self.refresh_lock:
             began, cpu = time.perf_counter(), time.process_time()
+            if not self.phase("sessions"):
+                return
             before_bytes = (self.codex.read_bytes if self.codex else 0)+self.diagnostics.read_bytes
             if self.codex and self.observations["codex"]:
                 self.codex.select_detail_targets((self.activity_history.snapshot("sql") if self.observations["sqlite"] else [])+(self.activity_history.snapshot("mcp") if self.observations["mcp"] else [])+(self.activity_history.snapshot("web") if self.observations["web"] else []))
-                self.codex.refresh()
-            codex_windows = self.codex.snapshot_windows() if self.codex and self.observations["codex"] else {window: {"source": "codex", "health": "disabled", "threads": [], "tools": {}} for window in WINDOWS}
+                self.codex.refresh(pause=(lambda: self.stop.wait(.01)) if self.stagger else None)
+                if self.stop.is_set():
+                    return
+            if not self.phase("projections"):
+                return
+            codex_windows = self.codex.snapshot_windows(pause=lambda: self.stop.wait(.05) if self.stagger else False) if self.codex and self.observations["codex"] else {window: {"source": "codex", "health": "disabled", "threads": [], "tools": {}} for window in WINDOWS}
+            if self.stop.is_set():
+                return
+            if not self.phase("worktrees"):
+                return
+            worktrees = self.worktrees.refresh(getattr(self.codex, "project_details", {}), codex_windows["all"].get("threads", []),
+                                               getattr(self.codex, "thread_workdirs", {}), self.observations["codex"] and self.observations["worktrees"])
+            for projection in codex_windows.values():
+                projection["worktrees"] = worktrees
+            if not self.phase("account"):
+                return
             # This refresh worker may wait on the optional source, while readers
             # continue receiving the last snapshot without holding self.lock.
             account = self.account.snapshot(self.observations["codex_account"] and self.observations["usage"])
@@ -151,11 +210,15 @@ class Dashboard:
             codex_windows = {window: dict(projection) for window, projection in codex_windows.items()}
             codex = codex_windows["all"]
             enabled, database, since = monitor_config(self.home)
+            if not self.phase("diagnostics"):
+                return
             self.diagnostics.capture_logs = self.observations["logs"]
             self.diagnostics.capture_sql = self.observations["sqlite"]
             if self.observations["codex"] and (self.observations["errors"] or self.observations["logs"] or self.observations["sqlite"]):
                 self.diagnostics.refresh()
             if self.observations["codex"]:
+                if not self.phase("history"):
+                    return
                 sql = codex.get("sqlite", {}).get("_retained_events", codex.get("sqlite", {}).get("events", []))+list(self.diagnostics.sql_events) if self.observations["sqlite"] else []
                 web = [event for event in codex.get("mcp_events", []) if event["server"]=="web"] if self.observations["web"] else []
                 mcp = [event for event in codex.get("mcp_events", []) if event["server"]!="web"] if self.observations["mcp"] else []
@@ -187,6 +250,8 @@ class Dashboard:
             diagnostic_events = diagnostics.pop("events")
             errors = codex.get("error_events", [])+diagnostic_events
             descriptions = {}
+            if not self.phase("mcp"):
+                return
             sources = discover_sources(self.home, descriptions, self.mcp_document_cache)
             if len(self.mcp_document_cache) > 256:
                 self.mcp_document_cache.clear()
@@ -203,8 +268,7 @@ class Dashboard:
                     source["tags"] = list(self.mcp_tags[source["server"]])
             availability = {"jev": "jev" in sources or database is not None or any(item["server"] == "jev" for item in mcp["servers"])}
             settings = self.settings()
-            assets = Path(__file__).parent/"web"
-            revision = self.code_revision+"-"+hashlib.sha256(b"".join((assets/name).read_bytes() for name in ("index.html", "app.js", "style.css", "locales.json", "workbench-ui.js", "workbench-ui.css"))).hexdigest()[:12]
+            revision = self.web_revision()
             scoped_mcp = {}
             for window, projection in codex_windows.items():
                 report = summarize(sources, projection.pop("mcp_events", []), self.mcp_sources, self.mcp_categories)
@@ -217,6 +281,8 @@ class Dashboard:
                 report["recording_status"] = mcp["recording_status"]
                 scoped_mcp[window] = report
             connection = connection_status(codex.get("threads", []), codex.get("error_events", [])+diagnostic_events, self.observations["codex"])
+            if not self.phase("jev"):
+                return
             for projection in codex_windows.values():
                 projection["connection"] = connection
             cache = {window: {"version": 1, "revision": revision, "label": "本機觀察統計", "started_at": self.started_at, "updated_at": now(), "settings": settings, "default_settings": self.default_settings, "availability": availability, "mcp": scoped_mcp[window], "jev": self.jev.snapshot(window) if self.observations["jev"] and self.observations["mcp"] and self.mcp_sources.get("jev", True) else {"source": "jev", "health": "paused", "scope": self.jev.SCOPE, "enabled": enabled, "enabled_at": since, "summary": {}, "recent": [], "series": []}, "codex": projection} for window, projection in codex_windows.items()}
@@ -246,12 +312,17 @@ class Dashboard:
             history += [{"timestamp": event["timestamp"], "category": "monitor", "source": "monitor", "severity": "error", "code": event.get("error_type") or "http_error", "http_status": event.get("http_status"), "reason": event["kind"]} for event in self.monitor.log_snapshot()["entries"] if event["kind"] in ("refresh_failed", "http_response_error")]
             self.error_history.update(history)
             database_bytes = None
+            if not self.phase("hardware"):
+                return
+            self.monitor.load_device()
+            if not self.phase("complete"):
+                return
             if database is not None:
                 try:
                     database_bytes = database.stat().st_size
                 except OSError:
                     pass
-            self.monitor.refreshed({"refresh_ms": round((time.perf_counter()-began)*1000, 2), "cpu_ms": round((time.process_time()-cpu)*1000, 2), "read_bytes": (self.codex.read_bytes if self.codex else 0)+self.diagnostics.read_bytes-before_bytes, "retained_calls": sum(len(state["calls"]) for state in self.codex.files.values()) if self.codex else 0, "buffer_bytes": sum(len(state["buffer"]) for state in self.codex.files.values()) if self.codex else 0, "trimmed_calls": self.codex.trimmed_calls if self.codex else 0, "call_limit": CodexCollector.CALL_LIMIT, "file_limit": CodexCollector.FILE_LIMIT, "buffer_limit": CodexCollector.BUFFER_LIMIT, "jev_database_bytes": database_bytes, "activity_cache_bytes": len(self.activity_history.saved) if self.activity_history.saved is not None else None, "sql_records": len(self.activity_history.sql), "web_records": len(self.activity_history.web), "mcp_records": len(self.activity_history.mcp)})
+            self.monitor.refreshed({"phase_metrics": dict(self.phase_times), "max_phase_cpu_ms": max((phase["cpu_ms"] for phase in self.phase_times.values()), default=0), "refresh_ms": round((time.perf_counter()-began)*1000, 2), "cpu_ms": round((time.process_time()-cpu)*1000, 2), "read_bytes": (self.codex.read_bytes if self.codex else 0)+self.diagnostics.read_bytes-before_bytes, "retained_calls": sum(len(state["calls"]) for state in self.codex.files.values()) if self.codex else 0, "buffer_bytes": sum(len(state["buffer"]) for state in self.codex.files.values()) if self.codex else 0, "trimmed_calls": self.codex.trimmed_calls if self.codex else 0, "call_limit": CodexCollector.CALL_LIMIT, "file_limit": CodexCollector.FILE_LIMIT, "buffer_limit": CodexCollector.BUFFER_LIMIT, "jev_database_bytes": database_bytes, "activity_cache_bytes": len(self.activity_history.saved) if self.activity_history.saved is not None else None, "sql_records": len(self.activity_history.sql), "web_records": len(self.activity_history.web), "mcp_records": len(self.activity_history.mcp)})
             with self.lock:
                 self.cache = cache
 
@@ -319,6 +390,7 @@ class Dashboard:
                 self.activity_history.retention_days = value["activity_retention_days"]
                 self.activity_history.update([], [], [])
             self.activity.wake()
+            self.cache_activity()
             self.max_files = value.get("max_files", self.max_files)
             restart_diagnostics = any(observations.get(key) and not self.observations[key] for key in ("codex", "errors", "logs", "sqlite"))
             self.observations.update(observations)
@@ -423,6 +495,7 @@ class Dashboard:
             result = write_document(value, document, text, expected)
             self.mcp_document_cache.clear()
             self.activity.wake()
+            self.cache_activity()
             self.refresh()
             return result
 
@@ -441,6 +514,12 @@ class Dashboard:
             detail = getattr(self.codex, "project_details", {}).get(project_id, {}) if self.codex else {}
             threads = [{key: row.get(key) for key in ("thread_id", "thread_name", "environment", "status", "archived", "model", "updated_at")} for row in codex.get("threads", []) if row.get("project_id") == project_id]
             return copy.deepcopy(project | {"project_id": project_id, "folders": detail.get("folders", []), "source": detail.get("source"), "threads": threads})
+
+    def worktree_detail(self, identity):
+        with self.refresh_lock:
+            if not self.observations["codex"] or not self.observations["worktrees"]:
+                return None
+            return copy.deepcopy(self.worktrees.detail(identity))
 
     def file_detail(self, thread_id, call_id, path):
         with self.lock:
@@ -490,21 +569,28 @@ class Dashboard:
             return {"enabled": self.observations["logs"], "entries": copy.deepcopy(entries[:2000]), "total": len(entries), "limit": 2000, "trimmed": self.diagnostics.log_trimmed, "sources": self.diagnostics.log_sources(self.observations["codex"] and self.observations["logs"])+[monitor, {"source": "session", "health": codex.get("health", "waiting"), "files": [], "file_count": codex.get("files"), "checked_at": cached.get("updated_at"), "read_bytes": codex.get("bytes_read"), "unsupported_lines": codex.get("malformed_lines"), "backfill_pending": codex.get("error_backfill_pending")}, {"source": "jev_telemetry", "health": jev.get("health", "waiting"), "files": [], "checked_at": cached.get("updated_at")}]}
 
     def activity_status(self):
-        with self.refresh_lock:
-            return self.activity.snapshot(self.idle_minutes, self.interval) | {"code_revision": self.code_revision}
+        # Readers use the last complete activity check instead of waiting for scans.
+        with self.lock:
+            return dict(self.activity_cache) | {"code_revision": self.code_revision}
+
+    def cache_activity(self):
+        with self.lock:
+            self.activity_cache = self.activity.snapshot(self.idle_minutes, self.interval)
 
     def resume_refresh(self):
         with self.refresh_lock:
             self.activity.wake()
+            self.cache_activity()
             self.refresh()
             return self.activity_status()
 
     def poll_once(self):
         with self.refresh_lock:
             self.activity.check(self.codex if self.observations["codex"] else None, self.idle_minutes, self.observations["metadata"])
+            self.cache_activity()
             if self.activity.paused:
                 return False
-            self.refresh()
+            self.refresh(stagger=True)
             return True
 
     def poll(self):
@@ -565,6 +651,12 @@ class Dashboard:
         add("catalog", "Codex / ChatGPT catalog", ["codex", "usage", "dots", "workflow", "skills", "plugins"],
             "titles_classification_and_local_thread_metadata", [reader["location"] for reader in readers], catalog_health,
             sorted({field for reader in loaded for field in reader.get("fields", [])}), readers=readers)
+        worktrees = codex.get("worktrees", {})
+        add("worktrees", "Git worktrees", ["projects", "worktrees"], "loaded_project_roots_and_codex_managed_worktrees",
+            [str(self.worktrees.managed_root)], worktrees.get("health", "disabled"),
+            ["name", "branch", "commit", "detached", "locked", "prunable", "managed", "project_ids", "thread_ids", "checked_at"],
+            {key: value for key, value in worktrees.items() if isinstance(value, (int, bool))})
+        registry["worktrees"]["checked_at"] = worktrees.get("checked_at")
         account = codex.get("account", {})
         add("account_api", "Codex account API", ["usage"], "official_account_read_only", (), account.get("health", "disabled"),
             ["plan_type", "limits", "credits", "account_usage"], {"cache_seconds": 60, "timeout_seconds": 10, "output_bytes": 1048576},
@@ -609,8 +701,10 @@ class Dashboard:
 
 def handler(dashboard, port):
     hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+    library = load_ui_assets()
     assets = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"), "/style.css": ("style.css", "text/css; charset=utf-8"), "/locales.json": ("locales.json", "application/json; charset=utf-8"), "/workbench-ui.js": ("workbench-ui.js", "text/javascript; charset=utf-8"), "/workbench-ui.css": ("workbench-ui.css", "text/css; charset=utf-8")}
     assets["/favicon.svg"] = ("favicon.svg", "image/svg+xml")
+    assets["/favicon.ico"] = ("favicon.ico", "image/vnd.microsoft.icon")
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -755,6 +849,15 @@ def handler(dashboard, port):
                     return
                 result = dashboard.file_detail(query["thread_id"][0], query["call_id"][0], query["path"][0])
                 self.reply(200 if result is not None else 409, json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            elif url.path == "/api/codex/worktree":
+                if len(url.query) > 64:
+                    return self.reply(400, b'{"error":"invalid worktree id"}')
+                query = parse_qs(url.query, keep_blank_values=True)
+                if set(query) != {"id"} or len(query["id"]) != 1 or not re.fullmatch(r"[a-f0-9]{24}", query["id"][0]):
+                    self.reply(400, b"Invalid worktree query")
+                    return
+                result = dashboard.worktree_detail(query["id"][0])
+                self.reply(200 if result is not None else 409, json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
             elif url.path in ("/api/codex/project", "/api/codex/instructions"):
                 query = parse_qs(url.query, keep_blank_values=True)
                 project_id = query.get("project_id", [None])[0]
@@ -818,11 +921,12 @@ def handler(dashboard, port):
             elif url.path in assets:
                 file, mime = assets[url.path]
                 root = Path(__file__).parent/"web"
-                content, script_hash, style_hash = (root/file).read_bytes(), None, None
+                path = library.path(file) if file in ("workbench-ui.js", "workbench-ui.css") else root/file
+                content, script_hash, style_hash = path.read_bytes(), None, None
                 if file == "index.html":
                     # Keep startup assets in one response, with exact CSP hashes.
-                    script = ((root/"workbench-ui.js").read_text(encoding="utf-8")+";\n"+(root/"app.js").read_text(encoding="utf-8")).encode("utf-8").replace(b"</", b"<\\/")
-                    style = ((root/"workbench-ui.css").read_text(encoding="utf-8")+"\n"+(root/"style.css").read_text(encoding="utf-8")).encode("utf-8")
+                    script = (library.path("workbench-ui.js").read_text(encoding="utf-8")+";\n"+(root/"app.js").read_text(encoding="utf-8")).encode("utf-8").replace(b"</", b"<\\/")
+                    style = (library.path("workbench-ui.css").read_text(encoding="utf-8")+"\n"+(root/"style.css").read_text(encoding="utf-8")).encode("utf-8")
                     content = content.replace(b"</body>", b"<script>"+script+b"</script>\n</body>")
                     content = content.replace(b'<link rel="stylesheet" href="/style.css">', b"<style>"+style+b"</style>")
                     content = content.replace(b'<link rel="stylesheet" href="/workbench-ui.css">', b"")
@@ -896,13 +1000,17 @@ def main(argv=None, watch_stdin=False):
             webbrowser.open(existing)
         return 0
     try:
+        load_ui_assets()
+    except (OSError, ValueError, RuntimeError) as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    try:
         server = ThreadingHTTPServer(("127.0.0.1", args.port), BaseHTTPRequestHandler)
     except OSError:
         print("Port is already in use. Keep the existing monitor open or choose another --port.", file=sys.stderr)
         return 1
     dashboard = Dashboard(home, args.codex, args.max_files)
     server.RequestHandlerClass = handler(dashboard, server.server_port)
-    dashboard.refresh()
     dashboard.thread.start()
     url = f"http://127.0.0.1:{server.server_port}/"
     print(json.dumps({"status": "listening", "url": url, "codex_metadata": args.codex}), flush=True)
@@ -911,7 +1019,8 @@ def main(argv=None, watch_stdin=False):
     if watch_stdin:
         def watch_control():
             try:
-                if sys.stdin.readline().strip() == "restart":
+                command = sys.stdin.readline()
+                if not command or command.strip() == "restart":
                     server.shutdown()
             except OSError:
                 pass

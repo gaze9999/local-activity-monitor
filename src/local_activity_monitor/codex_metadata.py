@@ -75,7 +75,7 @@ PROJECT_ROOT_LIMIT = 5000
 SUBAGENT_LIMIT = 500
 
 
-def read_metadata(home, identities, dots=None, source_info=None, project_details=None):
+def read_metadata(home, identities, dots=None, source_info=None, project_details=None, include_workdirs=False):
     entries = {}
     def report(path, health, fields=(), **limits):
         if source_info is not None:
@@ -159,7 +159,9 @@ def read_metadata(home, identities, dots=None, source_info=None, project_details
                 with closing(sqlite3.connect(path.as_uri()+"?mode=ro", uri=True, timeout=.08)) as db:
                     db.execute("PRAGMA query_only=ON")
                     columns = {row[1] for row in db.execute("PRAGMA table_info(threads)")}
-                    wanted = [key for key in ("id", "title", "model", "reasoning_effort", "originator", "thread_source", "model_provider", "cli_version", "approval_mode", "sandbox_policy", "git_branch", "git_sha", "agent_nickname", "agent_role", "agent_path", "source", "history_mode", "archived", "project_id", "created_at", "updated_at", "created_at_ms", "updated_at_ms") if key in columns]
+                    wanted = [key for key in ("id", "title", "model", "reasoning_effort", "originator", "thread_source", "model_provider", "cli_version", "approval_mode", "sandbox_policy", "git_branch", "git_sha", "agent_nickname", "agent_role", "agent_path", "source", "history_mode", "archived", "project_id", "cwd", "created_at", "updated_at", "created_at_ms", "updated_at_ms") if key in columns]
+                    if not include_workdirs and "cwd" in wanted:
+                        wanted.remove("cwd")
                     if not {"id", "title"} <= set(wanted):
                         report(path, "unsupported")
                         continue
@@ -190,6 +192,8 @@ def read_metadata(home, identities, dots=None, source_info=None, project_details
                             rows_read += 1
                             values = dict(zip(wanted, row))
                             entry = entries.setdefault(values["id"], {})
+                            if text(values.get("cwd"), 4096):
+                                entry["_cwd"] = text(values["cwd"], 4096)
                             if type(values.get("archived")) is int and values["archived"] in (0, 1):
                                 entry["archived"] = bool(values["archived"])
                             if text(values.get("project_id"), 160):

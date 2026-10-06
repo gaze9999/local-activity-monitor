@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-spec = importlib.util.spec_from_file_location("monitor_launch", Path(__file__).resolve().parents[1] / "launch.py")
+spec = importlib.util.spec_from_file_location("monitor_launch", Path(__file__).resolve().parents[1] / "tools/launch-cli.py")
 launch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(launch)
 
@@ -15,76 +15,34 @@ class LaunchTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="monitor launch ")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
-        self.python = self.root / ".venv" / ("Scripts/python.exe" if launch.sys.platform == "win32" else "bin/python")
-        self.file_patch = patch.object(launch, "__file__", str(self.root / "launch.py"))
+        self.file_patch = patch.object(launch, "__file__", str(self.root / "tools/launch-cli.py"))
         self.file_patch.start()
         self.addCleanup(self.file_patch.stop)
 
-    def existing(self):
-        self.python.parent.mkdir(parents=True)
-        self.python.touch()
-
-    @patch("builtins.input", return_value="n")
-    @patch.object(launch.subprocess, "run")
-    def test_decline_does_not_create_environment(self, run, prompt):
-        self.assertEqual(launch.main([]), 0)
-        run.assert_not_called()
+    @patch("builtins.input")
+    @patch.object(launch.subprocess, "run", return_value=subprocess.CompletedProcess([], 0))
+    def test_source_launch_never_installs_and_preserves_arguments(self, run, prompt):
+        arguments = ["--codex-home", "資料夾 with spaces"]
+        self.assertEqual(launch.main(arguments), 0)
+        prompt.assert_not_called()
+        run.assert_called_once_with([launch.sys.executable, "-I", "-B", str(self.root / "tools/watch.py"), "--codex", "--open", *arguments], cwd=self.root)
         self.assertFalse((self.root / ".venv").exists())
 
-    @patch("builtins.input", return_value="yes")
-    @patch.object(launch.subprocess, "run", return_value=subprocess.CompletedProcess([], 0))
-    def test_first_setup_then_launch_preserves_arguments(self, run, prompt):
-        self.assertEqual(launch.main(["--port", "8790"]), 0)
-        calls = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(calls[0][-3:], ["-m", "venv", str(self.root / ".venv")])
-        self.assertEqual(calls[1][-3:], ["install", "-r", "requirements.txt"])
-        self.assertEqual(calls[2][-2:], ["--port", "8790"])
-        self.assertTrue(all(call.kwargs["cwd"] == self.root for call in run.call_args_list))
+    @patch.object(launch.subprocess, "run", return_value=subprocess.CompletedProcess([], 17))
+    def test_application_exit_code_is_preserved(self, run):
+        self.assertEqual(launch.main([]), 17)
 
-    @patch("builtins.input")
-    @patch.object(launch.subprocess, "run", return_value=subprocess.CompletedProcess([], 0))
-    def test_installed_skips_prompt_and_install(self, run, prompt):
-        self.existing()
-        self.assertEqual(launch.main(["--help"]), 0)
-        prompt.assert_not_called()
-        self.assertEqual(run.call_count, 2)
-        self.assertNotIn("pip", str(run.call_args_list))
-
-    @patch("builtins.input", return_value="y")
-    @patch.object(launch.subprocess, "run")
-    def test_install_failure_does_not_launch(self, run, prompt):
-        run.side_effect = [subprocess.CompletedProcess([], 0), subprocess.CalledProcessError(1, ["pip"])]
+    @patch.object(launch.subprocess, "run", side_effect=OSError("missing interpreter"))
+    def test_missing_interpreter_never_installs(self, run):
         self.assertEqual(launch.main([]), 1)
-        self.assertEqual(run.call_count, 2)
+        run.assert_called_once()
+        self.assertFalse((self.root / ".venv").exists())
 
-    @patch("builtins.input", return_value="y")
+    @patch.object(launch.sys, "version_info", (3, 9))
     @patch.object(launch.subprocess, "run")
-    def test_missing_package_in_existing_environment_retries_install(self, run, prompt):
-        self.existing()
-        run.side_effect = [subprocess.CompletedProcess([], 1), subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 0)]
-        self.assertEqual(launch.main([]), 0)
-        self.assertEqual(run.call_count, 3)
-        self.assertEqual(run.call_args_list[1].args[0][-3:], ["install", "-r", "requirements.txt"])
-
-    @patch("builtins.input")
-    @patch.object(launch.subprocess, "run")
-    def test_incomplete_environment_is_preserved(self, run, prompt):
-        (self.root / ".venv").mkdir()
+    def test_unsupported_python_stops_before_launch(self, run):
         self.assertEqual(launch.main([]), 1)
         run.assert_not_called()
-        prompt.assert_not_called()
-        self.assertTrue((self.root / ".venv").exists())
-
-    def test_platform_interpreter_and_space_paths_preserve_arguments(self):
-        for platform in ('win32','linux','darwin'):
-            with self.subTest(platform=platform), tempfile.TemporaryDirectory(prefix='monitor platform ') as folder:
-                root=Path(folder).resolve();python=root/'.venv'/('Scripts/python.exe' if platform=='win32' else 'bin/python')
-                python.parent.mkdir(parents=True);python.touch()
-                with patch.object(launch,'__file__',str(root/'launch.py')),patch.object(launch.sys,'platform',platform),patch.object(launch.subprocess,'run',return_value=subprocess.CompletedProcess([],0)) as run,patch('builtins.input') as prompt:
-                    self.assertEqual(launch.main(['--codex-home',str(root/'home with spaces')]),0)
-                prompt.assert_not_called()
-                self.assertTrue(all(call.args[0][0]==str(python) and call.kwargs['cwd']==root for call in run.call_args_list))
-                self.assertEqual(run.call_args.args[0][-2:],['--codex-home',str(root/'home with spaces')])
 
 
 if __name__ == "__main__":

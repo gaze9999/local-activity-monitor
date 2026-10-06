@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
-ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+MONITOR_INSTALL=no
+if [ "${1-}" = --console ]; then shift; fi
+if [ "${1-}" = --install-python ]; then MONITOR_INSTALL=yes; shift; fi
 if { [ -e "$ROOT_DIR/.venv" ] || [ -L "$ROOT_DIR/.venv" ]; } && [ ! -x "$ROOT_DIR/.venv/bin/python" ]; then
   printf '%s\n' 'Existing .venv is incomplete. Inspect it before retrying; nothing was overwritten.' >&2
   exit 1
@@ -18,7 +21,7 @@ find_python() {
     if [ "$MONITOR_SYSTEM" = Darwin ] && [ "$MONITOR_PATH" = /usr/bin/python3 ] && ! xcode-select -p >/dev/null 2>&1; then
       continue
     fi
-    if "$MONITOR_PYTHON" -I -B -c 'import sys; assert sys.version_info >= (3, 10); import venv, ensurepip, ssl, sqlite3' >/dev/null 2>&1; then
+    if "$MONITOR_PYTHON" -I -B -c 'import sys; assert sys.version_info >= (3, 10); import ssl, sqlite3' >/dev/null 2>&1; then
       return 0
     fi
   done
@@ -26,7 +29,11 @@ find_python() {
 }
 
 if ! find_python; then
-  printf '%s\n' 'Python 3.10+ with venv, pip, SSL and SQLite support is required.'
+  printf '%s\n' 'Python 3.10+ with SSL and SQLite support is required.'
+  if [ "$MONITOR_INSTALL" != yes ]; then
+    printf '%s\n' 'No dependencies were installed. Install Python manually or retry with --install-python.' >&2
+    exit 1
+  fi
   MONITOR_BREW=''
   case "$MONITOR_SYSTEM" in
     Darwin)
@@ -95,8 +102,8 @@ if ! find_python; then
       ;;
   esac
   if ! find_python; then
-    printf '%s\n' 'Python is still unavailable, below 3.10 or missing venv/pip/SSL/SQLite support. Inspect the installation, then retry.' >&2
+    printf '%s\n' 'Python is still unavailable, below 3.10 or missing SSL/SQLite support. Inspect the installation, then retry.' >&2
     exit 1
   fi
 fi
-exec "$MONITOR_PYTHON" -I -B "$ROOT_DIR/launch.py" "$@"
+exec "$MONITOR_PYTHON" -I -B "$ROOT_DIR/tools/launch-cli.py" "$@"

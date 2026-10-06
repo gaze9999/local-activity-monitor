@@ -63,8 +63,11 @@ class LifecycleBackfillTests(unittest.TestCase):
             collector = CodexCollector(root, tail_bytes=8192);collector.refresh()
             self.assertLessEqual(collector.read_bytes, 8*1024*1024)
             self.assertTrue(collector.snapshot()["threads"][0]["status_backfill_pending"])
-            before = collector.read_bytes;collector.refresh()
-            self.assertLessEqual(collector.read_bytes-before, 8*1024*1024)
+            for _ in range(20):
+                before = collector.read_bytes;collector.refresh()
+                self.assertLessEqual(collector.read_bytes-before, 8*1024*1024)
+                if not collector.snapshot()["threads"][0]["status_backfill_pending"]:
+                    break
             row = collector.snapshot()["threads"][0]
             self.assertEqual(row["status"], "running")
             self.assertEqual(row["status_source"], "session_lifecycle")

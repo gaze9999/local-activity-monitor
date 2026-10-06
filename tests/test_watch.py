@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-spec=importlib.util.spec_from_file_location("monitor_watch",Path(__file__).resolve().parents[1]/"watch.py")
+spec=importlib.util.spec_from_file_location("monitor_watch",Path(__file__).resolve().parents[1]/"tools/watch.py")
 watch=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(watch)
 
@@ -41,6 +41,15 @@ class WatchTests(unittest.TestCase):
             path=source/"server.py";path.write_text("before")
             before=watch.signature(root);path.write_text("after change")
             self.assertNotEqual(watch.signature(root),before)
+
+    def test_gui_stop_event_stops_only_owned_child(self):
+        child=MagicMock();child.poll.return_value=None
+        stop=MagicMock();stop.is_set.return_value=True
+        with patch.object(watch,"signature",return_value=()),patch.object(watch.subprocess,"Popen",return_value=child):
+            self.assertEqual(watch.supervise(Path("."),[],stop),0)
+        child.stdin.write.assert_called_once_with("restart\n")
+        child.wait.assert_called_once_with(timeout=5)
+        child.terminate.assert_not_called()
 
 
 if __name__=="__main__":unittest.main()

@@ -45,7 +45,9 @@ class BootstrapFixture(unittest.TestCase):
 class PosixBootstrapTests(BootstrapFixture):
     def setUp(self):
         super().setUp()
-        shutil.copyfile(ROOT / "start.sh", self.root / "start.sh")
+        shutil.copyfile(ROOT / "launch-cli.sh", self.root / "launch-cli.sh")
+        (self.root / "tools").mkdir()
+        shutil.copyfile(ROOT / "tools/launch-posix.sh", self.root / "tools/launch-posix.sh")
         self.env.update(MOCK_SYSTEM="Linux", MOCK_UID="0")
         # Keep host package managers/interpreters out of discovery. Git's usr/bin
         # supplies dirname on Windows, /usr/bin does so on POSIX hosts.
@@ -88,9 +90,10 @@ if [ "$MOCK_STAY_MISSING" = 0 ]; then : > "$MOCK_READY"; fi
         target.write_text(content, newline="\n")
         target.chmod(0o755)
 
-    def run_launcher(self, reply="", args=()):
+    def run_launcher(self, reply="", args=(), install=True):
         # Send literal LF input. Windows text-mode pipes would convert it to CRLF.
-        result = subprocess.run([SH, str(self.root / "start.sh"), *args], input=reply.encode(),
+        options = ["--install-python"] if install else []
+        result = subprocess.run([SH, str(self.root / "launch-cli.sh"), *options, *args], input=reply.encode(),
                                 capture_output=True, env=self.env, timeout=15)
         return subprocess.CompletedProcess(result.args, result.returncode, result.stdout.decode(), result.stderr.decode())
 
@@ -101,6 +104,13 @@ if [ "$MOCK_STAY_MISSING" = 0 ]; then : > "$MOCK_READY"; fi
         self.assertFalse(self.install_log.exists())
         self.assertEqual(self.lines(self.launch_log)[-2:], ["--codex-home", "folder with spaces"])
         self.assertNotIn("Install Python", result.stdout)
+
+    def test_default_missing_runtime_never_prompts_or_installs(self):
+        result = self.run_launcher("y\n", install=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("Install Python now?", result.stdout)
+        self.assertFalse(self.install_log.exists())
+        self.assertFalse(self.launch_log.exists())
 
     def test_decline_empty_or_eof_never_installs_or_launches(self):
         for reply in ("n\n", "\n", ""):
@@ -181,7 +191,7 @@ if [ "$MOCK_STAY_MISSING" = 0 ]; then : > "$MOCK_READY"; fi
 class WindowsBootstrapTests(BootstrapFixture):
     def setUp(self):
         super().setUp()
-        self.env.update(MOCK_MANAGER="winget", MOCK_REPLY="y", MOCK_PROBE_LOG=str(self.root / "probe.log"))
+        self.env.update(MOCK_MANAGER="winget", MOCK_REPLY="y", MOCK_INSTALL="1", MOCK_PROBE_LOG=str(self.root / "probe.log"))
         python = self.bin / "python.cmd"
         python.write_text(r'''@echo off
 if "%~1"=="-3" shift /1
@@ -215,7 +225,7 @@ exit /b 0
         def quote(value):
             return "'" + str(value).replace("'", "''") + "'"
         harness = self.root / "bootstrap.ps1"
-        harness.write_text(f'''. {quote(ROOT / 'tools/start_windows.ps1')}
+        harness.write_text(f'''. {quote(ROOT / 'tools/launch-windows.ps1')}
 function Get-Command {{
     param($Name, $CommandType, $ErrorAction)
     if ($Name -in @('py', 'python', 'python3')) {{ return [pscustomobject]@{{ Source = {quote(python)} }} }}
@@ -223,7 +233,7 @@ function Get-Command {{
     return $null
 }}
 function Read-Host {{ param($Prompt) return $env:MOCK_REPLY }}
-exit (Start-Monitor {quote(self.root)} @('--codex-home', 'folder with spaces'))
+exit (Start-Monitor {quote(self.root)} @('--codex-home', 'folder with spaces') ($env:MOCK_INSTALL -eq '1'))
 ''')
         self.harness = harness
 
@@ -233,6 +243,28 @@ exit (Start-Monitor {quote(self.root)} @('--codex-home', 'folder with spaces'))
 
     def test_ready_environment_skips_install_and_prevents_probe_downloads(self):
         self.ready.touch()
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.install_log.exists())
+        self.assertEqual(self.lines(self.launch_log)[-2:], ["--codex-home", "folder with spaces"])
+        self.assertEqual(self.lines(self.root / "probe.log"), ["false"])
+
+    def test_default_missing_runtime_never_prompts_or_installs(self):
+        self.env["MOCK_INSTALL"] = "0"
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn("Install Python now?", result.stdout)
+        self.assertFalse(self.install_log.exists())
+        self.assertFalse(self.launch_log.exists())
+
+    def test_multiple_discovery_paths_try_each_without_installing(self):
+        self.ready.touch()
+        unavailable = self.bin / "unavailable.cmd"
+        unavailable.write_text("@exit /b 1\n", newline="\r\n")
+        harness = self.harness.read_text()
+        command = "[pscustomobject]@{ Source = '" + str(unavailable).replace("'", "''") + "' }"
+        harness = harness.replace("return [pscustomobject]@{ Source = ", "return " + command + ", [pscustomobject]@{ Source = ", 1)
+        self.harness.write_text(harness)
         result = self.run_launcher()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.install_log.exists())
@@ -301,16 +333,18 @@ exit (Start-Monitor {quote(self.root)} @('--codex-home', 'folder with spaces'))
         # Real interpreter, isolated inert entry point. No LAM service or install.
         checkout = self.root / "來源 🐍 with spaces"
         checkout.mkdir()
-        shutil.copyfile(ROOT / "Start.cmd", checkout / "Start.cmd")
+        shutil.copyfile(ROOT / "launch-cli.cmd", checkout / "launch-cli.cmd")
         (checkout / "tools").mkdir()
-        shutil.copyfile(ROOT / "tools/start_windows.ps1", checkout / "tools/start_windows.ps1")
-        (checkout / "launch.py").write_text("import json, sys\nprint(json.dumps(sys.argv[1:]))\n")
+        shutil.copyfile(ROOT / "tools/launch-windows.ps1", checkout / "tools/launch-windows.ps1")
+        (checkout / "tools/launch-cli.py").write_text("import json, sys\nprint(json.dumps(sys.argv[1:]))\n")
         arguments = ["--codex-home", "資料夾 🐍 with spaces"]
-        command = subprocess.list2cmdline([str(checkout / "Start.cmd"), *arguments])
+        command = subprocess.list2cmdline([str(checkout / "launch-cli.cmd"), *arguments])
         result = subprocess.run('"' + os.environ["COMSPEC"] + '" /d /s /c "' + command + '"', input="", capture_output=True,
                                 text=True, env=self.env, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertEqual(json.loads(result.stdout.strip()), arguments)
+
+
 
 
 if __name__ == "__main__":

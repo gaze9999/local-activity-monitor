@@ -19,6 +19,8 @@ dist/
 !.codex/agent-guidance/roles.md
 .agents/
 .local/
+.workbench-ui/
+src/local_activity_monitor/_workbench/
 state/
 *.db
 *.db-*

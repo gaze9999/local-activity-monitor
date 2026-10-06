@@ -6,8 +6,9 @@ Python 3.10+ 標準函式庫, 原生 HTML / JavaScript / CSS, setuptools package
 
 | 檔案 | 責任 |
 | --- | --- |
-| `launch.py` / 平台入口 | 首次安裝, 使用 repository venv 啟動 watcher |
-| `watch.py` | Python 原始碼儲存穩定後重啟自己建立的服務子程序 |
+| 根目錄平台入口 / `tools/launch-cli.py` | 使用既有 Python 直接啟動原始碼, 預設不安裝 |
+| `tools/smoke_gui.py` | 以隔離資料與瀏覽器偏好驗證原生 WebView 的分頁、設定與重新載入 |
+| `tools/watch.py` | Python 原始碼儲存穩定後重啟自己建立的服務子程序 |
 | `server.py` | loopback HTTP, snapshot cache, 設定驗證與 collector 協調 |
 | `collectors.py` | Jev metadata DB, Codex JSONL 增量讀取, 時間 / counters / 工具摘要 |
 | `codex_metadata.py` | 選取 catalog, session index 與 app state 中的名稱 / 分類 / 專案 |
@@ -86,6 +87,10 @@ AGENTS.md 的最後修改時間取自實際開啟的檔案, 技能文件沿用�
 
 ## HTTP 與設定
 
+共用 UI 由 `ui_assets.py` 串接 Workbench UI 的標準函式庫載入器. Checkout 直接讀取相鄰儲存庫的 `src/`, 可用 `WORKBENCH_UI_PATH` 指定來源, 不持有手動維護的 CSS / JavaScript 副本. 靜態路由仍使用固定白名單, 首頁保留合併資產與 CSP hash, 版本識別包含實際來源路徑、mtime 與內容 hash, 來源資產變更會觸發頁面更新
+
+`workbench-ui.json` 固定共用來源的完整 commit SHA. CI 呼叫 Workbench UI 的共用 action, 產生 `_workbench/` 的載入器、四個資產與 SHA-256 manifest, 原生程式與 Python 套件將此目錄內嵌, 原始碼下載包另外加入這些產生檔. 離線啟動先驗證 manifest 與資產, 不需另一份來源 checkout. 本機明確執行 `tools/prepare_ui.py --update` 才會取得最新版與更新 SHA, 啟動不下載、不安裝相依套件
+
 | Endpoint | 用途 |
 | --- | --- |
 | `GET /api/snapshot?window=1h\|24h\|7d\|all` | 彙整 snapshot, window 作用於 Jev DB |
@@ -108,7 +113,7 @@ AGENTS.md 的最後修改時間取自實際開啟的檔案, 技能文件沿用�
 
 Snapshot 額外提供 `default_settings` 與讀取器的來源資訊. `sources` 根據當次 collector 結果組合實際位置, health, 選取欄位與上限, 各讀取器保留實際讀取數量與回補狀態. 上限與執行讀取共用 constants, 不額外重掃來源或載入 payload. 頁面依主 / 子 Tab 的資料相依篩選來源, 詳細內容只在展開區塊時建立 DOM. MCP 回傳只投影最多 40 個符合用量, credits, 次數或耗時語意的數值, 排除 credentials 與任意帳戶欄位. Token 用量採 thread 最新累計, 額度保留來源視窗, 剩餘百分比與時間, 不推估帳單金額
 
-Snapshot 的 monitor 欄位提供處理器名稱, 實體與可用記憶體容量, GPU 型號 / 專用容量 / 共享上限 / 驅動版本及 runtime, uptime, refresh / process CPU 耗時, 本輪 session bytes, 資料保留量, HTTP 回應大小與錯誤計數. GPU 於啟動時查詢, 最多 16 張. Windows 使用 System32 的 DXGI 唯讀 API, 區分專用容量與共享上限, 32 位元程序不提供容量, 不採用只有 uint32 的 WMI AdapterRAM. Linux 使用已安裝的 nvidia-smi 或 DRM sysfs, 型號按需由已安裝的 lspci 補充, 外部查詢合計預算 3 秒, 不安裝工具. macOS 使用 system_profiler 的顯示卡資料, Apple M 系列標示統一記憶體, 不將共享容量當成專用容量. 每個外部指令最多 2 秒, 接受輸出最多 128 KiB. 權限, 工具, schema 或驅動欄位不足時保留未知, 不使用 kernel 或 macOS 版本冒充 GPU 驅動版本. 記憶體容量最多每 5 秒查詢一次, macOS 可用容量目前保持未知. 360 個效能樣本及 200 個狀態事件使用 bounded deque, 重新啟動後清空. 整理失敗保留前次 cache, poll 繼續重試, 紀錄只保存例外類型
+Snapshot 的 monitor 欄位提供處理器名稱, 實體與可用記憶體容量, GPU 型號 / 專用容量 / 共享上限 / 驅動版本及 runtime, uptime, refresh / process CPU 耗時, 本輪 session bytes, 資料保留量, HTTP 回應大小與錯誤計數. GPU 在首次硬體收集階段查詢, 最多 16 張. Windows 使用 System32 的 DXGI 唯讀 API, 區分專用容量與共享上限, 32 位元程序不提供容量, 不採用只有 uint32 的 WMI AdapterRAM. Linux 使用已安裝的 nvidia-smi 或 DRM sysfs, 型號按需由已安裝的 lspci 補充, 外部查詢合計預算 3 秒, 不安裝工具. macOS 使用 system_profiler 的顯示卡資料, Apple M 系列標示統一記憶體, 不將共享容量當成專用容量. 每個外部指令最多 2 秒, 接受輸出最多 128 KiB. 權限, 工具, schema 或驅動欄位不足時保留未知, 不使用 kernel 或 macOS 版本冒充 GPU 驅動版本. 記憶體容量最多每 5 秒查詢一次, macOS 可用容量目前保持未知. 360 個效能樣本及 200 個狀態事件使用 bounded deque, 重新啟動後清空. 整理失敗保留前次 cache, poll 繼續重試, 紀錄只保存例外類型
 
 錯誤觀察使用平台 log 目錄及 CODEX_HOME 的 logs_*.sqlite, 驗證 schema 後唯讀選取 metadata. Desktop 最多 8 個近期 log, 每份初始 256 KiB 尾端, 增量與歷史回補每輪各最多 1 MiB, 未完成行最多 64 KiB. Core 每輪最多最近 2000 列 ID, 歷史回補每輪最多 2000 列. 有 0.08 秒 SQLite 讀取預算, 投影診斷 / SQL metadata, body 只暫讀前 8192 字元供分類, 不保留. 診斷事件與輸出的錯誤清單各最多 1000 筆, source 缺少 / schema 不符顯示健康狀態. 詳細錯誤判定見 [錯誤觀察](error-observation.md)
 
@@ -124,9 +129,8 @@ HTML 內嵌目前 CSS / script 並提供精確 CSP SHA-256, 換行先統一為 L
 
 ## 原生發布
 
-`tools/portable.py` 直接啟動 server, 不使用原始碼 watcher 或安裝流程. `tools/build_release.py` 在各原生系統使用固定版 PyInstaller 建置資料夾套件, 收入完整 web assets, 說明與 runtime 授權文件. `tools/smoke_release.py` 以暫存 CODEX_HOME 與 loopback 隨機 port 啟動該執行檔, 核對 HTTP, CSP, 資產, 版本與任意檔案存取邊界
+`tools/launch-portable.py` 直接啟動 server, 不使用原始碼 watcher 或安裝流程. `tools/build_release.py` 在各原生系統使用固定版 PyInstaller 建置資料夾套件, 收入完整 web assets, 說明與 runtime 授權文件. `tools/smoke_release.py` 以暫存 CODEX_HOME 與 loopback 隨機 port 啟動該執行檔, 核對 HTTP, CSP, 資產, 版本與任意檔案存取邊界
 
-`.github/workflows/release.yml` 由 workflow_dispatch 對指定 commit 執行 Windows x64, macOS Intel / ARM64, Linux x64 / ARM64 建置, 測試失敗不進入 release 上傳. 原始碼 zip, sdist, wheel 與 SHA-256 一起附加到 draft release, 確認產物後再公開. Build 工具列在 requirements-build.txt, 不加入 runtime 相依
 
 GPU 容量語意依 [Microsoft DXGI](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/ns-dxgi-dxgi_adapter_desc), [NVIDIA SMI](https://docs.nvidia.com/deploy/nvidia-smi/), [Linux AMDGPU sysfs](https://docs.kernel.org/gpu/amdgpu/driver-misc.html) 與 [Apple silicon 架構](https://developer.apple.com/videos/play/wwdc2020/10686/) 處理
 ## 活動保留與按需檔案資訊
@@ -142,3 +146,11 @@ GPU 容量語意依 [Microsoft DXGI](https://learn.microsoft.com/en-us/windows/w
 前端 cardLibrary 保存卡片的來源, 穩定識別碼, 類別, 支援的圖表形式與共用控制項. chartViews 保存各實例的參數與本輪資料投影, 總覽副本沿用同一呈現函式並套用自己的範圍. summaryLibrary 保存已載入的摘要指標, 顯示數量, 順序與名稱由瀏覽器偏好管理. 新卡片沿用既有 renderer 與設定保存流程, 不增加資料讀取來源
 
 payload_detail.py 完成遮蔽與結構投影後建立含 revision 的內容頁, 原有受限明細 API 加上 lazy=1 時回傳分頁. offset 與 revision 只用於已確認的同一工具或診斷紀錄, 前端逐頁建立語法顏色或 Markdown 預覽. Markdown 以文字節點與明確允許的連結建立 DOM, 不執行文件中的 HTML 或程式碼
+
+## 分批收集與畫面載入
+
+HTTP 服務提供等待狀態後, 單一收集 worker 依序讀取 session、統計投影、工作樹、帳戶、診斷、歷史、MCP、Jev 與硬體資訊. 定期檢查在來源及投影之間短暫讓出執行時間, session 在有新資料的區塊之間也讓出執行時間. 快照及活動狀態讀取使用最近已發布結果, 不等待收集鎖. 收集取消保留上一輪完整結果
+
+前端只更新目前分頁內容, 已選的總覽副本保留自己的設定. 圖表接近可視範圍後才繪製, 每次排程只處理一張圖表, 切換分頁或更新資料時以最新工作取代尚未執行的工作. 圖表設定欄位在第一次點開齒輪時建立, 摘要與圖表預留顯示空間. 資料明細仍沿用原有按需讀取的路徑與權限檢查
+
+監測頁使用瀏覽器原生 PerformanceObserver 顯示 TTFB、FCP、LCP、CLS、長任務與最慢互動. 首次資料呈現取首批資料更新 DOM 後的下一個畫面回呼時間, 圖表仍按需繪製. 只保存目前頁面的數值, 重新載入後重算, 不保存 DOM、URL 或事件內容, 不送至後端. LCP 取首次進入背景前的最後樣本, CLS 取間隔未達 1 秒且總長未達 5 秒的最大位移群組, 排除近期輸入造成的位移. Event Timing 使用 interactionId 大於零的最大 duration, 不標示為 INP. 缺少樣本或 API 支援時維持缺值, 參考 [CLS 定義](https://web.dev/articles/cls) 與 [Event Timing](https://www.w3.org/TR/event-timing/)

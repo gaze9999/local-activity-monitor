@@ -29,14 +29,40 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Read shared UI pin
+        id: ui
+        shell: pwsh
+        run: |
+          $uiPin = Get-Content workbench-ui.json -Raw | ConvertFrom-Json
+          if ($uiPin.version -ne 1 -or $uiPin.repository -ne 'gaze9999/workbench-ui' -or $uiPin.revision -cnotmatch '^[a-f0-9]{40}$') { throw 'Invalid shared UI pin' }
+          "revision=$($uiPin.revision)" >> $env:GITHUB_OUTPUT
+      - name: Fetch pinned shared UI
+        uses: actions/checkout@v4
+        with:
+          repository: gaze9999/workbench-ui
+          ref: ${{ steps.ui.outputs.revision }}
+          token: ${{ secrets.WORKBENCH_UI_READ_TOKEN }}
+          path: .workbench-ui
+          persist-credentials: false
+      - name: Prepare offline UI assets
+        uses: ./.workbench-ui/integrations/github-action
+        with:
+          project: .
+          destination: src/local_activity_monitor/_workbench
       - name: Test source
         env:
           PYTHONPATH: src
         run: python -m unittest discover -s tests
       - name: Install isolated build tools
-        run: python -m pip install -r requirements-build.txt
+        run: python -m pip install -r tools/requirements-build.txt
       - name: Build and smoke test native bundle
-        run: python tools/build_release.py
+        shell: pwsh
+        env:
+          WORKBENCH_UI_PATH: .workbench-ui
+        run: |
+          $buildArgs = @('tools/build_release.py', '--release')
+          python @buildArgs
+          if ($LASTEXITCODE -ne 0) { throw 'Native bundle verification failed' }
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
@@ -53,18 +79,38 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Read shared UI pin
+        id: ui
+        shell: pwsh
+        run: |
+          $uiPin = Get-Content workbench-ui.json -Raw | ConvertFrom-Json
+          if ($uiPin.version -ne 1 -or $uiPin.repository -ne 'gaze9999/workbench-ui' -or $uiPin.revision -cnotmatch '^[a-f0-9]{40}$') { throw 'Invalid shared UI pin' }
+          "revision=$($uiPin.revision)" >> $env:GITHUB_OUTPUT
+      - name: Fetch pinned shared UI
+        uses: actions/checkout@v4
+        with:
+          repository: gaze9999/workbench-ui
+          ref: ${{ steps.ui.outputs.revision }}
+          token: ${{ secrets.WORKBENCH_UI_READ_TOKEN }}
+          path: .workbench-ui
+          persist-credentials: false
+      - name: Prepare offline UI assets
+        uses: ./.workbench-ui/integrations/github-action
+        with:
+          project: .
+          destination: src/local_activity_monitor/_workbench
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - run: node --check src/local_activity_monitor/web/app.js
-      - run: python -m pip install -r requirements-build.txt
+      - run: python -m pip install -r tools/requirements-build.txt
       - run: python -m build
       - name: Source archive with launchers
         env:
           PYTHONPATH: src
         run: |
           RELEASE_VERSION=$(python -c 'import local_activity_monitor as m; print(m.__version__)')
-          git archive --format=zip --prefix=local-activity-monitor/ HEAD -o "dist/local-activity-monitor-$RELEASE_VERSION-source.zip"
+          python tools/archive_source.py "dist/local-activity-monitor-$RELEASE_VERSION-source.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: source
