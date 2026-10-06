@@ -24,7 +24,7 @@ CLI 預設開啟本機監測頁面, 終端按 Ctrl+C 停止. 原生執行檔可�
 
 根目錄保留啟動入口、必要文件與設定. 啟動輔助程式與相依清單位於 `tools/`
 
-本機開發需將 private 的 `workbench-ui` 儲存庫放在相鄰目錄, 或以 `WORKBENCH_UI_PATH` 指定其根目錄. LAM 直接讀取共用 UI, 不維護 CSS / JavaScript 副本, 啟動不自動下載或安裝. 發行版與原始碼下載包內嵌共用資產, 可離線使用
+本機開發可將 private 的 `workbench-ui` 儲存庫放在相鄰目錄, 或以 `WORKBENCH_UI_PATH` 指定其根目錄. LAM 直接讀取共用 UI, 不維護 CSS / JavaScript 副本. CLI 啟動時若沒有共用來源或離線資產, 會使用既有 Git 認證取得 `workbench-ui.json` 指定的 commit, 保存至本專案的 `.local/workbench-ui/<revision>` 並產生離線資產. 不修改鄰近儲存庫或固定版本, 不安裝相依套件. 缺少 Git、存取權限或網路時顯示原因, 既有資產異常時保留原內容並停止啟動. 發行版與原始碼下載包內嵌共用資產, 可離線使用
 
 | --- | --- | --- |
 | Linux | 使用瀏覽器介面 | `sh launch-cli.sh` |
@@ -36,7 +36,7 @@ CLI 預設開啟本機監測頁面, 終端按 Ctrl+C 停止. 原生執行檔可�
 
 ```sh
 python -m venv .venv
-python tools/prepare_ui.py
+python tools/prepare_ui.py --ensure
 # Windows
 .venv/Scripts/python.exe -m pip install -r tools/requirements.txt
 # macOS / Linux
@@ -47,7 +47,7 @@ python tools/prepare_ui.py
 
 原始碼啟動由 `tools/watch.py` 監看 Python 修改, 儲存穩定後只重啟自己建立的服務子程序. HTML / JS / CSS 在更新週期內重新載入. 瀏覽器的 Tab、排序、篩選、頁碼、外觀與觀察設定保留在 localStorage. 更新 launcher / watcher 或 runtime 時需重新啟動入口, watcher 不自動 pull 或更新相依. 直接呼叫已安裝的 CLI / wheel 不啟用 watcher
 
-更新共用 UI 時執行 `python tools/prepare_ui.py --update`, 會以既有 Git 認證取得 Workbench UI 的 `main` 最新提交, 更新 `workbench-ui.json` 並產生離線資產. Workbench UI 必須處於乾淨的 `main`, 不會覆寫未提交內容或重寫歷史. 本機 CSS / JavaScript 更新依既有網頁更新週期套用, 更新載入器時需重啟 LAM. 不加 `--update` 時只準備設定檔指定的固定版本
+更新共用 UI 時執行 `python tools/prepare_ui.py --update`, 會以既有 Git 認證取得 Workbench UI 的 `main` 最新提交, 更新 `workbench-ui.json` 並產生離線資產. Workbench UI 必須處於乾淨的 `main`, 不會覆寫未提交內容或重寫歷史. 本機 CSS / JavaScript 更新依既有網頁更新週期套用, 更新載入器時需重啟 LAM. `--ensure` 只準備固定版本, 缺少來源時才自動取得, 不能與 `--update` 同時使用. 未指定這兩個選項時沿用既有本機來源與離線資產準備流程
 
 
 
@@ -96,7 +96,7 @@ Request bytes 是每次 HTTP 嘗試的 JSON body 大小. response bytes 只計�
 
 Codex collector 從 JSONL, 本機 thread SQLite catalog, session index 與指定 app state 欄位選取 metadata, 不將完整原始紀錄, 一般對話文字或完整指令送到頁面. 不讀 `auth.json`, 憑證檔或 shell history. `exec` 中只辨識明確 literal 的 Git / Jev / Skills / 驗證操作, 不執行程式碼. 工具明細另外列出 `exec` 內辨識到的工具名稱, 包含動態參數的呼叫. 數量是程式碼出現位置, 不推論迴圈或條件分支的實際執行次數. 對話名稱優先取本機 catalog 的側邊欄顯示名稱, 缺少時才使用 session title / index. 分類依已記錄欄位, 缺少資料顯示未知
 
-主頁整合總覽, 用量與額度, 對話, 專案, 工具, 資料操作, 錯誤與 Log, 監測程式. 對話包含列表 / 子代理程式 / 排程 / My dots, 專案包含列表 / Git / 驗證, 工具包含呼叫與耗時 / MCP / 技能 / Plugins, 資料操作包含網路 / 檔案 / SQL. 各子 Tab 的用途以 tooltip 顯示, 範圍沿用主頁或個別覆寫, 舊頁面入口與圖表設定保留. 排程只讀取本機 metadata, 不顯示 prompt 或帳戶 ID. MCP 來源按鈕固定展開並自動換行. 左上版本與標題分開, 右上集中更新, 啟動與執行時間. 每頁最下方的資料來源與讀取範圍維持全寬並預設收合, 展開可查看實際檔案位置, 選取欄位, 讀取結果, 目前保留量與程式上限
+主頁整合總覽, 用量與額度, 對話, 專案, 工具, 資料操作, 錯誤與 Log, 監測程式. 對話包含列表 / 子代理程式 / 排程 / My dots, 專案包含列表 / Git / 驗證, 工具包含呼叫與耗時 / MCP / 技能 / Plugins, 資料操作包含網路 / 檔案 / SQL. 各子 Tab 的用途以 tooltip 顯示, 時間範圍由頁首全域選單控制, 舊頁面入口與圖表設定保留. 排程只讀取本機 metadata, 不顯示 prompt 或帳戶 ID. MCP 來源按鈕固定展開並自動換行. 左上版本與標題分開, 右上資訊區維持兩行, 集中連線狀態、額度剩餘、重設與更新時間. 每頁最下方的資料來源與讀取範圍維持全寬並預設收合, 展開可查看實際檔案位置, 選取欄位, 讀取結果, 目前保留量與程式上限
 
 各分頁使用共用[卡片庫](docs/card-library.md), 可選趨勢, 比較, 排行, 分布與統計卡, 標籤分別列出類別與可用圖表形式. 總覽提供全部來源的圖表選項, 預設顯示 Model, 對話, 錯誤與用量, 每張副本有獨立參數. 主 Tab 摘要預設四項重要指標, 可設定數量, 項目, 名稱與順序, 副標優先顯示次要記錄值. 子 Tab 不顯示摘要卡或摘要設定. 圖表預設使用適合資料的形式, 可改選支援的形式, 時間圖另支援面積圖, 工具頁提供耗時分布. 多線圖預設 3 條, 可選 5 / 10 條. 有意義的平均值, P1 / P99, 總數與樣本範圍列在獨立統計卡, 各組以分隔線區分. 圖表保留刻度, 單位與完整 tooltip, 空資料顯示說明, 表格可使用全域或個別數值熱度. 程式碼中辨識到的工具預覽最多五行, 完整清單由明細視窗提供
 
@@ -114,7 +114,7 @@ Codex collector 從 JSONL, 本機 thread SQLite catalog, session index 與指定
 
 My dots 與排程顯示本機可取得的 metadata, 雲端 Work, My dots 與排程來源尚未連接時明確標示. 本機空清單不代表雲端沒有資料. 官方帳戶查詢不提供這些雲端清單, 目前也未加入網路流量擷取
 
-來源紀錄範圍預設 24 小時, 全域與主 / 子頁可覆寫, 列表與操作統計一起篩選. 最新狀態, 累計 Token 與帳戶額度保留來源快照. 專案資料夾, Global / Project AGENTS.md 與已觀察 Git 操作內容只在點明細時受限讀取, 不放入 snapshot 或 checkpoint
+來源紀錄範圍預設 24 小時, 全域選單統一控制列表與操作統計. 最新狀態, 累計 Token 與帳戶額度保留來源快照. 專案資料夾, Global / Project AGENTS.md 與已觀察 Git 操作內容只在點明細時受限讀取, 不放入 snapshot 或 checkpoint
 
 Token 使用每個 thread 最新累計快照. 不將每次快照或 last-turn counter 相加. cached input 與 reasoning output 是子項目, 不額外加到 total. 不彙整成帳戶總用量
 

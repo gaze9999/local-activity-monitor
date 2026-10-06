@@ -14,6 +14,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from socketserver import TCPServer
 import tempfile
 import threading
 import time
@@ -999,6 +1000,13 @@ def handler(dashboard, port):
     return Handler
 
 
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # The service uses a literal loopback address and needs no reverse DNS.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def main(argv=None, watch_stdin=False):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--codex-home", type=Path, default=Path(os.environ.get("CODEX_HOME") or Path.home()/".codex"))
@@ -1031,7 +1039,7 @@ def main(argv=None, watch_stdin=False):
         print(str(error), file=sys.stderr)
         return 1
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", args.port), BaseHTTPRequestHandler)
+        server = LoopbackHTTPServer(("127.0.0.1", args.port), BaseHTTPRequestHandler)
     except OSError:
         print("Port is already in use. Keep the existing monitor open or choose another --port.", file=sys.stderr)
         return 1

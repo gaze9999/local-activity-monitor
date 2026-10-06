@@ -31,13 +31,13 @@ class InstanceTests(unittest.TestCase):
             connection.return_value.close.assert_called_once()
 
     def test_existing_monitor_is_reused_without_starting_collectors(self):
-        with patch('local_activity_monitor.server.existing_instance',return_value='http://127.0.0.1:8791/'),patch('local_activity_monitor.server.Dashboard') as dashboard,patch('local_activity_monitor.server.ThreadingHTTPServer') as server,patch('local_activity_monitor.server.webbrowser.open') as browser:
+        with patch('local_activity_monitor.server.existing_instance',return_value='http://127.0.0.1:8791/'),patch('local_activity_monitor.server.Dashboard') as dashboard,patch('local_activity_monitor.server.LoopbackHTTPServer') as server,patch('local_activity_monitor.server.webbrowser.open') as browser:
             self.assertEqual(main(['--port','8791','--open']),0)
             dashboard.assert_not_called();server.assert_not_called()
             browser.assert_called_once_with('http://127.0.0.1:8791/')
 
     def test_unrecognized_busy_port_is_reported_without_collector_start(self):
-        with patch('local_activity_monitor.server.existing_instance',return_value=None),patch('local_activity_monitor.server.ThreadingHTTPServer',side_effect=OSError()),patch('local_activity_monitor.server.Dashboard') as dashboard:
+        with patch('local_activity_monitor.server.existing_instance',return_value=None),patch('local_activity_monitor.server.LoopbackHTTPServer',side_effect=OSError()),patch('local_activity_monitor.server.Dashboard') as dashboard:
             self.assertEqual(main(['--port','8791']),1)
             dashboard.assert_not_called()
 
