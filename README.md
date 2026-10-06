@@ -4,65 +4,54 @@ Codex 活動監測, 包含 Jev 與 MCP. 使用 Python 標準函式庫與原生�
 
 操作方式見 [使用說明](docs/usage.md), 資料來源與擴充方式見 [程式架構](docs/architecture.md), [設定檔格式](docs/settings-format.md) 與 [錯誤觀察](docs/error-observation.md). 維護與修改原則見 [維護與驗收](docs/maintenance.md). [活動匯出規劃](docs/export-plan.md) 保存後續功能需求. 可觀測欄位與取得限制見 [資料盤點](docs/data-inventory.md), 本輪檢查見 [驗證紀錄](docs/validation.md)
 
-## 下載即用
+## 免安裝版與發布建置
 
-從 [Releases](https://github.com/gaze9999/local-activity-monitor/releases/latest) 下載符合系統與處理器的壓縮檔, 解壓縮後啟動. 原生套件包含 Python runtime, 不需自行安裝 Python 或套件
 
 | 套件 | 啟動方式 |
 | --- | --- |
-| windows-x64.zip | Windows 10 / 11 x64, 雙擊 `Start.cmd` |
-| macos-arm64.tar.gz | Apple Silicon, 雙擊 `Start.command` |
-| macos-x64.tar.gz | Intel Mac, 雙擊 `Start.command` |
-| linux-x64.tar.gz | x86-64 Linux, 執行 `sh start.sh` |
-| linux-arm64.tar.gz | ARM64 Linux, 執行 `sh start.sh` |
+| windows-x64-cli.zip | `launch-cli.cmd`、`launch-cli.ps1` 或 `launch-cli.exe`, 只提供 CLI 入口 |
+| macos-arm64-cli.tar.gz | Apple Silicon CLI, 雙擊 `launch-cli.command` 或執行 `launch-cli` |
+| macos-x64-cli.tar.gz | Intel Mac CLI, 雙擊 `launch-cli.command` 或執行 `launch-cli` |
 
-macOS 套件在 macOS 15 建置, Linux 套件在 Ubuntu 22.04 建置, 需要 glibc 2.35+. 原生檔案未使用付費簽章或 macOS notarization, 系統可能要求確認來源. 保留整個解壓縮目錄, 不要只搬移執行檔. SHA256SUMS.txt 可核對下載檔案
 
-各入口開啟本機監測頁面, 終端按 Ctrl+C 停止. 若不想自動開啟瀏覽器, 原生執行檔可加 `--no-browser`. 監測資料取自執行電腦上的 Codex 與 MCP 設定, 不隨套件附帶活動紀錄
+
+
+macOS 套件在 macOS 15 建置. 既有 Linux CLI 封裝保留, 以 Ubuntu 22.04 建置, 需要 glibc 2.35+. macOS 封裝使用 ad-hoc 簽章並檢查完整性, 未提供 Developer ID 簽章或 notarization. 系統要求安全性確認時, 依提示核對來源. SHA256SUMS.txt 可核對下載檔案
+
+CLI 預設開啟本機監測頁面, 終端按 Ctrl+C 停止. 原生執行檔可加 `--no-browser` 停用自動開啟瀏覽器. 監測資料取自執行電腦上的 Codex 與 MCP 設定, 不隨套件附帶活動紀錄
 
 ## 從原始碼啟動
 
-Windows 雙擊 `Start.cmd`, macOS 雙擊 `Start.command`, Linux 執行 `sh start.sh`. 入口會先檢查 Python 3.10+ 與建立虛擬環境所需的模組
+根目錄保留啟動入口、必要文件與設定. 啟動輔助程式與相依清單位於 `tools/`
 
-缺少 Python 或必要模組時, 入口會先顯示安裝方式並詢問 `Install Python now? [y/N]`. Windows 使用既有 Python Install Manager 或 winget, 安裝至使用者帳戶. macOS 使用既有 Homebrew, Debian / Ubuntu 使用 apt 安裝 Python 與 venv, 系統套件安裝可能需要管理員授權. 找不到支援的安裝工具時會提供手動安裝資訊, 不會自行安裝套件管理工具. 安裝後再次檢查環境, 失敗時保留錯誤且不啟動
+本機開發需將 private 的 `workbench-ui` 儲存庫放在相鄰目錄, 或以 `WORKBENCH_UI_PATH` 指定其根目錄. LAM 直接讀取共用 UI, 不維護 CSS / JavaScript 副本, 啟動不自動下載或安裝. 發行版與原始碼下載包內嵌共用資產, 可離線使用
 
-安裝方式依 [Python Windows 文件](https://docs.python.org/3/using/windows.html), [Microsoft winget 說明](https://learn.microsoft.com/en-us/windows/dev-environment/python), [Homebrew Python formula](https://formulae.brew.sh/formula/python@3.14) 與 [Ubuntu Python 環境說明](https://ubuntu.com/developers/docs/howto/python-setup/). Windows / macOS 安裝目標為 Python 3.14, apt 使用系統套件庫提供的版本, 安裝後須符合 Python 3.10+ 要求. 已有可用環境時沿用, 偵測時不允許 Python Install Manager 自動下載 runtime
+| --- | --- | --- |
+| Linux | 使用瀏覽器介面 | `sh launch-cli.sh` |
 
-首次啟動若尚未安裝此專案, 入口會詢問 `Install and start now? [y/N]`. 輸入 `y` 後建立 repo 內的 `.venv`, 安裝 `requirements.txt`, 接著開啟監看頁面. 兩階段提示皆預設取消, Enter / `n` 或無輸入時不安裝. 已安裝時直接啟動, 不重複安裝或自動升級
 
-若偏好手動安裝, 以下指令在此 repo 執行
+缺少 Python 時顯示原因, 預設不詢問安裝、不下載 runtime. 若要明確啟用 Python 安裝流程, Windows 使用 `launch-cli.cmd --install-python`, macOS / Linux 使用 `sh launch-cli.sh --install-python`. 此流程仍須回答 `Install Python now? [y/N]`, 預設取消, 使用既有 Python Install Manager / winget、Homebrew 或 apt, 不自行安裝套件管理工具. 偵測時停用 Python Install Manager 的自動安裝
 
-Windows:
-
-```powershell
-python -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-.venv\Scripts\local-activity-monitor.exe --codex --open
-```
-
-macOS / Linux:
+若偏好手動安裝 CLI, 在 repository 根目錄執行:
 
 ```sh
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/local-activity-monitor --codex --open
+python -m venv .venv
+python tools/prepare_ui.py
+# Windows
+.venv/Scripts/python.exe -m pip install -r tools/requirements.txt
+# macOS / Linux
+.venv/bin/python -m pip install -r tools/requirements.txt
 ```
 
-原始碼版啟動入口會使用 repo 的 `.venv` 執行 checkout 的原始碼並開啟預設瀏覽器. 安裝失敗會保留錯誤, 下次缺少套件時可再確認重試. 已存在但損壞的 `.venv` 不會自動刪除或覆寫
+`tools/requirements.txt` 安裝專案本身, runtime 沒有第三方套件相依, build 相依由 `pyproject.toml` 管理. 手動安裝可能需要下載 build 工具. 不會自動啟用 Jev 紀錄或安裝 Codex
 
-使用 `Start.cmd` / `Start.command` / `start.sh` 啟動後可保持網頁開著. HTML / JS / CSS 修改會在更新週期內自動重新載入, Python 修改會由 `watch.py` 等待儲存穩定後重啟它建立的服務子程序, 原分頁重新連線. tab 與排序, 篩選, 頁碼, 外觀, 文案與觀察設定保留在此網站的 localStorage. 更新 launcher / watcher 本身, runtime 或 package 相依時仍需重新啟動入口或安裝. watcher 不自動 pull 或更新相依. 直接呼叫已安裝的 CLI / wheel 時不啟用原始碼 watcher
+原始碼啟動由 `tools/watch.py` 監看 Python 修改, 儲存穩定後只重啟自己建立的服務子程序. HTML / JS / CSS 在更新週期內重新載入. 瀏覽器的 Tab、排序、篩選、頁碼、外觀與觀察設定保留在 localStorage. 更新 launcher / watcher 或 runtime 時需重新啟動入口, watcher 不自動 pull 或更新相依. 直接呼叫已安裝的 CLI / wheel 不啟用 watcher
 
-重複啟動時會檢查相同 port 與 CODEX_HOME 的 monitor, 開啟既有服務並結束新的啟動程序. 其他程式占用 port 時顯示訊息, 可自行指定另一個 port
+更新共用 UI 時執行 `python tools/prepare_ui.py --update`, 會以既有 Git 認證取得 Workbench UI 的 `main` 最新提交, 更新 `workbench-ui.json` 並產生離線資產. Workbench UI 必須處於乾淨的 `main`, 不會覆寫未提交內容或重寫歷史. 本機 CSS / JavaScript 更新依既有網頁更新週期套用, 更新載入器時需重啟 LAM. 不加 `--update` 時只準備設定檔指定的固定版本
 
-macOS 若下載的檔案未保留執行權限, 在 repo 執行一次 `chmod +x Start.command`. 系統若要求安全性確認, 依 macOS 的提示檢查來源並處理, 不需停用系統防護
 
-`requirements.txt` 安裝此專案本身. runtime 只使用 Python 標準函式庫, build 相依由 `pyproject.toml` 管理. 首次安裝可能需要網路下載 build 工具. 不會自動啟用 Jev 紀錄或安裝 Codex
 
-入口皆加入 `--codex --open`. CLI 不加 `--codex` 時不讀 Codex sessions. 入口會保持服務終端開啟, 啟動失敗時保留錯誤訊息. 若重複開啟導致 port 已被使用, 使用既有頁面或先停止原本的服務
-
-預設頁面是 `http://127.0.0.1:8787/`. 只能從本機連線. `--port 8790` 可指定其他 port. 終端按 Ctrl+C 停止, 關閉瀏覽器分頁不會停止服務
-
-也可安裝已建置的 `local_activity_monitor-0.5.0-py3-none-any.whl`, 並從任意資料夾呼叫環境中的 `local-activity-monitor`. 不必保留 checkout
+也可安裝已建置的 `local_activity_monitor-0.5.0-py3-none-any.whl`, 再從安裝環境呼叫 `local-activity-monitor`
 
 ## MCP 來源紀錄
 
@@ -115,9 +104,9 @@ Codex collector 從 JSONL, 本機 thread SQLite catalog, session index 與指定
 
 對話與 MCP 來源頁可點開特定 Jev 呼叫, 從該 session 尾端取得可觀察的送出 / 回傳內容, 在送至頁面前遮蔽 credentials, 不另存內容資料庫. 使用動態參數或多個工具共用回傳時可能沒有獨立的 Jev request / response. 缺少內容顯示 --. 不從 metadata 統計重建 payload
 
-預設使用 Steam 深藍灰與淺藍配色, 可選其他主題, 強調色與深淺模式. 主設定與 Tab 設定採共用分類導覽及固定寬高, 桌面約 80vw / 80vh, 窄螢幕保留邊距. 右上設定集中外觀, 顯示, 更新與追蹤, 介面與說明, 監測項目, MCP 來源, 來源紀錄與設定檔. 來源紀錄顯示來源實際狀態, 不改寫來源開關. 提供繁體中文, English 與日本語, 更新預設 10 秒 (1 - 3600), session 1 - 5000, 介面字級預設 14 px (12 - 18). 數量設定四捨五入為整數. 字級輸入先保留草稿, 按套用才變更. 設定結果使用短暫浮動通知
+預設使用 Steam 深藍灰與淺藍配色, 可選其他主題, 強調色與深淺模式. 主設定與 Tab 設定採共用分類導覽, 依可視範圍與最小尺寸呈現, 切換分類時維持大小, 窄螢幕保留邊距, 設定選項靠右. 右上設定集中外觀, 顯示, 更新與追蹤, 介面與說明, 監測項目, MCP 來源, 來源紀錄與設定檔. 來源紀錄顯示來源實際狀態與更新時間, 缺少時間時顯示替代文字. 提供繁體中文, English 與日本語, 更新預設 10 秒 (1 - 3600), session 1 - 5000, 介面字級預設 14 px (12 - 18). 數量設定四捨五入為整數. 字級使用下拉選單, 選取後立即套用. 設定結果使用短暫浮動通知
 
-介面與說明分工具, 介面文字與指標 tooltip, 有搜尋 / 分類, 有變更才顯示還原. 共用 tooltip 會避開邊緣並在 modal 開關時隱藏. 偏好保存於瀏覽器, 可匯入 / 匯出 JSON. 全部還原需先確認, 已有活動紀錄保留. 全域顯示選項預設 5 / 10 / 20 / 全部, 排行 5 項, 表格 10 筆. 各排行榜的數量選擇在卡片右上角齒輪內, 每張圖表與表格可獨立保存設定. 既有有效自訂值保留, 還原預設後套用新數量與字級. Tag 以顏色區分狀態與分類, 同時保留文字
+介面與說明分工具, 介面文字與指標 tooltip, 有搜尋 / 分類, 有變更才顯示儲存與還原. 共用 tooltip 會避開邊緣並在 modal 開關時隱藏. 偏好保存於瀏覽器, 可匯入 / 匯出 JSON. 全部還原需先確認, 已有活動紀錄保留. 全域顯示選項預設 5 / 10 / 20 / 全部, 排行 5 項, 表格 10 筆. 圖表設定集中在卡片右上角齒輪, 分類趨勢可開啟合計線, 預設關閉, 包含全部分類且不占原有線數. 每張圖表與表格可獨立保存設定. 表格欄寬依內容安排, 時間在表格呈現兩行, 摘要與其他區域維持單行. Modal 的導覽按鈕與說明集中在 header, 工具說明的鉛筆緊接文字, 參考網址使用預設收合的逐筆清單. 既有有效自訂值保留, 還原預設後套用新數量與字級. Tag 以顏色區分狀態與分類, 同時保留文字
 
 用量頁顯示來源提供的額度視窗, 剩餘比例, 重設時間與 credits, 摘要優先選擇已取得的資料, 依實際視窗長度命名. Token 分析依 thread 最新快照. 設定的監測項目可選擇「官方帳戶查詢」, 預設關閉, 啟用後透過已登入的 Codex CLI 唯讀取得方案, 額度與帳戶 Token 統計, 成功及失敗結果至少快取 60 秒. 讀取失敗時保留本機額度來源, 來源未提供的欄位維持未知
 
@@ -184,4 +173,4 @@ python3 -m pip wheel --no-deps --wheel-dir dist .
 
 Jev usage 欄位來源見 [TypeSafe API 文件](https://docs.typesafe.ai/api), Jev 只觀察 client 回應. Codex 的選配帳戶來源依 [官方 app-server 文件](https://learn.chatgpt.com/docs/app-server), 使用 account/read, account/rateLimits/read 與 account/usage/read, 不送出工作或修改帳戶
 
-共用 JSON 顯示與 Tag 元件來自獨立的 [Workbench UI](https://github.com/gaze9999/workbench-ui) private 儲存庫, LAM 將所需資產隨套件附帶, 使用時不需連線至 GitHub
+共用 JSON 顯示與 Tag 元件來自獨立的 [Workbench UI](https://github.com/gaze9999/workbench-ui) private 儲存庫. `workbench-ui.json` 指定完整 commit SHA, release workflow 使用 `WORKBENCH_UI_READ_TOKEN` 取得固定來源並呼叫共用 action. 發行版、wheel 與原始碼下載包附帶自動產生的資產與 SHA-256 manifest, 使用時不需 GitHub 連線. 共用來源版本不要求另建 Workbench UI release

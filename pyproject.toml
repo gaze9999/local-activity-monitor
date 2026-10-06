@@ -17,4 +17,5 @@ local-activity-monitor = "local_activity_monitor.server:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-local_activity_monitor = ["web/*.html", "web/*.js", "web/*.css", "web/*.json", "web/*.svg"]
+local_activity_monitor = ["web/*.html", "web/*.js", "web/*.css", "web/*.json", "web/*.svg", "web/*.ico"]
+"local_activity_monitor._workbench" = ["*.js", "*.mjs", "*.css", "manifest.json"]

@@ -23,7 +23,7 @@ class MonitorState:
     LOG_LIMIT = 1000
     JOURNAL_LIMIT = 64*1024
 
-    def __init__(self, journal=None):
+    def __init__(self, journal=None, defer_device=False):
         self.lock = threading.Lock()
         self.began = time.monotonic()
         self.history = deque(maxlen=self.HISTORY_LIMIT)
@@ -43,8 +43,11 @@ class MonitorState:
         self.runtime = {"python": platform.python_version(), "platform": platform.system(), "architecture": platform.machine(), "pid": os.getpid(),
                         "system_release": platform.release(), "system_version": platform.version(),
                         "python_implementation": platform.python_implementation(), "process_bits": struct.calcsize("P")*8,
-                        "logical_cpus": cpu_count, "processor": processor_name(), "gpus": gpu_info()}
-        self.memory = memory_info()
+                        "logical_cpus": cpu_count, "processor": None, "gpus": []}
+        self.device_ready = False
+        self.collection = {"phase": "waiting", "phase_ms": 0, "phase_cpu_ms": 0}
+        self.collection_started = (time.perf_counter(), time.process_time())
+        self.memory = {}
         self.cpu = CpuUsage()
         self.cpu_percent = None
         self.device_checked_at = stamp()
@@ -53,6 +56,25 @@ class MonitorState:
         self.snapshot_bytes = self.transfer_bytes = 0
         self.load_journal()
         self.event("started")
+        if not defer_device:
+            self.load_device()
+
+    def load_device(self):
+        if self.device_ready:
+            return
+        # Hardware queries run in the collector worker, outside the snapshot lock.
+        processor, gpus, memory = processor_name(), gpu_info(), memory_info()
+        with self.lock:
+            self.runtime.update(processor=processor, gpus=gpus)
+            self.memory = memory
+            self.device_ready = True
+            self.device_checked_at = stamp()
+            self.memory_checked = time.monotonic()
+
+    def collecting(self, phase, phase_ms=0, phase_cpu_ms=0):
+        with self.lock:
+            self.collection = {"phase": phase, "phase_ms": phase_ms, "phase_cpu_ms": phase_cpu_ms}
+            self.collection_started = (time.perf_counter(), time.process_time())
 
     def load_journal(self):
         if self.journal is None:
@@ -156,10 +178,14 @@ class MonitorState:
 
     def snapshot(self):
         with self.lock:
-            if time.monotonic()-self.memory_checked >= 5:
+            collection = dict(self.collection)
+            if collection["phase"] not in ("idle", "waiting", "stopped", "error"):
+                wall, cpu = self.collection_started
+                collection.update(phase_ms=round((time.perf_counter()-wall)*1000, 2), phase_cpu_ms=round((time.process_time()-cpu)*1000, 2))
+            if self.device_ready and time.monotonic()-self.memory_checked >= 5:
                 if self.runtime["platform"] != "Darwin":
                     self.memory = memory_info()
                 self.cpu_percent = self.cpu.sample()
                 self.device_checked_at = stamp()
                 self.memory_checked = time.monotonic()
-            return {**self.runtime, **self.memory, "cpu_usage_percent": self.cpu_percent, "cpu_scope": self.cpu.scope, "device_checked_at": self.device_checked_at, "health": self.health, "uptime_seconds": round(time.monotonic()-self.began), "refreshes": self.refreshes, "errors": self.errors, "requests": self.requests, "http_errors": self.http_errors, "last_error_at": self.last_error_at, "error_type": self.error_type, **(self.history[-1] if self.history else {}), "snapshot_bytes": self.snapshot_bytes, "transfer_bytes": self.transfer_bytes, "history_limit": self.HISTORY_LIMIT, "event_limit": self.EVENT_LIMIT, "history": [dict(item) for item in self.history], "events": [dict(item) for item in self.events]}
+            return {**self.runtime, **self.memory, "collection": collection, "device_ready": self.device_ready, "cpu_usage_percent": self.cpu_percent, "cpu_scope": self.cpu.scope, "device_checked_at": self.device_checked_at if self.device_ready else None, "health": self.health, "uptime_seconds": round(time.monotonic()-self.began), "refreshes": self.refreshes, "errors": self.errors, "requests": self.requests, "http_errors": self.http_errors, "last_error_at": self.last_error_at, "error_type": self.error_type, **(self.history[-1] if self.history else {}), "snapshot_bytes": self.snapshot_bytes, "transfer_bytes": self.transfer_bytes, "history_limit": self.HISTORY_LIMIT, "event_limit": self.EVENT_LIMIT, "history": [dict(item) for item in self.history], "events": [dict(item) for item in self.events]}

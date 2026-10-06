@@ -1,0 +1,31 @@
+import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
+import vm from "node:vm";
+
+const app=readFileSync(new URL("../src/local_activity_monitor/web/app.js",import.meta.url),"utf8"),start=app.indexOf("function createPageMetrics()"),end=app.indexOf("const pageMetrics=",start);
+const metrics=vm.runInNewContext(app.slice(start,end)+"createPageMetrics()");
+assert.equal(metrics.snapshot().lcp,null);
+assert.equal(metrics.snapshot().interaction,null);
+metrics.support("layout-shift");metrics.support("longtask");
+assert.equal(metrics.snapshot().cls,0);
+metrics.consume("layout-shift",[{startTime:100,value:.05,hadRecentInput:false},{startTime:200,value:.04,hadRecentInput:true},{startTime:500,value:.07,hadRecentInput:false},{startTime:6000,value:.1,hadRecentInput:false}]);
+assert.ok(Math.abs(metrics.snapshot().cls-.12)<1e-9);
+metrics.consume("largest-contentful-paint",[{startTime:200},{startTime:500}],300);
+assert.equal(metrics.snapshot().lcp,200);
+metrics.consume("event",[{interactionId:0,duration:200},{interactionId:10,duration:32},{interactionId:10,duration:64}]);
+assert.equal(metrics.snapshot().interaction,64);
+metrics.consume("longtask",[{duration:60},{duration:80}]);
+assert.equal(metrics.snapshot().longTasks,2);
+assert.equal(metrics.snapshot().maxTask,80);
+metrics.firstData(200);metrics.firstData(500);
+assert.equal(metrics.snapshot().firstData,200);
+assert.equal(Object.hasOwn(metrics.snapshot(),"target"),false);
+const windowed=vm.runInNewContext(app.slice(start,end)+"createPageMetrics()");
+windowed.consume("layout-shift",Array.from({length:7},(_,index)=>({startTime:index*900,value:.01,hadRecentInput:false})));
+assert.ok(Math.abs(windowed.snapshot().cls-.06)<1e-9);
+const setup=app.slice(0,app.indexOf('const preferenceKey='))+"pageMetrics.snapshot()",document={visibilityState:"visible",addEventListener(){}};
+assert.equal(vm.runInNewContext(setup,{document}).lcp,null);
+assert.equal(vm.runInNewContext(setup,{document,PerformanceObserver:function(){}}).cls,null);
+class RejectedObserver{static supportedEntryTypes=["longtask"];observe(){throw Error("API unavailable");}}
+assert.equal(vm.runInNewContext(setup,{document,PerformanceObserver:RejectedObserver}).longTasks,null);
+console.log("Page metric session windows, hidden-page LCP, unsupported values and bounded counters passed");

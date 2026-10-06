@@ -140,7 +140,7 @@ class CodexCollector:
         self.malformed = 0
         self.health = "waiting"
         self.track_all = False
-        self.features = {"usage": True, "metadata": True, "git": True, "jev_calls": True, "skills": True, "checks": True, "tool_events": True, "mcp": True, "web": True, "files": True, "errors": True, "sqlite": True}
+        self.features = {"usage": True, "metadata": True, "git": True, "worktrees": True, "jev_calls": True, "skills": True, "checks": True, "tool_events": True, "mcp": True, "web": True, "files": True, "errors": True, "sqlite": True}
         self.mcp_sources = {}
         self.trimmed_calls = 0
         self.read_cursor = 0
@@ -195,6 +195,9 @@ class CodexCollector:
                 state["errors"].append({"timestamp": when, "category": "conversation", "code": code or identifier(payload.get("error_code")) or event_type, "reason": event_type, "file": state.get("source_file"), "source": "session", "severity": "warning" if event_type == "turn_aborted" else "error"})
                 state["errors"] = sorted(state["errors"], key=lambda event:event["timestamp"] or "", reverse=True)[:50]
         if kind == "session_meta":
+            cwd = payload.get("cwd")
+            if self.features["worktrees"] and isinstance(cwd, str) and 0 < len(cwd) <= 4096 and not any(ord(char) < 32 for char in cwd):
+                state["cwd"] = cwd
             identity = payload.get("id")
             if isinstance(identity, str) and UUID.fullmatch(identity):
                 state["thread_id"] = identity
@@ -284,15 +287,20 @@ class CodexCollector:
             if limits:
                 state["allowance"] = limits
 
-    def refresh(self):
+    def refresh(self, pause=None):
         self.scan()
         budget = self.READ_LIMIT
+        # Preserve a quarter of each read budget for older metadata even when
+        # append-only sessions continuously consume the live allowance.
+        reserve = budget//4
+        budget -= reserve
         entries = list(self.files.items())
-        start = self.read_cursor % max(1, len(entries))
-        for index, (path, state) in enumerate(entries[start:]+entries[:start]):
+        start_index = self.read_cursor % max(1, len(entries))
+        ordered = entries[start_index:]+entries[:start_index]
+        for index, (path, state) in enumerate(ordered):
             if budget < 65536:
                 break
-            self.read_cursor = start+index+1
+            self.read_cursor = start_index+index+1
             try:
                 size = path.stat().st_size
                 if state["offset"] is not None and size < state["offset"]:
@@ -319,7 +327,7 @@ class CodexCollector:
                             state["history_cursor"] = state["offset"]
                         state["discard"] = state["partial_history"]
                     stream.seek(state["offset"])
-                    raw = stream.read(max(0, min(budget, self.tail_bytes)))
+                    raw = stream.read(max(0, min(budget, self.tail_bytes, 256*1024 if pause else self.tail_bytes)))
                     state["offset"] += len(raw)
                     state["bytes"] += len(raw)
                     budget -= len(raw)
@@ -342,10 +350,19 @@ class CodexCollector:
                 if len(state["buffer"]) > 1024*1024:
                     state["buffer"] = b""
                     state["discard"] = True
+                if raw and pause and pause():
+                    return
             except OSError:
                 self.health = "partly_unavailable"
-        for path, state in self.files.items():
-            while budget > 0 and state["history_cursor"]:
+        else:
+            self.read_cursor = start_index+1
+        budget += reserve
+        error_reserve = min(budget, self.READ_LIMIT//8) if self.features["errors"] and any(state.get("error_cursor") for state in self.files.values()) else 0
+        budget -= error_reserve
+        for path, state in ordered:
+            # One bounded chunk per file prevents one large session starving
+            # every other pending lifecycle cursor.
+            if budget > 0 and state["history_cursor"]:
                 end = state["history_cursor"]
                 start = max(0, end-min(budget, 1024*1024))
                 try:
@@ -375,9 +392,12 @@ class CodexCollector:
                             continue
                 if state["task_time"] or not raw:
                     state["history_cursor"] = None
+                if raw and pause and pause():
+                    return
+        budget += error_reserve
         if self.features["errors"]:
             cutoff = datetime.now(timezone.utc)-timedelta(hours=24)
-            for path, state in entries[start:]+entries[:start]:
+            for path, state in ordered:
                 end = state.get("error_cursor")
                 if not end or budget <= 0:
                     continue
@@ -419,6 +439,8 @@ class CodexCollector:
                                 state["errors"] = sorted(state["errors"], key=lambda event:event["timestamp"] or "", reverse=True)[:50]
                     except (ValueError, TypeError, AttributeError, RecursionError):
                         continue
+                if raw and pause and pause():
+                    return
         retained = sum(len(state["calls"]) for state in self.files.values())
         if retained > self.CALL_LIMIT:
             oldest = sorted((call.get("timestamp") or "", str(path), identity, state) for path, state in self.files.items() for identity, call in state["calls"].items())
@@ -948,10 +970,15 @@ class CodexCollector:
                 continue
         return None
 
-    def snapshot_windows(self):
+    def snapshot_windows(self, pause=None):
         metadata_cache = {}
         reference = datetime.now(timezone.utc)
-        return {window: self.snapshot(window, reference, metadata_cache) for window in WINDOWS}
+        snapshots = {}
+        for window in WINDOWS:
+            snapshots[window] = self.snapshot(window, reference, metadata_cache)
+            if pause and pause():
+                break
+        return snapshots
 
     def snapshot(self, window="all", reference=None, metadata_cache=None):
         boundary = cutoff(window, reference)
@@ -989,7 +1016,7 @@ class CodexCollector:
             metadata, dots, metadata_sources, schedules, plugins = metadata_cache["metadata"]
         else:
             self.project_details = {}
-            metadata = read_metadata(self.root.parent, threads, dots, metadata_sources, self.project_details) if self.features["metadata"] else {}
+            metadata = read_metadata(self.root.parent, threads, dots, metadata_sources, self.project_details, include_workdirs=self.features["worktrees"]) if self.features["metadata"] else {}
             if self.features["metadata"]:
                 self.subagent_lifecycle(metadata, metadata_sources)
             schedules = read_schedules(self.root.parent, metadata_sources) if self.features["metadata"] else {"items": [], "health": "disabled"}
@@ -997,6 +1024,11 @@ class CodexCollector:
             if metadata_cache is not None:
                 metadata_cache["metadata"] = metadata, dots, metadata_sources, schedules, plugins
         dots = dict(dots)
+        self.thread_workdirs = {identity: entry["_cwd"] for identity, entry in metadata.items() if entry.get("_cwd")} if self.features["worktrees"] else {}
+        if self.features["worktrees"]:
+            for state in sorted(self.files.values(), key=lambda item: item.get("updated_at") or "", reverse=True):
+                if state.get("cwd"):
+                    self.thread_workdirs.setdefault(state["thread_id"], state["cwd"])
         dot_events = dots.pop("_retained_events", dots.get("events"))
         if dot_events is not None:
             scoped_dots = [event for event in dot_events if contains(event, boundary)]
@@ -1145,12 +1177,16 @@ class CodexCollector:
                 detail = getattr(self, "project_details", {}).get(project_id, {})
                 project = projects.setdefault(project_id, {"id": project_id, "name": row.get("project_name"), "icon": detail.get("icon"), "kind": detail.get("kind"), "thread_count": 0})
                 project["thread_count"] += 1
-        return {"projects": list(projects.values()), "schedules": schedules, "plugins": plugins, "activity_scope": {"window": window, "timestamp": "call_started_at", "unknown_timestamp": "all_only", "latest_state": ["tokens", "model", "status", "usage", "schedules"]}, "tool_statistics": statistics, "metadata_sources": list(metadata_sources.values()), "read_state": {
+        return {"projects": list(projects.values()), "schedules": schedules, "plugins": plugins, "activity_scope": {"window": window, "timestamp": "call_started_at", "unknown_timestamp": "all_only", "latest_state": ["tokens", "model", "status", "usage", "schedules", "worktrees"]}, "tool_statistics": statistics, "metadata_sources": list(metadata_sources.values()), "read_state": {
             "file_limit": self.FILE_LIMIT if self.track_all else self.max_files, "file_count": len(self.files),
             "read_limit": self.READ_LIMIT, "tail_bytes": self.tail_bytes, "scan_seconds": self.SCAN_INTERVAL,
             "call_limit": self.CALL_LIMIT, "buffer_limit": self.BUFFER_LIMIT,
             "sql_event_limit": self.SQL_EVENT_LIMIT, "git_event_limit": self.GIT_EVENT_LIMIT, "check_event_limit": self.CHECK_EVENT_LIMIT, "file_event_limit": self.FILE_EVENT_LIMIT, "skill_event_limit": self.thread_state.SKILL_LIMIT,
             "history_pending_files": sum(bool(state.get("history_cursor")) for state in self.files.values()),
+            "history_pending_bytes": sum(state.get("history_cursor") or 0 for state in self.files.values()),
+            "error_pending_files": sum(bool(state.get("error_cursor")) for state in self.files.values()) if self.features["errors"] else 0,
+            "error_pending_bytes": sum(state.get("error_cursor") or 0 for state in self.files.values()) if self.features["errors"] else 0,
+            "initial_pending_files": sum(state["offset"] is None for state in self.files.values()),
             "detail_index_pending_bytes": sum(index["cursor"] for index in self.detail_indexes.values() if not all("request_offset" in index["positions"].get(call, {}) and "response_offset" in index["positions"].get(call, {}) for call in index["targets"])),
             "detail_index_calls": sum(len(index["positions"]) for index in self.detail_indexes.values()),
             "locations": [str(path) for path in list(self.files)[:self.SOURCE_LOCATION_LIMIT]], "listed_file_limit": self.SOURCE_LOCATION_LIMIT,

@@ -24,6 +24,7 @@
 | MCP 被動連線觀測 | 最近回應時間, 尚待回應的直接呼叫數, 來源提供的連線 / 認證診斷錯誤 | 根據已載入工具事件與診斷紀錄, 不發送探測請求 | 有回應表示該時間曾收到回應, 不等於目前可即時連線. 沒有證據時省略連線 tag, 不消耗額度來確認 |
 | Jev 本機 telemetry | 操作數, HTTP attempts / retries, Token 已知及缺值數, 傳輸大小, 平均延遲, status 分布, 最近 metadata 與通用指標 | 唯讀查詢所選 1 小時 / 24 小時 / 7 天 / 全部視窗. 聚合統計使用視窗內符合條件的資料, 最近 metadata 最多 80 列, 小時序列最多 168 個時間格, status 分組最多 40 個 | 80 列是最近明細查詢上限, 不是聚合統計的來源上限. metadata 超過 65,536 字元或格式不支援會略過, 每筆最多顯示 16 個 attempts. 來源未啟用或 DB 不可用時保留實際健康狀態 |
 | Git / Skills / 驗證 / 檔案 / 網路 | literal Git 操作與 repository, Skills 文件讀取, test / build / lint, 檔案操作及位置, 網路工具與參考網址 | Git 回傳最近 500 筆, Skills 保留及回傳最多 500 筆, 驗證回傳最近 500 筆, 檔案回傳最近 1,000 筆. 網路事件使用 MCP 保留列表. 活動序列最多 10,080 個時間格, 工具序列最多 20,000 個工具時間格 | 工具回傳不等於命令成功. 各類摘要與表格可能有不同保存範圍, 不從最近明細推論所有歷史操作 |
+| Git 工作樹 | 已載入專案與 Codex 管理目錄的工作樹名稱, 分支, HEAD, detached / locked / prunable 狀態, 目錄可用性, 專案與對話關聯, 檢查時間 | 唯讀執行 `git worktree list --porcelain -z`, 最多 100 個來源根目錄及 500 筆工作樹, 每次 Git 輸出最多 1 MiB, 全輪 Git 查詢預算 5 秒, 快取 30 秒. Codex 管理目錄只檢查兩層目錄及 Git 標記 | 對話關聯只使用已載入 Thread 的來源工作目錄, 不推論未載入對話. 完整工作樹位置只在已觀察 ID 的明細回傳, 不讀取工作檔內容, 不抓取遠端或清理工作樹. 最新狀態不套用活動時間範圍 |
 | SQL / SQLite metadata 與按需內容 | SQL 操作類型, statement 類別, engine, 可確認的 DB 位置, 外層工具時間, 個別 SQL 時間, rows_affected / rows_returned, 來源與紀錄識別碼 | session literal 辨識與診斷 SQL 合併後回傳最多 500 筆. 點開已觀察的紀錄才讀取內容. session 內容限制在已追蹤檔案的設定檔尾範圍, 完整取得的 SQL 經遮蔽後分頁, 每頁 32,768 字元, 以 revision 核對後續內容 | 不執行 SQL, 不讀取查詢結果. 舊紀錄仍有 metadata, 但移出檔尾或來源變更後可能無法取得內容. 個別 SQL 耗時及列數僅使用診斷來源提供的值, 不以外層工具時間替代 |
 | Desktop / Core 診斷與 Log | severity, module, code, Thread / Call / Request / Trace ID, 檔案及 record ID, 錯誤摘要, 關聯 SQL | Desktop 最多追蹤 8 個檔案, 初次各檔取最近 256 KiB, 增量與歷史分別使用 1 MiB 預算. Core 每次增量及歷史查詢各最多 2,000 列. 錯誤歷史回補範圍 24 小時. 診斷錯誤與 Log 各保留最多 1,000 筆, SQL 診斷最多 500 筆 | 每次查詢上限不是 DB 總量上限. 不支援格式, 過長行, 截斷及尚待回補會影響範圍. Log 等級保留來源英文值 |
 | 程式 runtime 與保存資訊 | 版本, 系統, Python, PID, 開啟 / 更新 / 運行時間, refresh / CPU 時間, 讀取量, HTTP 次數及錯誤, 回應及壓縮大小, 保存上限與來源健康狀態 | 效能樣本最多 360 筆, 狀態事件最多 200 筆, 程式 Log 最多 1,000 筆. journal 每份 64 KiB 並保留一份輪替檔. 錯誤 metadata checkpoint 最多 1,000 筆及 512 KiB | 效能樣本與狀態事件存在記憶體, 重啟後重新累積. journal 與錯誤 checkpoint 可跨重啟保存, 不包含完整對話或工具 payload |
@@ -44,6 +45,8 @@
 - Jev 呼叫送出與回傳內容只在點開已觀察呼叫時讀取, 遮蔽可辨識 credentials. 混合 exec 回傳不當成 Jev 單一結果
 - 專案資料夾由已載入來源設定按需取得. Global / Project AGENTS.md 只從選定根目錄讀取, 最多 32 個根目錄, 每份最多 64 KiB, 不走訪任意檔案. 拒絕非絕對路徑, 網路路徑與 symlink, 遮蔽可辨識 credentials. 不加入 snapshot / checkpoint
 - Git 明細綁定已觀察的 Thread / Call / 操作, 按既有檔尾與讀取預算取得指令及工具回傳. 不執行內容, 多個操作共用回傳時保留外層回傳範圍, 不推論個別命令成功
+- 工作樹明細綁定最近檢查已取得的 ID, 回傳完整位置與已載入關聯對話. 拒絕任意位置與未觀察 ID. 停用 Codex 或工作樹監測後不再讀取 Git 或管理目錄, 管理設定維持唯讀
+- 工作樹查詢超出整輪時間預算時保留已取得結果, 下輪從未完成的根目錄繼續. 各列保留自己的檢查時間, 不將尚未更新的列標成最新資料
 - Skills 文件只在點開已辨識文件時讀取, 檔案清單最多 200 個, 走訪最多約 1,000 個項目. 單份文件最多讀取 256 KiB, 取得文字以分批建立 DOM 的方式完整顯示. 重啟保存的 Skill 事件不保存檔案路徑與內容
 
 ## 本輪修正與驗證
@@ -73,6 +76,7 @@
 - [SQL metadata 與內容遮蔽](../src/local_activity_monitor/sqlite_records.py)
 - [診斷讀取與錯誤摘要](../src/local_activity_monitor/error_records.py)
 - [Runtime 與 journal](../src/local_activity_monitor/monitor_state.py)
+- [Git 工作樹唯讀監測](../src/local_activity_monitor/worktree_info.py)
 - [錯誤 checkpoint](../src/local_activity_monitor/error_history.py)
 - [API, 合併資料與動態來源範圍](../src/local_activity_monitor/server.py)
 ## 裝置與活動新增欄位
@@ -84,3 +88,11 @@
 - MCP 活動: 選定摘要與數值指標加入容量受限的活動快取, 預設保留 7 天, 可設定 1 - 365 天, 配合來源開關及頁面時間範圍顯示. 可編輯文件內容不加入 snapshot 或活動快取
 
 Codex Core / App 診斷的錯誤內容由已觀察的紀錄 ID 或已確認檔案位置與行位移按需取得, 核對來源身分及內容雜湊, 遮蔽後才分頁. 資料快照只保存識別 metadata, 不保存原始錯誤本文
+
+## 收集排程與回補監測
+
+快照新增目前收集階段、各階段耗時 / 程序 CPU 時間與本輪最長階段 CPU 時間, 不保存來源本文. session 讀取狀態新增首次讀取待處理檔案數、工作狀態與錯誤回補的檔案數及剩餘位元組數. 回補只讀取既有白名單紀錄, 四分之一讀取額度保留給歷史資料, 有錯誤待回補時再保留八分之一整輪額度. 狀態補讀以檔案輪替且每檔每輪最多 1 MiB, 錯誤仍限最近 24 小時
+
+目前頁面的瀏覽器資訊保留名稱 / 版本、語言及時區, 不顯示或保存瀏覽器平台、視窗大小與裝置像素比
+
+頁面效能資訊僅在瀏覽器記憶體保存 TTFB、FCP、LCP、CLS、首次資料呈現時間、長任務數 / 最長耗時及最慢互動耗時. 不保存 DOM 或事件本文, 不送至伺服器, 不寫入偏好與 checkpoint. 不支援或尚未取得樣本時顯示缺值, 最慢互動不是 INP 分數
