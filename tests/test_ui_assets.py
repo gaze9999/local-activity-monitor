@@ -9,6 +9,7 @@ import re
 import shutil
 import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -59,6 +60,20 @@ class UIAssetTests(unittest.TestCase):
                 ui_assets.load_ui_assets.cache_clear()
                 with self.assertRaises(ValueError):
                     ui_assets.load_ui_assets()
+
+    def test_incomplete_embedded_loader_is_preserved_without_setup(self):
+        with tempfile.TemporaryDirectory() as folder:
+            package = Path(folder).resolve() / "src/local_activity_monitor"
+            bundle = package / "_workbench"
+            bundle.mkdir(parents=True)
+            marker = bundle / "user-file"
+            marker.write_text("keep")
+            with patch.object(ui_assets, "__file__", str(package / "ui_assets.py")), patch.object(sys, "frozen", True, create=True), patch.object(local_activity_monitor, "_workbench", types.SimpleNamespace(), create=True), patch("subprocess.run") as run:
+                ui_assets.load_ui_assets.cache_clear()
+                with self.assertRaisesRegex(ValueError, "incomplete"):
+                    ui_assets.load_ui_assets()
+                run.assert_not_called()
+            self.assertEqual(marker.read_text(), "keep")
 
     def test_static_routes_and_inline_csp_use_shared_source(self):
         ui_assets.load_ui_assets.cache_clear()

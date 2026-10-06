@@ -6,6 +6,10 @@ from pathlib import Path
 import sys
 
 
+class MissingUIAssetsError(RuntimeError):
+    pass
+
+
 @lru_cache(maxsize=1)
 def load_ui_assets():
     package = Path(__file__).resolve().parent
@@ -22,5 +26,7 @@ def load_ui_assets():
     try:
         from . import _workbench
     except ImportError:
-        raise RuntimeError("Workbench UI is missing. Clone workbench-ui next to this checkout, set WORKBENCH_UI_PATH, or prepare offline assets with tools/prepare_ui.py") from None
+        raise MissingUIAssetsError("Workbench UI is missing. Run the CLI launcher to prepare the pinned source automatically, use a complete LAM release, or set WORKBENCH_UI_PATH to an existing checkout.") from None
+    if not callable(getattr(_workbench, "Assets", None)):
+        raise ValueError("Embedded Workbench UI is incomplete. Existing files were preserved; restore the assets from a complete LAM release.")
     return _workbench.Assets(package / "_workbench", verify=True)
