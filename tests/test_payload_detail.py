@@ -5,6 +5,24 @@ from local_activity_monitor.payload_detail import bounded_payload, parse_text
 
 
 class PayloadDetailTests(unittest.TestCase):
+    def test_yaml_subset_literals_and_unsupported_expressions(self):
+        yaml = 'name: example\ncount: 0\nenabled: false\nitems:\n  - name: first\n    password: PRIVATE\n  - name: second\n    value: null\n'
+        parsed = parse_text(yaml)
+        self.assertEqual(parsed['format'], 'YAML subset')
+        self.assertEqual(parsed['value']['count'], 0)
+        self.assertFalse(parsed['value']['enabled'])
+        self.assertEqual(parsed['value']['items'][1]['value'], None)
+        self.assertNotIn('PRIVATE', json.dumps(bounded_payload(yaml)))
+        self.assertEqual(parse_text('single: value', format='yaml')['value'], {'single': 'value'})
+        self.assertEqual(parse_text(r'{name: "\uD83D\uDE00", letter: "\x41"}')['value'], {'name': '\U0001f600', 'letter': 'A'})
+        for source, expected in [("{'ok': True, 'value': None, 'items': (0, False)}", {'ok': True, 'value': None, 'items': [0, False]}),
+                                 ('{ok: true, value: null, items: [0, false], count: 1e2}', {'ok': True, 'value': None, 'items': [0, False], 'count': 100})]:
+            self.assertEqual(parse_text(source)['value'], expected)
+        for source in ('{value: run()}', '{value: variable}', '{value: `text ${secret}`}', "{'value': __import__('os').system('anything')}",
+                       'name: example\nvalue: &anchor 1', 'name: example\nvalue: *anchor', 'name: example\nvalue: !!python/object thing',
+                       'name: example\nvalue: |\n  line', 'name: example\nname: duplicate'):
+            self.assertIsNone(parse_text(source), source)
+
     def test_common_formats_preserve_structure_and_mask_fields(self):
         for text, format in [('{"a": 1}\n{"b": 2}', 'JSONL'),
                              ('<result><password>PRIVATE</password><count>2</count></result>', 'XML'),

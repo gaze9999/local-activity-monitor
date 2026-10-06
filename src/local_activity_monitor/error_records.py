@@ -297,7 +297,12 @@ class DiagnosticCollector:
                     return None
                 with closing(sqlite3.connect(self.sql_path.as_uri()+"?mode=ro", uri=True, timeout=.08)) as db:
                     db.execute("PRAGMA query_only=ON")
-                    body_column = "feedback_log_body" if full else "substr(feedback_log_body,1,65537)"
+                    columns = {row[1] for row in db.execute("PRAGMA table_info(logs)")}
+                    candidates = [column for column in ('feedback_log_body', 'message') if column in columns]
+                    if not candidates:
+                        return None
+                    body_source = "coalesce("+",".join("nullif("+column+",'')" for column in candidates)+")" if len(candidates)>1 else candidates[0]
+                    body_column = "substr("+body_source+",1,1048577)" if full else "substr("+body_source+",1,65537)"
                     row = db.execute("SELECT ts,target,"+body_column+" FROM logs WHERE id=?", (event["record_id"],)).fetchone()
                 if row and row[1] == event.get("module") and datetime.fromtimestamp(row[0], timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z") == event.get("timestamp"):
                     return row[2] if isinstance(row[2], str) else None
@@ -328,7 +333,7 @@ class DiagnosticCollector:
 
     def error_detail(self, event, full=False):
         body = self.diagnostic_body(event, full)
-        return {"text": redact(body, limit=None if full else 32768) if body is not None else None, "truncated": not full and isinstance(body, str) and len(body)>32768}
+        return {"text": redact(body[:1048576] if full else body, limit=None if full else 32768) if body is not None else None, "truncated": isinstance(body, str) and len(body)>(1048576 if full else 32768), "content_status": "available" if body is not None else "unavailable"}
 
     def refresh_core(self):
         stats = self.stats["core"]
@@ -361,7 +366,9 @@ class DiagnosticCollector:
                     self.sql_cursor, self.sql_history = None, None
                 thread_column = "thread_id" if "thread_id" in columns else "NULL"
                 sql_targets = " OR lower(target) LIKE '%sql%' OR lower(target) LIKE '%database%' OR lower(target) LIKE '%state_db%'" if self.capture_sql else ""
-                body_column = "CASE WHEN upper(level) IN ('ERROR','FATAL','CRITICAL','WARN','WARNING')"+sql_targets+" THEN substr(feedback_log_body,1,8192) END" if "feedback_log_body" in columns else "NULL"
+                candidates = [column for column in ('feedback_log_body', 'message') if column in columns]
+                body_source = "coalesce("+",".join("nullif("+column+",'')" for column in candidates)+")" if len(candidates)>1 else candidates[0] if candidates else "NULL"
+                body_column = "CASE WHEN upper(level) IN ('ERROR','FATAL','CRITICAL','WARN','WARNING')"+sql_targets+" THEN substr("+body_source+",1,8192) END"
                 fields = f"id,ts,level,target,{thread_column},{body_column}"
                 initial = self.sql_cursor is None
                 rows = db.execute(f"SELECT {fields} FROM logs WHERE id>? ORDER BY id {'DESC' if initial else 'ASC'} LIMIT 2000", (self.sql_cursor or 0,)).fetchall()

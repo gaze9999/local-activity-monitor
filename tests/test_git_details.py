@@ -41,7 +41,7 @@ class GitDetailTests(unittest.TestCase):
             collector.features["metadata"] = False
             collector.snapshot()
         collector.tail_bytes = 1
-        self.assertEqual(collector.git_detail(THREAD,"one","status")["commands"], [])
+        self.assertEqual(collector.git_detail(THREAD,"one","status")["commands"], ["git status"])
 
     def test_mixed_shell_nested_output_scope_and_redaction(self):
         self.call("git status; git diff; echo extra", output="password=SECRET")
@@ -78,3 +78,57 @@ class GitDetailTests(unittest.TestCase):
         self.assertEqual(instance.reply.call_args.args[0],200)
         dashboard.set_settings({"observations":{"git":False}});instance.do_GET()
         self.assertEqual(instance.reply.call_args.args[0],409)
+
+    def test_old_git_check_tool_content_and_source_change(self):
+        self.call('git diff -- example.txt; python -m unittest tests.test_example', output=json.dumps({'exit_code': 0, 'output': 'PRIVATE_DIFF'}))
+        collector = CodexCollector(self.root, tail_bytes=4096)
+        collector.refresh()
+        with self.path.open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps({'type': 'event_msg', 'payload': {'type': 'ignored', 'message': 'PRIVATE_PROMPT'*1000}})+'\n')
+        collector.refresh()
+        git = collector.git_detail(THREAD, 'one', 'diff')
+        check = collector.check_detail(THREAD, 'one', 'python -m unittest')
+        tool = collector.tool_detail(THREAD, 'one')
+        self.assertEqual(git['response']['output'], 'PRIVATE_DIFF')
+        self.assertEqual(git['result_scope'], 'containing_tool_call')
+        self.assertEqual(check['commands'], ['python -m unittest tests.test_example'])
+        self.assertEqual(check['result_scope'], 'containing_tool_call')
+        self.assertEqual(tool['response']['exit_code'], 0)
+        self.assertNotIn('PRIVATE_DIFF', json.dumps(collector.snapshot()))
+        with patch.object(Path, 'open', side_effect=AssertionError('unobserved read')):
+            self.assertEqual(collector.check_detail(THREAD, 'unknown', 'python -m unittest')['commands'], [])
+        state = next(iter(collector.files.values()))
+        with self.path.open('r+b') as stream:
+            stream.seek(state['calls']['one']['request_offset'])
+            stream.write(b'{}\n')
+        self.assertEqual(collector.git_detail(THREAD, 'one', 'diff')['commands'], [])
+        self.assertEqual(collector.check_detail(THREAD, 'one', 'python -m unittest')['commands'], [])
+        self.assertIsNone(collector.tool_detail(THREAD, 'one'))
+
+    def test_nested_check_keeps_containing_result_scope(self):
+        self.call('python -m unittest tests.test_example', nested=True, output='{"exit_code":0}')
+        collector = CodexCollector(self.root); collector.refresh()
+        result = collector.check_detail(THREAD, 'one', 'python -m unittest')
+        self.assertEqual(result['result_scope'], 'containing_tool_call')
+        self.assertEqual(result['response']['exit_code'], 0)
+        collector.features['checks'] = False
+        with patch.object(Path, 'open', side_effect=AssertionError('disabled read')):
+            self.assertIsNone(collector.check_detail(THREAD, 'one', 'python -m unittest'))
+
+    def test_retained_ids_rebuild_command_and_tool_positions_without_payload_cache(self):
+        self.path.write_text(json.dumps({'type': 'session_meta', 'payload': {'id': THREAD}})+'\n', encoding='utf-8')
+        self.call('git diff; python -m unittest tests.example', output='{"output":"selected response","exit_code":0}')
+        with self.path.open('a', encoding='utf-8') as stream:
+            for _ in range(100):
+                stream.write(json.dumps({'type': 'event_msg', 'payload': {'type': 'ignored', 'message': 'PRIVATE_PROMPT'*200}})+'\n')
+        collector = CodexCollector(self.root, tail_bytes=4096); collector.refresh()
+        self.assertNotIn('one', next(iter(collector.files.values()))['calls'])
+        collector.select_detail_targets([{'thread_id': THREAD, 'call_id': 'one'}])
+        for _ in range(4):
+            collector.refresh()
+            if 'response_offset' in collector.detail_position(THREAD, 'one'):
+                break
+        self.assertEqual(collector.git_detail(THREAD, 'one', 'diff')['response']['output'], 'selected response')
+        self.assertEqual(collector.check_detail(THREAD, 'one', 'python -m unittest')['response']['exit_code'], 0)
+        self.assertEqual(collector.tool_detail(THREAD, 'one')['response']['output'], 'selected response')
+        self.assertNotIn('selected response', json.dumps(collector.snapshot()))

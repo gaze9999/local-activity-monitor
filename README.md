@@ -51,7 +51,7 @@ python tools/prepare_ui.py
 
 
 
-也可安裝已建置的 `local_activity_monitor-0.5.0-py3-none-any.whl`, 再從安裝環境呼叫 `local-activity-monitor`
+也可安裝已建置的 `local_activity_monitor-0.5.1-py3-none-any.whl`, 再從安裝環境呼叫 `local-activity-monitor`
 
 ## MCP 來源紀錄
 
@@ -183,4 +183,4 @@ python3 -m pip wheel --no-deps --wheel-dir dist .
 
 Jev usage 欄位來源見 [TypeSafe API 文件](https://docs.typesafe.ai/api), Jev 只觀察 client 回應. Codex 的選配帳戶來源依 [官方 app-server 文件](https://learn.chatgpt.com/docs/app-server), 使用 account/read, account/rateLimits/read 與 account/usage/read, 不送出工作或修改帳戶
 
-共用 JSON 顯示與 Tag 元件來自獨立的 [Workbench UI](https://github.com/gaze9999/workbench-ui) private 儲存庫. `workbench-ui.json` 指定完整 commit SHA, release workflow 使用 `WORKBENCH_UI_READ_TOKEN` 取得固定來源並呼叫共用 action. 發行版、wheel 與原始碼下載包附帶自動產生的資產與 SHA-256 manifest, 使用時不需 GitHub 連線. 共用來源版本不要求另建 Workbench UI release
+共用 JSON 顯示、Tag 與技能檔案樹狀清單來自獨立的 [Workbench UI](https://github.com/gaze9999/workbench-ui) private 儲存庫. LAM 提供資料與欄位說明, 共用元件負責呈現及互動. `workbench-ui.json` 指定完整 commit SHA, release workflow 使用 `WORKBENCH_UI_READ_TOKEN` 取得固定來源並呼叫共用 action. 發行版、wheel 與原始碼下載包附帶自動產生的資產與 SHA-256 manifest, 使用時不需 GitHub 連線. 共用來源版本不要求另建 Workbench UI release

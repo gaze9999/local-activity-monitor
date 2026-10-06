@@ -415,7 +415,12 @@ class CodexCollector:
                 lines = raw.split(b"\n")
                 first = lines.pop(0) if begin else b""
                 state["error_cursor"] = min(end-1, begin+len(first)+1) if begin and lines else begin
-                for line in reversed(lines):
+                positioned = []
+                line_offset = begin+len(first)+1 if begin else 0
+                for line in lines:
+                    positioned.append((line_offset, line))
+                    line_offset += len(line)+1
+                for line_offset, line in reversed(positioned):
                     if not line or len(line) > 1024*1024:
                         continue
                     try:
@@ -431,11 +436,11 @@ class CodexCollector:
                         payload, kind = record["payload"], record.get("type")
                         event_type = identifier(payload.get("type"))
                         if kind == "event_msg" and event_type and (event_type in ("error", "turn_aborted", "turn_failed") or event_type.endswith("_failed")):
-                            self.consume(state, record)
+                            self.parse(state, line, line_offset)
                         elif kind == "response_item" and payload.get("type") in ("function_call_output", "custom_tool_call_output"):
                             failure = tool_error(payload.get("output"))
                             if failure:
-                                state["errors"].append({"timestamp": record["timestamp"], "source": "tool_result", "category": "tool", "severity": "error", "call_id": identifier(payload.get("call_id")), **failure})
+                                state["errors"].append({"timestamp": record["timestamp"], "source": "tool_result", "category": "tool", "severity": "error", "call_id": identifier(payload.get("call_id")), "record_offset": line_offset, "record_hash": hashlib.sha256(line).hexdigest(), **failure})
                                 state["errors"] = sorted(state["errors"], key=lambda event:event["timestamp"] or "", reverse=True)[:50]
                     except (ValueError, TypeError, AttributeError, RecursionError):
                         continue
@@ -486,8 +491,7 @@ class CodexCollector:
                 index = self.detail_indexes.setdefault(identity, {"cursor": stat.st_size, "size": stat.st_size, "modified": stat.st_mtime_ns, "positions": {}, "targets": set()})
                 if stat.st_size < index["size"] or stat.st_size == index["size"] and stat.st_mtime_ns != index["modified"]:
                     index.update(cursor=stat.st_size, positions={})
-                if targets-index["targets"]:
-                    index["cursor"] = stat.st_size
+                added = targets-index["targets"]
                 index["size"] = stat.st_size
                 index["modified"] = stat.st_mtime_ns
                 index["targets"] = set(targets)
@@ -497,6 +501,10 @@ class CodexCollector:
                         for call in targets & state["calls"].keys():
                             positions = {key: state["calls"][call][key] for key in ("request_offset", "response_offset") if key in state["calls"][call]}
                             index["positions"].setdefault(call, {}).update(positions)
+                # Recent requests already have a position, even while awaiting output.
+                # Restart only for newly retained calls whose older request is unknown.
+                if any("request_offset" not in index["positions"].get(call, {}) for call in added):
+                    index["cursor"] = stat.st_size
                 if all("request_offset" in index["positions"].get(call, {}) and "response_offset" in index["positions"].get(call, {}) for call in targets):
                     continue
                 end = index["cursor"]
@@ -607,6 +615,11 @@ class CodexCollector:
             if isinstance(record, dict):
                 self.consume(state, record)
                 payload = record.get("payload")
+                if offset is not None and record.get('type') == 'event_msg' and isinstance(payload, dict):
+                    for event in reversed(state['errors']):
+                        if event.get('source') == 'session' and event.get('timestamp') == timestamp(record.get('timestamp')) and event.get('reason') == payload.get('type'):
+                            event.update(record_offset=offset, record_hash=hashlib.sha256(raw.rstrip(b'\n')).hexdigest())
+                            break
                 if offset is not None and record.get("type") == "response_item" and isinstance(payload, dict):
                     identity = payload.get("call_id") or payload.get("id")
                     call = state["calls"].get(identity)
@@ -747,54 +760,74 @@ class CodexCollector:
         return {"skill": skill, "files": [], "files_truncated": False, "documents": []}
 
     def git_detail(self, thread_id, call_id, operation, full=False):
-        result = {"commands": [], "output": None, "output_scope": None, "truncated": False}
-        budget = self.READ_LIMIT
-        for path, state in self.files.items():
-            call = state["calls"].get(call_id)
-            if state["thread_id"] != thread_id or not call or not any(item["operation"] == operation for item in call.get("git", [])):
+        if not self.features.get('git', True):
+            return None
+        return self.command_detail(thread_id, call_id, operation, 'git', full)
+
+    def check_detail(self, thread_id, call_id, operation, full=False):
+        if not self.features.get('checks', True):
+            return None
+        return self.command_detail(thread_id, call_id, operation, 'checks', full)
+
+    def command_detail(self, thread_id, call_id, operation, category, full=False):
+        """Return observed Git/check commands and their containing response on demand."""
+        result = {'commands': [], 'request': None, 'response': None, 'output': None,
+                  'output_scope': None, 'result_scope': None, 'truncated': False}
+        for path, state in self.detail_states(thread_id):
+            call = state['calls'].get(call_id)
+            retained = getattr(self, 'detail_targets', {}).get(thread_id, set())
+            if not call and call_id not in retained:
                 continue
-            if path.is_symlink() or budget <= 0:
+            if call and not any(item['operation'] == operation for item in call.get(category, [])):
                 continue
+            if path.is_symlink():
+                continue
+            commands, output, request, outer = [], None, None, True
             try:
-                with path.open("rb") as stream:
-                    stream.seek(0, 2)
-                    limit = min(self.tail_bytes, budget)
-                    offset = max(0, stream.tell()-limit)
-                    stream.seek(offset)
-                    tail = stream.read(limit)
-                    budget -= len(tail)
-                if offset:
-                    tail = tail.partition(b"\n")[2]
-                commands, output, outer = [], None, True
-                for raw in tail.splitlines():
+                for raw in self.detail_lines(path, self.detail_position(thread_id, call_id, call)):
                     try:
                         record = json.loads(raw)
-                        payload = record.get("payload") if isinstance(record, dict) else None
-                        if record.get("type") != "response_item" or not isinstance(payload, dict) or (payload.get("call_id") or payload.get("id")) != call_id:
+                        payload = record.get('payload') if isinstance(record, dict) else None
+                        if record.get('type') != 'response_item' or not isinstance(payload, dict) or (payload.get('call_id') or payload.get('id')) != call_id:
                             continue
-                        if payload.get("type") in ("function_call", "custom_tool_call"):
+                        if payload.get('type') in ('function_call', 'custom_tool_call'):
                             calls = invocations(payload)
-                            all_parts = []
+                            selected, parts = [], []
                             for tool, args, nested in calls:
-                                if tool not in ("exec_command", "functions.exec_command") or not isinstance(args, dict) or not isinstance(args.get("cmd"), str):
+                                if tool not in ('exec_command', 'functions.exec_command') or not isinstance(args, dict) or not isinstance(args.get('cmd'), str):
                                     continue
-                                for part in shell_parts(args["cmd"]):
-                                    all_parts.append(part)
-                                    if operation in git_commands(part):
-                                        commands.append(part.strip())
-                            outer = len(calls) != 1 or any(item[2] for item in calls) or len(all_parts) != 1
-                        elif payload.get("type") in ("function_call_output", "custom_tool_call_output"):
-                            output = payload.get("output")
+                                for part in shell_parts(args['cmd']):
+                                    parts.append(part)
+                                    if category == 'git':
+                                        matches = operation in git_commands(part)
+                                    else:
+                                        check_payload = {'name': 'exec_command', 'arguments': {'cmd': part}}
+                                        _, checks = workflow_operations(check_payload, include_skills=False)
+                                        matches = any(item['operation'] == operation for item in checks)
+                                    if matches:
+                                        selected.append(part.strip())
+                            if selected:
+                                commands = selected
+                                request = payload.get('arguments', payload.get('input'))
+                                outer = len(calls) != 1 or any(item[2] for item in calls) or len(parts) != 1
+                        elif payload.get('type') in ('function_call_output', 'custom_tool_call_output'):
+                            output = payload.get('output')
                     except (ValueError, TypeError, AttributeError, RecursionError):
                         continue
                 if commands:
-                    command_text = "\n".join(commands)
-                    presented = (complete_payload if full else bounded_payload)(output)
-                    result.update(commands=[redact(command_text if full else command_text[:32768], limit=None if full else 32768)], output=presented["value"], output_scope="outer_scope" if outer else "git_command", truncated=not full and len(command_text)>32768 or presented["truncated"])
+                    present = complete_payload if full else bounded_payload
+                    sent, returned = present(request), present(output)
+                    command_text = '\n'.join(commands)
+                    result.update(commands=[redact(command_text if full else command_text[:32768], limit=None if full else 32768)],
+                                  request=sent['value'], response=returned['value'], output=returned['value'],
+                                  output_scope='outer_scope' if outer else 'git_command' if category == 'git' else 'check_command',
+                                  result_scope='containing_tool_call' if outer else 'git_command' if category == 'git' else 'check_command',
+                                  content_status='available',
+                                  truncated=sent['truncated'] or returned['truncated'] or not full and len(command_text)>32768)
                     return result
             except (OSError, ValueError, RuntimeError):
                 continue
-        return result
+        return result | {'content_status': self.detail_status(thread_id, call_id)}
 
     def sql_detail(self, event, mask=True, full=False):
         for path, state in self.detail_states(event.get("thread_id")):
@@ -830,7 +863,7 @@ class CodexCollector:
         """Read observed record positions and a bounded legacy tail, never scan a source."""
         with path.open("rb") as stream:
             seen, budget = set(), self.READ_LIMIT
-            for field in ("request_offset", "response_offset"):
+            for field in ("request_offset", "response_offset", "record_offset"):
                 offset = call.get(field)
                 if type(offset) is not int or offset < 0 or offset in seen or budget <= 0:
                     continue
@@ -841,6 +874,11 @@ class CodexCollector:
                 if raw.endswith(b"\n") and len(raw) <= 1024*1024:
                     yield raw
             stream.seek(0, 2)
+            observed_size = self.files.get(path, {}).get('offset')
+            if observed_size is None:
+                observed_size = next((index.get('size') for identity, index in self.detail_indexes.items() if self.session_paths.get(identity) == path), None)
+            if observed_size == stream.tell() and (type(call.get('record_offset')) is int or all(type(call.get(field)) is int for field in ('request_offset', 'response_offset'))):
+                return
             offset = max(0, stream.tell()-min(self.tail_bytes, budget))
             stream.seek(offset)
             if offset:
@@ -849,68 +887,56 @@ class CodexCollector:
                 yield raw
 
     def jev_detail(self, thread_id, call_id, index, full=False):
+        if not self.features.get('jev_calls', True) or type(index) is not int or index < 0:
+            return None
         request, output, nested, operation, isolated = None, None, False, None, True
-        for path, state in self.files.items():
-            if state["thread_id"] != thread_id or full and (path.is_symlink() or not 0 <= index < len(state["calls"].get(call_id, {}).get("jev", []))):
+        for path, state in self.detail_states(thread_id):
+            call = state['calls'].get(call_id)
+            if path.is_symlink() or not call or index >= len(call.get('jev', [])):
                 continue
             try:
-                with path.open("rb") as stream:
-                    stream.seek(0, 2)
-                    offset = max(0, stream.tell()-min(self.tail_bytes, self.READ_LIMIT))
-                    stream.seek(offset)
-                    if offset:
-                        stream.readline()
-                    for raw in stream.read(min(self.tail_bytes, self.READ_LIMIT)).splitlines():
-                        try:
-                            record = json.loads(raw)
-                            payload = record.get("payload") if isinstance(record, dict) else None
-                            if record.get("type") != "response_item" or not isinstance(payload, dict) or payload.get("call_id") != call_id:
-                                continue
-                            if payload.get("type") in ("function_call", "custom_tool_call"):
-                                _, calls = operations(payload)
-                                if index < len(calls):
-                                    request, nested, operation = calls[index]["arguments"], calls[index]["nested"], calls[index]["operation"]
-                                    isolated = not nested or len(invocations(payload)) == 1
-                            elif payload.get("type") in ("function_call_output", "custom_tool_call_output"):
-                                output = payload.get("output")
-                                if isinstance(output, str):
-                                    try:
-                                        output = json.loads(output)
-                                    except ValueError:
-                                        pass
-                        except (ValueError, AttributeError, RecursionError):
+                for raw in self.detail_lines(path, self.detail_position(thread_id, call_id, call)):
+                    try:
+                        record = json.loads(raw)
+                        payload = record.get('payload') if isinstance(record, dict) else None
+                        if record.get('type') != 'response_item' or not isinstance(payload, dict) or (payload.get('call_id') or payload.get('id')) != call_id:
                             continue
+                        if payload.get('type') in ('function_call', 'custom_tool_call'):
+                            _, calls = operations(payload)
+                            if index < len(calls):
+                                request, nested, operation = calls[index]['arguments'], calls[index]['nested'], calls[index]['operation']
+                                isolated = not nested or len(invocations(payload)) == 1
+                        elif payload.get('type') in ('function_call_output', 'custom_tool_call_output'):
+                            output = payload.get('output')
+                    except (ValueError, AttributeError, RecursionError):
+                        continue
             except OSError:
                 continue
         if full and not operation:
             return None
         present = complete_payload if full else bounded_payload
         sent, returned = present(request if operation else None), present(output if operation and isolated else None)
-        return {"operation": operation, "request": sent["value"], "response": returned["value"], "response_scope": "containing_tool_call" if nested else "jev_tool_call", "truncated": sent["truncated"] or returned["truncated"]}
+        return {'operation': operation, 'request': sent['value'], 'response': returned['value'],
+                'response_scope': 'containing_tool_call' if nested else 'jev_tool_call',
+                'truncated': sent['truncated'] or returned['truncated']}
 
     def tool_detail(self, thread_id, call_id, full=False):
         if not self.features.get('tool_events', True):
             return None
-        for path, state in self.files.items():
+        for path, state in self.detail_states(thread_id):
             call = state['calls'].get(call_id)
-            if state['thread_id']!=thread_id or not call or path.is_symlink():
+            if path.is_symlink() or not call and call_id not in self.detail_targets.get(thread_id, set()):
                 continue
-            request, output, found = None, None, False
+            request, output, found, tool = None, None, False, call.get('tool') if call else None
             try:
-                with path.open('rb') as stream:
-                    stream.seek(0, 2)
-                    offset = max(0, stream.tell()-min(self.tail_bytes, self.READ_LIMIT))
-                    stream.seek(offset)
-                    body = stream.read(min(self.tail_bytes, self.READ_LIMIT))
-                if offset:
-                    body = body.partition(b'\n')[2]
-                for line in body.splitlines():
+                for raw in self.detail_lines(path, self.detail_position(thread_id, call_id, call)):
                     try:
-                        record = json.loads(line)
+                        record = json.loads(raw)
                         payload = record.get('payload') if isinstance(record, dict) else None
-                        if record.get('type')!='response_item' or not isinstance(payload, dict) or (payload.get('call_id') or payload.get('id'))!=call_id:
+                        if record.get('type') != 'response_item' or not isinstance(payload, dict) or (payload.get('call_id') or payload.get('id')) != call_id:
                             continue
-                        if payload.get('type') in ('function_call', 'custom_tool_call') and name(qualified_tool(payload))==call.get('tool'):
+                        if payload.get('type') in ('function_call', 'custom_tool_call') and (tool is None or name(qualified_tool(payload)) == tool):
+                            tool = name(qualified_tool(payload))
                             request = payload.get('arguments', payload.get('input'))
                             found = True
                         elif payload.get('type') in ('function_call_output', 'custom_tool_call_output'):
@@ -921,11 +947,52 @@ class CodexCollector:
                     return None
                 present = complete_payload if full else bounded_payload
                 sent, returned = present(request), present(output)
-                return {'tool': call.get('tool'), 'request': sent['value'], 'response': returned['value'],
+                return {'tool': tool, 'request': sent['value'], 'response': returned['value'],
+                        'response_scope': 'tool_call', 'content_status': 'available',
                         'truncated': sent['truncated'] or returned['truncated']}
             except OSError:
                 return None
         return None
+
+    def error_detail(self, event, full=False):
+        """Read the exact observed session failure; no prompt/message records qualify."""
+        if not self.features.get('errors', True) or event.get('source') not in ('session', 'tool_result'):
+            return None
+        thread_id, call_id = event.get('thread_id'), event.get('call_id')
+        for path, state in self.detail_states(thread_id):
+            if path.is_symlink():
+                continue
+            call = state['calls'].get(call_id) if call_id else None
+            try:
+                positions = self.detail_position(thread_id, call_id, call) if call_id else {}
+                if type(event.get("record_offset")) is int:
+                    positions["record_offset"] = event["record_offset"]
+                for raw in self.detail_lines(path, positions):
+                    try:
+                        record = json.loads(raw)
+                        payload = record.get('payload') if isinstance(record, dict) else None
+                        if event.get("record_hash") and hashlib.sha256(raw.rstrip(b"\n")).hexdigest() != event["record_hash"]:
+                            continue
+                        if not isinstance(payload, dict) or timestamp(record.get('timestamp')) != timestamp(event.get('timestamp')):
+                            continue
+                        if event['source'] == 'tool_result':
+                            if record.get('type') != 'response_item' or payload.get('type') not in ('function_call_output', 'custom_tool_call_output') or (payload.get('call_id') or payload.get('id')) != call_id:
+                                continue
+                            value = payload.get('output')
+                            if not tool_error(value):
+                                continue
+                        else:
+                            kind = payload.get('type')
+                            if record.get('type') != 'event_msg' or kind != event.get('reason') or kind not in ('error', 'turn_aborted', 'turn_failed') and not kind.endswith('_failed'):
+                                continue
+                            value = {key: payload[key] for key in ('type', 'message', 'error', 'reason', 'error_code') if key in payload}
+                        presented = (complete_payload if full else bounded_payload)(value)
+                        return {'text': presented['value'], 'truncated': presented['truncated'], 'content_status': 'available', 'source': event['source']}
+                    except (ValueError, TypeError, AttributeError, RecursionError):
+                        continue
+            except OSError:
+                continue
+        return {'text': None, 'truncated': False, 'content_status': self.detail_status(thread_id, call_id) if call_id else 'unavailable', 'source': event['source']}
 
     def mcp_detail(self, thread_id, call_id, index, full=False, observed_event=None):
         for path, state in self.detail_states(thread_id):
@@ -1177,6 +1244,9 @@ class CodexCollector:
                 detail = getattr(self, "project_details", {}).get(project_id, {})
                 project = projects.setdefault(project_id, {"id": project_id, "name": row.get("project_name"), "icon": detail.get("icon"), "kind": detail.get("kind"), "thread_count": 0})
                 project["thread_count"] += 1
+        for event in error_events:
+            identity = [event.get(key) for key in ('source', 'thread_id', 'call_id', 'timestamp', 'reason', 'code', 'record_hash')]
+            event['content_id'] = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
         return {"projects": list(projects.values()), "schedules": schedules, "plugins": plugins, "activity_scope": {"window": window, "timestamp": "call_started_at", "unknown_timestamp": "all_only", "latest_state": ["tokens", "model", "status", "usage", "schedules", "worktrees"]}, "tool_statistics": statistics, "metadata_sources": list(metadata_sources.values()), "read_state": {
             "file_limit": self.FILE_LIMIT if self.track_all else self.max_files, "file_count": len(self.files),
             "read_limit": self.READ_LIMIT, "tail_bytes": self.tail_bytes, "scan_seconds": self.SCAN_INTERVAL,

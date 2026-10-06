@@ -12,7 +12,7 @@ TOOL_CALL = re.compile(r"\btools\.([A-Za-z_][\w]*)\(\s*")
 
 def literal(source, start=0):
     """Read only JSON-like JS literals, including unquoted object keys."""
-    index = start
+    index, nodes = start, 0
 
     def space():
         nonlocal index
@@ -31,26 +31,41 @@ def literal(source, start=0):
                 value = "".join(result)
                 if quote == "`" and "${" in value:
                     raise ValueError()
+                if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+                    try:
+                        value = value.encode('utf-16', errors='surrogatepass').decode('utf-16')
+                    except UnicodeError:
+                        raise ValueError() from None
                 return value
+            if char in '\r\n' and quote != '`':
+                raise ValueError()
             if char == "\\":
                 if index >= len(source):
                     raise ValueError()
                 char = source[index]
                 index += 1
-                if char == "u":
-                    digits = source[index:index+4]
-                    if not re.fullmatch(r"[0-9a-fA-F]{4}", digits):
+                if char in ("u", "x"):
+                    width = 4 if char == 'u' else 2
+                    digits = source[index:index+width]
+                    if len(digits) != width or not re.fullmatch(r"[0-9a-fA-F]+", digits):
                         raise ValueError()
                     char = chr(int(digits, 16))
-                    index += 4
+                    index += width
+                elif char in '\r\n':
+                    if char == '\r' and source[index:index+1] == '\n':
+                        index += 1
+                    continue
                 else:
-                    char = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f"}.get(char, char)
+                    if char.isdigit() and (char != '0' or source[index:index+1].isdigit()):
+                        raise ValueError()
+                    char = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}.get(char, char)
             result.append(char)
         raise ValueError()
 
     def value(depth=0):
-        nonlocal index
-        if depth > 12:
+        nonlocal index, nodes
+        nodes += 1
+        if depth > 12 or nodes > 20000:
             raise ValueError()
         space()
         if index >= len(source):
@@ -77,6 +92,8 @@ def literal(source, start=0):
                     if index >= len(source) or source[index] != ":":
                         raise ValueError()
                     index += 1
+                    if key in result:
+                        raise ValueError()
                     result[key] = value(depth+1)
                 else:
                     result.append(value(depth+1))
@@ -90,7 +107,7 @@ def literal(source, start=0):
                 raise ValueError()
             index += 1
             return result
-        match = re.match(r"(?:true|false|null|undefined)\b|-?\d+(?:\.\d+)?", source[index:])
+        match = re.match(r"(?:true|false|null|undefined)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", source[index:])
         if not match:
             raise ValueError()
         index += len(match[0])
