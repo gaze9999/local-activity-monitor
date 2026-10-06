@@ -29,7 +29,7 @@ class UIAssetTests(unittest.TestCase):
 
     def test_checkout_uses_one_shared_loader_and_does_not_download(self):
         with tempfile.TemporaryDirectory() as folder:
-            source = Path(folder)
+            source = Path(folder).resolve()
             (source / "integrations/python").mkdir(parents=True)
             (source / "src").mkdir()
             shutil.copyfile(LOADER, source / "integrations/python/workbench_assets.py")
@@ -44,7 +44,7 @@ class UIAssetTests(unittest.TestCase):
 
     def test_frozen_bundle_uses_embedded_assets_and_checks_hashes(self):
         with tempfile.TemporaryDirectory() as folder:
-            package = Path(folder) / "src/local_activity_monitor"
+            package = Path(folder).resolve() / "src/local_activity_monitor"
             bundle = package / "_workbench"
             bundle.mkdir(parents=True)
             hashes = {}
@@ -63,7 +63,7 @@ class UIAssetTests(unittest.TestCase):
     def test_static_routes_and_inline_csp_use_shared_source(self):
         ui_assets.load_ui_assets.cache_clear()
         with tempfile.TemporaryDirectory() as folder:
-            request = object.__new__(handler(Dashboard(Path(folder)), 8787))
+            request = object.__new__(handler(Dashboard(Path(folder).resolve()), 8787))
             request.headers = {"Host": "127.0.0.1:8787"}
             request.reply = MagicMock()
             for name in ("workbench-ui.css", "workbench-ui.js"):
@@ -88,13 +88,13 @@ class UIAssetTests(unittest.TestCase):
 
     def test_revision_detects_shared_file_updates_without_rereading_unchanged_bytes(self):
         with tempfile.TemporaryDirectory() as folder:
-            source = Path(folder) / "source"
+            source = Path(folder).resolve() / "source"
             source.mkdir()
             for name in loader.FILES:
                 shutil.copyfile(SOURCE / name, source / name)
             library = loader.Assets(source)
             with patch("local_activity_monitor.server.load_ui_assets", return_value=library):
-                dashboard = Dashboard(Path(folder) / "home")
+                dashboard = Dashboard(Path(folder).resolve() / "home")
                 before = dashboard.web_revision()
                 with patch.object(Path, "read_bytes", side_effect=AssertionError("unchanged assets reread")):
                     self.assertEqual(dashboard.web_revision(), before)
