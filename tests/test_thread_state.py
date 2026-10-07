@@ -16,19 +16,21 @@ class ThreadStateTests(unittest.TestCase):
             key = f'rollout-{identity}.jsonl'
             skill = {'thread_id':identity, 'call_id':'read_1', 'skill':'example', 'timestamp':'2026-10-04T00:00:00Z', 'doc_path':'PRIVATE'}
             path.write_text(json.dumps({'version':1, 'entries':{key:entry, '../bad':entry}, 'skills':[skill, {**skill, 'timestamp':'invalid'}]}))
+            legacy = path.read_bytes()
             cache = ThreadState(path)
             self.assertEqual(list(cache.entries), [key])
             self.assertNotIn('command', cache.entries[key])
             self.assertEqual(len(cache.skills), 1)
             self.assertNotIn('doc_path', cache.skills[0])
-            with patch('local_activity_monitor.thread_state.os.replace', side_effect=PermissionError):
+            with patch.object(cache.store, 'save', side_effect=PermissionError):
                 cache.update([{**entry, 'source_file':key, 'calls':{}}])
             self.assertEqual(cache.entries[key]['status'], 'running')
             cache.next_save = 0
             cache.update([{**entry, 'source_file':key, 'calls':{}}])
-            self.assertNotIn('PRIVATE', path.read_text())
+            self.assertNotIn('PRIVATE', json.dumps(cache.store.read_document(cache.BYTE_LIMIT)))
+            self.assertEqual(path.read_bytes(), legacy)
             path.write_bytes(b' '*(ThreadState.BYTE_LIMIT+1))
-            self.assertEqual(ThreadState(path).entries, {})
+            self.assertEqual(ThreadState(path).entries, cache.entries)
 
 
 if __name__ == '__main__':

@@ -1,11 +1,12 @@
 """Retain bounded activity metadata without request or response bodies."""
 from datetime import datetime, timedelta, timezone
 import json
-import os
+import sqlite3
 
 from .error_records import identifier
 from .mcp_records import reference_url, response_metadata, resource_ids, SOURCE
 from .sqlite_records import database_path
+from .history_store import HistoryStore
 
 
 def sql_identity(event):
@@ -41,15 +42,13 @@ class ActivityHistory:
     STATEMENTS = {"SELECT", "EXPLAIN", "INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "ALTER", "DROP", "PRAGMA", "VACUUM", "ANALYZE", "REINDEX", "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "ATTACH", "DETACH", "DATABASE_EVENT"}
 
     def __init__(self, path):
-        self.path, self.sql, self.web, self.mcp, self.saved = path, [], [], [], None
+        self.store = HistoryStore(path, "activity")
+        self.path, self.sql, self.web, self.mcp, self.saved = self.store.path, [], [], [], None
         self.retention_days = self.DEFAULT_DAYS
         self.health = "ok"
         try:
-            if path.is_symlink():
-                raise OSError()
-            if path.exists():
-                with path.open('rb') as stream:
-                    raw = stream.read(self.BYTE_LIMIT+1)
+            raw = self.store.load(self.BYTE_LIMIT)
+            if raw is not None:
                 if len(raw)>self.BYTE_LIMIT:
                     raise ValueError()
                 value = json.loads(raw)
@@ -62,7 +61,9 @@ class ActivityHistory:
                 self.sql = self.project(value['sql'][:self.SQL_LIMIT], 'sql')
                 self.web = self.project(value['web'][:self.WEB_LIMIT], 'web')
                 self.mcp = self.project(value.get('mcp', [])[:self.MCP_LIMIT], 'mcp')
-        except (OSError, ValueError):
+                if self.store.imported:
+                    self.store.save(self.encode())
+        except (OSError, ValueError, sqlite3.Error):
             self.health = "unavailable"
 
     def project(self, events, kind):
@@ -127,18 +128,10 @@ class ActivityHistory:
             raw = self.encode()
         if raw==self.saved:
             return
-        temporary = self.path.with_name(self.path.name+'.tmp')
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            if self.path.is_symlink() or temporary.is_symlink():
-                raise OSError()
-            with temporary.open('wb') as stream:
-                stream.write(raw)
-            if os.name!='nt':
-                temporary.chmod(0o600)
-            os.replace(temporary, self.path)
+            self.store.save(raw)
             self.saved, self.health = raw, 'ok'
-        except OSError:
+        except (OSError, sqlite3.Error):
             self.health = 'unavailable'
 
     def encode(self):

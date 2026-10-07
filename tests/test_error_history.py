@@ -21,11 +21,11 @@ class ErrorHistoryTests(unittest.TestCase):
             value = event(message="PRIVATE", thread_name="PRIVATE", command="PRIVATE", error_type="TypeError")
             history.update([value, event(25), value])
             self.assertEqual(len(history.snapshot()), 1)
-            self.assertNotIn("PRIVATE", path.read_text())
+            self.assertNotIn("PRIVATE", json.dumps(history.store.read_document(history.BYTE_LIMIT)))
             self.assertEqual(ErrorHistory(path).snapshot(), history.snapshot())
-            stamp = path.stat().st_mtime_ns
+            stamp = history.path.stat().st_mtime_ns
             history.update([value])
-            self.assertEqual(path.stat().st_mtime_ns, stamp)
+            self.assertEqual(history.path.stat().st_mtime_ns, stamp)
             self.assertEqual(error_identity(value), error_identity(history.snapshot()[0]))
 
     def test_caps_and_write_failure_preserve_memory(self):
@@ -35,8 +35,8 @@ class ErrorHistoryTests(unittest.TestCase):
             stamp = datetime.now(timezone.utc)
             history.update([event(timestamp=(stamp-timedelta(seconds=8-index)).isoformat(), index=index) for index in range(8)])
             self.assertEqual(len(history.snapshot()), 3)
-            self.assertLessEqual(history.path.stat().st_size, history.BYTE_LIMIT)
-            with patch("local_activity_monitor.error_history.os.replace", side_effect=PermissionError("PRIVATE")):
+            self.assertLessEqual(len(history.store.load(history.BYTE_LIMIT)), history.BYTE_LIMIT)
+            with patch.object(history.store, "save", side_effect=PermissionError("PRIVATE")):
                 history.update([event(timestamp=stamp.isoformat(), index=99)])
             self.assertEqual(history.health, "unavailable")
             self.assertTrue(any(value["index"] == 99 for value in history.snapshot()))

@@ -15,7 +15,7 @@ class WatchTests(unittest.TestCase):
         first,second=MagicMock(),MagicMock()
         first.poll.return_value=second.poll.return_value=None
         root=Path(__file__).resolve().parents[1]
-        with patch.object(watch,"signature",side_effect=[("old",),("new",),("new",)]),patch.object(watch.time,"monotonic",side_effect=[0,4]),patch.object(watch.subprocess,"Popen",side_effect=[first,second]) as spawn,patch.object(watch.time,"sleep",side_effect=[None,KeyboardInterrupt]):
+        with patch.object(watch,"signature",side_effect=[("old",),("new",),("new",)]),patch.object(watch.time,"monotonic",side_effect=[0,4]),patch.object(watch.subprocess,"run",return_value=subprocess.CompletedProcess([],0)),patch.object(watch.subprocess,"Popen",side_effect=[first,second]) as spawn,patch.object(watch.time,"sleep",side_effect=[None,KeyboardInterrupt]):
             self.assertEqual(watch.supervise(root,["--codex","--open","--port","8790"]),130)
         self.assertIn("--open",spawn.call_args_list[0].args[0])
         self.assertNotIn("--open",spawn.call_args_list[1].args[0])
@@ -48,8 +48,9 @@ class WatchTests(unittest.TestCase):
         with patch.object(watch,"signature",return_value=()),patch.object(watch.subprocess,"Popen",return_value=child):
             self.assertEqual(watch.supervise(Path("."),[],stop),0)
         child.stdin.write.assert_called_once_with("restart\n")
-        child.wait.assert_called_once_with(timeout=5)
+        child.wait.assert_called_once_with(timeout=15)
         child.terminate.assert_not_called()
+        child.stdin.close.assert_called_once()
 
 
 if __name__=="__main__":unittest.main()

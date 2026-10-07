@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import vm from "node:vm";
 
-const app=readFileSync(new URL("../src/local_activity_monitor/web/app.js",import.meta.url),"utf8"),start=app.indexOf("function browserEnvironment()"),end=app.indexOf("function cliVersionList",start),source=app.slice(start,end);
+const app=readFileSync(new URL("../frontend/app.js",import.meta.url),"utf8"),start=app.indexOf("function browserEnvironment()"),end=app.indexOf("function cliVersionList",start),source=app.slice(start,end);
 function environment(navigator){return vm.runInNewContext(source+"browserEnvironment()",{navigator,innerWidth:1320,innerHeight:900,devicePixelRatio:1.25,Intl});}
 assert.equal(environment({userAgentData:{brands:[{brand:"Not_A Brand",version:"99"},{brand:"Chromium",version:"154"},{brand:"Microsoft Edge",version:"154"}],platform:"Windows"},language:"zh-TW"}).browser,"Microsoft Edge 154");
 assert.equal(environment({userAgent:"Chrome/154.0.0.0 Safari/537.36 Edg/154.0.4258.62"}).browser,"Microsoft Edge 154.0.4258.62");

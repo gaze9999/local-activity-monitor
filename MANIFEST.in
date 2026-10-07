@@ -1,0 +1,3 @@
+recursive-include frontend *.html *.js *.css *.json *.svg *.ico
+include workbench-ui.json
+include tools/build_frontend.py tools/prepare_ui.py

@@ -1,203 +1,169 @@
 # Local Activity Monitor
 
-Codex 活動監測, 包含 Jev 與 MCP. 使用 Python 標準函式庫與原生網頁, 不需 Node, GPU, API Key 或雲端服務
+監測本機 Codex、Jev 與 MCP 活動的瀏覽器介面, 提供對話、用量、工具、專案及診斷明細. 後端使用 Python 3.10+ 標準函式庫, 前端使用原生 HTML / JavaScript / CSS 與 Workbench UI
 
-目前版本 `0.6.0`, 保留跨平台 CLI 與瀏覽器介面. 0.x 以 commit / push 與實際 minor 來源的 `0.x.0` tag 交付, 1.0.0 前不建立 GitHub Release
+目前版本 `0.7.0`. 0.x 以提交與 minor 版本 tag 交付, 建置包保存在 [Actions artifacts](https://github.com/gaze9999/local-activity-monitor/actions/workflows/release.yml). GitHub Release 從 1.0.0 起提供
 
-操作方式見 [使用說明](docs/usage.md), 資料來源與擴充方式見 [程式架構](docs/architecture.md), [設定檔格式](docs/settings-format.md) 與 [錯誤觀察](docs/error-observation.md). 維護與修改原則見 [維護與驗收](docs/maintenance.md). [活動匯出規劃](docs/export-plan.md) 保存後續功能需求. 可觀測欄位與取得限制見 [資料盤點](docs/data-inventory.md), 本輪檢查見 [驗證紀錄](docs/validation.md)
+## 功能
 
-## 免安裝版與發布建置
-
-Windows、macOS 與 Linux 分別建置 CLI 免安裝包, 套件內含 Python, 透過本機瀏覽器顯示監測網頁. 使用者不需安裝 Python 或相依套件
-
-| 套件 | 啟動方式 |
+| 主頁 | 內容 |
 | --- | --- |
-| windows-x64-cli.zip | 解壓縮後使用 `launch-cli.cmd`、`launch-cli.ps1` 或 `launch-cli.exe` |
-| macos-arm64-cli.tar.gz | Apple Silicon, 使用 `launch-cli.command` 或 `launch-cli` |
-| macos-x64-cli.tar.gz | Intel Mac, 使用 `launch-cli.command` 或 `launch-cli` |
-| linux-x64-cli.tar.gz / linux-arm64-cli.tar.gz | 使用 `launch-cli.sh` 或 `launch-cli` |
+| 總覽 | 可選擇及排序的圖表、帳戶用量與活動摘要 |
+| 用量與額度 | 模型 Token、帳戶額度剩餘比例、重設時間與 credits |
+| 對話 | 對話列表、子代理程式、本機排程與 My dots |
+| 專案 | 專案列表、Git 操作、工作樹與驗證活動 |
+| 工具 | 呼叫與耗時、MCP、技能與 Plugins |
+| 資料操作 | 網路參考、檔案操作與 SQL 紀錄 |
+| 錯誤與 Log | 錯誤分類、來源 Log 與關聯操作 |
+| 監測程式 | 收集進度、CPU 時間、讀取量、硬體與頁面效能 |
 
-套件由 `.github/workflows/release.yml` 在對應系統建置, 通過服務 smoke check 後保存在 Actions artifacts. 0.x 的流程不建立 Release, 1.0.0 後也需明確勾選 `publish` 才附加到草稿 Release. 本機建置只產出 `.local/package-tests/` 下的測試包, 不上傳或發布. 建置工具列在 `tools/requirements-build.txt`, 啟動入口不安裝相依套件
-
-測試套件可從 [Actions](https://github.com/gaze9999/local-activity-monitor/actions/workflows/release.yml) 已完成的建置下載, 需要 GitHub 存取權限, 並受 artifact 保留期限限制. 保留整個解壓縮目錄, 在本機瀏覽器使用監測網頁
+介面支援繁體中文、English 與日本語, 提供深淺模式、字型、強調色、圖表形式、篩選、分頁及拖曳排序. 偏好設定可匯出與匯入 JSON, 操作明細按需載入
 
 ## 從原始碼啟動
 
-根目錄保留啟動入口、必要文件與設定. 啟動輔助程式與相依清單位於 `tools/`
-
-本機開發可將 private 的 `workbench-ui` 儲存庫放在相鄰目錄, 或以 `WORKBENCH_UI_PATH` 指定其根目錄. LAM 直接讀取共用 UI, 不維護 CSS / JavaScript 副本. CLI 啟動時若沒有共用來源或離線資產, 會使用既有 Git 認證取得 `workbench-ui.json` 指定的 commit, 保存至本專案的 `.local/workbench-ui/<revision>` 並產生離線資產. 不修改鄰近儲存庫或固定版本, 不安裝相依套件. 缺少 Git、存取權限或網路時顯示原因, 既有資產異常時保留原內容並停止啟動. 發行版與原始碼下載包內嵌共用資產, 可離線使用
-
-| 系統 | CLI |
-| --- | --- |
-| Windows | `launch-cli.cmd` 或 `launch-cli.ps1` |
-| macOS | 雙擊 `launch-cli.command` 或 `sh launch-cli.sh` |
-| Linux | `sh launch-cli.sh` |
-
-原始碼直接使用已有的 Python 3.10+, CLI 優先沿用 repository 內可用的 `.venv`, 不建立環境、不安裝專案或套件. 損壞的 `.venv` 不會自動刪除或覆寫
-
-缺少 Python 時顯示原因, 預設不詢問安裝、不下載 runtime. 若要明確啟用 Python 安裝流程, Windows 使用 `launch-cli.cmd --install-python`, macOS / Linux 使用 `sh launch-cli.sh --install-python`. 此流程仍須回答 `Install Python now? [y/N]`, 預設取消, 使用既有 Python Install Manager / winget、Homebrew 或 apt, 不自行安裝套件管理工具. 偵測時停用 Python Install Manager 的自動安裝
-
-若偏好手動安裝 CLI, 在 repository 根目錄執行:
+需要 Python 3.10+. 首次取得 private 的 Workbench UI 來源時, 需要 Git 與該儲存庫的既有存取權限
 
 ```sh
-python -m venv .venv
-python tools/prepare_ui.py --ensure
-# Windows
-.venv/Scripts/python.exe -m pip install -r tools/requirements.txt
-# macOS / Linux
-.venv/bin/python -m pip install -r tools/requirements.txt
+git clone https://github.com/gaze9999/local-activity-monitor.git
+cd local-activity-monitor
 ```
 
-`tools/requirements.txt` 安裝專案本身, runtime 沒有第三方套件相依, build 相依由 `pyproject.toml` 管理. 手動安裝可能需要下載 build 工具. 不會自動啟用 Jev 紀錄或安裝 Codex
+| 系統 | 啟動方式 |
+| --- | --- |
+| Windows | `launch-cli.cmd` 或 `launch-cli.ps1` |
+| macOS | 雙擊 `launch-cli.command` 或執行 `sh launch-cli.sh` |
+| Linux | `sh launch-cli.sh` |
 
-原始碼啟動由 `tools/watch.py` 監看 Python 修改, 儲存穩定後只重啟自己建立的服務子程序. HTML / JS / CSS 在更新週期內重新載入. 瀏覽器的 Tab、排序、篩選、頁碼、外觀與觀察設定保留在 localStorage. 更新 launcher / watcher 或 runtime 時需重新啟動入口, watcher 不自動 pull 或更新相依. 直接呼叫已安裝的 CLI / wheel 不啟用 watcher
+入口優先使用儲存庫內的 `.venv`, 其次使用已安裝的 Python, 自動建置頁面並開啟 `http://127.0.0.1:8787/`. 終端按 Ctrl+C 停止服務. 可加入 `--port 8790` 指定連接埠, `--codex-home` 指定 Codex 資料目錄
 
-更新共用 UI 時執行 `python tools/prepare_ui.py --update`, 會以既有 Git 認證取得 Workbench UI 的 `main` 最新提交, 更新 `workbench-ui.json` 並產生離線資產. Workbench UI 必須處於乾淨的 `main`, 不會覆寫未提交內容或重寫歷史. 本機 CSS / JavaScript 更新依既有網頁更新週期套用, 更新載入器時需重啟 LAM. `--ensure` 只準備固定版本, 缺少來源時才自動取得, 不能與 `--update` 同時使用. 未指定這兩個選項時沿用既有本機來源與離線資產準備流程
+相同連接埠及 `CODEX_HOME` 已有 LAM 時, 新入口會開啟既有服務. 其他程式占用連接埠時會顯示錯誤. macOS 入口需要執行權限時, 執行 `chmod +x launch-cli.command`
 
-CLI 入口加入 `--codex --open`, 直接呼叫 CLI 不加 `--codex` 時不讀 Codex sessions. 預設頁面為 `http://127.0.0.1:8787/`, 只能從本機連線, 可用 `--port 8790` 指定連接埠. 網頁偏好保存在瀏覽器的 localStorage. 關閉瀏覽器分頁不會停止 CLI 服務
+缺少 Python 時可使用 `launch-cli.cmd --install-python` 或 `sh launch-cli.sh --install-python`, 確認後透過 Python Install Manager / winget、Homebrew 或 apt 安裝
 
-重複啟動 CLI 時檢查相同 port 與 CODEX_HOME 的 monitor, 開啟既有服務並結束新的啟動程序. 其他程式占用 port 時顯示訊息. macOS 若原始碼入口缺少執行權限, 執行一次 `chmod +x launch-cli.command`
+### Workbench UI 與頁面建置
 
-也可安裝 `local_activity_monitor-0.6.0-py3-none-any.whl`, 再從安裝環境呼叫 `local-activity-monitor`. wheel 需要已有 Python, 不等同內含 Python 的免安裝包
+LAM 頁面來源位於 `frontend/`. CLI 啟動會執行 `tools/build_frontend.py --latest`, 自動取得 WBUI 並產生 `src/local_activity_monitor/_web/` 與 `_workbench/`
 
-## MCP 來源紀錄
+- WBUI 0.x 選擇最高的正式 `vMAJOR.MINOR.PATCH` tag
+- WBUI 1.0.0 起選擇 GitHub Latest 的已發布非預覽 Release, 需要已登入的 GitHub CLI
+- 來源快取位於 `.local/workbench-ui/<revision>`, 建置成功後才將完整 SHA 寫入 `workbench-ui.json`
+- 查詢或下載失敗時沿用已驗證資產, 首次取得失敗時依錯誤訊息補齊 Git、認證或來源
 
-Dashboard 讀取來源實際的紀錄狀態, 不在啟動, 匯入或還原時改寫來源設定. 來源支援紀錄時, 請在該 MCP 啟用. Jev 的本機 telemetry 需要含 `jev_telemetry.py` 的新版 Jev client, 由 `codex-setup` 的 Jev wheel 或 managed Skill 安裝提供. 本 repo 不維護第二份 API client
+以下命令只建置 `workbench-ui.json` 記錄的版本, 用於離線重建與 CI:
 
-```text
+```sh
+python tools/build_frontend.py
+```
+
+`WORKBENCH_UI_PATH` 可指定 WBUI 開發來源. `tools/prepare_ui.py --ensure` 準備已記錄的 WBUI 版本, `--update` 更新乾淨的共用來源 main. 正式 tag 更新由 `build_frontend.py --latest` 處理
+
+左上角顯示 LAM 與實際載入的 WBUI 版本. Watcher 監看 Python 與 `frontend/` 修改, 建置成功後重啟自己建立的服務, 建置失敗時保留執行中的服務
+
+本版固定 WBUI 0.4.0 的已確認 commit. 自動更新繼續選擇正式 tag, 版本低於目前已建置版本時沿用原版. 明確串接其他 revision 可使用 `python tools/build_frontend.py --revision <完整 SHA>`, 建置成功後才更新版本 pin
+
+關閉 CLI 或按 Ctrl+C 時, 啟動器通知自己建立的 watcher 與服務退出並釋放連接埠. Windows 使用 Job Object 讓隱藏子程序隨所屬 CLI 結束, Linux / macOS 的終止訊號會進入退出清理. 建置暫存目錄在建置完成或失敗後清除, 已取得的 WBUI 快取與必要資料繼續保存
+
+### 安裝 Python 套件
+
+先建置頁面, 再在選定的 Python 環境安裝專案:
+
+```sh
+python tools/build_frontend.py --latest
+python -m pip install .
+local-activity-monitor --codex --open
+```
+
+也可安裝 Actions 產出的 wheel. 已安裝的 CLI 使用內附資產, `--codex` 啟用 Codex 活動讀取, `--open` 開啟瀏覽器
+
+## 免安裝 CLI 套件
+
+[Actions](https://github.com/gaze9999/local-activity-monitor/actions/workflows/release.yml) 提供五平台建置, 套件內含 Python、LAM、WBUI 及授權文件. 下載 artifacts 需要 GitHub 存取權限, 檔案受 Actions 保留期限限制
+
+| 套件 | 啟動方式 |
+| --- | --- |
+| `windows-x64-cli.zip` | 解壓縮後使用 `launch-cli.cmd`、`launch-cli.ps1` 或 `launch-cli.exe` |
+| `macos-arm64-cli.tar.gz` | Apple Silicon, 使用 `launch-cli.command` 或 `launch-cli` |
+| `macos-x64-cli.tar.gz` | Intel Mac, 使用 `launch-cli.command` 或 `launch-cli` |
+| `linux-x64-cli.tar.gz` / `linux-arm64-cli.tar.gz` | 使用 `launch-cli.sh` 或 `launch-cli` |
+
+保留完整解壓縮目錄. 原生入口預設啟用 Codex 並開啟瀏覽器, `--no-codex` 關閉 Codex 讀取, `--no-browser` 關閉自動開啟瀏覽器. 套件使用內附資產, 可離線啟動
+
+## 資料來源
+
+| 來源 | 資料意義 |
+| --- | --- |
+| Codex JSONL 與本機 catalog | 對話標題、狀態、專案、模型、工具與每個 thread 的最新累計 Token |
+| MCP 設定與工具紀錄 | 來源名稱、操作、時間、結果及來源提供的數值摘要 |
+| Jev telemetry | 每個完成操作的模型、耗時、HTTP 嘗試、body bytes 與 provider usage |
+| App / Core Log | 診斷等級、類型、時間、識別碼與關聯活動 |
+| 本機設定與快取 | 排程、My dots、Plugins 與工作樹 metadata |
+
+Token 分析使用每個對話的最新累計快照, Cached input 與 Reasoning output 為子項目. 帳戶額度顯示來源回報的剩餘比例與重設時間, 來源缺值顯示 `--`, 已確認零值顯示 `0`
+
+主設定的「官方帳戶查詢」預設關閉. 啟用後透過已登入的 Codex CLI 取得方案、額度與帳戶用量, 查詢結果至少快取 60 秒. 雲端 Work、My dots 與排程清單尚未串接
+
+一般更新收集選定 metadata, 完整 Git、SQL、工具輸入輸出、Log 與技能文件在開啟明細時受限讀取並遮蔽 credentials. 服務使用 loopback 與 Host / Origin 檢查. 讀取範圍、保存期限與上限見 [資料盤點](docs/data-inventory.md)
+
+### 回補資料
+
+`CODEX_HOME/monitoring/lam-history.sqlite3` 保存 SQL / 網路 / MCP 活動、錯誤摘要、已確認對話狀態與技能讀取紀錄. 首次讀取會匯入既有 `activity-history.json`、`error-history.json` 與 `thread-state.json`, 原檔保留, 後續以 SQLite 資料為準. 程式記錄檔 `local-activity-monitor.jsonl` 與輪替檔繼續保存
+
+SQLite 以交易保存各類資料, 版本升級前產生 `.schema-vN.bak` 備份, 遷移失敗時回復交易. 資料格式與擴充方式見 [架構](docs/architecture.md#回補資料儲存)
+
+### Jev 紀錄
+
+需要含 `jev_telemetry.py` 的 Jev client. 以下操作修改 `CODEX_HOME/monitoring/jev-monitor.json`, Jev CLI 與 MCP 共用此設定:
+
+```sh
 local-activity-monitor --enable-jev --configure-only
 local-activity-monitor --codex --open
 ```
 
-第一行明確啟用 metadata 紀錄, 只設定本機檔案. 不查 Jev API, 不讀 Key, 不送出專案資料. Jev CLI 與 MCP 讀取同一份設定
+已有 Jev MCP 程序需重新載入新版 client. 停用紀錄使用 `--disable-jev --configure-only`, 已有資料保留. 資料庫預設位置:
 
-- 設定檔: `$CODEX_HOME/monitoring/jev-monitor.json`, 未設定 `CODEX_HOME` 時使用 `~/.codex`
-- Windows 資料庫: `%LOCALAPPDATA%/local-activity-monitor/state/jev.sqlite3`
-- macOS 資料庫: `~/Library/Application Support/local-activity-monitor/state/jev.sqlite3`
-- Linux 資料庫: `$XDG_DATA_HOME/local-activity-monitor/state/jev.sqlite3`, 未設定絕對位置時使用 `~/.local/share`
-- `--codex-home` 與 `--database` 可指定實際位置. Jev 與 dashboard 必須使用相同的 `CODEX_HOME`. Windows Store 虛擬化環境要確認兩個程序看到同一個資料庫
+- Windows: `%LOCALAPPDATA%/local-activity-monitor/state/jev.sqlite3`
+- macOS: `~/Library/Application Support/local-activity-monitor/state/jev.sqlite3`
+- Linux: `$XDG_DATA_HOME/local-activity-monitor/state/jev.sqlite3`, 未設定時使用 `~/.local/share`
 
-已開啟的 Jev MCP process 必須重新載入才會使用新版程式. 設定啟用後, 新版 client 每次操作讀取 opt-in 狀態. 不會回補舊 client 的歷史紀錄
+## 開發與建置
 
-```text
-local-activity-monitor --disable-jev --configure-only
-```
-
-停用會保留已有紀錄. 個別 Jev process 也可設定 `JEV_TELEMETRY=0`. 清除歷史時先停用紀錄, 關閉 dashboard 與 Jev process, 再自行處理指定資料庫及 SQLite sidecar. 本工具不自動清除資料
-
-## 顯示範圍
-
-| 來源 | 觀察內容 | 限制 |
-| --- | --- | --- |
-| Jev | 已完成操作的 status, model, latency, HTTP 嘗試, body bytes, provider 回傳的 input/output tokens 與選定新增指標 | 一個操作完成時寫一列. 程序強制終止或資料庫不可寫時可能缺漏. 未知 usage 為 null |
-| Codex / ChatGPT | 對話名稱, ID, 時間, 類型, 專案, 本機 / 雲端 / 遠端分類, 最新累計 counters, 工具名稱與次數 | 本機 catalog 提供 metadata. 雲端 token / 工具紀錄未提供時維持未知. fork 可能繼承 token counters |
-| Codex Git | 工具呼叫中的 Git 操作, 時間, 工作目錄名稱與所屬對話 | 只辨識 literal 命令, 不主動執行 Git. 工具耗時屬於整次工具呼叫, 不等同單一 Git 命令耗時或成功 |
-| Skills / 驗證 | SKILL.md 讀取, test / build / lint / type check 操作與所屬對話 | 讀取不等同使用. 不從工具已回傳推論檢查通過 |
-| MCP | 各來源的工具, 操作類型, 時間, 結果, 耗時與選定摘要. 包含文件 / OCR, 環境 / 驗證, Runtime / 瀏覽器, Codex 工作流程, Review / Security, 部署與 App / 成果 | 自動辨識已設定與已出現的來源. 未知來源仍保留通用紀錄. 多個工具共用的回傳不拆成個別結果 |
-| 網路參考 | Web 工具紀錄, 開啟與獨立回傳中的網址, 時間與對話 | 移除 query / fragment, 排除 URL credentials 與內部 IP. 動態 reference ID 未取得網址時維持缺值 |
-| 工作 / 檔案 | 工作起訖累計耗時, literal 檔案讀取, apply_patch 與指定文字寫入操作的檔案位置 | 依可配對的工作起訖計算. 只辨識 literal 檔案操作, 不讀取檔案內文 |
-
-Jev 不保存 query, rubric, state, candidates, answers, credential, header, 原始錯誤或私有來源路徑. 紀錄失敗不改變 Jev 的原本結果或錯誤處理. HTTP error body 不另讀取
-
-Request bytes 是每次 HTTP 嘗試的 JSON body 大小. response bytes 只計已讀取內容, 未知部分另列. 不是 TLS / header / 網路流量或費用
-
-Codex collector 從 JSONL, 本機 thread SQLite catalog, session index 與指定 app state 欄位選取 metadata, 不將完整原始紀錄, 一般對話文字或完整指令送到頁面. 不讀 `auth.json`, 憑證檔或 shell history. `exec` 中只辨識明確 literal 的 Git / Jev / Skills / 驗證操作, 不執行程式碼. 工具明細另外列出 `exec` 內辨識到的工具名稱, 包含動態參數的呼叫. 數量是程式碼出現位置, 不推論迴圈或條件分支的實際執行次數. 對話名稱優先取本機 catalog 的側邊欄顯示名稱, 缺少時才使用 session title / index. 分類依已記錄欄位, 缺少資料顯示未知
-
-主頁整合總覽, 用量與額度, 對話, 專案, 工具, 資料操作, 錯誤與 Log, 監測程式. 對話包含列表 / 子代理程式 / 排程 / My dots, 專案包含列表 / Git / 驗證, 工具包含呼叫與耗時 / MCP / 技能 / Plugins, 資料操作包含網路 / 檔案 / SQL. 各子 Tab 的用途以 tooltip 顯示, 時間範圍由頁首全域選單控制, 舊頁面入口與圖表設定保留. 排程只讀取本機 metadata, 不顯示 prompt 或帳戶 ID. MCP 來源按鈕固定展開並自動換行. 左上版本與標題分開, 右上資訊區維持兩行, 集中連線狀態、額度剩餘、重設與更新時間. 每頁最下方的資料來源與讀取範圍維持全寬並預設收合, 展開可查看實際檔案位置, 選取欄位, 讀取結果, 目前保留量與程式上限
-
-各分頁使用共用[卡片庫](docs/card-library.md), 可選趨勢, 比較, 排行, 分布與統計卡, 標籤分別列出類別與可用圖表形式. 總覽提供全部來源的圖表選項, 預設顯示 Model, 對話, 錯誤與用量, 每張副本有獨立參數. 主 Tab 摘要預設四項重要指標, 可設定數量, 項目, 名稱與順序, 副標優先顯示次要記錄值. 子 Tab 不顯示摘要卡或摘要設定. 圖表預設使用適合資料的形式, 可改選支援的形式, 時間圖另支援面積圖, 工具頁提供耗時分布. 多線圖預設 3 條, 可選 5 / 10 條. 有意義的平均值, P1 / P99, 總數與樣本範圍列在獨立統計卡, 各組以分隔線區分. 圖表保留刻度, 單位與完整 tooltip, 空資料顯示說明, 表格可使用全域或個別數值熱度. 程式碼中辨識到的工具預覽最多五行, 完整清單由明細視窗提供
-
-右上拖曳開關預設關閉, 開啟後直接拖曳 Tab, 表頭, 圖表與卡片標題或活動摘要, 有插入位置提示. 各區獨立排序, 摘要指標的順序由頁面設定調整. 對話列只有一個相同明細入口, 關聯工具 / 對話使用按鈕. 狀態標籤依執行, 完成, 錯誤, 等待與回補分色, 保留文字與狀態確認時間
-
-對話與 MCP 來源頁可點開特定 Jev 呼叫, 從該 session 尾端取得可觀察的送出 / 回傳內容, 在送至頁面前遮蔽 credentials, 不另存內容資料庫. 使用動態參數或多個工具共用回傳時可能沒有獨立的 Jev request / response. 缺少內容顯示 --. 不從 metadata 統計重建 payload
-
-預設使用 Steam 深藍灰與淺藍配色, 可選其他主題, 強調色與深淺模式. 主設定與 Tab 設定採共用分類導覽, 依可視範圍與最小尺寸呈現, 切換分類時維持大小, 窄螢幕保留邊距, 設定選項靠右. 右上設定集中外觀, 顯示, 更新與追蹤, 介面與說明, 監測項目, MCP 來源, 來源紀錄與設定檔. 來源紀錄顯示來源實際狀態與更新時間, 缺少時間時顯示替代文字. 提供繁體中文, English 與日本語, 更新預設 10 秒 (1 - 3600), session 1 - 5000, 介面字級預設 14 px (12 - 18). 數量設定四捨五入為整數. 字級使用下拉選單, 選取後立即套用. 設定結果使用短暫浮動通知
-
-介面與說明分工具, 介面文字與指標 tooltip, 有搜尋 / 分類, 有變更才顯示儲存與還原. 共用 tooltip 會避開邊緣並在 modal 開關時隱藏. 偏好保存於瀏覽器, 可匯入 / 匯出 JSON. 全部還原需先確認, 已有活動紀錄保留. 全域顯示選項預設 5 / 10 / 20 / 全部, 排行 5 項, 表格 10 筆. 圖表設定集中在卡片右上角齒輪, 分類趨勢可開啟合計線, 預設關閉, 包含全部分類且不占原有線數. 每張圖表與表格可獨立保存設定. 表格欄寬依內容安排, 時間在表格呈現兩行, 摘要與其他區域維持單行. Modal 的導覽按鈕與說明集中在 header, 工具說明的鉛筆緊接文字, 參考網址使用預設收合的逐筆清單. 既有有效自訂值保留, 還原預設後套用新數量與字級. Tag 以顏色區分狀態與分類, 同時保留文字
-
-用量頁顯示來源提供的額度視窗, 剩餘比例, 重設時間與 credits, 摘要優先選擇已取得的資料, 依實際視窗長度命名. Token 分析依 thread 最新快照. 設定的監測項目可選擇「官方帳戶查詢」, 預設關閉, 啟用後透過已登入的 Codex CLI 唯讀取得方案, 額度與帳戶 Token 統計, 成功及失敗結果至少快取 60 秒. 讀取失敗時保留本機額度來源, 來源未提供的欄位維持未知
-
-工具子頁包含 Plugins, 區分設定啟用狀態與本機快取, 顯示供應商, 版本, Skills 及 MCP 數量. 子代理程式從本機 spawn 關聯補齊, 狀態以工作開始 / 完成事件確認. MCP 與 SQL 內容只在開啟已記錄的操作時按需取得. 動態參數顯示記錄的呼叫程式碼, 不推算當時執行值, 混合回傳保留外層來源
-
-My dots 與排程顯示本機可取得的 metadata, 雲端 Work, My dots 與排程來源尚未連接時明確標示. 本機空清單不代表雲端沒有資料. 官方帳戶查詢不提供這些雲端清單, 目前也未加入網路流量擷取
-
-來源紀錄範圍預設 24 小時, 全域選單統一控制列表與操作統計. 最新狀態, 累計 Token 與帳戶額度保留來源快照. 專案資料夾, Global / Project AGENTS.md 與已觀察 Git 操作內容只在點明細時受限讀取, 不放入 snapshot 或 checkpoint
-
-Token 使用每個 thread 最新累計快照. 不將每次快照或 last-turn counter 相加. cached input 與 reasoning output 是子項目, 不額外加到 total. 不彙整成帳戶總用量
-
-檔案清單每 15 秒盤點. 預設最多 20 個近期 session 檔案, 開啟完整追蹤時最多追蹤 5000 個檔案, 依每輪 8 MiB 預算逐步讀取. 初次每個檔案讀取頭行與最多 1 MiB 尾端, 缺少狀態時在同一預算內向前回查工作開始 / 完成事件. 處理部分行, 檔案截短與損壞 JSON. catalog 最多提供 2000 個對話 metadata. 最近確認狀態與 500 筆 Skills 讀取 metadata 另保存至有上限的 checkpoint, 重啟後沿用並回補未涵蓋的紀錄
-
-## 錯誤與常駐狀態
-
-右上角"錯誤"顯示最近 24 小時已載入的錯誤數, 錯誤摘要在重整與重啟後保留, 點擊直接進入錯誤紀錄並篩選錯誤. 也可查看警告, 對話送出失敗, 連線重試, MCP / 工具回報錯誤, 命令非零代碼與觀察程式錯誤. 點整列可看原因分類, 時間, 模組, 代碼, Request / Trace / Call ID, 來源紀錄 ID 與相關事件. 不保存原始診斷訊息, stack 或私人對話內容
-
-純 ChatGPT 雲端對話由本機 catalog 提供名稱, 時間與分類. 沒有 Codex session 或來源未提供的 Model / token / Reasoning 維持未知, 明細列出資料來源. 長時間工作的開始事件若超出尾端, 會分輪回查並補回狀態及可取得的起訖耗時
-
-監測程式 Tab 顯示 uptime, Python / 平台 / 版本, 整理耗時與 CPU 趨勢, 讀取量, HTTP 回應, 資料保留與狀態事件. 程式保留最多 50000 個工具呼叫, 8 MiB 未完成片段, 360 個效能樣本與 200 個狀態事件. 舊資料依上限移除, 效能樣本與執行事件保存在記憶體. 本程式 Log 最多 128 KiB, 錯誤與 lifecycle / Skills checkpoint 各最多 512 KiB. 瀏覽器分頁隱藏時停止自動畫面更新, 回到分頁再更新, 後端仍依設定收集
-
-## 畫面範例
-
-以下四個頁面使用隔離環境產生的示範資料, 對話與專案名稱、用量數值及錯誤內容皆為虛構, 不含真實活動紀錄
-
-### 總覽
-
-彙整活動摘要、模型分布與工具趨勢, 可從卡片庫選擇要顯示的圖表
-
-![總覽的活動摘要與趨勢圖, 使用示範資料](docs/images/overview-current.png)
-
-### 對話
-
-查看對話狀態、Model 與 Token 統計, 表格可排序、篩選及開啟明細
-
-![對話頁面的統計圖與對話表格, 使用示範資料](docs/images/conversations-current.png)
-
-### MCP 觀察
-
-比較 MCP 來源的呼叫次數, 查看工具排行、操作類型與操作紀錄
-
-![MCP 來源的呼叫趨勢、排行與操作紀錄, 使用示範資料](docs/images/mcp-current.png)
-
-### 錯誤紀錄
-
-查看錯誤與警告的趨勢、類型分布及相關紀錄, 子分頁以 Badge 顯示錯誤數量
-
-![錯誤與警告的趨勢、分布與紀錄表格, 使用示範資料](docs/images/errors-current.png)
-
-## 後續增加來源
-
-新 MCP 的名稱由目前 `CODEX_HOME/config.toml` 與 session 中的 `mcp__來源__工具` 自動發現. 不需維護固定來源清單或電腦路徑. 現有 adapters 只提供已知欄位的摘要, 欄位缺漏或格式改變時保留通用工具紀錄. 新來源可在設定指定分類, 在工具文件補充用途. 增加特定業務摘要時擴充 `mcp_records.py`, 細節見 [程式架構](docs/architecture.md)
-
-獨立於 Codex 操作紀錄的背景來源可新增 collector, 沿用 `source`, `health`, `scope` 與 timestamps. 額外背景服務或 native 相依採選用設定
-
-## 開發與驗證
-
-[1.0.0 前規劃](docs/release-1.0.md) 分開核對 LAM 資料來源、CLI、設定、效能與離線發布門檻, 共用庫的元件與平台驗收由 Workbench UI 獨立管理
-
-實測規模、回收與尚未驗證的效能項目見 [效能測試報告](docs/performance-report.md). 使用端布局與共用拖曳能力的後續考量見 [Workbench UI 互動清單](https://github.com/gaze9999/workbench-ui/blob/v0.3.0/docs/interaction-roadmap.md), private 文件需要既有權限
+先執行 `python tools/build_frontend.py`, 再檢查 checkout 來源
 
 Windows PowerShell:
 
 ```powershell
 $env:PYTHONPATH = "src"
 python -m unittest discover -s tests -v
-python -m pip wheel --no-deps --wheel-dir dist .
 ```
 
 macOS / Linux:
 
 ```sh
 PYTHONPATH=src python3 -m unittest discover -s tests -v
-python3 -m pip wheel --no-deps --wheel-dir dist .
 ```
 
-測試 checkout 時需先將 `src` 加入 `PYTHONPATH`, 避免載入其他已安裝版本. 測試使用臨時 metadata, 不呼叫付費 API. HTTP guard 直接測試實際 handler, watcher 測試僅操作自己建立的 mock 子程序. 本機 Codex 來源可唯讀檢查, 頁面開關與 Jev payload 使用隔離 fixture 驗證. 原生套件由各平台 CI 建置並執行隔離啟動檢查, macOS / Linux 的正式 Codex App log 格式仍需在目標環境確認, 結果見 [驗證紀錄](docs/validation.md)
+JavaScript 檢查:
 
-Jev usage 欄位來源見 [TypeSafe API 文件](https://docs.typesafe.ai/api), Jev 只觀察 client 回應. Codex 的選配帳戶來源依 [官方 app-server 文件](https://learn.chatgpt.com/docs/app-server), 使用 account/read, account/rateLimits/read 與 account/usage/read, 不送出工作或修改帳戶
+```sh
+node --check frontend/app.js
+node tests/test_runtime_ui.mjs
+node tests/test_page_metrics.mjs
+node tests/test_usage_projection.mjs
+```
 
-共用 JSON 顯示、Tag 與技能檔案樹狀清單來自獨立的 [Workbench UI](https://github.com/gaze9999/workbench-ui) private 儲存庫. LAM 提供資料與欄位說明, 共用元件負責呈現及互動. `workbench-ui.json` 指定完整 commit SHA, release workflow 使用 `WORKBENCH_UI_READ_TOKEN` 取得固定來源並呼叫共用 action. 發行版、wheel 與原始碼下載包附帶自動產生的資產與 SHA-256 manifest, 使用時不需 GitHub 連線. 共用來源版本不要求另建 Workbench UI release
+建置工具列在 `tools/requirements-build.txt`. `python -m build` 產生 wheel / sdist, `python tools/build_release.py` 產生 `.local/package-tests/` 的本機原生測試包. 平台 CI 使用已提交的 WBUI SHA, 各平台通過測試與服務啟動檢查後保存 artifacts 及 `SHA256SUMS.txt`
 
-## 版本與授權
+0.x 每個新 minor 建立一個 `v0.x.0` tag. 1.0.0 起需明確啟用 workflow 的 `publish`, 產物先附加至草稿 Release, 核對後公開
 
-LAM 與 Workbench UI 分別管理版本. LAM 的 `pyproject.toml`、`__version__`、`v0.6.0` tag 與套件檔名必須一致, 共用 UI 則固定完整 SHA. 0.x 仍在建立穩定介面, 相容性變更於 release 說明, 1.0.0 依獨立清單驗收. 本輪不進行使用者存檔 migration
+## 文件
 
-LAM 自有程式碼與文件採 [MIT](LICENSE), 著作權名稱 gaze9999. 內嵌 Workbench UI 保留私有使用, 不隨 LAM 改為 MIT. 各元件授權範圍及 native runtime 通知見 [NOTICE](NOTICE), native 包另附 Python / PyInstaller 的授權文件
+- [使用說明](docs/usage.md): 圖表、表格、明細與設定
+- [程式架構](docs/architecture.md): 資料流、模組、API 與擴充
+- [設定檔格式](docs/settings-format.md): 欄位、驗證與相容性
+- [資料盤點](docs/data-inventory.md)與[錯誤觀察](docs/error-observation.md): 來源、範圍與資料意義
+- [卡片庫](docs/card-library.md): 可用圖表形式
+- [維護與驗收](docs/maintenance.md)、[測試與建置](docs/validation.md)與[效能與資料上限](docs/performance-report.md): 開發流程及資源管理
+
+## 授權
+
+LAM 原始碼與文件採 [MIT License](LICENSE). 內附 Workbench UI 與原生套件元件的授權條件見 [NOTICE](NOTICE), WBUI 資產依持有人對 LAM 的授權提供

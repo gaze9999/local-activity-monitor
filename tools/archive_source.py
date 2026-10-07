@@ -11,12 +11,17 @@ def archive(root, destination):
     sys.path.insert(0, str(root / "src"))
     from local_activity_monitor import _workbench
     _workbench.Assets(bundle, verify=True)
+    from local_activity_monitor.frontend_assets import FILES, FrontendAssets
+    frontend = FrontendAssets(root / "src/local_activity_monitor/_web")
     destination = Path(destination).resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "-C", str(root), "archive", "--format=zip", "--prefix=local-activity-monitor/", "HEAD", "-o", str(destination)], check=True)
     with zipfile.ZipFile(destination, "a", compression=zipfile.ZIP_DEFLATED) as package:
         for name in _workbench.BUNDLE_FILES:
             path = bundle / name
+            package.write(path, "local-activity-monitor/" + path.relative_to(root).as_posix())
+        for name in (*FILES, "manifest.json"):
+            path = frontend.root / name
             package.write(path, "local-activity-monitor/" + path.relative_to(root).as_posix())
 
 

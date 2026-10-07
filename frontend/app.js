@@ -142,25 +142,26 @@ function pageInput(input,change){
   input.addEventListener("change",apply);input.addEventListener("keydown",event=>{if(event.key==="Enter"){event.preventDefault();apply();}});input.title=ui("輸入頁碼後按 Enter 套用");
 }
 function syncPageInput(input,value,max){input.max=max;if(document.activeElement!==input)input.value=value;}
-let overviewFrame=0;
 const cardLayouts=new Map();
-function arrangeCardLayout(grid,panels){
-  if(typeof WorkbenchUI.createCardLayout!=="function"||getComputedStyle(grid).display!=="grid")return;
-  let layout=cardLayouts.get(grid);if(!layout){layout=WorkbenchUI.createCardLayout(grid,{items:panels,fullWidth:panel=>panel.dataset.fullWidth==="true"});cardLayouts.set(grid,layout);}else layout.update(panels);
+function updateCardLayout(root,items){
+  const layout=cardLayouts.get(root);
+  if(layout)layout.update(items);
+  else cardLayouts.set(root,WorkbenchUI.createCardLayout(root,{items,flow:"column",fullWidth:card=>card.dataset.fullWidth==="true"}));
 }
 function arrangeOverview(){
-  const grid=document.querySelector(".overview-panels");arrangeCardLayout(grid,[...grid.children].filter(panel=>!panel.hidden&&!panel.classList.contains("layout-hidden")&&!panel.classList.contains("empty-statistics")));
+  const grid=document.querySelector(".overview-panels");updateCardLayout(grid,[...grid.children].filter(panel=>!panel.hidden&&!panel.classList.contains("layout-hidden")&&!panel.classList.contains("empty-statistics")));
 }
 let contentPanelFrame=0;
 function arrangeContentPanels(){
   if(contentPanelFrame)return;contentPanelFrame=requestAnimationFrame(()=>{contentPanelFrame=0;
-    for(const grid of document.querySelectorAll("main .panels:not(.overview-panels),#mcp-dashboard-panels")){
-      if(grid.closest("dialog"))continue;const panels=[...grid.querySelectorAll(":scope>.panel,:scope>.panels>.panel")].filter(panel=>!panel.hidden&&!panel.classList.contains("layout-hidden")&&!panel.classList.contains("empty-statistics"));grid.style.setProperty("--panel-columns",Math.min(3,Math.max(1,panels.filter(panel=>panel.dataset.fullWidth!=="true").length)));arrangeCardLayout(grid,panels);
+    for(const [root,layout]of cardLayouts)if(!root.isConnected){layout.destroy();cardLayouts.delete(root);}
+    for(const grid of document.querySelectorAll("main .panels:not(.overview-panels)")){
+      if(grid.closest("dialog"))continue;const panels=[...grid.children].filter(panel=>panel.matches(".panel")&&!panel.hidden&&!panel.classList.contains("layout-hidden")&&!panel.classList.contains("empty-statistics"));grid.style.setProperty("--panel-columns",Math.min(3,Math.max(1,panels.filter(panel=>panel.dataset.fullWidth!=="true").length)));updateCardLayout(grid,panels);
     }
     for(const [grid,layout]of cardLayouts)if(!grid.isConnected||getComputedStyle(grid).display==="contents"){layout.destroy();cardLayouts.delete(grid);}
   });
 }
-addEventListener("pagehide",()=>{cancelAnimationFrame(contentPanelFrame);cancelAnimationFrame(chartVisibilityFrame);resetChartQueue();notices?.destroy();for(const layout of cardLayouts.values())layout.destroy();cardLayouts.clear();});
+addEventListener("pagehide",()=>{cancelAnimationFrame(contentPanelFrame);contentPanelFrame=0;cancelAnimationFrame(chartVisibilityFrame);resetChartQueue();notices?.destroy();for(const layout of cardLayouts.values())layout.destroy();cardLayouts.clear();});
 function summaryOrder(id,size){const usage=data?.codex?.usage,limits=[...(usage?.limits||[])].sort((a,b)=>(a.window_minutes??Infinity)-(b.window_minutes??Infinity)),known=id==="usage-cards"?[Number.isFinite(limits[0]?.remaining_percent)&&4,Number.isFinite(limits[1]?.remaining_percent)&&5,usage?.credits?.balance!=null&&1,usage?.plan_type&&0,Number.isFinite(data?.codex?.account?.account_usage?.summary?.lifetimeTokens)&&6,2,usage?.updated_at&&3].filter(value=>value!==false&&value!=null):[],priority=known;return [...new Set(priority.concat(Array.from({length:size},(_,index)=>index)))].filter(index=>index<size);}
 function summaryObservations(id){
   if(!data)return {};const c=data.codex,threads=c.threads||[],pairs=[],counts=(label,value,unit)=>ui(label)+" "+fmt(value)+ui(unit),events=threads.flatMap(thread=>thread.tool_events||[]);
@@ -655,7 +656,6 @@ function arrangeContentCards(){
   for(const [index,root]of grids.entries())root.dataset.cardGroup||="panels-"+index;
   // ID-bearing grids are persistent render targets, including dynamic MCP cards.
   for(const root of grids){const previous=root.previousElementSibling;if(!root.id&&!previous?.id&&charts(root)&&charts(previous)){previous.append(...root.children);root.remove();}}
-  const monitor=$("monitor-environment"),monitorCharts=document.querySelector(".monitor-charts");if(monitor&&monitorCharts&&!monitor.parentElement.classList.contains("shared-panel-grid")){const layout=node("div",null,"panels shared-panel-grid");monitorCharts.before(layout);layout.append(monitorCharts,monitor);}
   for(const root of document.querySelectorAll("main .panels:not(.overview-panels)")){for(const [position,card]of [...root.children].entries())card.dataset.cardKey||=card.querySelector(".chart,.bar-chart,[id]")?.id||card.id||"card-"+position;dragCardGroup(root,root.dataset.cardGroup,card=>card.dataset.cardKey);}dragCardGroup($("mcp-source-cards"),"mcp-sources",card=>card.dataset.sourceKey);arrangeContentPanels();
 }
 
@@ -832,10 +832,12 @@ function panelNeeded(id){const root=$(id);return !!root&&!root.closest("[hidden]
 function renderVisibleContent(){
   updateProjects();
   for(const [id,draw]of [["view-monitor",renderMonitor],["view-logs",renderLogSummary],["view-sqlite",renderSQLite],["view-codex",renderCodex],["view-projects",renderCodex],["view-plugins",renderPlugins],["view-usage",renderUsage],["schedules-content",renderSchedules],["dots-content",renderDots],["view-git",renderGit],["view-checks",renderWorkflow],["tool-content",renderTools],["view-skills",renderWorkflow],["view-mcp",renderMcp],["view-web",renderWeb],["view-files",renderFiles]])if(panelNeeded(id))draw();
+  if(panelNeeded("overview-account-card"))renderBilling();
   if(snapshotDisplayState==="ready")setSnapshotState("ready");
 }
 function render(next){
   data=next;threadIndex=new Map((data.codex.threads||[]).map(thread=>[thread.thread_id,thread]));const c=data.codex,j=data.jev,threads=c.threads||[];
+  usageProjection=projectUsage(threads);usageModelCounts=usageProjection.counts;usageModelSegments=usageProjection.segments;
   $("program-version").textContent=data.monitor?.version?"v"+data.monitor.version:"--";document.documentElement.dataset.revision=data.revision||"";$("program-started").textContent=ui("啟動 ")+when(data.started_at);$("program-started").dateTime=data.started_at||"";$("program-started").title=ui("此監測程式的啟動時間");$("program-uptime").title=ui("此監測程式持續執行的時間")+"\n"+ui("啟動 ")+when(data.started_at);if(Number.isFinite(data.monitor?.uptime_seconds))uptimeSample={seconds:data.monitor.uptime_seconds,received:performance.now()};renderUptime();
   renderConnectionStatus();
   renderHeaderQuota(c.usage);
@@ -843,7 +845,7 @@ function render(next){
   const duration=threads.filter(t=>t.task_duration_ms!=null).reduce((n,t)=>n+t.task_duration_ms,0);
   cards("overview-cards",[[ui("對話"),fmt(threads.length),ui("執行中 ")+fmt(threads.filter(t=>t.status==="running").length)+ui(" 個")],[ui("工具呼叫"),fmt(c.observed_tool_calls||0),ui("工具種類 ")+fmt(Object.keys(c.tools||{}).length)],[ui("工作累計時間"),fmt(Math.round(duration/60000))+ui(" 分鐘"),ui("已取得時間的對話 ")+fmt(threads.filter(t=>t.task_duration_ms!=null).length)+ui(" 個")],[ui("資料來源"),fmt(data.mcp?.servers?.length||0),ui("檔案修改 ")+fmt(threads.reduce((n,t)=>n+(t.file_changes?.length||0),0))+ui(" 筆")]]);
 
-  renderUsageProjection();renderNavigationSummaries();renderErrors();renderVisibleContent();renderSources();if(!$("view-errors").hidden&&!$("view-logs").hidden||overviewNeeds("view-logs"))loadLogs();
+  renderNavigationSummaries();renderErrors();renderVisibleContent();renderSources();if(!$("view-errors").hidden&&!$("view-logs").hidden||overviewNeeds("view-logs"))loadLogs();
   renderCharts();if(!$("view-overview").hidden)renderHighlights();
   $("updated").textContent=data.updated_at?ui("更新 ")+new Date(data.updated_at).toLocaleTimeString(locale,{hour12:false}):ui("尚未更新");$("updated").title=when(data.updated_at)+"\n"+$("refresh-note").textContent+"\n"+ui("啟動 ")+when(data.started_at);$("updated").dateTime=data.updated_at||"";
   if(!settingsBusy&&data.settings){if(document.activeElement!==$("refresh-interval"))$("refresh-interval").value=data.settings.interval;syncIdleSettings();syncRefreshState(data.activity);schedule(data.updated_at?data.settings.interval:1);}
@@ -1740,6 +1742,7 @@ function groupSettings(){
   for(const child of [...content.children]){if(child.dataset.modalSection){if(child.dataset.modalSection==="資料來源"){panel=null;continue;}panel=node("section");groups.push([child.dataset.modalSection,ui(child.dataset.modalSection),panel]);}panel?.append(child);}
   const position=groups.findIndex(([key])=>key==="設定檔");for(const [index,[key,id]]of [["監測項目","observation-data"],["MCP 來源","observation-mcp"],["來源紀錄","observation-recording"]].entries()){const section=node("section");section.append(node("h4",ui(key)));const target=node("div");target.id=id;section.append(target);groups.splice(position+index,0,[key,ui(key),section]);}
   settingsLayout(content,groups,"settings-sections","外觀",status);
+  $("workbench-version").textContent="WBUI "+(window.WorkbenchUI.version?"v"+window.WorkbenchUI.version:ui("尚未提供"));
 }
 function groupTabSettings(){
   const content=$("tab-dialog").querySelector(".settings-content"),summaries=node("section"),summaryRows=node("div"),general=node("section"),observations=node("section");summaries.id="tab-summary-controls";summaryRows.id="tab-summary-rows";summaries.append(node("h4",ui("摘要卡")),summaryRows);general.append($("sql-masking-controls"));observations.append($("tab-observations-heading"),$("tab-observations"));
@@ -1807,25 +1810,28 @@ function settleChartState(id,error){
   const logChart=id.startsWith("log-")||id.startsWith("overview-copy-log-"),state=error?"error":logChart&&!logData?"loading":snapshotDisplayState==="refreshing"||snapshotDisplayState==="error"?snapshotDisplayState:data?.updated_at?"ready":"loading";
   for(const panel of [$(id)?.closest(".panel"),$(id+"-statistics")])if(panel)setPanelDataState(panel,state,error?ui("圖表無法顯示, 請重試"):"");
 }
-let usageModelGroups=new Map(),usageModelCounts={},usageModelSegments={};
-function renderUsageProjection(){
-  const usage=data.codex.usage,groups=new Map();
-  for(const thread of data.codex.threads||[]){const model=thread.model||"unknown";if(!groups.has(model))groups.set(model,{model,threads:0,known:0,complete:true,tokens:{}});const group=groups.get(model);group.threads++;const t=thread.tokens||{};group.complete&&=[t.input_tokens,t.cached_input_tokens,t.output_tokens,t.total_tokens].every(Number.isFinite)&&t.input_tokens>=t.cached_input_tokens&&t.input_tokens+t.output_tokens===t.total_tokens;if(Object.values(thread.tokens||{}).some(Number.isFinite))group.known++;for(const [key,value]of Object.entries(thread.tokens||{}))if(Number.isFinite(value))group.tokens[key]=(group.tokens[key]||0)+value;}
-  usageModelGroups=groups;
-  usageModelCounts=Object.fromEntries([...groups.values()].filter(group=>group.tokens.total_tokens!=null).map(group=>[group.model,group.tokens.total_tokens]));usageModelSegments=Object.fromEntries([...groups.values()].map(group=>{const t=group.tokens,complete=group.complete&&[t.input_tokens,t.cached_input_tokens,t.output_tokens,t.total_tokens].every(Number.isFinite)&&t.input_tokens>=t.cached_input_tokens&&t.input_tokens+t.output_tokens===t.total_tokens;return [group.model,complete?[["一般輸入",t.input_tokens-t.cached_input_tokens],["快取輸入",t.cached_input_tokens],["輸出",t.output_tokens]]:[["未分類",t.total_tokens]]];}));
-  const account=telemetryFields({plan_type:usage?.plan_type,credits_balance:usage?.credits?.balance,has_credits:usage?.credits?.has_credits,unlimited:usage?.credits?.unlimited}).filter(([,value])=>value!=null);for(const id of ["overview-billing","overview-account-card"])$(id).replaceChildren(account.length?metadataList(account.map(([key,value])=>[metricLabel(key),telemetryValue(value)])):node("p",ui("尚未取得帳戶用量資料"),"empty"));
+let usageModelCounts={},usageModelSegments={},usageProjection={groups:new Map(),counts:{},segments:{}};
+function projectUsage(threads){
+  const groups=new Map();
+  for(const thread of threads){const model=thread.model||"unknown";if(!groups.has(model))groups.set(model,{model,threads:0,known:0,complete:true,tokens:{}});const group=groups.get(model);group.threads++;const t=thread.tokens||{};group.complete&&=[t.input_tokens,t.cached_input_tokens,t.output_tokens,t.total_tokens].every(Number.isFinite)&&t.input_tokens>=t.cached_input_tokens&&t.input_tokens+t.output_tokens===t.total_tokens;if(Object.values(t).some(Number.isFinite))group.known++;for(const [key,value]of Object.entries(t))if(Number.isFinite(value))group.tokens[key]=(group.tokens[key]||0)+value;}
+  const counts=Object.fromEntries([...groups.values()].filter(group=>group.tokens.total_tokens!=null).map(group=>[group.model,group.tokens.total_tokens])),segments=Object.fromEntries([...groups.values()].map(group=>{const t=group.tokens,complete=group.complete&&[t.input_tokens,t.cached_input_tokens,t.output_tokens,t.total_tokens].every(Number.isFinite)&&t.input_tokens>=t.cached_input_tokens&&t.input_tokens+t.output_tokens===t.total_tokens;return [group.model,complete?[["一般輸入",t.input_tokens-t.cached_input_tokens],["快取輸入",t.cached_input_tokens],["輸出",t.output_tokens]]:[["未分類",t.total_tokens]]];}));
+  return {groups,counts,segments};
+}
+function renderBilling(){
+  const usage=data.codex.usage,account=telemetryFields({plan_type:usage?.plan_type,credits_balance:usage?.credits?.balance,has_credits:usage?.credits?.has_credits,unlimited:usage?.credits?.unlimited}).filter(([,value])=>value!=null);for(const id of ["overview-billing","overview-account-card"])if(panelNeeded(id))$(id).replaceChildren(account.length?metadataList(account.map(([key,value])=>[metricLabel(key),telemetryValue(value)])):node("p",ui("尚未取得帳戶用量資料"),"empty"));
 }
 function renderAllowance(id,usage){
   if(deferChart(id,()=>renderAllowance(id,usage)))return;
   const target=$(id);target.replaceChildren(...(usage?.limits||[]).map(item=>{const panel=node("section",null,"allowance-window"),expired=item.resets_at&&new Date(item.resets_at)<new Date(),progress=node("progress"),status=node("p",null,"snapshot-at allowance-status");panel.append(node("h4",usageWindow(item.window_minutes)),metadataList([[ui("剩餘比例"),item.remaining_percent==null?"--":fmt(item.remaining_percent)+"%"],[ui("已使用"),item.used_percent==null?"--":fmt(item.used_percent)+"%"],[ui("重設時間"),item.resets_at?when(item.resets_at):ui("尚未提供")]]));if(item.remaining_percent!=null){progress.max=100;progress.value=item.remaining_percent;progress.setAttribute("aria-label",ui("剩餘比例")+" "+fmt(item.remaining_percent)+"%");panel.append(progress);}status.append(node("span",ui(expired?"等待來源更新":"來源最後回報")),node("time",when(usage.updated_at)));bindHelp(status,fieldDescription("資料狀態"));panel.append(status);return panel;}));if(!usage?.limits?.length)target.append(node("p",ui("尚未取得額度資料"),"empty"));
 }
 function renderUsage(){
-  const usage=data.codex.usage,threads=data.codex.threads||[],groups=usageModelGroups;
+  const usage=data.codex.usage,threads=data.codex.threads||[],groups=usageProjection.groups;
   $("usage-observed").hidden=true;
   const knownTokens=threads.map(thread=>thread.tokens?.total_tokens).filter(Number.isFinite);
   const limits=[...(usage?.limits||[])].sort((a,b)=>(a.window_minutes??Infinity)-(b.window_minutes??Infinity)),quota=slot=>{const item=limits[slot],expired=item?.resets_at&&new Date(item.resets_at)<new Date(),note=expired?ui("等待來源更新"):item?.resets_at?ui("重設時間")+" "+when(item.resets_at):item?.used_percent!=null?ui("已使用")+" "+fmt(item.used_percent)+"%":ui("來源未提供重設時間");return [item?.window_minutes!=null?usageWindow(item.window_minutes)+ui(" 額度剩餘"):ui("額度剩餘"),item?.remaining_percent==null?ui("尚未取得"):fmt(item.remaining_percent)+"%",item?usageWindow(item.window_minutes)+" · "+note:ui("等待來源回報額度視窗")];};
   cards("usage-cards",[[ui("方案"),usage?.plan_type||ui("尚未取得"),usage?.limit_id||ui("來源回報的帳戶方案")],[ui("Credits 餘額"),fmt(usage?.credits?.balance),""],[ui("Token 合計"),fmt(knownTokens.length?knownTokens.reduce((sum,value)=>sum+value,0):null),ui("已載入對話")],[ui("最後檢查"),when(usage?.updated_at),""],quota(0),quota(1),[ui("帳戶 Token 合計"),fmt(data.codex.account?.account_usage?.summary?.lifetimeTokens),ui("官方帳戶統計")]]);
   replaceRows("usage-model-rows",...[...groups.values()].map(group=>{const row=node("tr");cell(row,group.model==="unknown"?"--":group.model,"mono");valueCell(row,group.threads);valueCell(row,group.known);for(const key of ["input_tokens","cached_input_tokens","output_tokens","reasoning_output_tokens","total_tokens"])valueCell(row,group.tokens[key]);valueCell(row,group.tokens.input_tokens>0&&group.tokens.cached_input_tokens!=null&&group.tokens.cached_input_tokens<=group.tokens.input_tokens?Math.round(group.tokens.cached_input_tokens/group.tokens.input_tokens*10000)/100:null);return clickableRow(row,()=>openDetail({kind:"usage-model",model:group.model}));}));
+  renderBilling();
 
   renderAccountUsage();
   $("usage-note").textContent=ui("依模型分析對話 Token 用量與快取比例");
@@ -2064,8 +2070,7 @@ pageInput($("mcp-page-number"),()=>{mcpPage=Number($("mcp-page-number").value);r
 pageInput($("docs-page-number"),()=>{docsPage=Number($("docs-page-number").value);renderToolDocs();});
 addTabSettings();
 applyAppearance();applyActionIcons();setSnapshotState("loading");loadLocales().then(()=>{applyLanguage();schedule(10);refresh();});
-if(typeof ResizeObserver==="function"){const overviewObserver=new ResizeObserver(arrangeOverview);for(const panel of document.querySelector(".overview-panels").children)overviewObserver.observe(panel);}
-if(typeof ResizeObserver==="function"){const contentObserver=new ResizeObserver(arrangeContentPanels);for(const grid of document.querySelectorAll("main .panels:not(.overview-panels),#mcp-dashboard-panels"))if(!grid.closest("dialog"))contentObserver.observe(grid);}
+addEventListener("pageshow",event=>{if(event.persisted){arrangeOverview();arrangeContentPanels();}});
 let chartResizeTimer;addEventListener("resize",()=>{clearTimeout(chartResizeTimer);chartResizeTimer=setTimeout(()=>{document.querySelectorAll(".purpose-editor textarea").forEach(fitPurposeEditor);if(data)renderCharts();},150);});
 
 for(const [id,value]of [["mcp-activity-tab","activity"],["mcp-files-tab","files"]]){$(id).addEventListener("click",()=>selectMcpSection(value));$(id).addEventListener("keydown",event=>{if(!["ArrowLeft","ArrowRight","Home","End"].includes(event.key))return;event.preventDefault();const next=event.key==="Home"?"mcp-activity-tab":event.key==="End"?"mcp-files-tab":id==="mcp-files-tab"?"mcp-activity-tab":"mcp-files-tab";$(next).click();$(next).focus();});}

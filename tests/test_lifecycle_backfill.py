@@ -31,7 +31,7 @@ class LifecycleBackfillTests(unittest.TestCase):
             self.assertEqual(row['status_source'],'cached_lifecycle')
             self.assertFalse(row['status_backfill_pending'])
             self.assertEqual(value['skills']['counts'],{'example':1})
-            self.assertNotIn('PRIVATE',(root.parent/'monitoring/thread-state.json').read_text())
+            self.assertNotIn('PRIVATE',json.dumps(collector.thread_state.store.read_document(collector.thread_state.BYTE_LIMIT)))
             with path.open('ab') as stream:stream.write(record('event_msg',{'type':'task_complete'},'2026-10-04T00:02:00Z'))
             restarted.refresh();self.assertEqual(restarted.snapshot()['threads'][0]['status'],'completed')
 

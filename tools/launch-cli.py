@@ -3,6 +3,11 @@ from pathlib import Path
 import subprocess
 import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from local_activity_monitor.process_lifecycle import cli_lifetime
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from watch import stop_child
+
 
 def main(args=None):
     args = sys.argv[1:] if args is None else args
@@ -11,19 +16,18 @@ def main(args=None):
         return 1
     root = Path(__file__).resolve().parents[1]
     try:
-        sys.path.insert(0, str(root / "src"))
-        from local_activity_monitor.ui_assets import MissingUIAssetsError, load_ui_assets
-        try:
-            load_ui_assets()
-        except MissingUIAssetsError:
-            print("找不到 Workbench UI, 正在用既有 Git 認證準備指定版本的離線資產", file=sys.stderr)
-            prepared = subprocess.run([sys.executable, "-I", "-B", str(root / "tools/prepare_ui.py"), "--ensure"], cwd=root)
+        with cli_lifetime():
+            prepared = subprocess.run([sys.executable, "-I", "-B", str(root / "tools/build_frontend.py"), "--latest"], cwd=root)
             if prepared.returncode:
                 return prepared.returncode
-        return subprocess.run(
-            [sys.executable, "-I", "-B", str(root/"tools/watch.py"), "--codex", "--open", *args],
-            cwd=root,
-        ).returncode
+            child = subprocess.Popen(
+                [sys.executable, "-I", "-B", str(root/"tools/watch.py"), "--watch-stdin", "--codex", "--open", *args],
+                cwd=root, stdin=subprocess.PIPE, text=True,
+            )
+            try:
+                return child.wait()
+            finally:
+                stop_child(child)
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
         print(f"Startup failed: {error}", file=sys.stderr)
         return 1

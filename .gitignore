@@ -19,8 +19,10 @@ dist/
 !.codex/agent-guidance/roles.md
 .agents/
 .local/
+.playwright-cli/
 .workbench-ui/
 src/local_activity_monitor/_workbench/
+src/local_activity_monitor/_web/
 state/
 *.db
 *.db-*

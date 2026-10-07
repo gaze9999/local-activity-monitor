@@ -1,9 +1,10 @@
 """Retain confirmed lifecycle checkpoints across collector restarts."""
 from datetime import datetime
 import json
-import os
+import sqlite3
 import re
 import time
+from .history_store import HistoryStore
 
 
 class ThreadState:
@@ -12,17 +13,14 @@ class ThreadState:
     BYTE_LIMIT = 512*1024
 
     def __init__(self, path):
-        self.path, self.entries = path, {}
+        self.store = HistoryStore(path, "threads")
+        self.path, self.entries = self.store.path, {}
         self.skills = []
         self.saved, self.next_save = None, 0
         self.load_health, self.write_health = "missing", None
         try:
-            if path.is_symlink():
-                self.load_health = "unavailable"
-                return
-            if path.exists():
-                with path.open('rb') as stream:
-                    raw = stream.read(self.BYTE_LIMIT+1)
+            raw = self.store.load(self.BYTE_LIMIT)
+            if raw is not None:
                 if len(raw) > self.BYTE_LIMIT:
                     self.load_health = "oversized"
                     return
@@ -35,9 +33,11 @@ class ThreadState:
                     if isinstance(value.get('skills'), list):
                         self.skills = [clean for entry in value['skills'][:self.SKILL_LIMIT] if (clean := self.project_skill(entry))]
                     self.load_health = "ok"
+                    if self.store.imported:
+                        self.store.save(json.dumps({'version':1, 'entries':self.entries, 'skills':self.skills}, separators=(',', ':')).encode())
                 else:
                     self.load_health = "unsupported"
-        except OSError:
+        except (OSError, sqlite3.Error):
             self.load_health = "unavailable"
         except (ValueError, TypeError, AttributeError, RecursionError):
             self.load_health = "unsupported"
@@ -115,17 +115,9 @@ class ThreadState:
             raw = json.dumps({'version':1, 'entries':self.entries, 'skills':self.skills}, separators=(',', ':')).encode()
         if raw == self.saved:
             return
-        temporary = self.path.with_name(self.path.name+'.tmp')
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            if self.path.is_symlink() or temporary.is_symlink():
-                self.write_health = "unavailable"
-                return
-            temporary.write_bytes(raw)
-            if os.name != 'nt':
-                temporary.chmod(0o600)
-            os.replace(temporary, self.path)
+            self.store.save(raw)
             self.saved = raw
             self.write_health = "ok"
-        except OSError:
+        except (OSError, sqlite3.Error):
             self.write_health = "unavailable"

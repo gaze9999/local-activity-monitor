@@ -146,7 +146,7 @@ class ProjectTests(unittest.TestCase):
         self.assertNotIn('TEXTTEXT', json.dumps(dashboard.snapshot('all')))
         for path in (self.home/'monitoring').glob('*'):
             if path.is_file():
-                self.assertNotIn('TEXTTEXT', path.read_text(encoding='utf-8'))
+                self.assertNotIn(b'TEXTTEXT', path.read_bytes())
 
     def test_missing_and_protected_instruction_roots(self):
         self.assertEqual(instructions([self.root])['documents'], [])
