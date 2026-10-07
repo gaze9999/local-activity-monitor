@@ -1,5 +1,17 @@
 # 驗證紀錄
 
+## 2026-10-07 歷史與建置交付整理
+
+已在隔離副本逐一整理 25 筆來源提交, 移除 11 個桌面封裝入口、相依清單、執行環境、圖示與專屬測試路徑, 並清理相應封裝程式及文件段落. 原始 recovery bundle 與 commit 對應表保留於私人備份, 不加入公開來源
+
+本輪核對 25 筆提交與 384 個歷史 blob, 未保留已移除的封裝或私人 agent 路徑及封裝關鍵字. 清理後以隔離暫存資料重跑前述五組最小檢查, 50/50 通過. workflow 的 0.x / 1.0.0 與發布旗標四種組合通過, 本機未執行封裝測試
+
+每個 minor tag 須核對 `pyproject.toml` 與 `src/local_activity_monitor/__init__.py` 的實際版本, 不把舊版 tag 指向最新程式. 本輪不重建已略過的 patch tags, GitHub Releases 在 1.0.0 前維持空白
+
+歷史驗證紀錄對應清理前的來源與當時流程, 不自動作為改寫後 commit / tag 的驗收. 最新 `src/` 執行程式與固定 WB revision 保留, 新版 workflow 預設只保存原生 / 原始碼與 checksum artifacts, 明確發布旗標在 0.x 會拒絕建立 Release
+
+可達 refs 的清理不證明 GitHub 已清除舊 SHA 快取、其他人的 clone 或既有 Actions 紀錄. 本輪不刪除他人的本機副本
+
 ## 0.6.0 發布準備
 
 2026-10-07, `test_mcp_observation`、`test_content_details`、`test_content_pages`、`test_ui_assets` 與 release-mode guard 合計 50/50 通過, 使用 Python 3.13.15 與隔離合成暫存資料. 先前 sandbox 暫存目錄權限失敗及錯誤測試模組名稱已修正重跑, 不列為產品測試通過. 版本 / MIT metadata / locale UTF-8 解析通過, native archive mock 測試未在本機執行, 留待 release CI

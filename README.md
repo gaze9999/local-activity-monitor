@@ -2,6 +2,7 @@
 
 Codex 活動監測, 包含 Jev 與 MCP. 使用 Python 標準函式庫與原生網頁, 不需 Node, GPU, API Key 或雲端服務
 
+目前版本 `0.6.0`, 保留跨平台 CLI 與瀏覽器介面. 0.x 以 commit / push 與實際 minor 來源的 `0.x.0` tag 交付, 1.0.0 前不建立 GitHub Release
 
 操作方式見 [使用說明](docs/usage.md), 資料來源與擴充方式見 [程式架構](docs/architecture.md), [設定檔格式](docs/settings-format.md) 與 [錯誤觀察](docs/error-observation.md). 維護與修改原則見 [維護與驗收](docs/maintenance.md). [活動匯出規劃](docs/export-plan.md) 保存後續功能需求. 可觀測欄位與取得限制見 [資料盤點](docs/data-inventory.md), 本輪檢查見 [驗證紀錄](docs/validation.md)
 
@@ -16,10 +17,9 @@ Windows、macOS 與 Linux 分別建置 CLI 免安裝包, 套件內含 Python, �
 | macos-x64-cli.tar.gz | Intel Mac, 使用 `launch-cli.command` 或 `launch-cli` |
 | linux-x64-cli.tar.gz / linux-arm64-cli.tar.gz | 使用 `launch-cli.sh` 或 `launch-cli` |
 
-正式套件由 `.github/workflows/release.yml` 在對應系統建置, 服務 smoke check 通過後附加至 draft release. 本機建置只產出 `.local/package-tests/` 下的測試包, 不上傳或發布. 建置工具列在 `tools/requirements-build.txt`, 啟動入口不安裝相依套件
+套件由 `.github/workflows/release.yml` 在對應系統建置, 通過服務 smoke check 後保存在 Actions artifacts. 0.x 的流程不建立 Release, 1.0.0 後也需明確勾選 `publish` 才附加到草稿 Release. 本機建置只產出 `.local/package-tests/` 下的測試包, 不上傳或發布. 建置工具列在 `tools/requirements-build.txt`, 啟動入口不安裝相依套件
 
-
-從 [Releases](https://github.com/gaze9999/local-activity-monitor/releases/latest) 下載符合系統與處理器的 CLI 壓縮包, 保留整個解壓縮目錄, 在本機瀏覽器使用監測網頁
+測試套件可從 [Actions](https://github.com/gaze9999/local-activity-monitor/actions/workflows/release.yml) 已完成的建置下載, 需要 GitHub 存取權限, 並受 artifact 保留期限限制. 保留整個解壓縮目錄, 在本機瀏覽器使用監測網頁
 
 ## 從原始碼啟動
 
