@@ -27,3 +27,10 @@ state/
 *.jsonl
 .DS_Store
 Thumbs.db
+
+# Actual project instructions and roles stay local
+/AGENTS.md
+/.codex/agent-guidance/roles.md
+/.codex/agents/metadata-collector-engineer.toml
+/.codex/agents/monitor-privacy-reviewer.toml
+/.codex/agents/monitor-ui-reviewer.toml
