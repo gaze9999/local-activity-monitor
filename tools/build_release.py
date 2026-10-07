@@ -16,13 +16,13 @@ def main():
     if args.release and os.environ.get("GITHUB_ACTIONS") != "true":
         parser.error("--release is restricted to GitHub Actions; omit it for a local test build")
     root = Path(__file__).resolve().parents[1]
-    subprocess.run([sys.executable, str(root/"tools/prepare_ui.py")], cwd=root, check=True)
+    subprocess.run([sys.executable, str(root/"tools/build_frontend.py")], cwd=root, check=True)
     sys.path.insert(0, str(root/"src"))
     from local_activity_monitor import __version__
     system = {"win32": "windows", "darwin": "macos", "linux": "linux"}[sys.platform]
     arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
     target = system+"-"+arch
-    windows_icon = ["--icon", str(root/"src/local_activity_monitor/web/favicon.ico")] if system == "windows" else []
+    windows_icon = ["--icon", str(root/"src/local_activity_monitor/_web/favicon.ico")] if system == "windows" else []
     if args.release:
         destination = root/"dist"
     else:
@@ -37,7 +37,7 @@ def main():
         sys.executable, "-m", "PyInstaller", "--onedir", "--console", "--noupx",
         "--name", "launch-cli", "--paths", str(root/"src"),
         *windows_icon,
-        "--add-data", str(root/"src/local_activity_monitor/web")+":local_activity_monitor/web",
+        "--add-data", str(root/"src/local_activity_monitor/_web")+":local_activity_monitor/_web",
         "--add-data", str(root/"src/local_activity_monitor/_workbench")+":local_activity_monitor/_workbench",
         "--hidden-import", "local_activity_monitor._workbench",
         "--distpath", str(output), "--workpath", str(work),

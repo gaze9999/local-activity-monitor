@@ -1,32 +1,53 @@
-# LAM 效能與回收測試報告
+# 效能與資料上限
 
-日期 2026-10-07, 整理本輪已執行的隔離合成資料測試, 功能 source 為 `64269e3` 之後的工作目錄, 發布版本 0.6.0. 不讀真實使用者資料, 不重新執行本機封裝或停止其他對話的自動化
+## 分批收集
 
-## 本輪直接證據
+服務先提供 loopback 頁面與等待狀態, 單一 worker 依序整理 session、統計、工作樹、帳戶、診斷、歷史、MCP、Jev 與硬體資訊. 快照 API 使用最近完整結果, 收集取消或失敗時保留上次快照
 
-| 項目 | 實際檢查 | 能證明的範圍 |
-| --- | --- | --- |
-| 初次 / 更新 / 恢復 | `tests/loading-layout-flow.cjs`, cold load、503、unknown / 0 / false、重試 | 保留既有內容, skeleton / 光帶不重複, 不以 0 代替缺值 |
-| 緊湊布局 | 同 flow, 9 張卡、1600 / 820 / 390 px | 無重疊, 來源尾端保持全寬, 非全部頁面長時間布局證明 |
-| 分布圖 / 光帶 | `tests/distribution-feedback-flow.cjs` | 可點 / 唯讀樣式一致、原始節點保留、遮罩字級與動畫相位一致、導頁 tooltip 關閉 |
-| 字級 / 字型 | `tests/font-resize-flow.cjs`, 12–18 px, 3 字型 × 4 視窗 | 12 組排列及實際設定保存, 不代表 Safari / iPad |
-| 內容量與清理 | `tests/output-detail-flow.cjs`, 702 行 diff / 完整原文、分頁 / 中止 / 關閉 | bounded 載入及回應取消, 沒有取得完整應用的 GC / heap 長期樣本 |
-| 資料解析 | 歷史 Python focused 38/38 與 SQL / YAML / Git / Markdown 操作, 發布前最小檢查 50/50 | 回應 metadata、內容路由與格式 / 隱私邊界, 不含本機封裝測試, 不代表 collector 或 API 耗時改善 |
+Session 清單每 15 秒更新, 預設追蹤 20 個近期檔案, 上限 5000. 初次讀取頭行與最多 1 MiB 尾端, 後續增量讀取. 每輪共用 8 MiB 預算, 使用輪替游標處理多檔及歷史回補
 
-共用元件另有 10 萬筆 table、25 萬筆 pivot、5000 選項、日曆 / 圖表、CPU / heap 與重複 destroy 的直接樣本, 見 [Workbench UI 效能報告](https://github.com/gaze9999/workbench-ui/blob/v0.3.0/docs/performance-report.md). 該報告需要共用儲存庫存取權, 元件數據不能當成 LAM 全站效能
+完整輸入輸出、SQL、Log、Git、技能文件與檔案 metadata 透過明細 API 按需取得. 同一內容以 revision 核對後續分頁
 
-## 回收責任
+## 畫面更新
 
-Workbench UI 清理自己建立的 DOM、事件、observer、frame / timer 與 Worker. LAM 必須在 Tab / modal / 明細生命週期結束時 destroy 控制器並中止未完成要求, 舊回應不得覆寫目前畫面. 使用端保存的資料陣列、控制器、訂閱與快取另有 owner, 關閉 DOM 不等於釋放所有參照
+前端更新目前頁面與已選總覽卡片. 圖表接近可視範圍後逐張繪製, 新快照及 Tab 切換取代舊排程. 圖表設定在第一次開啟齒輪時建立
 
-README 已列目前工具紀錄、未完成片段、效能樣本及執行事件的資料上限. 1.0.0 前需逐一驗證裁切 / 保留天數、游標輪替、刪除 / 移動來源、HTTP 內容快取、延後 renderer 及明細快取, 核對最大容量、TTL、取消與例外清理
+WBUI 共用卡片控制器負責布局, LAM 更新可見項目並在移除容器或離開頁面時釋放. 背景更新保留已開啟明細、捲動位置及草稿
 
-## 尚無可比樣本
+瀏覽器隱藏時暫停畫面輪詢. Codex 閒置預設五分鐘後保留輕量活動檢查, 新活動出現時恢復完整整理
 
-本輪沒有 LAM 同條件的初次載入 / 更新 / 歷史回補 p50 / p95 / p99、程序 CPU / RSS、GC 後 heap、detached DOM、完整 paint / GPU 或正式 CLS. 沒有這些基準時不宣告 peak 已降低, 不從其他網頁自動化的 CPU / 記憶體扣除後估計真正效能
+## 保存上限
 
-後續以固定來源大小、API 更新頻率、WB revision、視窗、字級 / 字型與動畫設定進行配對量測, 先記 cold / warm / update / cancel / close 各階段, 再比較結果. Shadow DOM 與跨引擎仍是獨立驗收, 本輪未測
+| 資料 | 上限 |
+| --- | --- |
+| 工具 Call ID | 每檔 8192 筆, 全部 50000 筆 |
+| 未完成行 | 每檔 1 MiB, 合計 8 MiB |
+| Lifecycle checkpoint | 1000 項 |
+| Skills checkpoint | 500 筆 |
+| Thread checkpoint | 合計 512 KiB |
+| SQL 活動 | 500 筆 |
+| 網路 / MCP 活動 | 各 1000 筆 |
+| 活動快取 | 合計 1 MiB, 預設 7 天, 可調整 1 - 365 天 |
+| 效能樣本 | 360 筆 |
+| 執行事件 | 200 筆 |
+| 程式 Log | 1000 筆 |
+| 錯誤 checkpoint | 1000 筆及 512 KiB |
+| 圖表樣本區間 | 240 個 |
 
-一般使用者不需 Playwright. 可在既有 Edge / Chrome 的 Performance / Memory 面板依序記錄開頁、更新、切 Tab、開關明細及字級變更, 註記資料規模、瀏覽器版本與同時執行的工作負載, 保存 trace / heap snapshot. 公開分享只使用合成資料, 真實活動 trace 留在本機
+回補資料使用 SQLite, 各分區的大小上限以投影資料計算, 不包含 SQLite 頁面與索引. 寫入以交易完成, 未變更的資料略過重寫. 來源資料庫仍使用唯讀連線
 
-已有 Playwright CLI 的維護者可用各 flow 的隔離伺服器與命令, 見 [驗證紀錄](validation.md). 本報告不代表 1.0.0 已完成, 發布產物的原生 CI 啟動檢查也不取代真實平台效能驗收
+來源讀取及 API 上限見 [資料盤點](data-inventory.md)
+
+## 頁面指標
+
+| 指標 | 意義 |
+| --- | --- |
+| TTFB | Navigation Timing 的 responseStart |
+| FCP | 首次進入背景前的 first-contentful-paint |
+| LCP | 首次進入背景前的最後 largest-contentful-paint 樣本 |
+| CLS | 排除近期輸入後, 間隔小於 1 秒且總長小於 5 秒的最大位移群組 |
+| 首次資料呈現 | 首批資料更新 DOM 後的下一個畫面回呼時間 |
+| 長任務 | PerformanceObserver 的 longtask 數量與最大耗時 |
+| 最慢互動 | Event Timing 中 interactionId 大於零的最大 duration |
+
+指標保留於目前頁面, 重新載入後重算. 缺少樣本或瀏覽器 API 時顯示缺值. 後端另記錄整理耗時、程序 CPU 時間、讀取量與回應大小

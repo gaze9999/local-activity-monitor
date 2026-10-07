@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import vm from "node:vm";
 
-const app=readFileSync(new URL("../src/local_activity_monitor/web/app.js",import.meta.url),"utf8"),start=app.indexOf("function createPageMetrics()"),end=app.indexOf("const pageMetrics=",start);
+const app=readFileSync(new URL("../frontend/app.js",import.meta.url),"utf8"),start=app.indexOf("function createPageMetrics()"),end=app.indexOf("const pageMetrics=",start);
 const metrics=vm.runInNewContext(app.slice(start,end)+"createPageMetrics()");
 assert.equal(metrics.snapshot().lcp,null);
 assert.equal(metrics.snapshot().interaction,null);

@@ -16,7 +16,7 @@ def load_ui_assets():
     project = package.parents[1]
     source = Path(os.environ.get("WORKBENCH_UI_PATH", project.parent / "workbench-ui")).expanduser().resolve()
     loader = source / "integrations/python/workbench_assets.py"
-    if not getattr(sys, "frozen", False) and (project / "workbench-ui.json").is_file() and (loader.is_file() or "WORKBENCH_UI_PATH" in os.environ):
+    if not getattr(sys, "frozen", False) and (project / "workbench-ui.json").is_file() and ("WORKBENCH_UI_PATH" in os.environ or loader.is_file() and not (package / "_workbench").exists()):
         if loader.is_symlink() or loader.resolve().parent != source / "integrations/python":
             raise ValueError("Unsafe Workbench UI loader")
         spec = importlib.util.spec_from_file_location("workbench_assets", loader)

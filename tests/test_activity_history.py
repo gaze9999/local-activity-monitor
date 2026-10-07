@@ -28,7 +28,7 @@ class ActivityHistoryTests(unittest.TestCase):
         self.assertEqual(len(loaded.snapshot('web')),1)
         self.assertEqual(loaded.web[0]['metadata']['references'], ['https://example.com/docs'])
         self.assertEqual(loaded.snapshot('sql')[0]['duration_ms'],0)
-        self.assertNotIn('PRIVATE',self.path.read_text(encoding='utf-8'))
+        self.assertNotIn('PRIVATE',json.dumps(history.store.read_document(history.BYTE_LIMIT)))
 
     def test_duplicates_expiry_and_limits_are_bounded(self):
         history=ActivityHistory(self.path)
@@ -39,7 +39,7 @@ class ActivityHistoryTests(unittest.TestCase):
         history.update([self.sql|{'record_id':index} for index in range(700)],[self.web|{'call_id':str(index)} for index in range(1200)])
         self.assertEqual(len(history.sql),500)
         self.assertEqual(len(history.web),1000)
-        self.assertLessEqual(self.path.stat().st_size,history.BYTE_LIMIT)
+        self.assertLessEqual(len(history.store.load(history.BYTE_LIMIT)),history.BYTE_LIMIT)
 
     def test_dashboard_retains_sql_and_network_after_live_sources_disappear(self):
         app=Dashboard(self.home,codex=True)
@@ -62,14 +62,14 @@ class ActivityHistoryTests(unittest.TestCase):
         history=ActivityHistory(self.path)
         history.update([self.sql|{'statement':'SELECT PRIVATE FROM users'}],[self.web|{'metadata':{'references':['http://private.internal','https://example.com/?token=PRIVATE']}}])
         self.assertEqual(history.sql,[])
-        self.assertNotIn('PRIVATE',self.path.read_text(encoding='utf-8'))
+        self.assertNotIn('PRIVATE',json.dumps(history.store.read_document(history.BYTE_LIMIT)))
 
     def test_mcp_metadata_survives_restart_and_incomplete_reloads(self):
         event = self.web | {'server': 'future', 'metadata': {'prompt': 'PRIVATE', 'resources': {'page_id': 'page1'}}, 'result': {'status': 'success', 'input_tokens': 0, 'cache_hit': False, 'password': 'PRIVATE'}}
         history = ActivityHistory(self.path)
         history.update([], [], [event])
         history.update([], [], [event | {'result': {}, 'completed_at': None}])
-        self.assertNotIn('PRIVATE', self.path.read_text())
+        self.assertNotIn('PRIVATE', json.dumps(history.store.read_document(history.BYTE_LIMIT)))
         loaded = ActivityHistory(self.path)
         self.assertEqual(loaded.mcp[0]['result']['input_tokens'], 0)
         self.assertFalse(loaded.mcp[0]['result']['cache_hit'])
@@ -92,9 +92,10 @@ class ActivityHistoryTests(unittest.TestCase):
         self.path.write_text(json.dumps({'version':2,'sql':[self.sql],'web':[self.web],'mcp':[]}))
         app=Dashboard(self.home,codex=True)
         app.refresh()
-        saved=json.loads(self.path.read_text())
+        saved=app.activity_history.store.read_document(ActivityHistory.BYTE_LIMIT)
         self.assertEqual(saved['version'],3)
         self.assertEqual(saved['retention_days'],7)
+        self.assertEqual(json.loads(self.path.read_text())['version'],2)
         coverage=app.snapshot('all')['sources']['activity_history']
         self.assertEqual(coverage['limits']['retention_days'],7)
 

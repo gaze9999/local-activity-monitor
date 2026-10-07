@@ -61,17 +61,23 @@ class SnapshotTransportTests(unittest.TestCase):
     def test_large_snapshot_is_complete_with_and_without_gzip(self):
         payload = {"records": [{"id": index, "value": hashlib.sha256(str(index).encode()).hexdigest()} for index in range(3000)]}
         raw = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
-        self.assertGreater(len(gzip.compress(raw, compresslevel=1)), 65536)
+        packed = gzip.compress(raw, compresslevel=1)
+        self.assertGreater(len(packed), 65536)
 
         # Distinguish a local transport restriction from an application defect.
         class BaselineHandler(BaseHTTPRequestHandler):
             def do_GET(self):
+                compressed = self.headers.get("Accept-Encoding") == "gzip"
+                content = packed if compressed else raw
                 self.connection.settimeout(3)
                 self.send_response(200)
-                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(content)))
+                if compressed:
+                    self.send_header("Content-Encoding", "gzip")
                 self.end_headers()
                 try:
-                    self.wfile.write(raw)
+                    self.wfile.write(content)
                 except OSError:
                     pass
 
@@ -83,9 +89,11 @@ class SnapshotTransportTests(unittest.TestCase):
         baseline_thread.start()
         try:
             try:
-                with urlopen(f"http://127.0.0.1:{baseline.server_address[1]}/", timeout=3) as response:
-                    baseline_body = response.read()
-                self.assertEqual(baseline_body, raw)
+                for encoding, expected in (("identity", raw), ("gzip", packed)):
+                    request = Request(f"http://127.0.0.1:{baseline.server_address[1]}/", headers={"Accept-Encoding": encoding})
+                    with urlopen(request, timeout=3) as response:
+                        baseline_body = response.read()
+                    self.assertEqual(baseline_body, expected)
             except OSError as error:
                 self.skipTest(f"Standard-library HTTP baseline unavailable: {type(error).__name__}. Large application bodies remain unverified in this environment")
         finally:

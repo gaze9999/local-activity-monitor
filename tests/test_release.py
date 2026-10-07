@@ -42,7 +42,7 @@ class ReleaseAssemblyTests(unittest.TestCase):
                     output = Path(command[command.index("--distpath") + 1])
                     name = command[command.index("--name") + 1]
                     if platform == "win32":
-                        self.assertEqual(command[command.index("--icon")+1], str(root / "src/local_activity_monitor/web/favicon.ico"))
+                        self.assertEqual(command[command.index("--icon")+1], str(root / "src/local_activity_monitor/_web/favicon.ico"))
                     else:
                         self.assertNotIn("--icon", command)
                     self.assertEqual(name, "launch-cli")

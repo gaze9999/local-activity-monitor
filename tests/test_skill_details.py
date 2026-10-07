@@ -62,7 +62,7 @@ class SkillDetailTests(unittest.TestCase):
         collector.refresh()
         collector.thread_state.update(list(collector.files.values()))
         checkpoint = collector.thread_state.path
-        self.assertNotIn("doc_path", checkpoint.read_text(encoding="utf-8"))
+        self.assertNotIn(b"doc_path", checkpoint.read_bytes())
         restored = CodexCollector(self.root)
         restored.refresh()
         restored.thread_state = ThreadState(checkpoint)

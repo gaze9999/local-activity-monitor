@@ -37,6 +37,8 @@ from .payload_detail import paged_content
 from .activity_history import ActivityHistory, sql_identity, mcp_identity, merge_event
 from .codex_account import CodexAccountSource
 from .ui_assets import load_ui_assets
+from .frontend_assets import load_frontend_assets
+from .process_lifecycle import cli_lifetime
 
 
 def data_root():
@@ -166,7 +168,7 @@ class Dashboard:
         return True
 
     def web_revision(self):
-        assets = Path(__file__).parent/"web"
+        assets = load_frontend_assets().root
         library = load_ui_assets()
         paths = [assets/name for name in ("index.html", "app.js", "style.css", "locales.json")]+[library.path(name) for name in ("workbench-ui.js", "workbench-ui.css")]
         signature = [(str(path), path.stat().st_mtime_ns, path.stat().st_size) for path in paths]
@@ -719,6 +721,7 @@ class Dashboard:
 def handler(dashboard, port):
     hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
     library = load_ui_assets()
+    frontend = load_frontend_assets()
     assets = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"), "/style.css": ("style.css", "text/css; charset=utf-8"), "/locales.json": ("locales.json", "application/json; charset=utf-8"), "/workbench-ui.js": ("workbench-ui.js", "text/javascript; charset=utf-8"), "/workbench-ui.css": ("workbench-ui.css", "text/css; charset=utf-8")}
     assets["/favicon.svg"] = ("favicon.svg", "image/svg+xml")
     assets["/favicon.ico"] = ("favicon.ico", "image/vnd.microsoft.icon")
@@ -947,7 +950,7 @@ def handler(dashboard, port):
                 self.reply(200, raw, "application/json; charset=utf-8")
             elif url.path in assets:
                 file, mime = assets[url.path]
-                root = Path(__file__).parent/"web"
+                root = frontend.root
                 path = library.path(file) if file in ("workbench-ui.js", "workbench-ui.css") else root/file
                 content, script_hash, style_hash = path.read_bytes(), None, None
                 if file == "index.html":
@@ -1008,6 +1011,11 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
 
 
 def main(argv=None, watch_stdin=False):
+    with cli_lifetime():
+        return serve(argv, watch_stdin)
+
+
+def serve(argv=None, watch_stdin=False):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--codex-home", type=Path, default=Path(os.environ.get("CODEX_HOME") or Path.home()/".codex"))
     parser.add_argument("--port", type=int, default=8787)
@@ -1035,6 +1043,7 @@ def main(argv=None, watch_stdin=False):
         return 0
     try:
         load_ui_assets()
+        load_frontend_assets()
     except (OSError, ValueError, RuntimeError) as error:
         print(str(error), file=sys.stderr)
         return 1
@@ -1066,5 +1075,5 @@ def main(argv=None, watch_stdin=False):
     finally:
         dashboard.stop.set()
         server.server_close()
-        dashboard.thread.join(timeout=5)
+        dashboard.thread.join(timeout=12)
     return 0

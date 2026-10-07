@@ -35,9 +35,9 @@ def read_pin(root):
     return value
 
 
-def run_command(command, *, env=None):
+def run_command(command, *, env=None, timeout=_TIMEOUT):
     try:
-        return subprocess.run(command, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=_TIMEOUT,
+        return subprocess.run(command, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
                               check=True, shell=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout.strip()
     except subprocess.TimeoutExpired:
         raise PreparationError("取得或準備 Workbench UI 逾時") from None
@@ -131,10 +131,69 @@ def verify_offline(destination, pin, *, loader=None):
         raise PreparationError("既有離線 UI 不完整或 checksum/pin 不符, 已保留原內容") from None
 
 
-def ensure_ui(root, source):
-    root, source = Path(root).resolve(), Path(source).expanduser().resolve()
+def latest_pin(root):
+    """Resolve the highest stable version tag, including annotated tag peeling."""
     pin = read_pin(root)
-    destination = root / "src/local_activity_monitor/_workbench"
+    current = None
+    library = Path(root) / "src/local_activity_monitor/_workbench"
+    if library.is_dir():
+        verify_offline(library, pin)
+        match = re.search(r'global\.WorkbenchUI\s*=\s*Object\.freeze\(\{\s*version:\s*"((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))"', (library / "workbench-ui.js").read_text(encoding="utf-8"))
+        if not match:
+            raise PreparationError("無法確認目前 WBUI 版本, 沿用已記錄版本")
+        current = tuple(map(int, match[1].split(".")))
+    git = shutil.which("git")
+    if not git:
+        raise PreparationError("找不到 Git, 無法檢查 Workbench UI 最新版本")
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")
+    output = run_command([git, "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never",
+                          "-c", "core.hooksPath=" + os.devnull, "ls-remote", "--tags", "--", _REMOTE], env=env, timeout=20)
+    tags = {}
+    for line in output.splitlines():
+        match = re.fullmatch(r"([a-f0-9]{40})\s+refs/tags/v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))(\^\{\})?", line)
+        if match:
+            revision, version, peeled = match.groups()
+            key = tuple(map(int, version.split(".")))
+            if key not in tags or peeled:
+                tags[key] = revision
+    if not tags:
+        raise PreparationError("Workbench UI 尚未提供正式版本 tag")
+    if current is not None and max(tags) < current:
+        return pin
+    development = {key: revision for key, revision in tags.items() if key[0] == 0}
+    if any(key[0] >= 1 for key in tags):
+        gh = shutil.which("gh")
+        if not gh:
+            raise PreparationError("Workbench UI 1.0 以上需用已認證的 GitHub CLI 確認已發布 Release")
+        env["GH_PROMPT_DISABLED"] = "1"
+        try:
+            release = json.loads(run_command([gh, "api", "--hostname", "github.com", "repos/" + _REPOSITORY + "/releases/latest"], env=env, timeout=20))
+            if not isinstance(release, dict) or release.get("draft") is not False or release.get("prerelease") is not False:
+                raise ValueError()
+            match = re.fullmatch(r"v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))", str(release.get("tag_name", "")))
+            key = tuple(map(int, match[1].split("."))) if match else None
+            if key not in tags or not release.get("published_at"):
+                raise ValueError()
+            if key[0] >= 1:
+                if current is not None and key < current:
+                    return pin
+                return {**pin, "revision": tags[key]}
+        except (ValueError, TypeError, KeyError):
+            raise PreparationError("Workbench UI Release 資訊無效, 保留已驗證版本") from None
+    if not development:
+        raise PreparationError("Workbench UI 尚未提供可用的正式 Release")
+    if current is not None and max(development) < current:
+        return pin
+    return {**pin, "revision": development[max(development)]}
+
+
+def ensure_ui(root, source, *, pin=None, destination=None):
+    root, source = Path(root).resolve(), Path(source).expanduser().resolve()
+    recorded = read_pin(root)
+    pin = recorded if pin is None else pin
+    destination = Path(destination) if destination is not None else root / "src/local_activity_monitor/_workbench"
+    if unsafe_path(destination) or not destination.resolve().is_relative_to(root):
+        raise PreparationError("離線 UI 位置不安全")
     if destination.exists() or destination.is_symlink():
         verify_offline(destination, pin)
         return "已驗證既有離線 Workbench UI " + pin["revision"]
@@ -183,16 +242,21 @@ def ensure_ui(root, source):
             if staging_parent.resolve() != root / ".local":
                 raise PreparationError("UI 暫存位置不安全")
             temporary = Path(tempfile.mkdtemp(prefix=".prepare-ui-", dir=staging_parent))
-        staged = temporary / "assets"
-        run_command([sys.executable, "-B", str(loader), "--project", str(root),
+        project = root
+        if pin != recorded:
+            project = temporary / "project"
+            project.mkdir()
+            (project / "workbench-ui.json").write_text(json.dumps(pin), encoding="utf-8")
+        staged = project / ".local/staged-ui" if project != root else temporary / "assets"
+        run_command([sys.executable, "-B", str(loader), "--project", str(project),
                      "--destination", str(staged), "--source", str(source)], env=env)
         verify_offline(staged, pin, loader=loader)
         if destination.exists() or destination.is_symlink():
             raise PreparationError("離線 UI 位置已存在, 已保留原內容")
-        if destination.parent.resolve() != root / "src/local_activity_monitor":
+        if not destination.parent.resolve().is_relative_to(root):
             raise PreparationError("離線 UI 位置不安全")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.parent.is_symlink() or destination.parent.resolve() != root / "src/local_activity_monitor":
+        if unsafe_path(destination.parent) or not destination.parent.resolve().is_relative_to(root):
             raise PreparationError("離線 UI 位置不安全")
         staged.rename(destination)
         return "已準備固定版本 Workbench UI " + pin["revision"]

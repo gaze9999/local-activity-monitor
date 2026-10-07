@@ -11,6 +11,7 @@ from local_activity_monitor.collectors import CodexCollector
 from local_activity_monitor.server import Dashboard
 from local_activity_monitor.mcp_records import summarize
 from local_activity_monitor.thread_state import ThreadState
+from local_activity_monitor.history_store import HistoryStore
 
 
 THREAD = "00000000-0000-0000-0000-000000000001"
@@ -116,13 +117,15 @@ class SourceCoverageTests(unittest.TestCase):
                 state = ThreadState(path)
                 self.assertEqual(state.load_health, expected)
                 self.assertEqual(state.skills, [])
-        with patch.object(Path, "open", side_effect=OSError("Fixture unreadable")):
+        with patch.object(HistoryStore, "connect", side_effect=OSError("Fixture unreadable")):
             self.assertEqual(ThreadState(path).load_health, "unavailable")
         with patch.object(Path, "is_symlink", return_value=True):
             state = ThreadState(path)
             self.assertEqual(state.load_health, "unavailable")
             state.update([])
             self.assertEqual(state.write_health, "unavailable")
+        path = self.home / "invalid/checkpoint.json"
+        path.parent.mkdir()
         path.write_bytes(b"invalid JSON")
         state = ThreadState(path)
         state.update([])
