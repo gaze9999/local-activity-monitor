@@ -14,6 +14,19 @@ THREAD = '00000000-0000-0000-0000-000000000001'
 
 
 class McpObservationTests(unittest.TestCase):
+    def test_choice_result_in_codex_text_blocks_is_metadata_only(self):
+        response = {"status":"ok", "model":"jev-1.13.0", "answers":{"synthetic":{"type":"choice", "choice":"unknown", "confidence":1, "probabilities":{"unknown":1}}}, "usage":{"input_tokens":916, "output_tokens":108}, "latency_ms":1172}
+        blocks = [{"type":"input_text", "text":"Script completed\nOutput:\n"}, {"type":"input_text", "text":response}]
+        for output in (blocks, json.dumps(blocks), {"content":blocks}):
+            result = response_metadata("jev", output)
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["latency_ms"], 1172)
+            self.assertEqual(result["usage_input_tokens"], 916)
+            self.assertNotIn("answers", result)
+            self.assertNotIn("model", result)
+        self.assertNotIn("status", response_metadata("jev", blocks+[blocks[-1]]))
+        self.assertEqual(response_metadata("jev", {"content":blocks,"isError":True})["status"], "error")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.home = Path(self.temp.name)

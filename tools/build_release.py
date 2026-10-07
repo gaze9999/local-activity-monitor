@@ -47,6 +47,8 @@ def main():
     shutil.move(str(bundle), str(output/"local-activity-monitor"))
     bundle = output/"local-activity-monitor"
     shutil.copy2(root/"README.md", bundle/"README.md")
+    for name in ("LICENSE", "NOTICE"):
+        shutil.copy2(root/name, bundle/name)
     shutil.copytree(root/"docs", bundle/"docs")
     notices = bundle/"third-party-licenses"
     notices.mkdir()

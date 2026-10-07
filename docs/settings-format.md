@@ -14,7 +14,7 @@
 | filterCollapsed | 各篩選區收合狀態, 最多 500 個 boolean 項目 |
 | sectionCollapsed | 觀察來源等區塊的收合狀態, 最多 100 個 boolean 項目 |
 | inputs / page | 搜尋, 篩選, 舊版來源 window, 對話頁碼 |
-| appearance / locale | mode, theme, accent, font, zh-TW / en / ja |
+| appearance / locale | mode, theme, accent, accentColor, font, fontFamily, reduceMotion, zh-TW / en / ja |
 | display | options, ranking, table, heatmap, lines, mainSummary, subSummary |
 | sourceWindows | global 來源紀錄範圍與 tabs 主 / 子頁覆寫, 預設 24h |
 | charts | 時間範圍, 長度 / 單位, 間隔, 項目數, 線數, 上限, statistics 與 shape |
@@ -35,6 +35,10 @@
 - idle_minutes 0 - 1440, 預設 5, 0 停用閒置暫停. 舊設定省略此欄位時沿用預設
 - activity_retention_days 1 - 365, 預設 7. 保存 SQL, 網路與 MCP 活動摘要的天數, 設定與摘要一起保存, 重啟後沿用. 縮短天數會移除已過期摘要, 筆數與容量上限仍生效
 - display.options 1 - 200, 最多 8 個不重複整數. ranking / table 必須是其中一項或 `all`
+- mainSummary 1 - 8, 預設 4. subSummary 0 - 8, 預設 0 不顯示子分頁摘要, 個別摘要區可覆寫數量, 名稱與順序. 子頁 count 可為 0, 主頁 count 仍需至少 1
+- appearance.reduceMotion 為 boolean, 預設 false. true 立即停用介面動畫與轉場, 保存於瀏覽器及可攜設定, 舊設定省略時沿用 false. 系統的減少動態效果設定也會停用動畫
+- theme 提供 workbench / neutral, 工作台保留目前配色, 名稱依語言顯示. 舊 steam / slate 設定改用 workbench
+- accent 提供 green / blue / orange / custom. accentColor 為六位十六進位色碼, 如 `#66c0f4`, custom 時必填. fontFamily 為本機字型清單, 最多 200 字元, 以逗號分開, 空字串使用預設字型, 字型未安裝時由瀏覽器使用後續或系統字型. 不下載字型, 不接受 URL 或 CSS 宣告
 - sourceWindows.global 與 tabs 值接受 1h / 24h / 7d / all. tabs 最多 64 個項目, key 為主頁或帶子頁的識別碼, 未設定者沿用全域範圍
 - charts 最多 256 項, tables 最多 500 項. 每張表 columns / hidden 最多 100 個欄名, heatmap / heatmapCustom / open 為 boolean. display.heatmap 提供全域預設, heatmapCustom 記錄個別覆寫, 全域 switch 立即套用到沿用設定的表格. 套用全部經確認後清除個別覆寫, open 省略時展開
 - 圖表最近長度 1 - 365, 單位分鐘 / 小時 / 天, interval 1 / 5 / 15 分鐘或 1 / 6 / 24 小時. top 最多 200, maximum 0 - 1000000000, 自訂起點需早於終點
@@ -57,10 +61,10 @@ localStorage 依 origin 隔離. 後端觀察設定保存於目前程序, 網頁�
 
 活動資料與圖片匯出見 [活動匯出規劃](export-plan.md)
 
-來源紀錄範圍同時套用列表與操作統計, 來源時間缺值只在全部範圍顯示. 最新對話狀態, 累計 Token 與帳戶額度保留來源回報值. 舊版有效 window 值可遷移, 字級欄位先保留草稿, 按套用才更新及保存
+來源紀錄範圍同時套用列表與操作統計, 來源時間缺值只在全部範圍顯示. 最新對話狀態, 累計 Token 與帳戶額度保留來源回報值. 舊版有效 window 值可遷移, 字級下拉選單即時套用並保存, 自訂字型與色碼在確認輸入後套用, 無效內容保留已套用的值
 
 cardVisibility 最多 500 項, 保留已有的明確顯示選擇. 省略時套用各分頁預設, 摘要項目使用 summaries 的配置, 總覽使用 overview 的配置. tableSchema 7 新增對話快取命中率欄位, 舊版排序 index 依原欄位移位
 
-多線圖的 display.lines 與 charts.lines 接受 3 / 5 / 10, 預設 3. display.mainSummary / subSummary 接受 1 - 8, 預設 4 / 3. summaries 最多 100 個區域, count 接受 1 - 8, order / hidden 各最多 32 個不重複指標序號, titles 每區最多 32 個名稱, 各 80 字元. 省略 count 時沿用全域數量, 新指標接到既有順序尾端
+多線圖的 display.lines 與 charts.lines 接受 3 / 5 / 10, 預設 3. display.mainSummary 接受 1 - 8, 預設 4, subSummary 接受 0 - 8, 預設 0. summaries 最多 100 個區域, count 在主頁接受 1 - 8, 子頁接受 0 - 8, order / hidden 各最多 32 個不重複指標序號, titles 每區最多 32 個名稱, 各 80 字元. 省略 count 時沿用全域數量, 新指標接到既有順序尾端
 
 overview.order / hidden 各最多 500 個卡片 ID. 總覽副本以 overview-copy- 前綴保存獨立圖表設定, 統計卡使用 -statistics 後綴. 匯出保存卡片配置與摘要偏好, 活動資料仍依來源按需取得

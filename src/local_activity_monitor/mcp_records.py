@@ -247,12 +247,32 @@ def decoded_output(output):
             output = json.loads(output)
         except (ValueError, RecursionError):
             return {}
+    # Codex may wrap an exec result in input_text blocks whose text is already
+    # a JSON object. Select only one structured result, never merge tool logs.
+    if isinstance(output, list) and len(output) <= 100:
+        results = []
+        for block in output:
+            if not isinstance(block, dict) or block.get("type") not in ("input_text", "text"):
+                continue
+            value = block.get("text")
+            if isinstance(value, str) and len(value) <= 1024*1024:
+                try:
+                    value = json.loads(value)
+                except (ValueError, RecursionError):
+                    continue
+            if isinstance(value, dict) and isinstance(value.get("status"), str):
+                results.append(value)
+        return results[0] if len(results) == 1 else {}
     if not isinstance(output, dict):
         return {}
     result = output.get("structuredContent")
     if isinstance(result, dict):
         return dict(result, isError=output.get("isError") is True)
     content = output.get("content")
+    if isinstance(content, list):
+        result = decoded_output(content)
+        if result:
+            return dict(result, isError=output.get("isError") is True or result.get("isError") is True)
     if isinstance(content, list) and len(content) == 1 and isinstance(content[0], dict):
         text = content[0].get("text")
         if isinstance(text, str):

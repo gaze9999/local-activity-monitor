@@ -344,7 +344,17 @@ exit (Start-Monitor {quote(self.root)} @('--codex-home', 'folder with spaces') (
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertEqual(json.loads(result.stdout.strip()), arguments)
 
-
+    def test_powershell_entry_points_preserve_mode_and_unicode_arguments(self):
+        for entry, mode in (("launch-cli.ps1", "--console"),):
+            with self.subTest(entry=entry):
+                checkout = self.root / entry.replace(".ps1", " 資料夾 🐍 with spaces")
+                (checkout / "tools").mkdir(parents=True)
+                shutil.copyfile(ROOT / entry, checkout / entry)
+                (checkout / "tools/launch-windows.ps1").write_text("[IO.File]::WriteAllText($env:MOCK_LAUNCH_LOG, (ConvertTo-Json -InputObject @($args) -Compress), [Text.Encoding]::UTF8)\nexit 0\n")
+                arguments = ["--fixture", "資料夾 🐍 with spaces"]
+                result = subprocess.run([POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(checkout / entry), *arguments], capture_output=True, text=True, env=self.env, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(self.launch_log.read_text(encoding="utf-8-sig")), [mode, *arguments])
 
 
 if __name__ == "__main__":

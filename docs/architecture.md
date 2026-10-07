@@ -7,7 +7,6 @@ Python 3.10+ 標準函式庫, 原生 HTML / JavaScript / CSS, setuptools package
 | 檔案 | 責任 |
 | --- | --- |
 | 根目錄平台入口 / `tools/launch-cli.py` | 使用既有 Python 直接啟動原始碼, 預設不安裝 |
-| `tools/smoke_gui.py` | 以隔離資料與瀏覽器偏好驗證原生 WebView 的分頁、設定與重新載入 |
 | `tools/watch.py` | Python 原始碼儲存穩定後重啟自己建立的服務子程序 |
 | `server.py` | loopback HTTP, snapshot cache, 設定驗證與 collector 協調 |
 | `collectors.py` | Jev metadata DB, Codex JSONL 增量讀取, 時間 / counters / 工具摘要 |
@@ -146,6 +145,8 @@ GPU 容量語意依 [Microsoft DXGI](https://learn.microsoft.com/en-us/windows/w
 前端 cardLibrary 保存卡片的來源, 穩定識別碼, 類別, 支援的圖表形式與共用控制項. chartViews 保存各實例的參數與本輪資料投影, 總覽副本沿用同一呈現函式並套用自己的範圍. summaryLibrary 保存已載入的摘要指標, 顯示數量, 順序與名稱由瀏覽器偏好管理. 新卡片沿用既有 renderer 與設定保存流程, 不增加資料讀取來源
 
 payload_detail.py 完成遮蔽與結構投影後建立含 revision 的內容頁, 原有受限明細 API 加上 lazy=1 時回傳分頁. offset 與 revision 只用於已確認的同一工具或診斷紀錄, 前端逐頁建立語法顏色或 Markdown 預覽. Markdown 以文字節點與明確允許的連結建立 DOM, 不執行文件中的 HTML 或程式碼
+
+通用 parser、語法顏色、Markdown 預覽與輸出檢視器由 Workbench UI 提供, LAM 只管理已遮蔽的資料、受限明細 API、內容頁版本與卸載時機. 同一檢視器套用工具、MCP、Git、驗證與錯誤明細, 解開 text 物件與 output / stdout / stderr, 混合 JSON 與 diff 分開顯示, 提供原文切換. 跨頁 JSON 完整讀取後才展開, 內容分批建立 DOM, 關閉明細釋放元件與觀察器, 不改變外層工具回覆的來源判定
 
 ## 分批收集與畫面載入
 
