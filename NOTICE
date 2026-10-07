@@ -1,0 +1,19 @@
+Local Activity Monitor
+Copyright (c) 2026 gaze9999
+
+Local Activity Monitor's own source and documentation are licensed under MIT;
+see LICENSE. Separately bundled software retains its own licensing terms.
+
+Workbench UI (https://github.com/gaze9999/workbench-ui)
+Copyright (c) 2026 gaze9999
+Workbench UI remains private-use software and is not covered by the Local
+Activity Monitor MIT grant. Release assets under local_activity_monitor/_workbench,
+including JavaScript, CSS and the generated Python asset loader, are provided
+from the owner-authorized revision in workbench-ui.json. Repository access and
+a read token do not grant general redistribution rights. Use or distribution
+outside the explicitly authorized application requires the holder's permission.
+
+Native bundles additionally include Python and PyInstaller components.
+Their license texts are retained under third-party-licenses in each native
+bundle. These components are build/runtime distributions, not application
+runtime dependencies installed on the user's computer.

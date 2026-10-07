@@ -1,5 +1,9 @@
 {
   "en": {
+    "減少動畫效果": "Reduce motion",
+    "開啟後停用介面動畫, 也會遵循系統的減少動態效果設定": "Disable interface animations when enabled. System reduced-motion settings are also respected.",
+    "子分頁摘要卡預設數量": "Default subpage summary cards",
+    "不顯示": "Hidden",
     " Tab 設定": " Tab settings",
     " · Tab 設定": " · Tab settings",
     " · 保存最近 24 小時錯誤摘要": " · Error summaries retained for 24 hours",
@@ -1971,9 +1975,23 @@
     "來源可取得的顯示記憶體組成方式": "Graphics memory organization available from the source",
     "目前開啟此頁面的瀏覽器或 WebView 回報名稱": "Browser or WebView name reported by the current page",
     "目前瀏覽器回報的偏好語言": "Preferred language reported by the current browser",
-    "目前瀏覽器使用的時區": "Time zone used by the current browser"
+    "目前瀏覽器使用的時區": "Time zone used by the current browser",
+    "自訂": "Custom",
+    "自訂強調色": "Custom accent color",
+    "選擇強調色": "Choose accent color",
+    "字型": "Font family",
+    "系統預設": "Default font",
+    "輸入本機字型名稱, 多個字型以逗號分開, 留空使用預設字型": "Enter local font names separated by commas. Leave blank to use the default font.",
+    "自訂強調色或字型格式無效": "Invalid custom accent color or font family",
+    "更新失敗, 顯示上次取得的資料": "Update failed, showing the last available data",
+    "圖表無法顯示, 請重試": "Could not display the chart, please retry",
+    "Log 讀取失敗, 請重試": "Could not load logs, please retry"
   },
   "ja": {
+    "減少動畫效果": "アニメーションを減らす",
+    "開啟後停用介面動畫, 也會遵循系統的減少動態效果設定": "有効にすると画面のアニメーションを無効にします。システムの視差効果を減らす設定にも従います。",
+    "子分頁摘要卡預設數量": "サブページの要約カード数",
+    "不顯示": "非表示",
     " Tab 設定": " Tab 設定",
     " · Tab 設定": " · Tab 設定",
     " · 保存最近 24 小時錯誤摘要": " · 過去24時間のエラー概要を保存",
@@ -2586,7 +2604,7 @@
     "尚無錯誤": "エラーなし",
     "尚無錯誤或警告紀錄": "エラーまたは警告の記録はありません",
     "就緒": "準備完了",
-    "工作台": "作業台",
+    "工作台": "ワークベンチ",
     "工作檢查台": "アクティビティ画面",
     "工作監測台": "アクティビティ監視",
     "工作目錄": "作業ディレクトリ",
@@ -3945,6 +3963,16 @@
     "來源可取得的顯示記憶體組成方式": "ソースから取得できた GPU メモリの構成方式",
     "目前開啟此頁面的瀏覽器或 WebView 回報名稱": "現在のページを開いているブラウザーまたは WebView が報告した名前",
     "目前瀏覽器回報的偏好語言": "現在のブラウザーが報告した優先言語",
-    "目前瀏覽器使用的時區": "現在のブラウザーが使用しているタイムゾーン"
+    "目前瀏覽器使用的時區": "現在のブラウザーが使用しているタイムゾーン",
+    "自訂": "カスタム",
+    "自訂強調色": "カスタムアクセント色",
+    "選擇強調色": "アクセント色を選択",
+    "字型": "フォント",
+    "系統預設": "既定のフォント",
+    "輸入本機字型名稱, 多個字型以逗號分開, 留空使用預設字型": "ローカルフォント名をカンマで区切って入力します。空欄の場合は既定のフォントを使用します。",
+    "自訂強調色或字型格式無效": "カスタムアクセント色またはフォントの形式が無効です",
+    "更新失敗, 顯示上次取得的資料": "更新に失敗しました, 前回のデータを表示しています",
+    "圖表無法顯示, 請重試": "グラフを表示できませんでした, 再試行してください",
+    "Log 讀取失敗, 請重試": "ログを読み込めませんでした, 再試行してください"
   }
 }

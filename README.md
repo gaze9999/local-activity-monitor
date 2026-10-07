@@ -2,23 +2,24 @@
 
 Codex 活動監測, 包含 Jev 與 MCP. 使用 Python 標準函式庫與原生網頁, 不需 Node, GPU, API Key 或雲端服務
 
+
 操作方式見 [使用說明](docs/usage.md), 資料來源與擴充方式見 [程式架構](docs/architecture.md), [設定檔格式](docs/settings-format.md) 與 [錯誤觀察](docs/error-observation.md). 維護與修改原則見 [維護與驗收](docs/maintenance.md). [活動匯出規劃](docs/export-plan.md) 保存後續功能需求. 可觀測欄位與取得限制見 [資料盤點](docs/data-inventory.md), 本輪檢查見 [驗證紀錄](docs/validation.md)
 
 ## 免安裝版與發布建置
 
+Windows、macOS 與 Linux 分別建置 CLI 免安裝包, 套件內含 Python, 透過本機瀏覽器顯示監測網頁. 使用者不需安裝 Python 或相依套件
 
 | 套件 | 啟動方式 |
 | --- | --- |
-| windows-x64-cli.zip | `launch-cli.cmd`、`launch-cli.ps1` 或 `launch-cli.exe`, 只提供 CLI 入口 |
-| macos-arm64-cli.tar.gz | Apple Silicon CLI, 雙擊 `launch-cli.command` 或執行 `launch-cli` |
-| macos-x64-cli.tar.gz | Intel Mac CLI, 雙擊 `launch-cli.command` 或執行 `launch-cli` |
+| windows-x64-cli.zip | 解壓縮後使用 `launch-cli.cmd`、`launch-cli.ps1` 或 `launch-cli.exe` |
+| macos-arm64-cli.tar.gz | Apple Silicon, 使用 `launch-cli.command` 或 `launch-cli` |
+| macos-x64-cli.tar.gz | Intel Mac, 使用 `launch-cli.command` 或 `launch-cli` |
+| linux-x64-cli.tar.gz / linux-arm64-cli.tar.gz | 使用 `launch-cli.sh` 或 `launch-cli` |
+
+正式套件由 `.github/workflows/release.yml` 在對應系統建置, 服務 smoke check 通過後附加至 draft release. 本機建置只產出 `.local/package-tests/` 下的測試包, 不上傳或發布. 建置工具列在 `tools/requirements-build.txt`, 啟動入口不安裝相依套件
 
 
-
-
-macOS 套件在 macOS 15 建置. 既有 Linux CLI 封裝保留, 以 Ubuntu 22.04 建置, 需要 glibc 2.35+. macOS 封裝使用 ad-hoc 簽章並檢查完整性, 未提供 Developer ID 簽章或 notarization. 系統要求安全性確認時, 依提示核對來源. SHA256SUMS.txt 可核對下載檔案
-
-CLI 預設開啟本機監測頁面, 終端按 Ctrl+C 停止. 原生執行檔可加 `--no-browser` 停用自動開啟瀏覽器. 監測資料取自執行電腦上的 Codex 與 MCP 設定, 不隨套件附帶活動紀錄
+從 [Releases](https://github.com/gaze9999/local-activity-monitor/releases/latest) 下載符合系統與處理器的 CLI 壓縮包, 保留整個解壓縮目錄, 在本機瀏覽器使用監測網頁
 
 ## 從原始碼啟動
 
@@ -26,9 +27,13 @@ CLI 預設開啟本機監測頁面, 終端按 Ctrl+C 停止. 原生執行檔可�
 
 本機開發可將 private 的 `workbench-ui` 儲存庫放在相鄰目錄, 或以 `WORKBENCH_UI_PATH` 指定其根目錄. LAM 直接讀取共用 UI, 不維護 CSS / JavaScript 副本. CLI 啟動時若沒有共用來源或離線資產, 會使用既有 Git 認證取得 `workbench-ui.json` 指定的 commit, 保存至本專案的 `.local/workbench-ui/<revision>` 並產生離線資產. 不修改鄰近儲存庫或固定版本, 不安裝相依套件. 缺少 Git、存取權限或網路時顯示原因, 既有資產異常時保留原內容並停止啟動. 發行版與原始碼下載包內嵌共用資產, 可離線使用
 
-| --- | --- | --- |
-| Linux | 使用瀏覽器介面 | `sh launch-cli.sh` |
+| 系統 | CLI |
+| --- | --- |
+| Windows | `launch-cli.cmd` 或 `launch-cli.ps1` |
+| macOS | 雙擊 `launch-cli.command` 或 `sh launch-cli.sh` |
+| Linux | `sh launch-cli.sh` |
 
+原始碼直接使用已有的 Python 3.10+, CLI 優先沿用 repository 內可用的 `.venv`, 不建立環境、不安裝專案或套件. 損壞的 `.venv` 不會自動刪除或覆寫
 
 缺少 Python 時顯示原因, 預設不詢問安裝、不下載 runtime. 若要明確啟用 Python 安裝流程, Windows 使用 `launch-cli.cmd --install-python`, macOS / Linux 使用 `sh launch-cli.sh --install-python`. 此流程仍須回答 `Install Python now? [y/N]`, 預設取消, 使用既有 Python Install Manager / winget、Homebrew 或 apt, 不自行安裝套件管理工具. 偵測時停用 Python Install Manager 的自動安裝
 
@@ -49,9 +54,11 @@ python tools/prepare_ui.py --ensure
 
 更新共用 UI 時執行 `python tools/prepare_ui.py --update`, 會以既有 Git 認證取得 Workbench UI 的 `main` 最新提交, 更新 `workbench-ui.json` 並產生離線資產. Workbench UI 必須處於乾淨的 `main`, 不會覆寫未提交內容或重寫歷史. 本機 CSS / JavaScript 更新依既有網頁更新週期套用, 更新載入器時需重啟 LAM. `--ensure` 只準備固定版本, 缺少來源時才自動取得, 不能與 `--update` 同時使用. 未指定這兩個選項時沿用既有本機來源與離線資產準備流程
 
+CLI 入口加入 `--codex --open`, 直接呼叫 CLI 不加 `--codex` 時不讀 Codex sessions. 預設頁面為 `http://127.0.0.1:8787/`, 只能從本機連線, 可用 `--port 8790` 指定連接埠. 網頁偏好保存在瀏覽器的 localStorage. 關閉瀏覽器分頁不會停止 CLI 服務
 
+重複啟動 CLI 時檢查相同 port 與 CODEX_HOME 的 monitor, 開啟既有服務並結束新的啟動程序. 其他程式占用 port 時顯示訊息. macOS 若原始碼入口缺少執行權限, 執行一次 `chmod +x launch-cli.command`
 
-也可安裝已建置的 `local_activity_monitor-0.5.1-py3-none-any.whl`, 再從安裝環境呼叫 `local-activity-monitor`
+也可安裝 `local_activity_monitor-0.6.0-py3-none-any.whl`, 再從安裝環境呼叫 `local-activity-monitor`. wheel 需要已有 Python, 不等同內含 Python 的免安裝包
 
 ## MCP 來源紀錄
 
@@ -164,6 +171,10 @@ Token 使用每個 thread 最新累計快照. 不將每次快照或 last-turn co
 
 ## 開發與驗證
 
+[1.0.0 前規劃](docs/release-1.0.md) 分開核對 LAM 資料來源、CLI、設定、效能與離線發布門檻, 共用庫的元件與平台驗收由 Workbench UI 獨立管理
+
+實測規模、回收與尚未驗證的效能項目見 [效能測試報告](docs/performance-report.md). 使用端布局與共用拖曳能力的後續考量見 [Workbench UI 互動清單](https://github.com/gaze9999/workbench-ui/blob/v0.3.0/docs/interaction-roadmap.md), private 文件需要既有權限
+
 Windows PowerShell:
 
 ```powershell
@@ -184,3 +195,9 @@ python3 -m pip wheel --no-deps --wheel-dir dist .
 Jev usage 欄位來源見 [TypeSafe API 文件](https://docs.typesafe.ai/api), Jev 只觀察 client 回應. Codex 的選配帳戶來源依 [官方 app-server 文件](https://learn.chatgpt.com/docs/app-server), 使用 account/read, account/rateLimits/read 與 account/usage/read, 不送出工作或修改帳戶
 
 共用 JSON 顯示、Tag 與技能檔案樹狀清單來自獨立的 [Workbench UI](https://github.com/gaze9999/workbench-ui) private 儲存庫. LAM 提供資料與欄位說明, 共用元件負責呈現及互動. `workbench-ui.json` 指定完整 commit SHA, release workflow 使用 `WORKBENCH_UI_READ_TOKEN` 取得固定來源並呼叫共用 action. 發行版、wheel 與原始碼下載包附帶自動產生的資產與 SHA-256 manifest, 使用時不需 GitHub 連線. 共用來源版本不要求另建 Workbench UI release
+
+## 版本與授權
+
+LAM 與 Workbench UI 分別管理版本. LAM 的 `pyproject.toml`、`__version__`、`v0.6.0` tag 與套件檔名必須一致, 共用 UI 則固定完整 SHA. 0.x 仍在建立穩定介面, 相容性變更於 release 說明, 1.0.0 依獨立清單驗收. 本輪不進行使用者存檔 migration
+
+LAM 自有程式碼與文件採 [MIT](LICENSE), 著作權名稱 gaze9999. 內嵌 Workbench UI 保留私有使用, 不隨 LAM 改為 MIT. 各元件授權範圍及 native runtime 通知見 [NOTICE](NOTICE), native 包另附 Python / PyInstaller 的授權文件

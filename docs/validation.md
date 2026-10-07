@@ -1,5 +1,11 @@
 # 驗證紀錄
 
+## 0.6.0 發布準備
+
+2026-10-07, `test_mcp_observation`、`test_content_details`、`test_content_pages`、`test_ui_assets` 與 release-mode guard 合計 50/50 通過, 使用 Python 3.13.15 與隔離合成暫存資料. 先前 sandbox 暫存目錄權限失敗及錯誤測試模組名稱已修正重跑, 不列為產品測試通過. 版本 / MIT metadata / locale UTF-8 解析通過, native archive mock 測試未在本機執行, 留待 release CI
+
+README、授權範圍、1.0.0 與效能報告經 textlint / 人工複核, 不做本機封裝. 下列瀏覽器紀錄仍為先前實際流程, 不以版本 / 文件調整宣告新的 CPU / 記憶體數據
+
 ## 2026-10-07, 0.5.1
 
 Windows, Python 3.12.14 隔離測試與 Python 3.14.7 本機服務, Node.js 22.19.0, Playwright CLI 0.1.22 與 Edge
@@ -148,3 +154,82 @@ Windows, Python 3.14.7 與 Codex in-app browser. 沿用隔離 session / Jev fixt
 ## 其他驗證範圍
 
 本輪沒有呼叫 live provider 或付費 API, MCP 連線狀態由本機紀錄取得. macOS / Linux 桌面雙擊與簽章提示未在本機操作. 設定 JSON 內容與匯入已驗證, IAB download 等待未取得實體下載檔, 頁面仍提供可複製 JSON
+
+
+
+本次 checked state 為 `64269e3` 之後的未提交工作目錄, Python 3.12.14、Node.js v26.9.0、Playwright CLI 0.1.22 與 Microsoft Edge 154 headless
+
+- Python focused checks 共 43 項通過: `test_release.py` 2、`test_account_projection.py` 4、`test_ui_assets.py` 5、`test_launch.py` 7、`test_bootstrap.py` 25. 封裝測試 mock PyInstaller 與 smoke 程序, 檢查 Windows、macOS、Linux 的 CLI 入口與 archive 組裝, 沒有建立原生二進位檔
+- `tests/test_runtime_ui.mjs` 與 `web/app.js` Node 語法檢查通過. CMD / PowerShell 啟動、參數與 Unicode 由 bootstrap tests 檢查, 沒有安裝 Python 或相依套件
+- `tests/loading-layout-flow.cjs` 通過: 初次等待、503 斷線、重新取得資料、空帳戶資料及再更新, 初次總覽不必先開用量分頁. 零餘額與 false 保留, model Token 圖可按需呈現, 舊 Steam 設定名稱轉為 Workbench
+- 同一 browser flow 在 1600、820、390 px 檢查 9 張監測卡片, 無重疊或頁面水平溢位, 框線保留, 頁尾資料來源仍全寬且在最底下. 桌面截圖另經人工複核
+- 本機 textlint 台灣用語 / prh 與人工複核通過. 瀏覽器檢查使用新建的合成來源, 未讀取真實 Codex 活動、帳戶或專案資料
+- Fixture 啟動與中斷清理另經 focused check 通過. SQLite transaction context 不會自動關閉 connection, 本輪改為明確關閉後再清理暫存目錄, 解決 Windows 關閉時的檔案鎖定
+
+可重現 UI fixture 由 `tests/serve_loading_fixture.py` 在暫存目錄建立, 只綁定 loopback, 不啟動帳戶 / 工作樹 / 裝置探測. 關閉時釋放服務並清理該暫存目錄. 使用現有工具, 不自動安裝:
+
+```sh
+python -X utf8 tests/serve_loading_fixture.py
+```
+
+另一個終端機使用程式印出的 URL:
+
+```sh
+playwright-cli -s=lam-loading open <fixture-url> --browser=msedge
+playwright-cli -s=lam-loading run-code --filename=tests/loading-layout-flow.cjs
+playwright-cli -s=lam-loading close
+```
+
+UI 流程沒有 pageerror, 注入的 503 會在 console 留下預期的 HTTP 錯誤. 測試重跑會重設該隔離 origin 的頁面偏好, 不可對正式監測服務使用. 受限程序無法存取 loopback / 暫存檔時, 以本次隔離的本機測試程序完成, 未安裝新工具
+
+本輪未執行完整 unittest、原生封裝、平台雙擊驗收、發布或遠端更新. Release workflow 經 source 複核, 本機沒有可用的 YAML parser, 未重跑遠端 CI. Workbench UI 的布局實作與缺項文件在上游工作目錄, LAM 原始碼可讀取相鄰 source, 既有 `workbench-ui.json` 固定版本未更新, 舊封裝仍以內附 UI 為準
+
+## 2026-10-07 共用解析與主題串接
+
+Checked state 為 `64269e3` 之後的未提交工作目錄, Python 3.12.14、Node.js v26.9.0、Playwright CLI 0.1.22 與 Microsoft Edge 154 headless
+
+- `PYTHONPATH=src python -B -m unittest tests.test_content_pages tests.test_ui_assets`: 12/12 通過, 涵蓋按需內容分頁、來源版本、敏感資料遮蔽與共用資產 / CSP
+- `tests/test_runtime_ui.mjs` 與 `web/app.js` 語法檢查通過, 此結果不代表所有 collector 或原生封裝已驗證
+- `tests/output-detail-flow.cjs` 通過: 工具、MCP、Git 與錯誤明細使用相同解析器, 外層工具來源說明保留, 摺疊時不啟動解析、分頁只讀取所需下一頁、702 個新增行與尾端內容完整、原文保留、關閉取消未完成請求, 共用 Markdown 與 SQL 顏色可顯示. 摺疊狀態以區段名稱恢復, 不將先前的執行資訊狀態套給新輸入區段, 已移除的摺疊區不延遲建立解析器
+- Workbench、工作台與簡約主題的深色 / 淺色共 6 個狀態, 解析背景與既有 payload 背景一致, 框線及模式按鈕配色通過實際 computed style 比較. 共用 UI 的 CSS 主題變數由 LAM 自有主題提供, 元件樣式仍由 Workbench UI 管理
+- 本機 textlint 台灣用語 / prh 與人工複核完成, 測試來源及畫面全部使用隔離合成資料
+
+重現時先啟動 `tests/serve_loading_fixture.py`, 用其印出的 loopback URL 開啟命名瀏覽器 session, 再執行:
+
+```sh
+playwright-cli -s=lam-output run-code --filename=tests/output-detail-flow.cjs
+```
+
+瀏覽器沒有 pageerror, 關閉中的分頁要求回報預期的 `net::ERR_ABORTED`. 未測試真實活動內容、所有來源 API、Safari / iPad / WebView、完整 WCAG、CPU / 記憶體峰值或原生封裝. 上游 source 與 LAM 串接已修改, `workbench-ui.json` 固定版本保持原值, 舊封裝沒有自動取得本輪共用 parser. 沒有 commit、push 或 release
+
+Python focused checks 首次在沙箱暫存目錄遭遇 WinError 5, 改以同一組合成測試的隔離本機程序完成, 沒有因該限制修改應用程式或安裝套件
+
+## 2026-10-07 摘要、外觀、更新回饋與結果 metadata
+
+Checked state 為 `64269e3` 之後的未提交工作目錄, Python 3.12.14、Node.js v26.9.0、Playwright CLI 0.1.22 與 Microsoft Edge 154 headless. 使用相鄰 Workbench UI 的未提交 source, `workbench-ui.json` 維持原固定版本, 本節不代表已封裝使用端已更新
+
+- `PYTHONPATH=src python -B -m unittest tests.test_mcp_observation tests.test_content_pages tests.test_ui_assets`: 38/38 通過. MCP 結果可從物件 / JSON 字串的 input_text 區塊取出 status、來源耗時與 Token, 多個結果不合併, 外層 error 保留, 未將 answers / probabilities 本文加入 metadata
+- `tests/parser-summary-motion-flow.cjs`: 子分頁預設沒有摘要, 全域與個別 0 / 3 張設定、保存 / 重載 / 匯出 / 匯入及主頁拒絕 0 通過. 54,864 字元 SQL 分頁、排版、完整原文、YAML 結構與編輯後預覽、關閉控制器清理通過
+- 同 flow 檢查三語減少動畫設定, 手動及系統 reduced-motion 都停用轉場、進入動畫、光帶與 pseudo 動畫, 靜態狀態保留. 深淺模式與 1280 / 820 / 390 / 320 px 共 8 組原文布局沒有水平溢位
+- `tests/appearance-layout-flow.cjs`: 三語主題名稱、保留目前配色、移除重複工作台、自訂強調色 / 本機字型保存與匯入拒絕通過. number 上下箭頭隱藏, 原生 ArrowUp 保留. 延後統計卡四種寬度無重疊, SVG 更新保留節點且不重播進入動畫
+- `tests/loading-layout-flow.cjs`: 冷啟動、503、恢復、未知 / 零帳戶值及重新更新通過. 9 張監測卡在 1600 / 820 / 390 px 無重疊 / 溢位, 框線及全寬頁尾保留. 初次使用橫條 skeleton, 已有內容使用柔和光帶, 沒有背景覆蓋或 spinner, 帳戶卡更新前後高度一致
+- `tests/distribution-feedback-flow.cjs`: 可操作與唯讀分布的字級 / 高度 / 對齊相同, SVG 遮罩字體與原圖一致、原始節點位置不變、更新不改卡片尺寸. 光帶僅在文字 / 圖形, 底軌與框線不參與. Tooltip 點擊導頁即關閉, 合成截圖另經人工複核
+- `tests/font-resize-flow.cjs`: 設定中的 12–18 px 字級全部實際套用並保存, 12 / 14 / 18 px 與 1600 / 820 / 390 / 320 px 共 12 組布局無重疊及水平溢位, 最後回復 fixture 字級 14
+- `tests/output-detail-flow.cjs` 依 sticky 複製列的新內容容器更新 selector 後通過, 702 個新增行及尾端 / 原文完整, tool / MCP / Git / error 共用解析、按需分頁、關閉取消與 Markdown 保留. 目前 Workbench / 簡約的深淺模式共 4 個狀態通過, 前述 6 狀態是移除重複主題前的歷史證據
+- JavaScript 語法、locale JSON 與 Git diff whitespace 檢查通過. 文件使用本機 textlint 台灣用語 / prh 與人工複核, 畫面和 browser flow 均為隔離合成資料
+
+重現時啟動 `python -X utf8 tests/serve_loading_fixture.py`, 使用印出的 loopback URL 開啟命名 session, 依序執行:
+
+```sh
+playwright-cli -s=lam-final run-code --filename=tests/parser-summary-motion-flow.cjs
+playwright-cli -s=lam-final run-code --filename=tests/appearance-layout-flow.cjs
+playwright-cli -s=lam-final run-code --filename=tests/loading-layout-flow.cjs
+playwright-cli -s=lam-final run-code --filename=tests/distribution-feedback-flow.cjs
+playwright-cli -s=lam-final run-code --filename=tests/font-resize-flow.cjs
+playwright-cli -s=lam-final run-code --filename=tests/output-detail-flow.cjs
+playwright-cli -s=lam-final close
+```
+
+本次流程沒有 pageerror, 503 與 `net::ERR_ABORTED` 是失敗 / 取消注入的預期結果, 既有 Permissions-Policy 警告保留. 共用元件壓力測試由 Workbench UI 的 `tests/stress-font-flow.cjs` 驗證, 不代表真實 LAM 收集與回補 peak 已改善, 各案例耗時與自有 renderer thread CPU 分開記錄
+
+本輪未執行完整 unittest、真實 Codex / provider API、Safari / iPad / WebView、完整 WCAG、原生封裝或平台雙擊, 分別屬資料來源 / 平台 / 發布驗收. 沒有安裝、改存檔 migration、更新 pin、commit、push 或 release. LAM 的 1.0.0 門檻見 [獨立規劃](release-1.0.md)
