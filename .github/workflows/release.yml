@@ -1,7 +1,13 @@
-name: Build release
+name: Build CLI packages
 
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Attach packages to a draft Release, available from 1.0.0
+        type: boolean
+        default: false
+        required: false
 
 permissions:
   contents: read
@@ -131,7 +137,28 @@ jobs:
           merge-multiple: true
       - name: Checksums
         run: cd assets && sha256sum * > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: checksums
+          path: assets/SHA256SUMS.txt
+          if-no-files-found: error
+      - name: Check Release eligibility
+        id: release
+        env:
+          PUBLISH_RELEASE: ${{ inputs.publish }}
+          PYTHONPATH: src
+        run: |
+          python - <<'PY'
+          import os
+          from local_activity_monitor import __version__
+          requested = os.environ.get('PUBLISH_RELEASE') == 'true'
+          if requested and int(__version__.split('.')[0]) < 1:
+              raise SystemExit('GitHub Releases are disabled before 1.0.0')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('allowed=' + str(requested).lower() + '\n')
+          PY
       - name: Attach to draft release
+        if: steps.release.outputs.allowed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}

@@ -12,12 +12,15 @@
 | 狀態與布局 | 表格 / 卡片初次載入、更新中、空資料、失敗 / 重試, compact 排列與全寬來源尾端 | 320 px 至桌面、連續縮放、延後統計卡與表格無重疊 |
 | 設定 | 三語主題名稱、自訂強調色 / 本地字型、數量覆寫、減少動畫、匯入拒絕不修改目前設定 | 保存 / 重載 / 匯出 / 匯入 / 取消及無效格式 |
 | 隱私與權限 | 本機路徑 / 紀錄不進公開截圖, credential 不進前端或資產, 檔案讀寫及來源遮蔽 | 合成示範、允許路徑與敏感欄位測試, 明確區分唯讀觀察與寫入 |
+| CLI 建置 | Windows、macOS、Linux 的原生 CLI 套件、圖示、啟動及停止、checksum、第三方授權 | 平台 CI 通過, 1.0.0 前只保存 Actions artifacts, 不建立 Release |
 | 效能 | 啟動及延後載入 peak、圖表更新、回補、程序 CPU / 讀取量與瀏覽器指標 | 相同 fixture / 視窗 / 偏好的比較, CPU 與 paint / CLS 分開記錄 |
 | 回收與上限 | Tab / modal 切換、資料更新、取消、DOM / listener / observer / timer / frame、內容 / 圖表 / 明細快取與歷史裁切 | 無晚到 DOM 寫入, owner 釋放參照, 關閉後資源數回到基準, GC 後 heap / RSS 分開核對 |
 | Shadow DOM 串接 | 共用庫驗收後, LAM 的主題 / i18n / 浮層 / focus / 詳細內容在 root 邊界的行為 | 先驗共用庫, 不以一般 DOM 的 LAM flow 推論支援 |
 | 版本及離線 | WB pin / hash、開發來源與封裝資產一致、離線啟動、設定相容性與遷移 | 明確 revision 的串接驗證, 版本遷移另依已授權順序處理 |
 
 ## 獨立核對順序
+
+0.x 以 commit / push 與各 minor 實際來源的 `0.x.0` tag 交付, 不為每個 patch 建立 tag. GitHub Releases 清空, 1.0.0 完成驗收後才明確啟用 workflow 的 `publish`. 建置與發布是不同階段
 
 1. 以 LAM 最終 diff 選擇 focused Python / JavaScript 檢查, 先驗資料及設定規格
 2. 以隔離的合成 Codex home / DB 操作本機 Web 頁面, 驗證來源、卡片與表格流程, 記錄 console / network 及取消結果
