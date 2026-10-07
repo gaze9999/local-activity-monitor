@@ -1,8 +1,11 @@
 """Build, update and recovery fixtures, without real Git or account data."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -31,6 +34,12 @@ class FrontendBuildTests(unittest.TestCase):
         self.library = self.root / "src/local_activity_monitor/_workbench"
         shutil.copytree(load_ui_assets().root, self.library, ignore=shutil.ignore_patterns("__pycache__"))
         self.app = self.root / "src/local_activity_monitor/_web"
+
+    def test_cli_status_is_utf8_with_legacy_output_encoding(self):
+        result = subprocess.run([sys.executable, str(ROOT / "tools/build_frontend.py")], cwd=ROOT,
+                                env=dict(os.environ, PYTHONIOENCODING="ascii"), capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8"))
+        self.assertIn("LAM 頁面已是最新建置", result.stdout.decode("utf-8"))
 
     def test_first_build_then_no_rewrite_without_git(self):
         with patch.object(builder, "ensure_ui", side_effect=AssertionError("unexpected Git")), patch.object(builder, "latest_pin", side_effect=AssertionError("unexpected network")):

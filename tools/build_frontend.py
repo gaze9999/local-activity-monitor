@@ -116,6 +116,9 @@ def build(root, source=None, *, latest=False, revision=None):
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     parser = argparse.ArgumentParser(description=__doc__)
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--latest", action="store_true", help="Check the latest stable WBUI tag using existing Git authentication")
