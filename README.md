@@ -2,7 +2,7 @@
 
 監測本機 Codex、Jev 與 MCP 活動的瀏覽器介面, 提供對話、用量、工具、專案及診斷明細. 後端使用 Python 3.10+ 標準函式庫, 前端使用原生 HTML / JavaScript / CSS 與 Workbench UI
 
-目前版本 `0.7.0`. 0.x 以提交與 minor 版本 tag 交付, 建置包保存在 [Actions artifacts](https://github.com/gaze9999/local-activity-monitor/actions/workflows/release.yml). GitHub Release 從 1.0.0 起提供
+目前版本 `0.7.1`. 0.x 以提交與 minor 版本 tag 交付, 建置包保存在 [Actions artifacts](https://github.com/gaze9999/local-activity-monitor/actions/workflows/release.yml). GitHub Release 從 1.0.0 起提供
 
 ## 功能
 
@@ -59,7 +59,7 @@ python tools/build_frontend.py
 
 左上角顯示 LAM 與實際載入的 WBUI 版本. Watcher 監看 Python 與 `frontend/` 修改, 建置成功後重啟自己建立的服務, 建置失敗時保留執行中的服務
 
-本版固定 WBUI 0.4.0 的已確認 commit. 自動更新繼續選擇正式 tag, 版本低於目前已建置版本時沿用原版. 明確串接其他 revision 可使用 `python tools/build_frontend.py --revision <完整 SHA>`, 建置成功後才更新版本 pin
+本版固定 WBUI 0.4.1 的已確認 commit `659953cb7168fb6e8a155af42f4652c11c25186d`. 自動更新繼續選擇正式 tag, 版本低於目前已建置版本時沿用原版. 明確串接其他 revision 可使用 `python tools/build_frontend.py --revision <完整 SHA>`, 建置成功後才更新版本 pin
 
 關閉 CLI 或按 Ctrl+C 時, 啟動器通知自己建立的 watcher 與服務退出並釋放連接埠. Windows 使用 Job Object 讓隱藏子程序隨所屬 CLI 結束, Linux / macOS 的終止訊號會進入退出清理. 建置暫存目錄在建置完成或失敗後清除, 已取得的 WBUI 快取與必要資料繼續保存
 
