@@ -19,7 +19,7 @@ python3 tools/build_frontend.py
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-測試使用暫存 metadata、SQLite 與來源 fixture, 涵蓋資料投影、增量讀取、checkpoint、內容遮蔽、來源快取、HTTP 邊界、啟動及建置回復
+測試使用暫存 metadata、SQLite 與來源 fixture, 涵蓋資料投影、差異讀取、checkpoint、內容遮蔽、來源快取、HTTP 邊界、啟動及建置回復
 
 `test_history_store.py` 檢查分區共用、舊資料匯入、版本升級備份、遷移失敗回復、寫入鎖定及不支援格式. `test_process_lifecycle.py` 檢查終止訊號、父程序控制串流關閉、Windows 隱藏子程序清理與資料保留
 
@@ -50,6 +50,13 @@ python tests/serve_loading_fixture.py
 | `distribution-feedback-flow.cjs` | 分布圖、讀值及更新狀態 |
 | `output-detail-flow.cjs` | 原文、內容分頁、取消與明細清理 |
 | `parser-summary-motion-flow.cjs` | 結構解析、摘要、減少動畫及設定匯入 |
+| `console-sql-flow.cjs` | console 呈現、SQL 外層工具回覆、複製與捲軸 |
+| `context-agent-flow.cjs` | 代理訊息、公開 Context 摘要、遮蔽切換及舊設定相容性 |
+| `reactive-motion-adapter-flow.cjs` | 卡片、資料列與欄位插入 / 移出, 保留節點與目標計數 |
+| `history-flow.cjs` | SQLite 歷史總數、游標分頁、錯誤後重試 |
+| `history-chart-flow.cjs` | 完整保存範圍統計與總覽副本獨立範圍 |
+| `reconnect-flow.cjs` | 中斷後自動重連與保留畫面 |
+| `restart-reset-flow.cjs` | 後端更新及還原預設不重新載入整頁 |
 
 ## 套件建置
 

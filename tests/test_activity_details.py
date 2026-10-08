@@ -236,7 +236,7 @@ class ActivityDetailsTests(unittest.TestCase):
         self.write("session_meta",{"id":THREAD})
         second=self.root/"rollout-00000000-0000-0000-0000-000000000002.jsonl"
         second.write_text(json.dumps({"type":"session_meta","payload":{"id":"00000000-0000-0000-0000-000000000002"}})+"\n")
-        dashboard.refresh();self.assertEqual(dashboard.snapshot("24h")["codex"]["files"],1)
+        dashboard.refresh();self.assertEqual(dashboard.snapshot("24h")["codex"]["files"],2)
         for value in ({"interval":0},{"interval":True},{"interval":2.5},{"observations":{"git":1}},{"observations":{"unknown":True}}):
             with self.assertRaises(ValueError):dashboard.set_settings(value)
         self.assertEqual(dashboard.interval,10)

@@ -4,6 +4,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
 from local_activity_monitor.collectors import JevCollector
@@ -47,6 +48,35 @@ class JevTelemetryTests(unittest.TestCase):
         self.assertNotIn('secret_tokens',json.dumps(result))
         self.assertNotIn('PRIVATE',json.dumps(result))
         self.assertNotIn('SECRET',json.dumps(result))
+
+    def test_source_health_distinguishes_disabled_missing_invalid_and_empty(self):
+        config = self.home/'monitoring/jev-monitor.json'
+        config.write_text(json.dumps({'version':1,'enabled':False,'database':str(self.database)}))
+        with patch('local_activity_monitor.collectors.sqlite3.connect', side_effect=AssertionError('Disabled reader must not open SQLite')):
+            self.assertEqual(JevCollector(self.home).snapshot('all')['health'], 'disabled')
+        missing = self.home/'unrecorded.sqlite3'
+        config.write_text(json.dumps({'version':1,'enabled':True,'database':str(missing)}))
+        result = JevCollector(self.home).snapshot('all')
+        self.assertEqual(result['health'], 'not_recorded')
+        self.assertEqual(result['reader']['locations'], [str(missing)])
+        self.assertEqual(result['reader']['config_location'], str(config))
+        self.assertFalse(missing.exists())
+        config.write_text('invalid JSON')
+        self.assertEqual(JevCollector(self.home).snapshot('all')['health'], 'invalid_config')
+        config.write_text(json.dumps({'version':1,'enabled':True,'database':str(self.database)}))
+        with closing(sqlite3.connect(self.database)) as db, db:
+            db.execute('DELETE FROM jev_events')
+        result = JevCollector(self.home).snapshot('all')
+        self.assertEqual(result['health'], 'ok')
+        self.assertEqual(result['summary']['calls'], 0)
+
+    def test_source_failures_expose_types_without_private_error_text(self):
+        for error, health in [(PermissionError('PRIVATE_PATH'), 'unavailable'), (sqlite3.OperationalError('database is locked'), 'unavailable'), (sqlite3.OperationalError('no such table: jev_events'), 'unsupported'), (sqlite3.OperationalError('no such column: http_attempts'), 'unsupported')]:
+            with self.subTest(health=health, error=type(error).__name__), patch('local_activity_monitor.collectors.sqlite3.connect', side_effect=error):
+                result = JevCollector(self.home).snapshot('all')
+            self.assertEqual(result['health'], health)
+            self.assertEqual(result['reader']['error_type'], type(error).__name__)
+            self.assertNotIn('PRIVATE_PATH', json.dumps(result))
 
     def test_malformed_metadata_is_isolated_from_valid_rows(self):
         with closing(sqlite3.connect(self.database)) as db:

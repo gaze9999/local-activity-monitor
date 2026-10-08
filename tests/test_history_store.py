@@ -31,41 +31,44 @@ class HistoryStoreTests(unittest.TestCase):
         self.assertEqual(threads.read_document(1024)["entries"], {})
         with closing(sqlite3.connect(self.store.path)) as db:
             self.assertEqual(db.execute("SELECT count(*) FROM history_state").fetchone()[0], 3)
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], history_store.SCHEMA_VERSION)
 
     def test_schema_upgrade_backs_up_and_preserves_data(self):
         self.value["mcp"] = [{"timestamp": "2026-10-08T00:00:00Z", "input_tokens": 0, "cache_hit": False, "missing": None}]
         self.store.save(json.dumps(self.value))
-        changes = {**history_store.MIGRATIONS, 2: ("ALTER TABLE history_state ADD COLUMN extra TEXT",)}
-        with patch.object(history_store, "SCHEMA_VERSION", 2), patch.object(history_store, "MIGRATIONS", changes):
+        current = history_store.SCHEMA_VERSION
+        changes = {**history_store.MIGRATIONS, current+1: ("ALTER TABLE history_state ADD COLUMN extra TEXT",)}
+        with patch.object(history_store, "SCHEMA_VERSION", current+1), patch.object(history_store, "MIGRATIONS", changes):
             self.assertEqual(self.store.read_document(2048), self.value)
             with closing(sqlite3.connect(self.store.path)) as db:
-                self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+                self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], current+1)
                 self.assertEqual(db.execute("SELECT extra FROM history_state").fetchone()[0], None)
-        backup = self.store.path.with_name(self.store.path.name + ".schema-v1.bak")
+        backup = self.store.path.with_name(self.store.path.name + f".schema-v{current}.bak")
         with closing(sqlite3.connect(backup)) as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], current)
             self.assertEqual(db.execute("SELECT count(*) FROM history_items").fetchone()[0], 1)
 
     def test_failed_schema_upgrade_rolls_back_columns_data_and_version(self):
-        changes = {**history_store.MIGRATIONS, 2: ("ALTER TABLE history_state ADD COLUMN extra TEXT", "INVALID SQL")}
-        with patch.object(history_store, "SCHEMA_VERSION", 2), patch.object(history_store, "MIGRATIONS", changes):
+        current = history_store.SCHEMA_VERSION
+        changes = {**history_store.MIGRATIONS, current+1: ("ALTER TABLE history_state ADD COLUMN extra TEXT", "INVALID SQL")}
+        with patch.object(history_store, "SCHEMA_VERSION", current+1), patch.object(history_store, "MIGRATIONS", changes):
             with self.assertRaises(sqlite3.Error):
                 self.store.read_document(1024)
         self.assertEqual(self.store.read_document(1024), self.value)
         with closing(sqlite3.connect(self.store.path)) as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], current)
             self.assertNotIn("extra", [row[1] for row in db.execute("PRAGMA table_info(history_state)")])
 
     def test_schema_rebuild_removes_column_and_converts_type_without_losing_rows(self):
         with closing(sqlite3.connect(self.store.path)) as db:
             db.execute("ALTER TABLE history_state ADD COLUMN obsolete TEXT")
-        changes = {**history_store.MIGRATIONS, 2: (
+        current = history_store.SCHEMA_VERSION
+        changes = {**history_store.MIGRATIONS, current+1: (
             "CREATE TABLE replacement (namespace TEXT PRIMARY KEY, metadata TEXT NOT NULL, updated_at TEXT NOT NULL)",
             "INSERT INTO replacement SELECT namespace, metadata, CAST(updated_at AS TEXT) FROM history_state",
             "DROP TABLE history_state", "ALTER TABLE replacement RENAME TO history_state",
         )}
-        with patch.object(history_store, "SCHEMA_VERSION", 2), patch.object(history_store, "MIGRATIONS", changes):
+        with patch.object(history_store, "SCHEMA_VERSION", current+1), patch.object(history_store, "MIGRATIONS", changes):
             self.assertEqual(self.store.read_document(1024), self.value)
             self.store.save(json.dumps(self.value))
             with closing(sqlite3.connect(self.store.path)) as db:

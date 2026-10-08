@@ -1,10 +1,84 @@
 import json
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 
-from local_activity_monitor.payload_detail import bounded_payload, parse_text
+from local_activity_monitor.payload_detail import bounded_payload, complete_payload, content_page, mask_payloads, parse_text, payload_masking, visible_context_record
 
 
 class PayloadDetailTests(unittest.TestCase):
+    def test_request_masking_preserves_guards_and_restores_nested_context(self):
+        value = {'password': 'PRIVATE', 'encoded': '{"authorization":"SECRET","count":0}', 'text': 'api_key=SECRET', 'large': 'x'*50000}
+        self.assertTrue(payload_masking.get())
+        self.assertNotIn('PRIVATE', json.dumps(complete_payload(value)))
+        with mask_payloads(False):
+            self.assertEqual(complete_payload(value)['value']['password'], 'PRIVATE')
+            self.assertEqual(complete_payload(value)['value']['encoded']['authorization'], 'SECRET')
+            self.assertEqual(complete_payload(value)['value']['text'], 'api_key=SECRET')
+            bounded = bounded_payload(value)
+            self.assertEqual(bounded['value']['password'], 'PRIVATE')
+            self.assertTrue(bounded['truncated'])
+            with mask_payloads(True):
+                self.assertNotIn('PRIVATE', json.dumps(bounded_payload(value)))
+            self.assertFalse(payload_masking.get())
+        self.assertTrue(payload_masking.get())
+        with self.assertRaises(RuntimeError):
+            with mask_payloads(False):
+                raise RuntimeError('Fixture')
+        self.assertTrue(payload_masking.get())
+        with self.assertRaises(ValueError):
+            with mask_payloads('false'):
+                pass
+
+    def test_masking_does_not_leak_between_threads_or_disable_metadata_redaction(self):
+        from local_activity_monitor.operation_records import redact
+        def read_default():
+            return payload_masking.get(), complete_payload({'password': 'PRIVATE'})['value']
+        with ThreadPoolExecutor(max_workers=1) as pool, mask_payloads(False):
+            self.assertEqual(pool.submit(read_default).result(), (True, {'password': '[已隱藏]'}))
+            self.assertEqual(redact({'password': 'PRIVATE'}), {'password': '[已隱藏]'})
+        self.assertTrue(payload_masking.get())
+
+    def test_independent_contexts_on_one_thread_keep_their_own_masking(self):
+        unmasked, masked = copy_context(), copy_context()
+        unmasked.run(payload_masking.set, False)
+        self.assertEqual(unmasked.run(complete_payload, {'password': 'PRIVATE'})['value']['password'], 'PRIVATE')
+        self.assertEqual(masked.run(complete_payload, {'password': 'PRIVATE'})['value']['password'], '[已隱藏]')
+        self.assertEqual(unmasked.run(complete_payload, {'password': 'PRIVATE'})['value']['password'], 'PRIVATE')
+        self.assertTrue(payload_masking.get())
+
+    def test_content_revisions_reject_pages_with_another_masking_mode(self):
+        first = content_page('ordinary output')
+        with mask_payloads(False):
+            with self.assertRaises(ValueError):
+                content_page('ordinary output', revision=first['revision'])
+            unmasked = content_page('ordinary output')
+            self.assertEqual(content_page('ordinary output', revision=unmasked['revision'])['text'], 'ordinary output')
+        with self.assertRaises(ValueError):
+            content_page('ordinary output', revision=unmasked['revision'])
+
+    def test_context_loader_never_projects_hidden_reasoning_even_when_unmasked(self):
+        item = {'type': 'reasoning', 'text': 'PRIVATE FULL REASONING', 'encrypted_content': 'PRIVATE ENCRYPTED', 'content': [{'type': 'reasoning_text', 'text': 'PRIVATE'}], 'summary': [{'type': 'summary_text', 'text': 'PUBLIC SUMMARY'}, {'type': 'reasoning_text', 'text': 'PRIVATE'}]}
+        for mask in (True, False):
+            with mask_payloads(mask):
+                result = visible_context_record({'type': 'response_item', 'payload': item})
+                self.assertIn('PUBLIC SUMMARY', json.dumps(result))
+                self.assertNotIn('PRIVATE', json.dumps(result))
+                for hidden in ({'type': 'reasoning_text', 'text': 'PRIVATE'}, {'type': 'reasoning.text', 'text': 'PRIVATE'}, item | {'channel': 'analysis'}, item | {'summary': []}):
+                    self.assertIsNone(visible_context_record({'type': 'response_item', 'payload': hidden}))
+                self.assertEqual(complete_payload({'type': 'reasoning', 'text': 'legitimate tool field'})['value'], {'type': 'reasoning', 'text': 'legitimate tool field'})
+
+    def test_visible_context_accepts_only_recorded_public_message_parts(self):
+        for role in ('user', 'assistant'):
+            item = {'type': 'message', 'role': role, 'channel': 'final', 'content': [{'type': 'output_text', 'text': 'PUBLIC'}, {'type': 'reasoning_text', 'text': 'PRIVATE'}], 'encrypted_content': 'PRIVATE'}
+            result = visible_context_record({'type': 'response_item', 'payload': item})
+            self.assertEqual(result['role'], role)
+            self.assertNotIn('PRIVATE', json.dumps(result))
+            self.assertIsNone(visible_context_record({'type': 'response_item', 'payload': item | {'channel': 'analysis'}}))
+            self.assertIsNone(visible_context_record({'type': 'response_item', 'payload': item | {'role': 'developer'}}))
+        self.assertIsNone(visible_context_record(None))
+        self.assertIsNone(visible_context_record({'type': 'event_msg', 'payload': item}))
+
     def test_yaml_subset_literals_and_unsupported_expressions(self):
         yaml = 'name: example\ncount: 0\nenabled: false\nitems:\n  - name: first\n    password: PRIVATE\n  - name: second\n    value: null\n'
         parsed = parse_text(yaml)

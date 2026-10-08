@@ -51,12 +51,21 @@ class SQLiteRecordTests(unittest.TestCase):
             path=sessions/("rollout-"+thread+".jsonl")
             stamp=datetime.now(timezone.utc).isoformat()
             records=[{"timestamp":stamp, "type":"session_meta", "payload":{"id":thread}}, {"timestamp":stamp, "type":"response_item", "payload":{"type":"function_call", "name":"exec_command", "call_id":"sql-call", "arguments":json.dumps({"cmd":'sqlite3 demo.db "SELECT 12; SELECT 34"'})}}]
+            records.append({"timestamp":stamp, "type":"response_item", "payload":{"type":"function_call_output", "call_id":"sql-call", "output":json.dumps({"rows":[12,34],"api_key":"SQL_PRIVATE_RESULT"})}})
+            records.append({"timestamp":stamp, "type":"response_item", "payload":{"type":"function_call_output", "call_id":"other-call", "output":"UNRELATED_RESULT"}})
             path.write_text("\n".join(json.dumps(row) for row in records)+"\n",encoding="utf-8")
             dashboard=Dashboard(home,codex=True);dashboard.refresh()
             events=dashboard.cache["24h"]["codex"]["sqlite"]["events"]
             select=next(event for event in events if event["index"]==2)
             self.assertNotIn("SELECT 34",json.dumps(dashboard.cache))
             self.assertEqual(dashboard.sql_detail(select["id"])["sql"],"SELECT 34")
+            for full in (False, True):
+                detail = dashboard.sql_detail(select["id"], full=full)
+                self.assertEqual(detail["response"]["rows"], [12,34])
+                self.assertEqual(detail["response_scope"], "containing_tool_call")
+                self.assertNotIn("SQL_PRIVATE_RESULT", json.dumps(detail))
+                self.assertNotIn("UNRELATED_RESULT", json.dumps(detail))
+            self.assertNotIn("SQL_PRIVATE_RESULT", json.dumps(dashboard.cache))
             instance=object.__new__(handler(dashboard,8787))
             for path,host,expected in [("/api/codex/sql?id="+select["id"],"127.0.0.1:8787",200),("/api/codex/sql?id="+"f"*64,"127.0.0.1:8787",409),("/api/codex/sql?id=../../auth.json","127.0.0.1:8787",400),("/api/codex/sql?id="+select["id"]+"&file=auth.json","127.0.0.1:8787",400),("/api/codex/sql?id="+select["id"],"external.example:8787",403)]:
                 instance.path=path;instance.headers={"Host":host};instance.reply=MagicMock();instance.do_GET()

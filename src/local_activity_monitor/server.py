@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from datetime import datetime
 import base64
 import copy
 import gzip
 import hashlib
 from http.client import HTTPConnection, HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import sqlite3
 import json
 import os
 import re
@@ -19,11 +21,12 @@ import tempfile
 import threading
 import time
 import uuid
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlsplit, urlencode
 import webbrowser
 
 from .collectors import CodexCollector, JevCollector, WINDOWS, monitor_config, name as tool_name, now
 from .activity_windows import cutoff, contains
+from .payload_detail import mask_payloads, payload_masking
 from .project_instructions import instructions, observed_file_metadata
 from .codex_connection import connection_status
 from .idle_activity import IdleActivity
@@ -132,6 +135,8 @@ class Dashboard:
         self.diagnostics = DiagnosticCollector(home)
         self.error_history = ErrorHistory(home/"monitoring/error-history.json")
         self.activity_history = ActivityHistory(home/"monitoring/activity-history.json")
+        if self.codex:
+            self.codex.history_sink = self.retain_calls
         self.stop = threading.Event()
         self.lock = threading.Lock()
         self.refresh_lock = threading.RLock()
@@ -142,6 +147,25 @@ class Dashboard:
         self.phase_times = {}
         self.phase_started = None
         self.thread = threading.Thread(target=self.poll, name="metadata-collectors", daemon=True)
+
+    def retain_calls(self, states):
+        sql, web, mcp, errors = [], [], [], []
+        for state in states:
+            errors.extend(event|{'thread_id':state['thread_id']} for event in state.get('errors',[]))
+            for identity, call in state['calls'].items():
+                stamp, end = call.get('timestamp'), call.get('completed_at')
+                duration = max(0, round((datetime.fromisoformat(end.replace('Z','+00:00'))-datetime.fromisoformat(stamp.replace('Z','+00:00'))).total_seconds()*1000)) if stamp and end else None
+                context = {'thread_id':state['thread_id'], 'call_id':identity, 'timestamp':stamp, 'completed_at':end}
+                sql.extend(context|event|{'index':index, 'duration_ms':None, 'container_duration_ms':duration, 'result':'failed' if call.get('error') else 'returned' if end else 'unknown'} for index,event in enumerate(call.get('sqlite',[])))
+                for index,event in enumerate(call.get('mcp',[])):
+                    value = event|context|{'index':index, 'duration_ms':None if event['nested'] else duration, 'container_duration_ms':duration if event['nested'] else None}
+                    (web if event['server']=='web' else mcp).append(value)
+                if call.get('error'):
+                    errors.append(call['error']|context|{'timestamp':end or stamp, 'category':'tool', 'source':'tool_result', 'severity':'error', 'tool':call['tool']})
+        self.activity_history.update(sql,web,mcp)
+        self.error_history.update(errors)
+        self.codex.thread_state.update(states)
+        return self.activity_history.health=='ok' and self.error_history.health=='ok' and self.codex.thread_state.write_health=='ok'
 
     def refresh(self, stagger=False):
         try:
@@ -255,6 +279,8 @@ class Dashboard:
                     identity_fields = ("source", "thread_id", "call_id", "index", "file", "record_id", "record_offset", "record_hash", "timestamp", "statement")
                     events = [event | {"id": hashlib.sha256(json.dumps([event.get(key) for key in identity_fields]).encode()).hexdigest()} for event in events]
                     sql.update(events=events, total=len(retained), operations=dict(Counter(event["operation"] for event in retained)))
+                    boundary = cutoff(window)
+                    sql['aggregate'] = self.activity_history.store.aggregate('sql', since=boundary.isoformat() if boundary else None) | {'scope':'retained_database', 'window':window}
             for projection in codex_windows.values():
                 projection.get("sqlite", {}).pop("_retained_events", None)
             diagnostics = self.diagnostics.snapshot() if self.observations["codex"] and self.observations["errors"] else {"events": [], "health": {"desktop": "disabled", "core": "disabled"}}
@@ -290,6 +316,9 @@ class Dashboard:
                 report["servers"] += [source | {"calls": 0, "recognized": 0, "returned": 0, "known_status": 0, "errors": 0, "average_ms": None, "p99_ms": None, "p95_ms": None, "last_at": None, "latest_metrics": {}} for source in mcp["servers"] if source["server"] not in present]
                 report["configuration"] = mcp["configuration"]
                 report["recording_status"] = mcp["recording_status"]
+                if self.observations['codex'] and self.observations['mcp']:
+                    boundary = cutoff(window)
+                    report['history_aggregate'] = self.activity_history.store.aggregate('mcp', since=boundary.isoformat() if boundary else None, excluded_sources=[key for key,enabled in self.mcp_sources.items() if enabled is False]) | {'scope':'retained_database', 'window':window}
                 scoped_mcp[window] = report
             connection = connection_status(codex.get("threads", []), codex.get("error_events", [])+diagnostic_events, self.observations["codex"])
             if not self.phase("jev"):
@@ -298,6 +327,8 @@ class Dashboard:
                 projection["connection"] = connection
             cache = {window: {"version": 1, "revision": revision, "label": "本機觀察統計", "started_at": self.started_at, "updated_at": now(), "settings": settings, "default_settings": self.default_settings, "availability": availability, "mcp": scoped_mcp[window], "jev": self.jev.snapshot(window) if self.observations["jev"] and self.observations["mcp"] and self.mcp_sources.get("jev", True) else {"source": "jev", "health": "paused", "scope": self.jev.SCOPE, "enabled": enabled, "enabled_at": since, "summary": {}, "recent": [], "series": []}, "codex": projection} for window, projection in codex_windows.items()}
             for window, snapshot in cache.items():
+                snapshot["frontend_revision"] = revision.rsplit("-", 1)[-1]
+                snapshot["backend_revision"] = self.code_revision
                 statuses = dict(mcp["recording_status"])
                 if availability["jev"]:
                     state = copy.deepcopy(statuses.get("jev", {"enabled": None, "health": None, "observed_at": None, "flags": {}}))
@@ -359,7 +390,7 @@ class Dashboard:
             raise ValueError()
         if "idle_minutes" in value and (type(value["idle_minutes"]) is not int or not 0 <= value["idle_minutes"] <= 1440):
             raise ValueError()
-        if "activity_retention_days" in value and (type(value["activity_retention_days"]) is not int or not 1 <= value["activity_retention_days"] <= 365):
+        if "activity_retention_days" in value and (type(value["activity_retention_days"]) is not int or not 0 <= value["activity_retention_days"] <= 3650):
             raise ValueError()
         if any(key in value and type(value[key]) is not bool for key in ("replace_customizations", "recording")):
             raise ValueError()
@@ -395,6 +426,7 @@ class Dashboard:
             track_all = value.get("track_all", self.codex.track_all if self.codex else False)
             if observations.get("codex") and not self.codex:
                 self.codex = CodexCollector(self.home/"sessions", self.max_files)
+                self.codex.history_sink = self.retain_calls
             self.interval = interval
             self.idle_minutes = value.get("idle_minutes", self.idle_minutes)
             if "activity_retention_days" in value:
@@ -710,6 +742,8 @@ class Dashboard:
                 reader.get("locations", []), telemetry.get("health"),
                 sorted(telemetry.get("summary", {})), {"loaded_records": len(telemetry.get("recent", [])), "series_points": len(telemetry.get("series", [])), **{key: value for key, value in reader.items() if type(value) is int}})
             registry["telemetry:"+server]["window"] = telemetry.get("window")
+            registry["telemetry:"+server]["checked_at"] = reader.get('checked_at') or telemetry.get('checked_at')
+            registry["telemetry:"+server]["error_type"] = reader.get('error_type') or telemetry.get('error_type')
         monitor = snapshot.get("monitor", {})
         add("monitor", "Local Activity Monitor", ["monitor", "errors", "logs"], "runtime_samples_and_bounded_event_metadata",
             [str(self.monitor.journal), str(self.error_history.path)], monitor.get("health"),
@@ -818,6 +852,37 @@ def handler(dashboard, port):
             if not self.local_request():
                 return
             url = urlsplit(self.path)
+            detail_routes = {'tool','mcp','git','check','sql','error','jev','context','agent-message'}
+            query = parse_qs(url.query,keep_blank_values=True)
+            if url.path.startswith('/api/codex/') and url.path.rsplit('/',1)[-1] in detail_routes:
+                values = query.get('mask',['1'])
+                if len(values)!=1 or values[0] not in ('0','1'):
+                    self.reply(400,b'Invalid content mask')
+                    return
+                masked = values[0]=='1'
+                if url.path!='/api/codex/sql':
+                    query.pop('mask',None)
+                    url = url._replace(query=urlencode(query,doseq=True))
+                with mask_payloads(masked):
+                    self.get_local(url)
+            else:
+                self.get_local(url)
+
+        def get_local(self, url):
+            if url.path in ('/api/codex/context','/api/codex/agent-message'):
+                query = parse_qs(url.query,keep_blank_values=True)
+                allowed = {'thread_id','call_id','index'} if url.path.endswith('agent-message') else {'thread_id','call_id'}
+                if len(url.query)>256 or set(query)-allowed or 'thread_id' not in query or any(len(values)!=1 for values in query.values()) or not re.fullmatch(r'[a-fA-F0-9-]{36}',query['thread_id'][0]) or 'call_id' in query and not re.fullmatch(r'[A-Za-z0-9_.:-]{1,160}',query['call_id'][0]) or 'index' in query and not re.fullmatch(r'\d{1,2}',query['index'][0]):
+                    self.reply(400,b'Invalid context query')
+                    return
+                result = None
+                if dashboard.codex and dashboard.observations['codex']:
+                    if url.path.endswith('agent-message') and 'call_id' in query:
+                        result = dashboard.codex.agent_message_detail(query['thread_id'][0],query['call_id'][0],int(query.get('index',['0'])[0]))
+                    elif url.path.endswith('context'):
+                        result = dashboard.codex.context_detail(query['thread_id'][0],query.get('call_id',[None])[0])
+                self.reply(200 if result is not None else 409,json.dumps(result,ensure_ascii=False,allow_nan=False).encode('utf-8'),'application/json; charset=utf-8')
+                return
             if url.path in ("/api/codex/tool", "/api/codex/mcp", "/api/codex/git", "/api/codex/check", "/api/codex/sql", "/api/codex/error", "/api/codex/jev") and "lazy" in parse_qs(url.query, keep_blank_values=True):
                 self.content_request(url)
                 return
@@ -935,6 +1000,27 @@ def handler(dashboard, port):
                     return
                 result = dashboard.mcp_documents(query["server"][0], query.get("document", [None])[0])
                 self.reply(200 if result is not None else 409, json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            elif url.path == "/api/history":
+                query = parse_qs(url.query, keep_blank_values=True)
+                try:
+                    if len(url.query)>512 or set(query)-{'namespace', 'section', 'limit', 'offset', 'since', 'cursor'} or any(len(values)!=1 for values in query.values()):
+                        raise ValueError('Invalid history query')
+                    namespace, section = query.get('namespace', ['activity'])[0], query.get('section', [''])[0]
+                    stores = {'activity': dashboard.activity_history.store, 'errors': dashboard.error_history.store}
+                    if dashboard.codex:
+                        stores['threads'] = dashboard.codex.thread_state.store
+                    observation = {'sql': 'sqlite', 'web': 'web', 'mcp': 'mcp', 'events': 'errors', 'skills': 'skills', 'entries': 'codex'}.get(section)
+                    if namespace not in stores or not observation or not dashboard.observations.get(observation):
+                        raise ValueError('Unavailable history source')
+                    excluded = [key for key, enabled in dashboard.mcp_sources.items() if enabled is False] if section=='mcp' else []
+                    result = stores[namespace].page(section, limit=int(query.get('limit', ['100'])[0]), offset=int(query.get('offset', ['0'])[0]), since=query.get('since', [None])[0], cursor=query.get('cursor', [None])[0], excluded_sources=excluded)
+                except (ValueError, TypeError):
+                    self.reply(400, b'Invalid history query')
+                    return
+                except (OSError, sqlite3.Error):
+                    self.reply(503, b'History temporarily unavailable')
+                    return
+                self.reply(200, json.dumps(result, ensure_ascii=False).encode('utf-8'), 'application/json; charset=utf-8')
             elif url.path == "/api/activity" and not url.query:
                 self.reply(200, json.dumps(dashboard.activity_status()).encode("utf-8"), "application/json; charset=utf-8")
             elif url.path == "/api/snapshot":

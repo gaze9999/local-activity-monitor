@@ -1,6 +1,8 @@
 """Read selected metadata only; never return raw records to HTTP callers."""
 from __future__ import annotations
 from .thread_state import ThreadState
+from .session_checkpoint import SessionCheckpoint
+from .agent_messages import agent_messages, parse_message_detail, incoming_message
 from .activity_windows import cutoff, contains
 
 from collections import Counter
@@ -16,7 +18,7 @@ import time
 from .codex_metadata import execution_metadata, read_metadata
 from .codex_schedules import read_schedules
 from .codex_plugins import read_plugins
-from .payload_detail import bounded_payload, complete_payload
+from .payload_detail import bounded_payload, complete_payload, visible_context_record, payload_masking
 from .error_records import identifier, tool_error
 from .mcp_records import mcp_operations, response_metadata, decoded_output
 from .operation_records import file_operations, git_commands, shell_parts, invocations, invocation_expressions, operations, qualified_tool, redact, workflow_operations
@@ -79,14 +81,21 @@ class JevCollector:
 
     def snapshot(self, window="24h"):
         enabled, database, since = monitor_config(self.home)
-        result = {"source": "jev", "enabled": enabled, "enabled_at": since, "health": "waiting" if enabled else "disabled", "scope": self.SCOPE, "window": window, "summary": {}, "recent": [], "series": []}
-        if database is None and (self.home/"monitoring/jev-monitor.json").exists():
-            result["health"] = "invalid_config"
-        if database is None or not database.is_file():
+        result = {"source": "jev", "enabled": enabled, "enabled_at": since, "health": "not_recorded" if enabled else "disabled", "scope": self.SCOPE, "window": window, "summary": {}, "recent": [], "series": [], "reader": {"locations": [str(database)] if database else [], "config_location": str(self.home/"monitoring/jev-monitor.json"), "record_limit": self.RECENT_LIMIT, "series_limit": self.SERIES_LIMIT}}
+        if database is None:
+            try:
+                if (self.home/"monitoring/jev-monitor.json").exists():
+                    result["health"] = "invalid_config"
+            except OSError as error:
+                result["health"] = "unavailable"
+                result["reader"]["error_type"] = type(error).__name__
+        if not enabled or database is None:
             return result
         hours = WINDOWS[window]
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(timespec="milliseconds").replace("+00:00", "Z") if hours else ""
         try:
+            if not database.is_file():
+                return result
             with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=.08)) as db:
                 db.execute("PRAGMA query_only=ON")
                 row = db.execute("SELECT count(*), min(timestamp), sum(http_attempts), sum(max(http_attempts-1,0)), sum(input_tokens), sum(output_tokens), count(input_tokens), count(output_tokens), sum(request_bytes), sum(response_bytes), sum(response_unknown_attempts), avg(latency_ms) FROM jev_events WHERE timestamp>=?", (cutoff,)).fetchone()
@@ -112,8 +121,11 @@ class JevCollector:
                     except (ValueError, TypeError, AttributeError):
                         continue
             result["health"] = "ok"
-        except (OSError, sqlite3.Error):
+        except (OSError, sqlite3.Error) as error:
             result["health"] = "unavailable"
+            if isinstance(error, sqlite3.OperationalError) and str(error).lower().startswith(("no such table:", "no such column:")):
+                result["health"] = "unsupported"
+            result["reader"]["error_type"] = type(error).__name__
         return result
 
 
@@ -121,6 +133,7 @@ class CodexCollector:
     """Bounded initial tail, incremental append reads, latest cumulative snapshots."""
     FILE_LIMIT = 5000
     CALL_LIMIT = 50000
+    FILE_CALL_LIMIT = 8192
     BUFFER_LIMIT = 8*1024*1024
     READ_LIMIT = 8*1024*1024
     SOURCE_LOCATION_LIMIT = 20
@@ -145,9 +158,27 @@ class CodexCollector:
         self.trimmed_calls = 0
         self.read_cursor = 0
         self.thread_state = ThreadState((root.parent if root.name == "sessions" else root)/"monitoring/thread-state.json")
+        self.session_checkpoint = SessionCheckpoint(root)
         self.session_paths, self.related_lifecycle = {}, {}
         self.related_budget = 0
         self.detail_targets, self.detail_indexes = {}, {}
+        self.history_sink, self.retired_calls = None, []
+
+    def retire_call(self, state, identity):
+        call = state['calls'].pop(identity)
+        state.setdefault('retired_ids',set()).add(identity)
+        if self.history_sink is not None:
+            self.retired_calls.append({'thread_id':state['thread_id'], 'calls':{identity:call}})
+        self.trimmed_calls += 1
+
+    def flush_retired(self):
+        while self.retired_calls:
+            batch = self.retired_calls[:512]
+            if not self.history_sink or not self.history_sink(batch):
+                self.health = 'partly_unavailable'
+                return False
+            del self.retired_calls[:len(batch)]
+        return True
 
     def scan(self):
         if time.monotonic() < self.next_scan:
@@ -160,17 +191,20 @@ class CodexCollector:
         try:
             for path in self.root.rglob("rollout-*.jsonl"):
                 try:
-                    paths.append((path.stat().st_mtime_ns, path))
+                    info = path.stat()
+                    paths.append((info.st_mtime_ns, path, info.st_size))
                 except OSError:
                     continue
             ordered = sorted(paths, reverse=True)
             self.session_paths = {}
-            for _, path in ordered[:self.FILE_LIMIT]:
+            for _, path, _ in ordered:
                 identities = UUID_IN_NAME.findall(path.name)
                 if identities:
                     self.session_paths.setdefault(identities[-1], path)
-            active = [path for _, path in ordered[:self.FILE_LIMIT if self.track_all else self.max_files]]
-            self.files = {path: self.files.get(path, self.new_file(path)) for path in active}
+            active = [path for _, path, _ in ordered]
+            self.files = {path: self.files[path] if path in self.files else self.new_file(path) for path in active}
+            for _, path, size in ordered:
+                self.files[path]["source_size"] = size
             self.health = "ok"
         except OSError:
             self.health = "unavailable"
@@ -193,6 +227,7 @@ class CodexCollector:
                 error = payload.get("error")
                 code = identifier(error.get("code")) if isinstance(error, dict) else None
                 state["errors"].append({"timestamp": when, "category": "conversation", "code": code or identifier(payload.get("error_code")) or event_type, "reason": event_type, "file": state.get("source_file"), "source": "session", "severity": "warning" if event_type == "turn_aborted" else "error"})
+                state.setdefault('pending_errors',[]).append(state['errors'][-1])
                 state["errors"] = sorted(state["errors"], key=lambda event:event["timestamp"] or "", reverse=True)[:50]
         if kind == "session_meta":
             cwd = payload.get("cwd")
@@ -217,6 +252,13 @@ class CodexCollector:
                 state["reasoning_effort"] = name(context.get("reasoning_effort", context.get("effort")))
                 state["execution"].update(execution_metadata(context))
                 state["context_time"] = when or ""
+        elif kind == 'response_item' and payload.get('type') == 'message':
+            visible = visible_context_record(record)
+            if visible is not None:
+                for part in visible.get('content', []):
+                    if descriptor := incoming_message(part.get('text')):
+                        state.setdefault('agent_incoming', []).append(descriptor|{'timestamp':when})
+                        state['agent_incoming'] = state['agent_incoming'][-100:]
         elif kind == "response_item" and payload.get("type") in ("function_call", "custom_tool_call"):
             tool, identity = name(qualified_tool(payload)), payload.get("call_id") or payload.get("id")
             if tool and isinstance(identity, str) and len(identity) <= 160:
@@ -231,9 +273,9 @@ class CodexCollector:
                 state["calls"][identity] = {"tool": tool, "timestamp": when, "completed_at": previous.get("completed_at"), "error": previous.get("error"), "nested_tools": dict(Counter(tool for tool, _, nested in calls if nested and name(tool))) if self.features["tool_events"] else {}, "git": git if self.features["git"] else [], "skills": skills if self.features["skills"] else [], "checks": checks if self.features["checks"] else [], "jev": [{"operation": item["operation"], "nested": item["nested"]} for item in jev] if self.features["jev_calls"] else [], "mcp": mcp, "isolated": len(calls) == 1}
                 state["calls"][identity]["files"] = file_operations(calls) if self.features["files"] else []
                 state["calls"][identity]["sqlite"] = sqlite_operations(calls) if self.features["sqlite"] else []
-                if len(state["calls"]) > 8192:
-                    del state["calls"][next(iter(state["calls"]))]
-                    self.trimmed_calls += 1
+                state['calls'][identity]['agent_messages'] = agent_messages(payload, {'agent_id':state['thread_id']}, calls)
+                if len(state["calls"]) > self.FILE_CALL_LIMIT:
+                    self.retire_call(state, next(iter(state['calls'])))
         elif kind == "response_item" and payload.get("type") in ("function_call_output", "custom_tool_call_output"):
             identity = payload.get("call_id")
             if isinstance(identity, str) and identity in state["calls"]:
@@ -251,6 +293,11 @@ class CodexCollector:
                     event = call["mcp"][0]
                     if self.features["web" if event["server"] == "web" else "mcp"] and self.mcp_sources.get(event["server"], True):
                         event["result"] = response_metadata(event["server"], payload.get("output"))
+            elif self.features['errors'] and (failure := tool_error(payload.get('output'))):
+                error = failure|{'timestamp':when,'category':'tool','source':'tool_result','severity':'error','call_id':identifier(identity)}
+                state['errors'].append(error)
+                state.setdefault('pending_errors',[]).append(error)
+                state['errors'] = sorted(state['errors'],key=lambda event:event.get('timestamp') or '',reverse=True)[:50]
         elif kind == "event_msg" and payload.get("type") in ("task_started", "task_complete"):
             latest = when and when >= state["task_time"]
             if latest:
@@ -288,6 +335,18 @@ class CodexCollector:
                 state["allowance"] = limits
 
     def refresh(self, pause=None):
+        if not self.flush_retired():
+            return
+        if self.history_sink is not None:
+            for path, state in self.files.items():
+                if not state.get('dirty_calls') and not state.get('retired_ids') and not state.get('pending_errors'):
+                    continue
+                changed = {'thread_id':state['thread_id'], 'errors':state.get('pending_errors',[]), 'calls':{identity:state['calls'][identity] for identity in state.get('dirty_calls',()) if identity in state['calls']}}
+                if not self.history_sink([changed]):
+                    self.health = 'partly_unavailable'
+                    return
+                self.session_checkpoint.save(path,state)
+                state['pending_errors'] = []
         self.scan()
         budget = self.READ_LIMIT
         # Preserve a quarter of each read budget for older metadata even when
@@ -298,13 +357,18 @@ class CodexCollector:
         start_index = self.read_cursor % max(1, len(entries))
         ordered = entries[start_index:]+entries[:start_index]
         for index, (path, state) in enumerate(ordered):
-            if budget < 65536:
+            if budget < 65536 or index >= 1000:
                 break
             self.read_cursor = start_index+index+1
             try:
                 size = path.stat().st_size
+                state["source_size"] = size
+                if state["offset"] == size:
+                    continue
                 if state["offset"] is not None and size < state["offset"]:
                     self.files[path] = state = self.new_file(path)
+                if state['offset'] is None and (cached := self.session_checkpoint.load(path,max(0,self.CALL_LIMIT-sum(len(item['calls']) for item in self.files.values())))):
+                    state.update(cached)
                 with path.open("rb") as stream:
                     if state["offset"] is None:
                         head = stream.readline(65536)
@@ -313,7 +377,7 @@ class CodexCollector:
                         budget -= len(head)
                         if head.endswith(b"\n"):
                             self.parse(state, head, 0)
-                        state["offset"] = max(len(head), size-self.tail_bytes)
+                        state["offset"] = len(head)
                         state["partial_history"] = state["offset"] > len(head)
                         cached = self.thread_state.entries.get(path.name)
                         if cached and cached['thread_id'] == state['thread_id'] and cached['offset'] <= size:
@@ -350,6 +414,16 @@ class CodexCollector:
                 if len(state["buffer"]) > 1024*1024:
                     state["buffer"] = b""
                     state["discard"] = True
+                state["partial_history"] = state["offset"] < size
+                if not self.flush_retired():
+                    return
+                changed = {'thread_id':state['thread_id'], 'errors':state.get('pending_errors',[]), 'calls':{identity:state['calls'][identity] for identity in state.get('dirty_calls',()) if identity in state['calls']}}
+                if self.history_sink is not None and not self.history_sink([changed]):
+                    self.health = 'partly_unavailable'
+                    return
+                if self.history_sink is not None:
+                    self.session_checkpoint.save(path, state)
+                    state['pending_errors'] = []
                 if raw and pause and pause():
                     return
             except OSError:
@@ -450,8 +524,13 @@ class CodexCollector:
         if retained > self.CALL_LIMIT:
             oldest = sorted((call.get("timestamp") or "", str(path), identity, state) for path, state in self.files.items() for identity, call in state["calls"].items())
             for _, _, identity, state in oldest[:retained-self.CALL_LIMIT]:
-                del state["calls"][identity]
-                self.trimmed_calls += 1
+                self.retire_call(state, identity)
+        if not self.flush_retired():
+            return
+        if self.history_sink is not None:
+            for path,state in self.files.items():
+                if state.get('retired_ids'):
+                    self.session_checkpoint.save(path,state)
         retained_errors = sorted((event.get("timestamp") or "", str(path), index, state) for path, state in self.files.items() for index, event in enumerate(state["errors"]))
         drop = {}
         for _, path, index, state in retained_errors[:max(0, len(retained_errors)-1000)]:
@@ -624,7 +703,13 @@ class CodexCollector:
                     identity = payload.get("call_id") or payload.get("id")
                     call = state["calls"].get(identity)
                     kind = payload.get("type")
+                    if not call and kind in ('function_call_output','custom_tool_call_output'):
+                        for event in reversed(state['errors']):
+                            if event.get('source')=='tool_result' and event.get('call_id')==identity and event.get('timestamp')==timestamp(record.get('timestamp')):
+                                event.update(record_offset=offset,record_hash=hashlib.sha256(raw.rstrip(b'\n')).hexdigest())
+                                break
                     if call and kind in ("function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"):
+                        state.setdefault('dirty_calls',set()).add(identity)
                         call["request_offset" if kind in ("function_call", "custom_tool_call") else "response_offset"] = offset
         except (ValueError, RecursionError):
             self.malformed += 1
@@ -818,7 +903,7 @@ class CodexCollector:
                     present = complete_payload if full else bounded_payload
                     sent, returned = present(request), present(output)
                     command_text = '\n'.join(commands)
-                    result.update(commands=[redact(command_text if full else command_text[:32768], limit=None if full else 32768)],
+                    result.update(commands=[present(command_text)['value']],
                                   request=sent['value'], response=returned['value'], output=returned['value'],
                                   output_scope='outer_scope' if outer else 'git_command' if category == 'git' else 'check_command',
                                   result_scope='containing_tool_call' if outer else 'git_command' if category == 'git' else 'check_command',
@@ -835,19 +920,29 @@ class CodexCollector:
                 if path.is_symlink():
                     continue
                 positions = self.detail_position(event.get("thread_id"), event.get("call_id"), state["calls"].get(event.get("call_id")))
+                result, output = None, None
                 for raw in self.detail_lines(path, positions):
                     try:
                         record = json.loads(raw)
                         payload = record.get("payload") if isinstance(record, dict) else None
-                        if not isinstance(payload, dict) or record.get("type") != "response_item" or payload.get("call_id") != event.get("call_id") or payload.get("type") not in ("function_call", "custom_tool_call"):
+                        if not isinstance(payload, dict) or record.get("type") != "response_item" or (payload.get("call_id") or payload.get("id")) != event.get("call_id"):
+                            continue
+                        if payload.get("type") in ("function_call_output", "custom_tool_call_output"):
+                            output = payload.get("output")
+                            continue
+                        if payload.get("type") not in ("function_call", "custom_tool_call"):
                             continue
                         calls = sqlite_operations(invocations(payload), include_sql=True)
                         index = event.get("index", -1)
                         if 0 <= index < len(calls) and calls[index]["statement"] == event["statement"]:
                             result = sql_content(calls[index].get("sql"), mask, full)
-                            return result | {"content_status": "available" if result["sql"] is not None else "unavailable"}
                     except (ValueError, AttributeError, RecursionError):
                         continue
+                if result is not None:
+                    returned = (complete_payload if full else bounded_payload)(output)
+                    return result | {"content_status": "available" if result["sql"] is not None else "unavailable",
+                                     "response": returned["value"], "response_scope": "containing_tool_call",
+                                     "truncated": result["truncated"] or returned["truncated"]}
             except OSError:
                 continue
         return sql_content(None) | {"content_status": self.detail_status(event.get("thread_id"), event.get("call_id"))}
@@ -919,6 +1014,51 @@ class CodexCollector:
         return {'operation': operation, 'request': sent['value'], 'response': returned['value'],
                 'response_scope': 'containing_tool_call' if nested else 'jev_tool_call',
                 'truncated': sent['truncated'] or returned['truncated']}
+
+    def context_detail(self, thread_id, call_id=None):
+        for path,state in self.detail_states(thread_id):
+            if path.is_symlink() or state.get('thread_id')!=thread_id:
+                continue
+            if call_id and call_id not in state['calls']:
+                return None
+            try:
+                call = state['calls'].get(call_id,{})
+                position = self.detail_position(thread_id,call_id,call) if call_id else {}
+                if call_id and type(position.get('request_offset')) is not int:
+                    return {'text':[],'scope':'preceding_visible_messages','truncated':False,'context_state':'pending','masked':payload_masking.get()}
+                end = position['request_offset'] if call_id else path.stat().st_size
+                start = max(0,end-1024*1024)
+                with path.open('rb') as stream:
+                    stream.seek(start)
+                    raw = stream.read(end-start)
+                lines = raw.split(b'\n')
+                if start:
+                    lines = lines[1:]
+                messages = []
+                for line in lines:
+                    if not line or len(line)>1024*1024:
+                        continue
+                    try:
+                        record = json.loads(line)
+                        value = visible_context_record(record)
+                        if value is not None:
+                            messages.append({'timestamp':timestamp(record.get('timestamp')),**value})
+                    except (ValueError,TypeError,AttributeError,RecursionError):
+                        continue
+                return {'text':complete_payload(messages[-32:])['value'],'scope':'preceding_visible_messages' if call_id else 'latest_visible_messages','truncated':start>0 or len(messages)>32,'context_state':'recorded' if messages else 'not_recorded','masked':payload_masking.get()}
+            except OSError:
+                return None
+        return None
+
+    def agent_message_detail(self, thread_id, call_id, index=0):
+        content = self.tool_detail(thread_id,call_id,full=True)
+        if content is None:
+            return None
+        payload = {'type':'function_call','name':content['tool'],'arguments':content['request']}
+        selected = parse_message_detail(payload,index,mask=payload_masking.get())
+        if selected is None:
+            return None
+        return selected|{'response':content['response'],'response_scope':'containing_tool_call','text':self.context_detail(thread_id,call_id),'content_status':content['content_status'],'truncated':content['truncated']}
 
     def tool_detail(self, thread_id, call_id, full=False):
         if not self.features.get('tool_events', True):
@@ -1060,6 +1200,7 @@ class CodexCollector:
             if cached and cached['task_time'] > target.get('cached_status', {}).get('task_time', ''):
                 target['cached_status'] = cached
             target["errors"].extend(state["errors"])
+            target.setdefault('agent_incoming', []).extend(state.get('agent_incoming', []))
             if state["task_time"] > target["task_time"]:
                 target["task_time"], target["status"], target["task_start"] = state["task_time"], state["status"], state["task_start"]
                 target["status_cached"] = state.get("status_cached", False)
@@ -1101,7 +1242,7 @@ class CodexCollector:
             scoped_dots = [event for event in dot_events if contains(event, boundary)]
             dots.update(events=sorted(scoped_dots, key=lambda item:item.get("timestamp") or "", reverse=True)[:500], total=len(scoped_dots))
         dots.update(window=window, activity_items_scope="latest_loaded_snapshot")
-        pending_status = {state["thread_id"] for state in self.files.values() if state.get("history_cursor")}
+        pending_status = {state["thread_id"] for state in self.files.values() if state.get("history_cursor") or state["offset"] is None or state["offset"] < state.get("source_size", 0)}
         rows, tools, nested_tools, git_events, skill_events, check_events, series, mcp_events, tool_series = [], Counter(), Counter(), [], [], [], Counter(), [], Counter()
         file_events, error_events, sqlite_events = [], [], []
         tool_statistics = {}
@@ -1152,6 +1293,7 @@ class CodexCollector:
             tools.update(counts)
             nested_counts = Counter()
             events, jev_calls, file_changes, file_reads = [], [], [], []
+            communication = [event|{'thread_id':thread['thread_id']} for event in thread.get('agent_incoming',[]) if contains(event,boundary)]
             for identity, call in thread["calls"].items():
                 duration = None
                 if any(self.features[key] for key in ("tool_events", "git", "checks", "mcp", "web", "files", "sqlite")) and call["timestamp"] and call.get("completed_at"):
@@ -1175,6 +1317,7 @@ class CodexCollector:
                 for index, operation in enumerate(call.get("jev", []) if self.features["jev_calls"] else []):
                     jev_calls.append(operation | {"thread_id": thread["thread_id"], "call_id": identity, "index": index, "timestamp": call["timestamp"], "completed_at": call.get("completed_at")})
                 context = {"thread_id": thread["thread_id"], "thread_name": row["thread_name"], "call_id": identity, "timestamp": call["timestamp"], "completed_at": call.get("completed_at"), "duration_ms": duration}
+                communication.extend(context|event for event in call.get('agent_messages',[]))
                 if self.features["sqlite"]:
                     for index, operation in enumerate(call.get("sqlite", [])):
                         sqlite_events.append(context | operation | {"index": index, "duration_ms": None, "container_duration_ms": duration, "result": "failed" if call.get("error") else "returned" if call.get("completed_at") else "unknown"})
@@ -1198,6 +1341,7 @@ class CodexCollector:
             nested_tools.update(nested_counts)
             row.update(token_updated_at=thread["token_time"] or None, tool_calls=None if thread.get("metadata_only") else sum(counts.values()), tools=dict(counts), nested_tools=dict(nested_counts), tool_events=events[:100] if self.features["tool_events"] else [], jev_calls=jev_calls[:100] if self.features["jev_calls"] else [])
             row["file_changes"] = sorted(file_changes, key=lambda event: event["timestamp"] or "", reverse=True)[:200]
+            row['agent_messages'] = sorted(communication,key=lambda event:event.get('timestamp') or '',reverse=True)[:100]
             row["file_reads"] = sorted(file_reads, key=lambda event: event["timestamp"] or "", reverse=True)[:200]
             intervals = dict(thread.get("task_intervals", {}))
             if thread.get("task_start") and thread["task_start"] not in intervals and row["status"] == "running":
@@ -1248,7 +1392,7 @@ class CodexCollector:
             identity = [event.get(key) for key in ('source', 'thread_id', 'call_id', 'timestamp', 'reason', 'code', 'record_hash')]
             event['content_id'] = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
         return {"projects": list(projects.values()), "schedules": schedules, "plugins": plugins, "activity_scope": {"window": window, "timestamp": "call_started_at", "unknown_timestamp": "all_only", "latest_state": ["tokens", "model", "status", "usage", "schedules", "worktrees"]}, "tool_statistics": statistics, "metadata_sources": list(metadata_sources.values()), "read_state": {
-            "file_limit": self.FILE_LIMIT if self.track_all else self.max_files, "file_count": len(self.files),
+            "file_limit": None, "file_count": len(self.files), "pending_files": sum(state["offset"] is None or state["offset"] < state.get("source_size", 0) for state in self.files.values()), "read_mode": "incremental_all_sources",
             "read_limit": self.READ_LIMIT, "tail_bytes": self.tail_bytes, "scan_seconds": self.SCAN_INTERVAL,
             "call_limit": self.CALL_LIMIT, "buffer_limit": self.BUFFER_LIMIT,
             "sql_event_limit": self.SQL_EVENT_LIMIT, "git_event_limit": self.GIT_EVENT_LIMIT, "check_event_limit": self.CHECK_EVENT_LIMIT, "file_event_limit": self.FILE_EVENT_LIMIT, "skill_event_limit": self.thread_state.SKILL_LIMIT,
@@ -1262,4 +1406,4 @@ class CodexCollector:
             "locations": [str(path) for path in list(self.files)[:self.SOURCE_LOCATION_LIMIT]], "listed_file_limit": self.SOURCE_LOCATION_LIMIT,
             "enabled_features": [key for key, enabled in self.features.items() if enabled],
             "checkpoint": {"location": str(self.thread_state.path), "load_health": self.thread_state.load_health, "write_health": self.thread_state.write_health, "retained": len(self.thread_state.entries), "skills": len(self.thread_state.skills), "entry_limit": self.thread_state.LIMIT, "skill_limit": self.thread_state.SKILL_LIMIT, "byte_limit": self.thread_state.BYTE_LIMIT},
-        }, "usage": max((state["allowance"] for state in self.files.values() if state.get("allowance")), key=lambda item:item["updated_at"], default=None) if self.features["usage"] else None, "dots": dots, "sqlite": sqlite_summary, "source": "codex", "health": self.health, "started_at": self.started_at, "scope": "recent_file_tail_and_new_records", "track_all": self.track_all, "max_files": self.max_files, "files": len(self.files), "bytes_read": self.read_bytes, "error_backfill_pending": sum(state.get("error_cursor") or 0 for state in self.files.values()), "malformed_lines": self.malformed, "threads": rows, "tools": dict(tools), "nested_tools": dict(nested_tools), "observed_tool_calls": sum(tools.values()), "activity_series": [{"time": key, "calls": value} for key, value in sorted(series.items())[-10080:]], "tool_series": [{"time": key[0], "tool": key[1], "calls": value} for key, value in sorted(tool_series.items())[-20000:]], "mcp_events": mcp_events, "error_events": error_events if self.features["errors"] else [], "file_activity": {"events": file_events[:self.FILE_EVENT_LIMIT], "total": len(file_events), "operations": dict(Counter(event["operation"] for event in file_events))}, "git": {"events": git_events[:self.GIT_EVENT_LIMIT] if self.features["git"] else [], "operations": dict(Counter(event["operation"] for event in git_events)) if self.features["git"] else {}, "total": len(git_events) if self.features["git"] else 0}, "skills": skill_summary, "checks": check_events[:self.CHECK_EVENT_LIMIT] if self.features["checks"] else []}
+        }, "usage": max((state["allowance"] for state in self.files.values() if state.get("allowance")), key=lambda item:item["updated_at"], default=None) if self.features["usage"] else None, "dots": dots, "sqlite": sqlite_summary, "source": "codex", "health": self.health, "started_at": self.started_at, "scope": "incremental_all_sources", "track_all": self.track_all, "max_files": self.max_files, "files": len(self.files), "bytes_read": self.read_bytes, "error_backfill_pending": sum(state.get("error_cursor") or 0 for state in self.files.values()), "malformed_lines": self.malformed, "threads": rows, "tools": dict(tools), "nested_tools": dict(nested_tools), "observed_tool_calls": sum(tools.values()), "activity_series": [{"time": key, "calls": value} for key, value in sorted(series.items())[-10080:]], "tool_series": [{"time": key[0], "tool": key[1], "calls": value} for key, value in sorted(tool_series.items())[-20000:]], "mcp_events": mcp_events, "error_events": error_events if self.features["errors"] else [], "file_activity": {"events": file_events[:self.FILE_EVENT_LIMIT], "total": len(file_events), "operations": dict(Counter(event["operation"] for event in file_events))}, "git": {"events": git_events[:self.GIT_EVENT_LIMIT] if self.features["git"] else [], "operations": dict(Counter(event["operation"] for event in git_events)) if self.features["git"] else {}, "total": len(git_events) if self.features["git"] else 0}, "skills": skill_summary, "checks": check_events[:self.CHECK_EVENT_LIMIT] if self.features["checks"] else []}

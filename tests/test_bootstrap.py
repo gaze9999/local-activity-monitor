@@ -340,7 +340,7 @@ exit (Start-Monitor {quote(self.root)} @('--codex-home', 'folder with spaces') (
         arguments = ["--codex-home", "資料夾 🐍 with spaces"]
         command = subprocess.list2cmdline([str(checkout / "launch-cli.cmd"), *arguments])
         result = subprocess.run('"' + os.environ["COMSPEC"] + '" /d /s /c "' + command + '"', input="", capture_output=True,
-                                text=True, env=self.env, timeout=15)
+                                text=True, encoding='utf-8', env=self.env, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertEqual(json.loads(result.stdout.strip()), arguments)
 

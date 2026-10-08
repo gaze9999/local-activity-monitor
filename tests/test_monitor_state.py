@@ -185,12 +185,12 @@ class MonitorStateTests(unittest.TestCase):
             self.assertEqual(calls,{'call-0-1','call-1-0','call-1-1'})
             self.assertEqual(collector.trimmed_calls,1)
 
-    def test_track_all_keeps_file_cap(self):
+    def test_all_sources_ignore_legacy_file_cap(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder)
             for index in range(4):(root/f'rollout-{index}.jsonl').write_text('')
             collector=CodexCollector(root);collector.FILE_LIMIT=3;collector.track_all=True;collector.refresh()
-            self.assertEqual(len(collector.files),3)
+            self.assertEqual(len(collector.files),4)
 
     def test_http_counts_and_sizes_do_not_store_routes(self):
         state=MonitorState();state.requested(200,1000,120);state.requested(403)

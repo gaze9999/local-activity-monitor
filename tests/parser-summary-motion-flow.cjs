@@ -61,13 +61,13 @@ async page => {
       openDetail({kind:'sqlite',event:{id:'synthetic-sql',timestamp:new Date().toISOString(),statement:'SELECT',operation:'select',engine:'demo',tool:'exec'},sqlLoaded:true,sqlContent:{sql:value}});
       window.IntersectionObserver=io;window.parserFixture={sql,reads:()=>reads};
     });
-    const dialog=page.locator('#detail-dialog');check(await dialog.locator('.wb-output').count()===1,'SQL uses shared parsed output');
+    const dialog=page.locator('#detail-dialog'),sqlOutput=dialog.locator('.wb-output').first();check(await dialog.locator('.wb-output').count()===2,'SQL and containing tool response use shared parsed output');
     check(await page.evaluate(()=>parserFixture.reads()===0),'SQL paging stays lazy');
     await page.evaluate(async()=>{const view=[...payloadViews.values()][0];for(let i=0;i<40&&!view.element.querySelector('.wb-output-content>.wb-button').hidden;i++)await view.loadMore();});
-    check((await dialog.locator('code').allTextContents()).join('')===await page.evaluate(()=>WorkbenchUI.formatSql(parserFixture.sql)),'complete SQL formatting beyond first page');
-    check(await dialog.locator('.wb-code-keyword').count()>0,'SQL colors');
-    await dialog.getByRole('button',{name:'原文',exact:true}).click();await page.evaluate(async()=>{const view=[...payloadViews.values()][0];for(let i=0;i<40&&!view.element.querySelector('.wb-output-content>.wb-button').hidden;i++)await view.loadMore();});
-    check((await dialog.locator('code').allTextContents()).join('')===await page.evaluate(()=>parserFixture.sql),'SQL raw exact and complete');await closeModal();
+    check((await sqlOutput.locator('code').allTextContents()).join('')===await page.evaluate(()=>WorkbenchUI.formatSql(parserFixture.sql)),'complete SQL formatting beyond first page');
+    check(await sqlOutput.locator('.wb-code-keyword').count()>0,'SQL colors');
+    await sqlOutput.getByRole('button',{name:'原文',exact:true}).click();await page.evaluate(async()=>{const view=[...payloadViews.values()][0];for(let i=0;i<40&&!view.element.querySelector('.wb-output-content>.wb-button').hidden;i++)await view.loadMore();});
+    check((await sqlOutput.locator('code').allTextContents()).join('')===await page.evaluate(()=>parserFixture.sql),'SQL raw exact and complete');await closeModal();
     const yaml='enabled: false\ncount: 0\nmissing: null\nname: "<img src=x onerror=alert(1)>"\n';
     await page.evaluate(yaml=>openDetail({kind:'mcp-file',server:'demo_docs',file:{name:'demo.yaml'},documentContent:{id:'synthetic-yaml',path:'demo.yaml',format:'yaml',text:yaml,editable:false}}),yaml);
     const yamlCount=await dialog.locator('.wb-output').count(),unsafeCount=await dialog.locator('img,script').count();check(yamlCount===1&&!unsafeCount,'YAML file uses safe shared parser '+JSON.stringify({yamlCount,unsafeCount,text:await dialog.innerText()}));
@@ -75,7 +75,7 @@ async page => {
     await dialog.getByRole('button',{name:'原文',exact:true}).click();check(await dialog.locator('code').textContent()===yaml,'YAML raw exact');await closeModal();
     await page.evaluate(()=>openDetail({kind:'mcp-file',server:'demo_docs',file:{name:'edit.yaml'},documentContent:{id:'synthetic-edit',path:'edit.yaml',format:'yaml',text:'count: 0\n',editable:true}}));
     const fold=dialog.locator('details').filter({has:page.getByText('內容預覽',{exact:true})}),editor=dialog.getByRole('textbox',{name:'檔案內容',exact:true});
-    await fold.locator('summary').click();await dialog.locator('.wb-output').waitFor();await fold.locator('summary').click();await editor.fill('count: 1\n');await fold.locator('summary').click();
+    await fold.evaluate(node=>node.open=false);await fold.locator('summary').click();await dialog.locator('.wb-output').waitFor();await fold.locator('summary').click();await editor.fill('count: 1\n');await fold.locator('summary').click();
     await page.waitForFunction(()=>document.querySelector('#detail-dialog .wb-output code')?.textContent.includes('1'));
     check((await dialog.locator('.wb-output code').textContent()).includes('1')&&await page.evaluate(()=>payloadViews.size===1),'editable YAML preview updates without leaked controllers');
     const layouts=[];

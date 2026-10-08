@@ -32,7 +32,7 @@ class ActivityHistoryTests(unittest.TestCase):
 
     def test_duplicates_expiry_and_limits_are_bounded(self):
         history=ActivityHistory(self.path)
-        old=(datetime.now(timezone.utc)-timedelta(days=8)).isoformat()
+        old=(datetime.now(timezone.utc)-timedelta(days=91)).isoformat()
         history.update([self.sql,self.sql,self.sql|{'timestamp':old}],[self.web,self.web])
         self.assertEqual(len(history.sql),1)
         self.assertEqual(len(history.web),1)
@@ -94,18 +94,18 @@ class ActivityHistoryTests(unittest.TestCase):
         app.refresh()
         saved=app.activity_history.store.read_document(ActivityHistory.BYTE_LIMIT)
         self.assertEqual(saved['version'],3)
-        self.assertEqual(saved['retention_days'],7)
+        self.assertEqual(saved['retention_days'],90)
         self.assertEqual(json.loads(self.path.read_text())['version'],2)
         coverage=app.snapshot('all')['sources']['activity_history']
-        self.assertEqual(coverage['limits']['retention_days'],7)
+        self.assertEqual(coverage['limits']['retention_days'],90)
 
-    def test_weekend_events_survive_with_default_seven_days(self):
+    def test_weekend_events_survive_with_default_ninety_days(self):
         stamp=(datetime.now(timezone.utc)-timedelta(days=6)).isoformat()
         history=ActivityHistory(self.path)
         history.update([self.sql|{'timestamp':stamp}],[self.web|{'timestamp':stamp}],[self.web|{'timestamp':stamp,'server':'future'}])
         app=Dashboard(self.home,codex=True)
         app.refresh()
-        self.assertEqual(app.settings()['activity_retention_days'],7)
+        self.assertEqual(app.settings()['activity_retention_days'],90)
         self.assertEqual(app.snapshot('7d')['codex']['sqlite']['total'],1)
         self.assertEqual(len(app.snapshot('7d')['mcp']['events']),2)
         self.assertEqual(app.snapshot('24h')['codex']['sqlite']['total'],0)
@@ -121,7 +121,7 @@ class ActivityHistoryTests(unittest.TestCase):
         restarted.set_settings({'activity_retention_days':7})
         self.assertEqual(restarted.activity_history.sql,[])
         self.assertEqual(ActivityHistory(self.path).retention_days,7)
-        for invalid in (0,366,True,1.5,'7'):
+        for invalid in (-1,3651,True,1.5,'7'):
             with self.assertRaises(ValueError):restarted.set_settings({'activity_retention_days':invalid})
 
 

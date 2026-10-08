@@ -130,12 +130,18 @@ class ContentDetailsTests(unittest.TestCase):
             self.write('response_item', {'type':'message','content':'PRIVATE_PROMPT'*1000})
         self.write('event_msg', {'type':'task_complete'})
         self.app.refresh()
+        for _ in range(100):
+            if self.app.codex.files[self.path]['offset']==self.path.stat().st_size:
+                break
+            self.app.refresh()
+        self.assertEqual(self.app.codex.files[self.path]['offset'],self.path.stat().st_size)
         restarted = Dashboard(self.home,True,20)
         restarted.codex.tail_bytes = 4096
         restarted.codex.READ_LIMIT = 131072
         restarted.codex.features['errors'] = False
         restarted.refresh()
-        self.assertEqual(restarted.mcp_detail(THREAD,'retained',0)['content_status'],'pending')
+        self.assertEqual(restarted.codex.read_bytes,0)
+        self.assertEqual(restarted.mcp_detail(THREAD,'retained',0)['content_status'],'available')
         for _ in range(20):
             before = restarted.codex.read_bytes
             restarted.refresh()
@@ -162,6 +168,9 @@ class ContentDetailsTests(unittest.TestCase):
         collector.features['errors'] = False
         collector.refresh()
         state = collector.files[self.path]
+        # Exercise the retained-detail index after calls leave the working cache.
+        state['calls'].pop('old-first',None)
+        state['calls'].pop('old-second',None)
         self.assertNotIn('old-first', state['calls'])
         targets = [{'thread_id': THREAD, 'call_id': 'old-first'}]
         collector.select_detail_targets(targets)

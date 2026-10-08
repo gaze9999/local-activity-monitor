@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from local_activity_monitor.collectors import CodexCollector
-from local_activity_monitor.error_records import DiagnosticCollector, tool_error
+from local_activity_monitor.error_records import DiagnosticCollector, diagnostic_roots, tool_error
 from local_activity_monitor.server import Dashboard
 
 THREAD = "00000000-0000-4000-8000-000000000001"
@@ -16,6 +16,19 @@ TIME = "2026-10-04T03:32:58Z"
 
 
 class ErrorRecordTests(unittest.TestCase):
+    def test_windows_sandbox_appdata_uses_desktop_profile_without_expanding_fixtures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root/"codex-home"
+            local = root/"AppData/Local"
+            redirected = local/"Packages/sandbox.fixture/AC"
+            with patch("local_activity_monitor.error_records.sys.platform", "win32"), patch.dict("os.environ", {"CODEX_HOME": str(home), "LOCALAPPDATA": str(redirected)}):
+                self.assertEqual(diagnostic_roots(home), [local/"Codex/Logs"])
+                self.assertEqual(diagnostic_roots(root/"fixture"), [root/"fixture/desktop-logs"])
+            custom = root/"custom/AC"
+            with patch("local_activity_monitor.error_records.sys.platform", "win32"), patch.dict("os.environ", {"CODEX_HOME": str(home), "LOCALAPPDATA": str(custom)}):
+                self.assertEqual(diagnostic_roots(home), [custom/"Codex/Logs"])
+
     def test_core_message_column_and_null_feedback_details_are_on_demand(self):
         for feedback in (False, True):
             with self.subTest(feedback=feedback), tempfile.TemporaryDirectory() as directory:
@@ -94,8 +107,12 @@ class ErrorRecordTests(unittest.TestCase):
             content += record('event_msg', {'type': 'task_started', 'turn_id': 'turn_current'})
             path.write_text(content, encoding='utf-8')
             collector = CodexCollector(root, tail_bytes=65536)
-            for _ in range(4):collector.refresh()
+            for _ in range(16):
+                collector.refresh()
+                if collector.files[path]['offset'] == path.stat().st_size:
+                    break
             state = collector.files[path]
+            self.assertEqual(state['offset'], path.stat().st_size)
             self.assertEqual(state['tokens']['input_tokens'], 123)
             self.assertIsNotNone(state['task_start'])
             self.assertEqual({row['code'] for row in state['errors']}, {'historical_failure', 'process_exit'})
