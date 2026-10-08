@@ -2,7 +2,7 @@
 
 監測本機 Codex、Jev 與 MCP 活動的瀏覽器介面, 提供對話、用量、工具、專案及診斷明細. 後端使用 Python 3.10+ 標準函式庫, 前端使用原生 HTML / JavaScript / CSS 與 Workbench UI
 
-目前版本 `0.7.1`. 0.x 以提交與 minor 版本 tag 交付, 建置包保存在 [Actions artifacts](https://github.com/gaze9999/local-activity-monitor/actions/workflows/release.yml). GitHub Release 從 1.0.0 起提供
+目前版本 `0.8.0`. 0.x 以提交與 minor 版本 tag 交付, 建置包保存在 [Actions artifacts](https://github.com/gaze9999/local-activity-monitor/actions/workflows/release.yml). GitHub Release 從 1.0.0 起提供
 
 ## 功能
 
@@ -167,3 +167,9 @@ node tests/test_usage_projection.mjs
 ## 授權
 
 LAM 原始碼與文件採 [MIT License](LICENSE). 內附 Workbench UI 與原生套件元件的授權條件見 [NOTICE](NOTICE), WBUI 資產依持有人對 LAM 的授權提供
+
+歷史預設保存 90 天, 可在設定調整保存天數, 0 表示不自動刪除. 資料庫保存量與畫面 / 查詢筆數上限分開, 來源依輪替游標分批回補, 右上角顯示保存期限及回補進度
+
+Release 內的程式與前端產物由建置流程產生, 不包含使用者資料、暫存檔或監測資料庫. 歷史固定保存於 `CODEX_HOME/monitoring`, 更新程式版本不搬移或重設資料. SQLite 格式升級前備份, 不支援的格式保留原檔並回報無法讀取. 備份執行中的 WAL 資料庫應使用 SQLite backup API, 不只複製單一資料庫檔案, 一般啟動不自動 VACUUM
+
+後續遠端串接入口見 [遠端存取設計](docs/remote-access.md), 首次啟動引導及遠端連線尚未實作

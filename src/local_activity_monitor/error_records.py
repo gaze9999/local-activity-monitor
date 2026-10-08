@@ -12,6 +12,7 @@ import time
 
 from .mcp_records import decoded_output
 from .operation_records import redact
+from .payload_detail import payload_masking
 from .sqlite_records import diagnostic_content, sql_content, sql_diagnostic
 
 IDENTIFIER = re.compile(r"[a-zA-Z0-9_./:-]{1,160}\Z")
@@ -88,7 +89,13 @@ def diagnostic_roots(home):
     if home.resolve() != (Path(os.environ.get("CODEX_HOME", Path.home()/".codex")).expanduser()).resolve():
         return [home/"desktop-logs"]
     if sys.platform == "win32":
-        return [Path(os.environ.get("LOCALAPPDATA", Path.home()/"AppData/Local"))/"Codex/Logs"]
+        local = Path(os.environ.get("LOCALAPPDATA", Path.home()/"AppData/Local"))
+        # Windows restricted processes redirect AppData into a sandbox package.
+        # Only undo that known redirection, retaining explicit custom paths.
+        parts = local.parts
+        if len(parts) >= 3 and parts[-1].lower() == "ac" and parts[-2].lower().startswith("sandbox.") and parts[-3].lower() == "packages":
+            local = local.parents[2]
+        return [local/"Codex/Logs"]
     if sys.platform == "darwin":
         return [Path.home()/"Library/Logs/Codex"]
     return [Path(os.environ.get("XDG_STATE_HOME", Path.home()/".local/state"))/"Codex/Logs", Path(os.environ.get("XDG_CONFIG_HOME", Path.home()/".config"))/"Codex/logs"]
@@ -182,7 +189,7 @@ class DiagnosticCollector:
         event.update(diagnostic_details(body), file=file, record_offset=offset, record_hash=hashlib.sha256(line.encode()).hexdigest())
         event["content_id"] = diagnostic_id(event)
         stats["parsed_lines"] += 1
-        sql = sql_diagnostic(source, body) if self.capture_sql and not historical else None
+        sql = sql_diagnostic(source, body) if self.capture_sql else None
         if sql:
             self.sql_events.append(sql | {"timestamp": when, "source": "codex_desktop", "module": source, "thread_id": thread, "file": file, "record_offset": offset, "record_hash": hashlib.sha256(line.encode()).hexdigest(), "recognition": "diagnostic_log", "result": "log_error" if level in ("error", "fatal", "critical") else "log_recorded"})
         if level in ("error", "fatal", "critical", "warn", "warning"):
@@ -333,7 +340,8 @@ class DiagnosticCollector:
 
     def error_detail(self, event, full=False):
         body = self.diagnostic_body(event, full)
-        return {"text": redact(body[:1048576] if full else body, limit=None if full else 32768) if body is not None else None, "truncated": isinstance(body, str) and len(body)>(1048576 if full else 32768), "content_status": "available" if body is not None else "unavailable"}
+        selected = body[:1048576 if full else 32768] if isinstance(body,str) else body
+        return {"text": redact(selected, limit=None) if selected is not None and payload_masking.get() else selected, "truncated": isinstance(body, str) and len(body)>(1048576 if full else 32768), "content_status": "available" if body is not None else "unavailable"}
 
     def refresh_core(self):
         stats = self.stats["core"]
@@ -401,7 +409,7 @@ class DiagnosticCollector:
                     event.update(diagnostic_details(body))
                     event["content_id"] = diagnostic_id(event)
                     stats["parsed_lines"] += 1
-                    sql = sql_diagnostic(source, body) if self.capture_sql and not past else None
+                    sql = sql_diagnostic(source, body) if self.capture_sql else None
                     if sql:
                         self.sql_events.append(sql | {"timestamp": when, "source": "codex_core", "module": source, "thread_id": event["thread_id"], "file": path.name, "record_id": identity, "recognition": "diagnostic_log", "result": "log_error" if level in ("error", "fatal", "critical") else "log_recorded"})
                     if level in ("error", "fatal", "critical", "warn", "warning"):

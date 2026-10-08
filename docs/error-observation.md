@@ -30,11 +30,11 @@ Desktop log 只從級別與固定 key-value 欄位取值, 排除引號內的 err
 - Linux: `$XDG_STATE_HOME/Codex/Logs` 或 `$XDG_CONFIG_HOME/Codex/logs`, 缺少環境變數時使用 `~/.local/state` / `~/.config`
 - Core: 目前 CODEX_HOME 下的 `logs_*.sqlite`, 動態選取檔案並驗證 logs schema
 
-Desktop 最多追蹤 8 個近期 log, 初始每份 256 KiB 尾端, 後續增量讀取, 增量與歷史回補每輪各最多 1 MiB, 未完成片段每檔最多 64 KiB. Core 每輪選取最近最多 2000 列 ID, 歷史分批回讀每輪最多 2000 列並限制在最近 24 小時, SQLite 讀取預算為 0.08 秒. 輸出的診斷事件最多 1000 筆, 完整錯誤清單也最多 1000 筆, 超過保留最新事件
+Desktop 最多追蹤 8 個近期 log, 初始每份 256 KiB 尾端, 後續差異讀取, 差異讀取與歷史回補每輪各最多 1 MiB, 未完成片段每檔最多 64 KiB. Core 每輪選取最近最多 2000 列 ID, 歷史分批回讀每輪最多 2000 列並限制在最近 24 小時, SQLite 讀取預算為 0.08 秒. 輸出的診斷事件最多 1000 筆, 完整錯誤清單也最多 1000 筆, 超過保留最新事件
 
 找不到目錄顯示"未找到", DB schema 改變顯示"格式未支援", 權限 / SQLite 讀取失敗顯示"無法讀取". 不寫入或修改 Codex log. 平台目錄探索與 fixture 已驗證, 原生 macOS / Linux App log 的實際格式仍需在目標環境確認
 
-"對話與工具錯誤"switch 停止診斷讀取與 session / tool error 解析. 重新啟用時回補目前選取尾端, 觀察程式本身的錯誤仍保留. 診斷事件最多 1000 筆保存在記憶體. 最近 24 小時錯誤摘要另外保存至 `monitoring/error-history.json`, 上限 1000 筆 / 512 KiB, 原子替換, 不保存原始訊息. 重整 / 重啟後保留, 新事件依識別去重. 本程式 Log 只寫啟動, 設定, 失敗 / 恢復等事件, 每份 64 KiB 與一份輪替檔, 最多 128 KiB
+"對話與工具錯誤"switch 停止診斷讀取與 session / tool error 解析. 重新啟用時回補目前選取尾端, 觀察程式本身的錯誤仍保留. 診斷事件最多 1000 筆保存在記憶體. 錯誤摘要另外保存至 `monitoring/lam-history.sqlite3`, 不保存原始訊息. 記憶體工作集合上限 1000 筆 / 512 KiB, SQLite 歷史不依筆數刪除, 預設保存 90 天, 設定 0 時不自動刪除. 既有 `error-history.json` 僅供首次匯入, 原檔保留. 重整 / 重啟後保留, 新事件依識別去重. 本程式 Log 只寫啟動, 設定, 失敗 / 恢復等事件, 每份 64 KiB 與一份輪替檔, 最多 128 KiB
 
 ## 對話狀態與雲端缺值
 

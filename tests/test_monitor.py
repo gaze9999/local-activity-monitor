@@ -53,7 +53,7 @@ class MonitorTests(unittest.TestCase):
         collector.refresh(); self.assertEqual(collector.snapshot()['observed_tool_calls'],1)
         self.assertEqual(collector.malformed,1)
         path.write_bytes(b''); collector.refresh(); self.assertEqual(collector.snapshot()['observed_tool_calls'],0)
-    def test_bounded_tail(self):
+    def test_bounded_incremental_source_read(self):
         path=self.home/'rollout-00000000-0000-0000-0000-000000000001.jsonl'
         for _ in range(300): self.write(path,self.record('response_item',{'type':'message','content':'s'*2000}))
         self.write(path,self.record('token_usage_record',{'thread_token_usage':{'total_tokens':9}}))
@@ -63,6 +63,14 @@ class MonitorTests(unittest.TestCase):
         self.assertGreaterEqual(collector.read_bytes,8192+head_bytes)
         self.assertLessEqual(collector.read_bytes,8*1024*1024)
         self.assertTrue(collector.snapshot()['threads'][0]['partial_history'])
+        self.assertNotIn('total_tokens',collector.snapshot()['threads'][0]['tokens'])
+        for _ in range(100):
+            if collector.files[path]['offset']==path.stat().st_size:
+                break
+            before=collector.read_bytes
+            collector.refresh()
+            self.assertLessEqual(collector.read_bytes-before,collector.READ_LIMIT)
+        self.assertFalse(collector.snapshot()['threads'][0]['partial_history'])
         self.assertEqual(collector.snapshot()['threads'][0]['tokens']['total_tokens'],9)
     def test_config_opt_in_idempotent_and_disable_preserves_history_path(self):
         db=self.home/'state/events.sqlite'

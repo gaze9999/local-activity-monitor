@@ -26,9 +26,13 @@ class LifecycleBackfillTests(unittest.TestCase):
                 for _ in range(20):stream.write(record('response_item',{'type':'message','content':'PRIVATE'*100}))
             collector.refresh();collector.thread_state.next_save=0;collector.thread_state.update(collector.files.values())
             restarted=CodexCollector(root,tail_bytes=8192);restarted.refresh()
+            for _ in range(10):
+                if not restarted.snapshot()['threads'][0]['status_backfill_pending']:
+                    break
+                restarted.refresh()
             value=restarted.snapshot();row=value['threads'][0]
             self.assertEqual(row['status'],'running')
-            self.assertEqual(row['status_source'],'cached_lifecycle')
+            self.assertEqual(row['status_source'],'session_lifecycle')
             self.assertFalse(row['status_backfill_pending'])
             self.assertEqual(value['skills']['counts'],{'example':1})
             self.assertNotIn('PRIVATE',json.dumps(collector.thread_state.store.read_document(collector.thread_state.BYTE_LIMIT)))
@@ -60,7 +64,7 @@ class LifecycleBackfillTests(unittest.TestCase):
                 for _ in range(500):
                     stream.write(padding)
                 stream.write(record("token_usage_record", {"thread_token_usage": {"total_tokens": 123}}, "2026-10-04T00:02:00Z"))
-            collector = CodexCollector(root, tail_bytes=8192);collector.refresh()
+            collector = CodexCollector(root, tail_bytes=1024*1024);collector.refresh()
             self.assertLessEqual(collector.read_bytes, 8*1024*1024)
             self.assertTrue(collector.snapshot()["threads"][0]["status_backfill_pending"])
             for _ in range(20):

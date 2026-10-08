@@ -1,5 +1,7 @@
 """Preserve bounded structure when presenting on-demand tool content."""
 import ast
+from contextlib import contextmanager
+from contextvars import ContextVar
 import csv
 import hashlib
 from datetime import date, time
@@ -14,6 +16,44 @@ except ImportError:
     tomllib = None
 
 from .operation_records import literal, redact
+
+payload_masking = ContextVar("payload_masking", default=True)
+
+
+@contextmanager
+def mask_payloads(enabled=True):
+    """Apply one request's display masking without changing metadata collection."""
+    if type(enabled) is not bool:
+        raise ValueError("Invalid payload masking")
+    token = payload_masking.set(enabled)
+    try:
+        yield
+    finally:
+        payload_masking.reset(token)
+
+
+def visible_context_record(record):
+    """Select user/assistant messages and explicit public summaries, never raw reasoning."""
+    if not isinstance(record, dict) or record.get("type") != "response_item" or record.get("channel") == "analysis":
+        return None
+    item = record.get("payload")
+    if not isinstance(item, dict) or item.get("channel") == "analysis":
+        return None
+    if item.get("type") == "reasoning":
+        summary = item.get("summary")
+        if not isinstance(summary, list):
+            return None
+        summary = [{"type": "summary_text", "text": child["text"]} for child in summary if isinstance(child, dict) and child.get("type") == "summary_text" and isinstance(child.get("text"), str)]
+        return {"type": "reasoning", "summary": summary} if summary else None
+    if item.get("type") != "message" or item.get("role") not in ("user", "assistant"):
+        return None
+    content = item.get("content")
+    if not isinstance(content, list):
+        return None
+    content = [{"type": child["type"], "text": child["text"]} for child in content if isinstance(child, dict) and child.get("type") in ("input_text", "output_text", "text") and isinstance(child.get("text"), str)]
+    if not content:
+        return None
+    return {"type": "message", "role": item["role"], "channel": item.get("channel"), "content": content}
 
 
 def parse_literal(text):
@@ -208,12 +248,12 @@ def complete_payload(value):
             return '[內容過深]'
         if isinstance(item, str):
             parsed = parse_text(item, full=True)
-            return project(parsed['value'], depth+1) if parsed else redact(item, limit=None)
+            return project(parsed['value'], depth+1) if parsed else redact(item, limit=None) if payload_masking.get() else item
         if isinstance(item, dict):
             result = {}
             for key, child in item.items():
                 label = str(key)
-                result[label] = '[已隱藏]' if redact({label: None}, limit=None).get(label) == '[已隱藏]' else project(child, depth+1)
+                result[label] = '[已隱藏]' if payload_masking.get() and redact({label: None}, limit=None).get(label) == '[已隱藏]' else project(child, depth+1)
             return result
         if isinstance(item, list):
             return [project(child, depth+1) for child in item]
@@ -229,7 +269,8 @@ CONTENT_FIELDS = {'request', 'response', 'output', 'sql', 'text'}
 def content_page(value, offset=0, revision=None):
     """Page already masked display text, checking that all pages share one version."""
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)
-    digest = hashlib.sha256(text.encode('utf-8')).hexdigest()
+    mode = b"masked\0" if payload_masking.get() else b"unmasked\0"
+    digest = hashlib.sha256(mode+text.encode('utf-8')).hexdigest()
     if revision is not None and revision != digest or offset < 0 or offset > len(text):
         raise ValueError('Content changed or invalid offset')
     end = min(offset+32768, len(text))
@@ -258,7 +299,7 @@ def bounded_payload(value, limit=32768):
             parsed = parse_text(item)
             if parsed:
                 return project(parsed['value'], depth+1)
-            clean = redact(item)
+            clean = redact(item) if payload_masking.get() else item[:32768]
             truncated |= len(item) > len(clean) and len(item) > 32768 or len(clean) > remaining
             clean = clean[:remaining]
             remaining -= len(clean)
@@ -274,7 +315,7 @@ def bounded_payload(value, limit=32768):
                 label = str(key)[:160]
                 remaining -= len(label)
                 # Preserve the existing credential field whitelist before recursion.
-                protected = redact({label: None})[label] == "[已隱藏]"
+                protected = payload_masking.get() and redact({label: None})[label] == "[已隱藏]"
                 result[label] = "[已隱藏]" if protected else project(child, depth+1)
             return result
         if isinstance(item, list):

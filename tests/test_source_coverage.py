@@ -135,13 +135,13 @@ class SourceCoverageTests(unittest.TestCase):
 
     def test_registry_uses_loaded_reader_results_and_generic_telemetry_without_io(self):
         path = self.session()
-        dashboard = Dashboard(self.home, codex=True, max_files=7)
+        dashboard = Dashboard(self.home, codex=True)
         dashboard.refresh()
         snapshot = dashboard.snapshot("all")
         session = snapshot["sources"]["session"]
         self.assertIn(str(path), session["locations"])
         self.assertIn("git", session["features"])
-        self.assertEqual(session["limits"]["file_limit"], 7)
+        self.assertNotIn("file_limit", session["limits"])
         self.assertEqual(session["limits"]["file_count"], 1)
         self.assertEqual(session["limits"]["read_limit"], CodexCollector.READ_LIMIT)
         self.assertNotIn("SECRET_PROMPT", json.dumps(snapshot))

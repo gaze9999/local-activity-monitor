@@ -102,6 +102,10 @@ class ThreadState:
             if clean:
                 lifecycle_changed |= self.entries.get(key, {}).get('task_time') != clean['task_time']
                 self.entries[key] = clean
+        try:
+            self.store.save(json.dumps({'version':1, 'entries':self.entries, 'skills':list(skills.values())}, separators=(',', ':')).encode())
+        except (OSError, sqlite3.Error):
+            self.write_health = 'unavailable'
         recent = sorted(skills.values(), key=lambda entry:entry['timestamp'], reverse=True)[:self.SKILL_LIMIT]
         lifecycle_changed |= recent != self.skills
         self.skills = recent

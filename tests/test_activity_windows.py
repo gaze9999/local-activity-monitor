@@ -64,12 +64,64 @@ class ActivityWindowTests(unittest.TestCase):
         dashboard.refresh()
         recent = dashboard.snapshot('1h')
         all_data = dashboard.snapshot('all')
+        self.assertEqual(recent['backend_revision'], dashboard.code_revision)
+        self.assertEqual(recent['frontend_revision'], recent['revision'].rsplit('-', 1)[-1])
+        self.assertEqual(recent['frontend_revision'], all_data['frontend_revision'])
         self.assertEqual(recent['mcp']['servers'][0]['calls'], 5)
         self.assertEqual(all_data['mcp']['servers'][0]['calls'], 130)
         self.assertFalse(recent['mcp']['recording_status']['future']['enabled'])
         self.assertEqual(recent['mcp']['servers'][0]['connection'], all_data['mcp']['servers'][0]['connection'])
         self.assertEqual(recent['sources']['session']['display_window'], '1h')
-        self.assertEqual(recent['sources']['session']['limits']['file_limit'], all_data['sources']['session']['limits']['file_limit'])
+        self.assertEqual(recent['sources']['session']['limits'].get('file_limit'), all_data['sources']['session']['limits'].get('file_limit'))
+
+    def test_working_cache_eviction_saves_history_before_projection(self):
+        self.write()
+        dashboard = Dashboard(self.home, codex=True)
+        dashboard.codex.FILE_CALL_LIMIT = 7
+        dashboard.codex.refresh()
+        self.assertEqual(dashboard.activity_history.store.page('mcp')['total'], 130)
+        self.assertEqual(sum(len(state['calls']) for state in dashboard.codex.files.values()), 7)
+        self.assertFalse(dashboard.codex.retired_calls)
+        dashboard.refresh()
+        self.assertEqual(dashboard.activity_history.store.page('mcp')['total'], 130)
+        latest = {event['call_id']:event for event in dashboard.activity_history.store.page('mcp')['items']}
+        self.assertEqual(latest['129']['result']['items_count'], 129)
+
+    def test_failed_history_write_keeps_pending_batch_and_pauses_source_read(self):
+        self.write()
+        collector = CodexCollector(self.root)
+        collector.FILE_CALL_LIMIT = 7
+        collector.history_sink = lambda states: False
+        collector.refresh()
+        pending = len(collector.retired_calls)
+        self.assertEqual(pending, 123)
+        before = collector.read_bytes
+        collector.refresh()
+        self.assertEqual(collector.read_bytes, before)
+        self.assertEqual(len(collector.retired_calls), pending)
+        batches = []
+        collector.history_sink = lambda states: batches.extend(states) or True
+        collector.refresh()
+        self.assertEqual(sum(len(state['calls']) for state in batches), pending+7)
+        self.assertFalse(collector.retired_calls)
+
+    def test_database_aggregates_exceed_working_views_and_honor_windows_and_sources(self):
+        dashboard = Dashboard(self.home, codex=True)
+        stamp = self.reference.isoformat()
+        old = (self.reference-timedelta(days=2)).isoformat()
+        mcp = [{'timestamp':stamp if index<1200 else old,'thread_id':'00000000-0000-0000-0000-000000000001','call_id':str(index),'tool':'run','server':'future','nested':index%2==0} for index in range(1500)]
+        sql = [{'timestamp':stamp,'thread_id':'00000000-0000-0000-0000-000000000001','call_id':str(index),'statement':'SELECT','operation':'read','engine':'sqlite','recognition':'code'} for index in range(700)]
+        dashboard.activity_history.update(sql, [], mcp)
+        dashboard.refresh()
+        snapshot = dashboard.snapshot('all')
+        self.assertEqual(snapshot['codex']['sqlite']['aggregate']['total'],700)
+        self.assertEqual(snapshot['codex']['sqlite']['aggregate']['scope'],'retained_database')
+        self.assertEqual(snapshot['mcp']['history_aggregate']['total'],1500)
+        self.assertEqual(snapshot['mcp']['history_aggregate']['servers']['future']['nested'],750)
+        self.assertEqual(dashboard.snapshot('1h')['mcp']['history_aggregate']['total'],1200)
+        dashboard.mcp_sources['future'] = False
+        dashboard.refresh()
+        self.assertEqual(dashboard.snapshot('all')['mcp']['history_aggregate']['total'],0)
 
     def test_log_window_filters_before_display_limit(self):
         dashboard = Dashboard(self.home)

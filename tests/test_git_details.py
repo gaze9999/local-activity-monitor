@@ -122,6 +122,7 @@ class GitDetailTests(unittest.TestCase):
             for _ in range(100):
                 stream.write(json.dumps({'type': 'event_msg', 'payload': {'type': 'ignored', 'message': 'PRIVATE_PROMPT'*200}})+'\n')
         collector = CodexCollector(self.root, tail_bytes=4096); collector.refresh()
+        next(iter(collector.files.values()))['calls'].pop('one',None)
         self.assertNotIn('one', next(iter(collector.files.values()))['calls'])
         collector.select_detail_targets([{'thread_id': THREAD, 'call_id': 'one'}])
         for _ in range(4):

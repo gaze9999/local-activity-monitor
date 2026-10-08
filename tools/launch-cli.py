@@ -17,11 +17,11 @@ def main(args=None):
     root = Path(__file__).resolve().parents[1]
     try:
         with cli_lifetime():
-            prepared = subprocess.run([sys.executable, "-I", "-B", str(root / "tools/build_frontend.py"), "--latest"], cwd=root)
+            prepared = subprocess.run([sys.executable, "-X", "utf8", "-I", "-B", str(root / "tools/build_frontend.py"), "--latest"], cwd=root)
             if prepared.returncode:
                 return prepared.returncode
             child = subprocess.Popen(
-                [sys.executable, "-I", "-B", str(root/"tools/watch.py"), "--watch-stdin", "--codex", "--open", *args],
+                [sys.executable, "-X", "utf8", "-I", "-B", str(root/"tools/watch.py"), "--watch-stdin", "--codex", "--open", *args],
                 cwd=root, stdin=subprocess.PIPE, text=True,
             )
             try:

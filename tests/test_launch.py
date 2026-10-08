@@ -31,8 +31,8 @@ class LaunchTests(unittest.TestCase):
         arguments = ["--codex-home", "資料夾 with spaces"]
         self.assertEqual(launch.main(arguments), 0)
         prompt.assert_not_called()
-        self.assertEqual(run.call_args_list[0].args[0], [launch.sys.executable, "-I", "-B", str(self.root / "tools/build_frontend.py"), "--latest"])
-        self.assertEqual(self.spawn.call_args.args[0], [launch.sys.executable, "-I", "-B", str(self.root / "tools/watch.py"), "--watch-stdin", "--codex", "--open", *arguments])
+        self.assertEqual(run.call_args_list[0].args[0], [launch.sys.executable, "-X", "utf8", "-I", "-B", str(self.root / "tools/build_frontend.py"), "--latest"])
+        self.assertEqual(self.spawn.call_args.args[0], [launch.sys.executable, "-X", "utf8", "-I", "-B", str(self.root / "tools/watch.py"), "--watch-stdin", "--codex", "--open", *arguments])
         self.assertEqual(self.spawn.call_args.kwargs["stdin"], subprocess.PIPE)
         self.child.stdin.close.assert_called_once()
         self.assertFalse((self.root / ".venv").exists())
@@ -58,7 +58,7 @@ class LaunchTests(unittest.TestCase):
         self.child.wait.return_value = 17
         with patch.object(launch.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
             self.assertEqual(launch.main(["--port", "8790"]), 17)
-        self.assertEqual(run.call_args_list[0].args[0], [launch.sys.executable, "-I", "-B", str(self.root / "tools/build_frontend.py"), "--latest"])
+        self.assertEqual(run.call_args_list[0].args[0], [launch.sys.executable, "-X", "utf8", "-I", "-B", str(self.root / "tools/build_frontend.py"), "--latest"])
         self.assertEqual(self.spawn.call_args.args[0][-2:], ["--port", "8790"])
 
     def test_failed_ui_preparation_does_not_start_service(self):

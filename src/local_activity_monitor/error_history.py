@@ -43,8 +43,9 @@ class ErrorHistory:
         except (OSError, ValueError, sqlite3.Error) as error:
             self.health, self.error_type = "unavailable", type(error).__name__
 
-    def project(self, events):
-        cutoff, ceiling = datetime.now(timezone.utc)-timedelta(hours=24), datetime.now(timezone.utc)+timedelta(minutes=1)
+    def project(self, events, bounded=True):
+        cutoff = datetime.now(timezone.utc)-timedelta(hours=24) if bounded else datetime.min.replace(tzinfo=timezone.utc)
+        ceiling = datetime.now(timezone.utc)+timedelta(minutes=1)
         result = {}
         for value in events:
             if not isinstance(value, dict) or value.get("severity") not in ("error", "warning"):
@@ -69,16 +70,23 @@ class ErrorHistory:
             # Stable identity excludes enrichment fields, so late metadata does not duplicate errors
             identity = error_identity(event)
             result[identity] = event
-        return sorted(result.values(), key=lambda event:event["timestamp"], reverse=True)[:self.LIMIT]
+        ordered = sorted(result.values(), key=lambda event:event["timestamp"], reverse=True)
+        return ordered[:self.LIMIT] if bounded else ordered
 
     def update(self, events):
         with self.lock:
+            storage_error = None
+            try:
+                self.store.save(json.dumps({'version': 1, 'events': self.project(events, False)}, ensure_ascii=True, separators=(',', ':')).encode())
+            except (OSError, sqlite3.Error) as error:
+                self.health, self.error_type = 'unavailable', type(error).__name__
+                storage_error = error
             self.events = self.project(self.events+events)
             raw = json.dumps({"version": 1, "events": self.events}, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
             while len(raw) > self.BYTE_LIMIT and self.events:
                 self.events.pop()
                 raw = json.dumps({"version": 1, "events": self.events}, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-            if raw == self.saved:
+            if storage_error is not None or raw == self.saved:
                 return
             try:
                 self.store.save(raw)

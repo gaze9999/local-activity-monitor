@@ -1,6 +1,10 @@
 ﻿# Source checkout bootstrap. Native release bundles already contain Python.
 # Keep discovery offline even when Python Install Manager has no runtimes yet.
 $env:PYTHON_MANAGER_AUTOMATIC_INSTALL = 'false'
+$monitorEncoding = New-Object System.Text.UTF8Encoding($false)
+[Console]::InputEncoding = $monitorEncoding
+[Console]::OutputEncoding = $monitorEncoding
+$OutputEncoding = $monitorEncoding
 
 function Find-MonitorPython([string]$Root) {
     $localPython = Join-Path $Root '.venv\Scripts\python.exe'
@@ -10,7 +14,7 @@ function Find-MonitorPython([string]$Root) {
         $prefix = @()
         if ($name -eq 'py') { $prefix = @('-3') }
         foreach ($command in @(Get-Command $name -CommandType Application -ErrorAction SilentlyContinue)) {
-            $result = & $command.Source @prefix -I -B -c $probe 2>$null
+            try { $result = & $command.Source @prefix -I -B -c $probe 2>$null } catch { continue }
             if ($LASTEXITCODE -eq 0 -and $result) {
                 # ASCII JSON survives Windows PowerShell's legacy console encoding.
                 try { $python = ConvertFrom-Json -InputObject ([string]@($result)[-1]) -ErrorAction Stop } catch { continue }
@@ -63,7 +67,7 @@ function Start-Monitor([string]$Root, [string[]]$MonitorArguments, [bool]$Instal
             return 1
         }
     }
-    & $python -I -B (Join-Path $Root 'tools\launch-cli.py') @MonitorArguments | Out-Host
+    & $python -X utf8 -I -B (Join-Path $Root 'tools\launch-cli.py') @MonitorArguments | Out-Host
     return $LASTEXITCODE
 }
 

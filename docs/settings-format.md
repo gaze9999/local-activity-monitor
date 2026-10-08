@@ -2,6 +2,8 @@
 
 設定 → 設定檔匯出 / 匯入 version 1 的完整偏好, 可跨瀏覽器, 電腦與 port 使用
 
+全部設定還原預設會在目前頁面直接套用, 恢復外觀、語言、篩選、表格、圖表及來源設定, 不重新載入整頁. 後端重啟與前端資產版本分開判斷, 重新連線後套用已保存的來源設定, 保留目前分頁與篩選. 前端資產變動時才重新載入, 明細或設定視窗開啟時延後處理
+
 外層包含 `application: "local-activity-monitor"`, `kind: "settings"`, `version: 1`, `exported_at`, `preferences`
 
 | preferences 欄位 | 保存內容 |
@@ -21,8 +23,9 @@
 | chartDefaultsVersion | 舊版圖表預設遷移標記, 接受值 1 以相容既有設定檔 |
 | tables | size, page, sort, filters, hidden, columns, heatmap, heatmapCustom, open |
 | summaries | 各摘要區的 count, order, hidden 與 titles |
-| sqlMasking | SQL 明細遮蔽, 省略時為 true |
-| tableSchema | 欄位相容版本, 目前為 7 |
+| contentMasking | 訊息、工具執行回覆、SQL、錯誤與 Context 的按需明細遮蔽, 預設 true |
+| sqlMasking | 舊 SQL 遮蔽設定相容欄位, 與 contentMasking 同步 |
+| tableSchema | 欄位相容版本, 目前為 8 |
 | copy | 預設完整標籤 / tooltip → 自訂文字 |
 | settings | interval, idle_minutes, activity_retention_days, max_files, track_all, observations, mcp_sources, mcp_categories, tool_descriptions, mcp_descriptions, mcp_tags |
 
@@ -30,10 +33,15 @@
 
 ## 驗證與套用
 
+- contentMasking 為 boolean, 預設 true. 舊設定未提供此欄位時沿用 sqlMasking, 兩者都省略時啟用遮蔽. 同時提供時以 contentMasking 為準, 匯出保存兩欄相同值. SQL 分頁的舊開關也同步套用全域設定
+- 切換內容遮蔽時立即清除目前明細及返回歷史中的本文快取, 按新模式重新讀取. 分頁 revision 包含遮蔽模式, 不混接不同模式的內容. 全部設定還原預設重新啟用遮蔽, 不重新載入整頁
+- 內容遮蔽只控制支援 `mask=0|1` 的訊息與執行明細, 不改變文件選取及編輯規則, 也不解除隱藏推理、analysis 或加密內容的排除
+
 - 設定檔最多 2 MiB, HTTP 設定 body 最多 256 KiB
 - font 12 - 18 px, interval 1 - 3600 秒, max_files 1 - 5000. JSON 需提供有效整數, 頁面輸入四捨五入
 - idle_minutes 0 - 1440, 預設 5, 0 停用閒置暫停. 舊設定省略此欄位時沿用預設
-- activity_retention_days 1 - 365, 預設 7. 保存 SQL, 網路與 MCP 活動摘要的天數, 設定與摘要一起保存, 重啟後沿用. 縮短天數會移除已過期摘要, 筆數與容量上限仍生效
+- activity_retention_days 0 - 3650, 預設 90, 0 不自動刪除歷史. 保存 SQL、網路、MCP、技能與錯誤的已整理紀錄, 設定與摘要一起保存, 重啟後沿用. 縮短天數分批清理過期紀錄, 快取、查詢、API 與畫面仍保留各自的讀取限制, 不以快取筆數限制 SQLite 歷史保存
+- max_files / track_all 保留舊版匯入與 API 相容格式, 不再限制 session 選取, 設定畫面不提供這兩項. 所有來源分批差異讀取, 每輪讀取量仍有上限
 - display.options 1 - 200, 最多 8 個不重複整數. ranking / table 必須是其中一項或 `all`
 - mainSummary 1 - 8, 預設 4. subSummary 0 - 8, 預設 0 不顯示子分頁摘要, 個別摘要區可覆寫數量, 名稱與順序. 子頁 count 可為 0, 主頁 count 仍需至少 1
 - appearance.reduceMotion 為 boolean, 預設 false. true 立即停用介面動畫與轉場, 保存於瀏覽器及可攜設定, 舊設定省略時沿用 false. 系統的減少動態效果設定也會停用動畫
@@ -47,9 +55,9 @@
 - tool_descriptions / mcp_descriptions / mcp_tags 各最多 64 項, 說明每項 400 字元. 標籤每來源最多 4 個, 各 40 字元, 空陣列還原自動標籤. copy 最多 500 項, 每項 400 字元. MCP 分類與開關各最多 64 項
 - 主 Tab order 最多 50 項, 子頁 / 卡片順序 map 最多 100 個區域, 每區最多 100 個 ID. 無效或不存在的 ID 忽略
 
-匯入先驗證並顯示套用範圍, 確認後呼叫後端, 保存 localStorage 並重新載入. 取消或無效內容保留既有設定. 匯入以 `replace_customizations` 替換自訂來源分類, 觀察開關, 標籤與說明. 一般編輯採增量更新. 前後端只接受可寫欄位, 不接受任意檔案位置或 command
+匯入先驗證並顯示套用範圍, 確認後呼叫後端, 保存 localStorage 並重新載入. 取消或無效內容保留既有設定. 匯入以 `replace_customizations` 替換自訂來源分類, 觀察開關, 標籤與說明. 一般編輯採差異更新. 前後端只接受可寫欄位, 不接受任意檔案位置或 command
 
-全部設定還原預設以後端 `default_settings` 為基準: 10 秒更新, 閒置五分鐘暫停, 20 個近期 session, 各來源的程式預設開關, 空自訂 map, 前端預設顯示 / 排序 / 外觀 / 語言. 需先確認, 已有活動紀錄保留
+全部設定還原預設以後端 `default_settings` 為基準: 10 秒更新, 閒置五分鐘暫停, 歷史保存 90 天, 所有 session 分批差異讀取, 各來源的程式預設開關, 空自訂 map, 前端預設顯示 / 排序 / 外觀 / 語言. 需先確認, 已有活動紀錄依套用後的保存策略處理
 
 前端新預設為排行榜 5 項, 表格每頁 10 筆, 介面字級 14 px, 所有數量選擇在各卡片 / 表格齒輪內. 已保存的有效自訂值保留, 省略欄位時使用預設
 

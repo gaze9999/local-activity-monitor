@@ -170,7 +170,7 @@ input[type=checkbox].switch:checked{background-color:var(--accent);border-color:
 
 
 .table-wrap{overflow:visible}.table-wrap th{position:static;background:var(--surface);box-shadow:0 1px var(--border)}
-.table-wrap.table-scroll{overflow-x:auto;overscroll-behavior-x:contain;padding-bottom:6px;scrollbar-width:thin;scrollbar-color:var(--border) var(--surface)}.table-scroll:focus-visible{outline:2px solid var(--accent);outline-offset:3px}.table-scroll thead{position:relative;z-index:3;background:var(--surface)}.table-scroll th{position:relative}
+.table-wrap.table-scroll{overflow-x:auto;overscroll-behavior-x:contain;padding-bottom:6px}.table-scroll:focus-visible{outline:2px solid var(--accent);outline-offset:3px}.table-scroll thead{position:relative;z-index:3;background:var(--surface)}.table-scroll th{position:relative}
 .interface-content{padding:0}.source-reference{margin-top:24px}.source-reference details{padding:12px 0;border-top:1px solid var(--border)}.source-reference summary{cursor:pointer;color:var(--text)}.source-reference p{margin:10px 0 0}.source-location{overflow-wrap:anywhere}.chart-statistics span[title]{cursor:help}.statistic-line{stroke-width:1.5;stroke-dasharray:5 5;pointer-events:none}.mean-line{stroke:var(--text);opacity:.65}.p99-line{stroke:var(--accent);stroke-dasharray:2 5}
 .statistic-basis{align-self:start;line-height:1.5}.help-tooltip{z-index:10000;line-height:1.6;max-width:min(420px,calc(100vw - 16px))}
 .chart-note-summary{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;min-height:2.8em;line-height:1.4}.statistic-basis{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}

@@ -55,6 +55,8 @@ class SubagentSourceTests(unittest.TestCase):
         os.utime(child,(100,100))
         collector = CodexCollector(sessions,max_files=1)
         collector.refresh()
+        # Exercise the fallback for a related session absent from the loaded set.
+        collector.files.pop(child,None)
         first = collector.snapshot()
         row = next(row for row in first['threads'] if row['thread_id']==CHILD)
         self.assertTrue(row['metadata_only'])

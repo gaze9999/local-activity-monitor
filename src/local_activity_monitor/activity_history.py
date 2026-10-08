@@ -37,9 +37,9 @@ def merge_event(previous, current):
 
 
 class ActivityHistory:
-    DEFAULT_DAYS = 7
+    DEFAULT_DAYS = 90
     SQL_LIMIT, WEB_LIMIT, MCP_LIMIT, BYTE_LIMIT = 500, 1000, 1000, 1024*1024
-    STATEMENTS = {"SELECT", "EXPLAIN", "INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "ALTER", "DROP", "PRAGMA", "VACUUM", "ANALYZE", "REINDEX", "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "ATTACH", "DETACH", "DATABASE_EVENT"}
+    STATEMENTS = {"CONNECT", "CLOSE", "SELECT", "EXPLAIN", "INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "ALTER", "DROP", "PRAGMA", "VACUUM", "ANALYZE", "REINDEX", "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "ATTACH", "DETACH", "DATABASE_EVENT"}
 
     def __init__(self, path):
         self.store = HistoryStore(path, "activity")
@@ -55,7 +55,7 @@ class ActivityHistory:
                 if not isinstance(value, dict) or value.get('version') not in (1, 2, 3) or not isinstance(value.get('sql'), list) or not isinstance(value.get('web'), list) or not isinstance(value.get('mcp', []), list):
                     raise ValueError()
                 days = value.get('retention_days', self.DEFAULT_DAYS)
-                if type(days) is not int or not 1 <= days <= 365:
+                if type(days) is not int or not 0 <= days <= 3650:
                     raise ValueError()
                 self.retention_days = days
                 self.sql = self.project(value['sql'][:self.SQL_LIMIT], 'sql')
@@ -66,8 +66,9 @@ class ActivityHistory:
         except (OSError, ValueError, sqlite3.Error):
             self.health = "unavailable"
 
-    def project(self, events, kind):
-        boundary, ceiling = datetime.now(timezone.utc)-timedelta(days=self.retention_days), datetime.now(timezone.utc)+timedelta(minutes=1)
+    def project(self, events, kind, bounded=True):
+        boundary = datetime.now(timezone.utc)-timedelta(days=self.retention_days) if self.retention_days else datetime.min.replace(tzinfo=timezone.utc)
+        ceiling = datetime.now(timezone.utc)+timedelta(minutes=1)
         result = {}
         for value in events:
             if not isinstance(value, dict) or kind=='sql' and value.get('statement') not in self.STATEMENTS or kind=='web' and value.get('server')!='web' or kind=='mcp' and (not isinstance(value.get('server'), str) or not SOURCE.fullmatch(value['server']) or value['server']=='web'):
@@ -115,9 +116,22 @@ class ActivityHistory:
                         event[key]['status'] = identifier(original['status'])
                 identity = web_identity(event) if kind=='web' else mcp_identity(event)
             result[identity] = merge_event(result.get(identity, {}), event)
-        return sorted(result.values(), key=lambda event:event['timestamp'], reverse=True)[:self.SQL_LIMIT if kind=='sql' else self.WEB_LIMIT if kind=='web' else self.MCP_LIMIT]
+        ordered = sorted(result.values(), key=lambda event:event['timestamp'], reverse=True)
+        return ordered[:self.SQL_LIMIT if kind=='sql' else self.WEB_LIMIT if kind=='web' else self.MCP_LIMIT] if bounded else ordered
 
     def update(self, sql, web, mcp=()):
+        # Validate all incoming metadata before trimming the in-memory view.
+        incoming = {'version': 3, 'retention_days': self.retention_days,
+                    'sql': self.project(list(sql), 'sql', False),
+                    'web': self.project(list(web), 'web', False),
+                    'mcp': self.project(list(mcp), 'mcp', False)}
+        storage_error = None
+        try:
+            self.store.save(json.dumps(incoming, ensure_ascii=True, separators=(',', ':')).encode())
+            self.store.prune(self.retention_days)
+        except (OSError, sqlite3.Error) as error:
+            self.health = 'unavailable'
+            storage_error = error
         self.sql = self.project(self.sql+sql, 'sql')
         self.web = self.project(self.web+web, 'web')
         self.mcp = self.project(self.mcp+list(mcp), 'mcp')
@@ -126,7 +140,7 @@ class ActivityHistory:
             entries = min((items for items in (self.sql, self.web, self.mcp) if items), key=lambda items:items[-1]['timestamp'])
             entries.pop()
             raw = self.encode()
-        if raw==self.saved:
+        if storage_error is not None or raw==self.saved:
             return
         try:
             self.store.save(raw)

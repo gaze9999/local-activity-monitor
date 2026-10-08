@@ -47,3 +47,10 @@ Thumbs.db
 /.codex/agents/metadata-collector-engineer.toml
 /.codex/agents/monitor-privacy-reviewer.toml
 /.codex/agents/monitor-ui-reviewer.toml
+
+# Local builds and validation caches
+/.tmp/
+/tmp/
+/test-results/
+/playwright-report/
+/coverage/
