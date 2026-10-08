@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-activity-monitor"
-version = "0.7.0"
+version = "0.7.1"
 description = "Loopback-only local Jev and Codex activity dashboard"
 readme = "README.md"
 license = {file = "LICENSE"}

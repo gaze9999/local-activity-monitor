@@ -1,15 +1,28 @@
+# Python environments, caches and build output
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
 build/
 dist/
+
+# Private recordings, databases, logs and recovery files
 *.sqlite*
+*.db
+*.db-*
+*.jsonl
 *.log
 *.bak
+state/
+
+# Local settings; keep distributable examples visible
 .env
 .env.*
 !.env.example
+.agents/
+.local/
+
+# Portable role sources remain visible inside the local Codex directory
 .codex/*
 !.codex/agents/
 .codex/agents/*
@@ -17,16 +30,14 @@ dist/
 !.codex/agent-guidance/
 .codex/agent-guidance/*
 !.codex/agent-guidance/roles.md
-.agents/
-.local/
+
+# Browser validation output and generated shared UI assets
 .playwright-cli/
 .workbench-ui/
 src/local_activity_monitor/_workbench/
 src/local_activity_monitor/_web/
-state/
-*.db
-*.db-*
-*.jsonl
+
+# Operating-system metadata
 .DS_Store
 Thumbs.db
 
