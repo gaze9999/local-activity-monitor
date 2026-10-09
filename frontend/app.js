@@ -1258,8 +1258,8 @@ function agentAction(action){return ui(({send_message:"傳送訊息",spawn_agent
 function agentRole(thread){return ui(thread.execution?.parent_thread_id?"子代理":(data.codex.threads||[]).some(item=>item.execution?.parent_thread_id===thread.thread_id)?"父代理":"主代理");}
 function agentMessageRows(messages,thread){return messages.map(event=>{const row=node("tr");cell(row,when(event.timestamp||event.time));cell(row).append(tag(agentAction(event.action)));cell(row,event.sender||"--","mono");cell(row,event.target||"--","mono");cell(row,event.task_name||"--");cell(row,ui(event.direction==="incoming"?"接收":event.direction==="outgoing"?"傳送":"未知"));cell(row,ui(event.recognition==="recorded_message_header"?"已記錄訊息標頭":event.nested?"程式碼辨識":"直接呼叫"));return clickableRow(row,()=>openDetail(event.call_id?{kind:"agent-message",thread,event}:{kind:"context",thread,incoming:true}));});}
 function renderCommunicationDetail(content,selected){
-  const context=selected.kind==="context",prefix=context?"context":"agent",thread=selected.thread||{},event=selected.event||{},result=selected[prefix+"Content"],error=selected[prefix+"Error"];
-  $("detail-title").textContent=ui(context?"Context":"代理訊息")+" · "+agentRole(thread)+" · "+title(thread);
+  const context=selected.kind!=="agent-message",prefix=context?"context":"agent",thread=selected.thread||{},event=selected.event||{},result=selected[prefix+"Content"],error=selected[prefix+"Error"];
+  if(selected.kind!=="thread")$("detail-title").textContent=ui(context?"Context":"代理訊息")+" · "+agentRole(thread)+" · "+title(thread);
   content.append(metadataList([[ui("代理角色"),agentRole(thread)],[ui("目前對話"),threadLink(thread)],["Thread ID",thread.thread_id]]));
   const parent=threadIndex.get(thread.execution?.parent_thread_id);if(parent)content.append(metadataList([[ui("父對話"),threadLink(parent)]]));
   content.append(node("p",ui("目前對話的訊息、代理傳送內容與思考摘要"),"muted"));
@@ -1275,10 +1275,10 @@ function renderCommunicationDetail(content,selected){
     else content.append(structuredPayload(ui("傳送內容"),result?.request??ui("來源未記錄傳送內容")),structuredPayload(ui("回傳內容"),result?.response??ui("來源未記錄回傳內容")),structuredPayload(ui("呼叫前的 Context"),result?.text?.text??ui("來源未記錄可取得的 Context")));
     content.append(button(ui("重新讀取"),()=>{delete selected[prefix+"Content"];selected[prefix+"Loaded"]=false;renderDetail();}));
   }
-  if(thread.thread_id)content.append(threadLink(thread,ui("查看對話")));
+  if(thread.thread_id&&selected.kind!=="thread")content.append(threadLink(thread,ui("查看對話")));
 }
 async function loadCommunicationContent(selected){
-  const context=selected.kind==="context",prefix=context?"context":"agent",query=new URLSearchParams({thread_id:selected.thread.thread_id,mask:contentMasked()?"1":"0"}),modeVersion=contentMaskVersion;
+  const context=selected.kind!=="agent-message",prefix=context?"context":"agent",query=new URLSearchParams({thread_id:selected.thread.thread_id,mask:contentMasked()?"1":"0"}),modeVersion=contentMaskVersion;
   if(context&&selected.call_id)query.set("call_id",selected.call_id);if(!context){query.set("call_id",selected.event.call_id);query.set("index",selected.event.index??0);}selected[prefix+"Loading"]=true;
   const control=new AbortController();selected.communicationRequest=control;
   try{const result=await request((context?"/api/codex/context":"/api/codex/agent-message")+"?"+query,{cache:"no-store",signal:control.signal});if(control.signal.aborted||modeVersion!==contentMaskVersion)return;if(!result.ok)throw new Error(ui(context?"Context 無法讀取":"代理訊息無法讀取"));selected[prefix+"Content"]=result.data;}
@@ -1327,7 +1327,7 @@ function renderDetail(){
     const threadErrors=(data.errors?.events||[]).filter(e=>e.thread_id===t.thread_id);if(threadErrors.length)content.append(node("h4",ui("錯誤與警告")),table([ui("時間"),ui("等級"),ui("類型"),ui("對話"),ui("專案"),ui("來源"),ui("工具"),ui("錯誤說明"),ui("代碼")],errorRows(threadErrors)));
     appendThreadMcp(content,t);
     if(detail.kind==="thread"){
-      content.append(node("h4",ui("代理訊息")),button(ui("查看 Context"),()=>openDetail({kind:"context",thread:t})),node("p",agentRole(t)+" · "+title(t),"muted"));
+      content.append(node("h4","Context"),node("section",ui("目前對話的訊息、代理傳送內容與思考摘要"),"thread-context"),node("h4",ui("代理訊息")),node("p",agentRole(t)+" · "+title(t),"muted"));
       const messages=t.agent_messages||[];if(messages.length)content.append(table([ui("時間"),ui("操作"),ui("傳送者"),ui("接收者"),ui("子工作名稱"),ui("方向"),ui("紀錄方式")],agentMessageRows(messages,t),ui("代理訊息")));else content.append(node("p",ui("來源未記錄代理訊息"),"empty"));
     }
   }else if(detail.kind==="context"||detail.kind==="agent-message"){
@@ -1976,9 +1976,10 @@ function settingsLayout(content,groups,id,selected,status,onSelect){
   status.remove();const navigation=modalTabs(content,groups,id,selected,onSelect,false),nav=content.previousElementSibling,layout=node("div",null,"settings-layout"),narrow=matchMedia("(max-width:760px)"),orientation=()=>nav.setAttribute("aria-orientation",narrow.matches?"horizontal":"vertical");nav.classList.add("settings-navigation");nav.setAttribute("aria-label",ui("設定分類"));orientation();narrow.addEventListener("change",orientation);content.before(layout);layout.append(nav,content);status.className="settings-feedback";layout.before(status);return navigation;
 }
 function groupThreadDetails(content){
-  const groups=new Map(),headingGroup=new Map([[ui("工具使用 (次)"),"tools"],[ui("exec 內辨識到的工具"),"tools"],[ui("工具呼叫紀錄"),"tools"],[ui("MCP 檢查"),"mcp"],[ui("檔案讀寫紀錄"),"files"],[ui("MCP / Web 操作"),"mcp"],[ui("子代理程式"),"subagents"],[ui("代理訊息"),"agent-messages"],[ui("網路參考"),"mcp"],[ui("錯誤與警告"),"errors"]]),names={summary:ui("對話資訊"),tools:ui("工具"),files:ui("檔案"),mcp:"MCP",subagents:ui("子代理程式"),"agent-messages":ui("代理訊息"),errors:ui("錯誤紀錄")};let key="summary";
+  const groups=new Map(),headingGroup=new Map([["Context","context"],[ui("工具使用 (次)"),"tools"],[ui("exec 內辨識到的工具"),"tools"],[ui("工具呼叫紀錄"),"tools"],[ui("MCP 檢查"),"mcp"],[ui("檔案讀寫紀錄"),"files"],[ui("MCP / Web 操作"),"mcp"],[ui("子代理程式"),"subagents"],[ui("代理訊息"),"agent-messages"],[ui("網路參考"),"mcp"],[ui("錯誤與警告"),"errors"]]),names={summary:ui("對話資訊"),context:"Context",tools:ui("工具"),files:ui("檔案"),mcp:"MCP",subagents:ui("子代理程式"),"agent-messages":ui("代理訊息"),errors:ui("錯誤紀錄")};let key="summary";
   for(const child of [...content.children]){if(child.tagName==="H4"&&headingGroup.has(child.textContent))key=headingGroup.get(child.textContent);if(!groups.has(key))groups.set(key,node("section"));groups.get(key).append(child);}
-  modalTabs(content,[...groups].map(([id,panel])=>[id,names[id]||id,panel]),"thread-detail",detail.section,key=>detail.section=key);
+  const panels=[...groups],contextIndex=panels.findIndex(([id])=>id==="context");if(contextIndex>1)panels.splice(1,0,...panels.splice(contextIndex,1));
+  modalTabs(content,panels.map(([id,panel])=>[id,names[id]||id,panel]),"thread-detail",detail.section,key=>{detail.section=key;const panel=content.querySelector(".thread-context");if(key==="context"&&panel&&!panel.dataset.rendered){panel.dataset.rendered="true";panel.replaceChildren();renderCommunicationDetail(panel,detail);}});
 }
 function groupSettings(){
   const content=$("settings-dialog").querySelector(".settings-content"),status=$("settings-message"),groups=[];status.remove();let panel;
@@ -2023,9 +2024,9 @@ function renderHeaderQuota(usage){
     const block=node("div",null,"header-quota-window"),amount=node("div",null,"header-quota-amount"),known=Number.isFinite(item.remaining_percent)&&item.remaining_percent>=0&&item.remaining_percent<=100,value=node("strong",known?fmt(item.remaining_percent)+"%":ui("尚未取得")),reset=node("time",null,"header-quota-reset");
     if(item.window_minutes!=null)amount.append(node("span",usageWindow(item.window_minutes)));amount.append(value);
     const label=node("span",ui("重設 "),"header-quota-reset-label"),date=node("span",item.resets_at?quotaResetTime(item.resets_at):ui("尚未提供"));reset.append(label,date);reset.setAttribute("aria-label",ui("重設時間")+": "+(item.resets_at?when(item.resets_at):ui("尚未提供")));if(item.resets_at)reset.dateTime=item.resets_at;
-    block.append(reset,amount);bindHelp(block,[fieldDescription("剩餘比例"),usage.updated_at?ui("最近更新")+": "+when(usage.updated_at):"",item.resets_at&&Date.parse(item.resets_at)<=Date.now()?ui("等待來源更新"):""].filter(Boolean).join("\n"));bindHelp(reset,reset.getAttribute("aria-label"));values.append(block);
+    const separator=node("span","·");separator.setAttribute("aria-hidden","true");block.append(reset,separator,amount);bindHelp(block,[fieldDescription("剩餘比例"),usage.updated_at?ui("最近更新")+": "+when(usage.updated_at):"",item.resets_at&&Date.parse(item.resets_at)<=Date.now()?ui("等待來源更新"):""].filter(Boolean).join("\n"));bindHelp(reset,reset.getAttribute("aria-label"));values.append(block);
   }
-  if(!limits.length)values.append(node("span",ui("尚未取得"),"muted"));target.append(values);
+  if(!limits.length)values.append(node("span",ui("尚未取得")));target.append(values);
 }
 const panelDataStates=new Map();let snapshotDisplayState="loading";
 function panelDataState(panel){

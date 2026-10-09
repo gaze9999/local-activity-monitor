@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
 import unittest
@@ -8,6 +9,19 @@ from local_activity_monitor.thread_state import ThreadState
 
 
 class ThreadStateTests(unittest.TestCase):
+    def test_check_times_follow_load_and_failed_save_attempts(self):
+        with tempfile.TemporaryDirectory() as directory, patch('local_activity_monitor.thread_state.datetime', wraps=datetime) as clock:
+            clock.now.return_value = datetime(2026, 10, 9, 1, tzinfo=timezone.utc)
+            cache = ThreadState(Path(directory)/'thread-state.json')
+            self.assertEqual(cache.load_checked_at, '2026-10-09T01:00:00.000Z')
+            self.assertIsNone(cache.write_checked_at)
+            clock.now.return_value = datetime(2026, 10, 9, 2, tzinfo=timezone.utc)
+            with patch.object(cache.store, 'save', side_effect=PermissionError):
+                cache.update([])
+            self.assertEqual(cache.write_health, 'unavailable')
+            self.assertEqual(cache.write_checked_at, '2026-10-09T02:00:00.000Z')
+            self.assertEqual(cache.load_checked_at, '2026-10-09T01:00:00.000Z')
+
     def test_checkpoint_projects_metadata_and_tolerates_write_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)/'thread-state.json'

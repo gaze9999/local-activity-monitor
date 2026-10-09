@@ -15,7 +15,7 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 | MCP 活動 | 依設定與紀錄產生來源卡、呼叫趨勢及明細, 分開顯示直接呼叫、程式碼辨識位置與來源紀錄 |
 | 工作操作 | Git、工作樹、驗證、Skills、SQL、網路及錯誤紀錄 |
 | 來源檢查 | 顯示每個來源的讀取結果、最近檢查時間、檔案數及回補進度 |
-| 歷史資料 | SQLite 保存有界 metadata, 分批回補與增量更新, 設定保留天數與清理過期摘要 |
+| 歷史資料 | SQLite 保存有界 metadata, 分批回補與差異更新, 設定保留天數與清理過期摘要 |
 | 本機排程 | 讀取本機自動化定義、狀態與執行紀錄 |
 | 其他電腦活動 | 讀取 Codex 本機保存的遠端對話與 My dots 活動摘要, 列出電腦、近期活動與對話數 |
 | 系統資訊 | 裝置、使用量與 GPU, 依實體顯示卡及介面識別去重 |
@@ -24,30 +24,46 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 | 共用互動 | 載入狀態、展開與收合、按鈕間距、標籤、下拉選單樣式及減少動態效果設定 |
 | 螢幕配置 | 橫向、直向與手機可視寬度, 直向兩欄卡片、摘要與子頁籤分區、寬表格區域捲動及明細高度限制 |
 | 啟動預載 | 啟動先讀取有界對話目錄, 活動紀錄在背景整理, 首輪完成前仍可閱讀對話列表 |
-| 明細導覽 | 主要明細由列點選開啟, 列內連結提供不同紀錄或個別操作, My dots 活動、產出與電腦可查看已有資訊 |
+| 明細導覽 | 主要明細由列點選開啟, 對話明細包含按需讀取的 Context 分頁, 列內連結提供不同紀錄或個別操作, My dots 活動、產出與電腦可查看已有資訊 |
 | 表格顯示 | 預設顯示主要欄位, 保留欄位設定, 空資料隱藏表頭並顯示提示, 分頁導引置中且提供第一頁與最後一頁 |
 | 樹狀明細 | 專案對話與技能檔案採可收合的階層, 預設收合, SVG 表示資料夾與檔案類型 |
 | 檔案大小檢查 | 進入檔案頁自動檢查, 顯示期間每分鐘更新, 可手動重新檢查, 每次最多 100 個已觀察檔案 |
 
-## 待實作與待驗證
+## 待實作
 
 | 項目 | 現況 | 完成條件 |
 | --- | --- | --- |
 | 其他電腦的完整排程定義 | 本機快取可取得活動摘要, 尚無排程定義與下次執行時間的讀取入口 | 串接 Codex 已授權的唯讀介面, 以電腦與排程識別碼核對定義、狀態及下次執行時間 |
 | My dots 電腦即時連線狀態 | 已列出近期活動電腦, 本機摘要未提供目前連線證據 | 取得可用的連線狀態與檢查時間, 區分近期活動與目前連線 |
-| TOML、XML、CSV / TSV 結構預覽 | 原文可讀取, WBUI 尚未內建這些格式的資料解析 | 依格式規格加入有界解析, 核對跳脫、多行、錯誤與原文保留 |
-| SQL AST、完整 YAML 與 Markdown | 已有 SQL 排版、YAML 子集及 Markdown 預覽 | 依使用情境補齊 dialect、節點、source map 與完整格式規格 |
-| 共用元件候選 | WBUI 已列出 sortable list、列拖曳、跨容器拖放、圖表縮放及面板編輯等候選 | 按 [WBUI 元件盤點](https://github.com/gaze9999/workbench-ui/blob/b2824dc6a478e6eb00e8b4f246b4ab5255781936/docs/component-coverage.md) 與所屬資料介面驗收 |
-| macOS / Linux 字型與啟動實機驗證 | 字型讀取已分別使用 CoreText / fontconfig, 本次在 Windows 驗證 | 在對應系統核對字型名稱、啟動、視窗關閉與記錄檔輪替 |
-| 其他瀏覽器的選單與動畫 | 共用樣式含原生選單及支援 `base-select` 的瀏覽器, 本次以 Edge 驗證 | 在目標瀏覽器核對選單、鍵盤、焦點、動畫中斷及內容載入 |
-| 遠端 LAM 存取、配對及登入 | 設計文件保留候選介面, 尚未實作 | 另行確認部署、HTTPS、權限及配對規格後實作, 見 [遠端存取設計](remote-access.md) |
-| 更多程式碼 parser | WBUI 已有格式註冊與可視範圍上色, 尚未串接 TextMate grammar 或語意 token provider | 保留原文、逐行狀態、上下預載與 Worker 取消, 核對 grammar 授權、執行成本及格式樣本 |
 | 一般檔案內文 | 一般檔案目前顯示操作與本機 metadata, 技能與 MCP 文件已有按需內文 | 沿已觀察檔案識別建立受限唯讀入口, 保留路徑邊界、重新解析點、檔案型態與容量檢查, 分批讀取、遮蔽與原文切換 |
 | 檔案大小分批續查 | 每次取得前 100 個不同檔案, 超出部分顯示已檢查 / 總數 | 定義穩定游標、變更失效、分批預算與取消, 不在每輪重新掃描全部檔案 |
+| 首次啟動引導 | 已有 CLI 啟動及主設定, 尚無首次使用的設定導覽 | 沿既有設定說明 Codex 監測、來源、保存天數與更新頻率, 保留有效設定及略過入口 |
+
+其他電腦的資料讀取由 LAM 管理, 共用呈現由 WBUI 提供. 遠端排程與 My dots 的資料串接, 與對外開放 LAM 服務分開規劃
+
+## 共用能力與後續候選
+
+| 項目 | 現況 | 所屬工作 |
+| --- | --- | --- |
+| TOML、XML、CSV / TSV 結構預覽 | 原文可讀取, WBUI 尚未內建資料解析 | WBUI 定義格式、讀取上限與錯誤處理, LAM 依來源格式採用 |
+| SQL AST、完整 YAML 與 Markdown | 已有 SQL 排版、YAML 子集及 Markdown 預覽 | WBUI 依使用情境補齊 dialect、節點、source map 與格式規格 |
+| 更多程式碼 parser | WBUI 的 `registerParser` 用於資料結構解析, 程式碼已有通用 tokenizer 與可視範圍上色 | WBUI 另定程式碼上色介面、逐行狀態、grammar 授權、語意 token 與 Worker 取消, LAM 保留來源格式及完整原文 |
+| 共用元件與互動 | 虛擬表格、組合搜尋、條件篩選、sortable list、列拖曳、跨容器拖放、圖表縮放及面板編輯列為候選 | WBUI 維護[元件盤點](https://github.com/gaze9999/workbench-ui/blob/ce243e1d30cbb2c801d99c77b770afe416e0e2c3/docs/component-coverage.md)與[互動待辦](https://github.com/gaze9999/workbench-ui/blob/ce243e1d30cbb2c801d99c77b770afe416e0e2c3/docs/interaction-roadmap.md), LAM 按資料用途選用 |
+| 遠端 LAM 存取、配對及登入 | 已有[遠端存取設計](remote-access.md), 尚未實作 | 待確認部署、HTTPS、權限及配對規格, 目前服務維持 loopback |
+
+## 待驗收
+
+| 項目 | 已有證據 | 尚需完成 |
+| --- | --- | --- |
+| 更新後的正式資料 | 隔離 fixture 涵蓋來源投影、啟動預載、Context、來源計數與分頁 | 重新啟動最新後端, 核對正式來源與畫面, 包含驗證紀錄、父子 Context、MCP、My dots、排程及來源計數 |
+| 回補與增量效能 | 同一合成資料已比較回補與無新增資料更新, 見[效能報告](performance-report.md) | 使用固定的正式資料樣本比較冷啟動、回補、增量與長時間更新, 記錄各階段 CPU、耗時、讀取量與快照大小 |
+| macOS / Linux 字型與啟動 | 已有 CoreText / fontconfig 讀取與平台啟動入口, Windows 已驗證 | 實機核對字型、啟動、視窗關閉、程序清理與記錄檔輪替 |
+| 瀏覽器、觸控與輔助技術 | Edge fixture 已檢查橫向、直向、語系、字級及主要互動 | 核對 Firefox / WebKit、實體觸控與螢幕閱讀器, 包含選單、焦點、快速反覆展開 / 收合、載入 / 移出與背景更新 |
+| 平台建置與下載包 | 已有各平台 workflow 與 smoke check 入口 | 在對應平台執行建置、啟動及離線資產檢查, 記錄下載包與 checksum, 見[測試與建置](validation.md) |
 
 ## SSE 評估
 
-目前使用本機 SSE 傳送快照版本通知, 畫面收到後取得完整快照, 中斷時由定時查詢補上. 本輪維持此行為, 尚未改成分區推送
+目前使用本機 SSE 傳送快照版本通知, 畫面收到後取得完整快照, 中斷時由定時查詢補上. 分區推送暫不修改, 以下保留評估項目
 
 | 資料 | 候選方式 | 需要核對 |
 | --- | --- | --- |
@@ -58,9 +74,9 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 
 ## UI 元件對照
 
-依 [PrimeNG Table](https://primeng.dev/table)、[HeroUI Table](https://beta.heroui.com/docs/components/table) 與 [Nuxt UI Table](https://github.com/nuxt/ui/blob/v4/src/runtime/components/Table.vue)、[Tree](https://github.com/nuxt/ui/blob/v4/src/runtime/components/Tree.vue) 的官方介面核對, 本輪補齊空資料、列動作、分頁邊界、樹狀圖示與載入狀態. 元件數量不作為 LAM 的實作清單
+空資料、列動作、分頁邊界、樹狀圖示與載入狀態的行為參考 [PrimeNG Table](https://primeng.dev/table)、[HeroUI Table](https://beta.heroui.com/docs/components/table) 與 [Nuxt UI Table](https://github.com/nuxt/ui/blob/v4/src/runtime/components/Table.vue)、[Tree](https://github.com/nuxt/ui/blob/v4/src/runtime/components/Tree.vue), 採用項目依 LAM 的資料與操作用途決定
 
-後續優先評估大型表格的可視範圍呈現、階層導覽、組合搜尋與欄位條件篩選, 其餘候選沿 [WBUI 元件盤點](https://github.com/gaze9999/workbench-ui/blob/b2824dc6a478e6eb00e8b4f246b4ab5255781936/docs/component-coverage.md) 管理
+後續優先評估大型表格的可視範圍呈現、階層導覽、組合搜尋與欄位條件篩選, 其餘候選沿 [WBUI 元件盤點](https://github.com/gaze9999/workbench-ui/blob/ce243e1d30cbb2c801d99c77b770afe416e0e2c3/docs/component-coverage.md) 管理
 
 程式碼上色可參考 VS Code 的 [TextMate 語法上色](https://code.visualstudio.com/api/language-extensions/syntax-highlight-guide) 與 [語意上色](https://code.visualstudio.com/api/language-extensions/semantic-highlight-guide). TextMate 依 grammar 分詞, 語意 token 由能分析專案的 provider 提供, 兩者與 TOML、CSV 等結構解析分開評估
 
@@ -68,7 +84,7 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 
 各分頁共用載入、排序、篩選、返回與明細生命週期, 依資料用途保留專用操作. Context 列開啟目前對話的 Context, 代理訊息按鈕開啟該對話訊息, 父對話連結開啟父對話, 欄位重排與背景更新後仍須保持此對應
 
-效能比較分開記錄回補與無回補、冷啟動與增量更新的耗時、CPU 及讀取量. 測試入口見 [測試與建置](validation.md), 資料上限與量測方式見 [效能與資料上限](performance-report.md)
+效能比較分開記錄回補與無回補、冷啟動與差異更新的耗時、CPU 及讀取量. 測試入口見 [測試與建置](validation.md), 資料上限與量測方式見 [效能與資料上限](performance-report.md)
 
 ## 實作與驗證入口
 

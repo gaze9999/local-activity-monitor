@@ -2,6 +2,7 @@ async page=>{
   const errors=[],onError=error=>errors.push(error.message);page.on('pageerror',onError);
   const check=(value,label)=>{if(!value)throw Error(label);};
   await page.reload();await page.waitForFunction(()=>data?.codex?.threads?.length&&typeof WorkbenchUI.bindDisclosure==='function');
+  check(await page.evaluate(()=>data.codex.threads.every(thread=>thread.model?.startsWith('demo-model-'))),'Synthetic fixture required');
   await page.evaluate(()=>{locale='zh-TW';applyLanguage();});
   const result=await page.evaluate(async()=>{
     const check=(value,label)=>{if(!value)throw Error(label);};
@@ -27,6 +28,18 @@ async page=>{
   await page.waitForFunction(()=>detail?.contextLoaded);
   const parent=await page.evaluate(()=>({id:detail.thread.thread_id,text:JSON.stringify(detail.contextContent),title:document.getElementById('detail-title').textContent}));
   check(parent.id===result.parentId&&parent.text.includes('PARENT_CONTEXT_ONLY')&&!parent.text.includes('CHILD_CONTEXT_ONLY')&&parent.title.includes('父代理'),'parent context identity');
+  const contextRequests=[];const onRequest=request=>{if(new URL(request.url()).pathname==='/api/codex/context')contextRequests.push(request.url());};page.on('request',onRequest);
+  await page.evaluate(id=>{document.getElementById('detail-dialog').close();selectConversationSource('conversations');renderCodex();const count=pageCount;let row;for(let index=1;index<=count;index++){page=index;renderCodex();attachTables();row=tableViews.get('codex-rows').rows.find(row=>row.textContent.includes(title(threadIndex.get(id))));if(row)break;}if(!row)throw Error('Child conversation row missing');row._rowAction();},result.childId);
+  check(await page.evaluate(()=>detail.kind==='thread'&&detail.section==='summary'&&!!document.querySelector('#detail-dialog [data-modal-key="context"]:not(:disabled)')),'conversation details expose Context');
+  check(contextRequests.length===0,'Context stays lazy until selected');
+  await page.locator('#detail-dialog [data-modal-key="context"]').click();
+  await page.waitForFunction(()=>detail?.kind==='thread'&&detail?.contextLoaded);
+  const conversation=await page.evaluate(()=>({id:detail.thread.thread_id,section:detail.section,text:document.querySelector('#detail-content>.modal-tab-content:not([hidden])').textContent,title:document.getElementById('detail-title').textContent,folds:[...document.querySelectorAll('#detail-content .thread-context details')].map(el=>el.open)}));
+  check(conversation.id===result.childId&&conversation.section==='context'&&conversation.text.includes('子代理')&&conversation.text.includes('CHILD_CONTEXT_ONLY')&&!conversation.text.includes('PARENT_CONTEXT_ONLY')&&conversation.folds.every(Boolean),'conversation Context belongs to current child');
+  check(conversation.title===await page.evaluate(id=>title(threadIndex.get(id)),result.childId),'Context preserves conversation detail title');
+  await page.locator('#detail-dialog [data-modal-key="summary"]').click();await page.locator('#detail-dialog [data-modal-key="context"]').click();
+  check(contextRequests.length===1,'Context cached across detail tabs');
+  page.off('request',onRequest);
   const motion=await page.evaluate(async()=>{
     document.getElementById('detail-dialog').close();
     const root=document.createElement('details'),summary=document.createElement('summary'),body=document.createElement('div');root.append(summary,body);summary.textContent='Motion fixture';body.style.height='120px';body.textContent='Motion content';document.body.append(root);const view=WorkbenchUI.bindDisclosure(root,{content:body,duration:120});
@@ -43,7 +56,7 @@ async page=>{
     const sample=()=>[...code.querySelectorAll('.wb-code-chunk')].filter(el=>{const r=el.getBoundingClientRect(),p=pre.getBoundingClientRect();return r.bottom>p.top&&r.top<p.bottom;}).every(el=>!!el.querySelector('.wb-code-keyword'));
     const start=sample();pre.scrollTop=pre.scrollHeight-260;pre.dispatchEvent(new Event('scroll'));const end=sample();pre.scrollTop=8000;pre.dispatchEvent(new Event('scroll'));const middle=sample();const nodes=code.querySelectorAll('*').length,complete=code.textContent===text;renderer.destroy();pre.remove();return {start,end,middle,nodes,complete};
   });check(parser.start&&parser.end&&parser.middle&&parser.complete,'viewport parser '+JSON.stringify(parser));
-  const layouts=[];
+  const layouts=[],detailLayouts=[];
   await page.evaluate(saved=>{tableStates['context-rows']=saved;applyTableColumns('context-rows');appearance.font=18;applyAppearance();},result.saved);
   for(const width of [1366,820,390,320])for(const language of ['zh-TW','en','ja']){
     await page.setViewportSize({width,height:900});
@@ -56,8 +69,14 @@ async page=>{
       const line=parseFloat(getComputedStyle(secondary).lineHeight);
       return {width:innerWidth,locale,font:appearance.font,overflow:document.documentElement.scrollWidth-innerWidth,headerHeight:header.getBoundingClientRect().height,primary:primary.getBoundingClientRect().height,primaryLine:parseFloat(getComputedStyle(primary).lineHeight),secondary:secondary.getBoundingClientRect().height,line,faults,fonts:document.getElementById('font-family').options.length};
     });layouts.push(layout);check(layout.font===18&&layout.overflow<=1&&!layout.faults.length&&layout.secondary<=layout.line+1&&layout.primary<=layout.primaryLine*1.3,'layout '+JSON.stringify(layout));
+    if(language==='zh-TW'){
+      await page.evaluate(id=>openDetail({kind:'thread',id,thread:threadIndex.get(id),section:'context'}),result.childId);
+      await page.waitForFunction(()=>detail?.contextLoaded);
+      const modal=await page.evaluate(()=>{const content=document.getElementById('detail-content'),panel=content.querySelector(':scope>.modal-tab-content:not([hidden])'),tabs=[...document.querySelectorAll('#detail-dialog .modal-tabs>[role="tab"]')],rect=panel.getBoundingClientRect();return {width:innerWidth,overflow:document.documentElement.scrollWidth-innerWidth,contextPosition:tabs.findIndex(tab=>tab.dataset.modalKey==='context'),panelInside:rect.left>=0&&rect.right<=innerWidth+1,selected:tabs.find(tab=>tab.getAttribute('aria-selected')==='true')?.dataset.modalKey};});detailLayouts.push(modal);check(modal.overflow<=1&&modal.contextPosition===1&&modal.panelInside&&modal.selected==='context','Context modal layout '+JSON.stringify(modal));
+      await page.evaluate(()=>document.getElementById('detail-dialog').close());
+    }
   }
   await page.evaluate(()=>{locale='zh-TW';appearance.font=14;applyLanguage();});
   check(!errors.length,'page errors '+JSON.stringify(errors));page.off('pageerror',onError);
-  return {identities:result,child,parent,motion,parser,layouts,errors};
+  return {identities:result,child,parent,conversation,contextRequests:contextRequests.length,motion,parser,layouts,detailLayouts,errors};
 }

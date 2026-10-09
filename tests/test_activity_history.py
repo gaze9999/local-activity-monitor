@@ -3,12 +3,30 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from local_activity_monitor.activity_history import ActivityHistory
 from local_activity_monitor.server import Dashboard
 
 
 class ActivityHistoryTests(unittest.TestCase):
+    def test_check_time_stays_stable_when_update_skips_storage(self):
+        initial = datetime.now(timezone.utc)
+        with patch('local_activity_monitor.activity_history.datetime', wraps=datetime) as clock:
+            clock.now.return_value = initial
+            history = ActivityHistory(self.path)
+            history.update([], [])
+            checked = history.checked_at
+            clock.now.return_value = initial+timedelta(seconds=1)
+            with patch.object(history.store, 'save', side_effect=AssertionError('Unchanged data should not save')):
+                history.update([], [])
+                history.snapshot('sql')
+            self.assertEqual(history.checked_at, checked)
+            with patch.object(history.store, 'save', side_effect=PermissionError):
+                history.update([self.sql], [])
+            self.assertEqual(history.health, 'unavailable')
+            self.assertEqual(history.checked_at, clock.now.return_value.isoformat(timespec='milliseconds').replace('+00:00', 'Z'))
+
     def setUp(self):
         self.directory=tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

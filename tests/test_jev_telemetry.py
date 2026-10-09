@@ -33,9 +33,20 @@ class JevTelemetryTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_check_time_survives_telemetry_projection(self):
+        dashboard = Dashboard(self.home)
+        dashboard.refresh()
+        snapshot = dashboard.snapshot('all')
+        checked = snapshot['jev']['reader']['checked_at']
+        self.assertEqual(snapshot['mcp']['telemetry']['jev']['reader']['checked_at'], checked)
+        self.assertEqual(snapshot['sources']['telemetry:jev']['checked_at'], checked)
+        self.assertEqual(dashboard.snapshot('all')['sources']['telemetry:jev']['checked_at'], checked)
+        self.assertEqual(next(source for source in dashboard.logs()['sources'] if source['source']=='jev_telemetry')['checked_at'], checked)
+
     def test_unknown_metadata_is_projected_and_private_payloads_are_omitted(self):
         result = JevCollector(self.home).snapshot('all')
         self.assertEqual(result['health'],'ok')
+        self.assertTrue(datetime.fromisoformat(result['reader']['checked_at'].replace('Z', '+00:00')).tzinfo)
         self.assertEqual(result['summary']['statuses'],{'future_status':1})
         self.assertEqual(result['summary']['retries'],4)
         event = result['recent'][0]

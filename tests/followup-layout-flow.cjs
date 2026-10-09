@@ -2,6 +2,7 @@ async page=>{
   const faults=[],onError=error=>faults.push(error.message),check=(value,message)=>{if(!value)throw Error(message);};page.on('pageerror',onError);
   await page.reload();await page.waitForFunction(()=>data?.updated_at&&!busy);
   check(await page.evaluate(()=>data.codex.threads.every(thread=>thread.model?.startsWith('demo-model-'))),'Synthetic fixture required');
+  await page.evaluate(()=>{locale='zh-TW';applyLanguage();});
   await page.setViewportSize({width:1366,height:900});
   // An empty chart hides its SVG. Its visible content region must still schedule a new plot.
   await page.evaluate(()=>{switchTab('overview');overviewHidden.delete('activity-chart');applyOverview();resetChartQueue();chartDrawing=true;try{timeline('activity-chart','activity-chart-note',[]);}finally{chartDrawing=false;}settleChartState('activity-chart');});

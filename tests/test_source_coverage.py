@@ -138,6 +138,17 @@ class SourceCoverageTests(unittest.TestCase):
         dashboard = Dashboard(self.home, codex=True)
         dashboard.refresh()
         snapshot = dashboard.snapshot("all")
+        checkpoint = snapshot['sources']['thread_state']['readers']
+        self.assertEqual({reader['name']: reader['checked_at'] for reader in checkpoint}, {
+            'Checkpoint load': dashboard.codex.thread_state.load_checked_at,
+            'Checkpoint save': dashboard.codex.thread_state.write_checked_at,
+        })
+        self.assertTrue(all(reader['checked_at'] for reader in checkpoint))
+        self.assertTrue(next(reader for reader in snapshot['sources']['catalog']['readers'] if reader['name']=='subagent_lifecycle')['checked_at'])
+        checked = dashboard.activity_history.checked_at
+        self.assertEqual(snapshot['sources']['activity_history']['checked_at'], checked)
+        snapshot['updated_at'] = '2099-01-01T00:00:00Z'
+        self.assertEqual(dashboard.sources(snapshot)['activity_history']['checked_at'], checked)
         session = snapshot["sources"]["session"]
         self.assertIn(str(path), session["locations"])
         self.assertIn("git", session["features"])
