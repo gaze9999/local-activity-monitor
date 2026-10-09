@@ -5,6 +5,9 @@ import signal
 import subprocess
 import sys
 import tempfile
+from queue import Queue, Empty
+import threading
+import time
 import unittest
 
 from local_activity_monitor.process_lifecycle import cli_lifetime
@@ -14,6 +17,65 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ProcessLifetimeTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows watcher job ownership")
+    def test_watcher_owner_exit_closes_http_descendant_and_preserves_data(self):
+        import json
+        import socket
+        from urllib.parse import urlsplit
+        for forced in (False, True):
+            with self.subTest(forced=forced), tempfile.TemporaryDirectory(prefix="LAM watcher shutdown ") as folder:
+                home = Path(folder)
+                retained = home / "retained-metadata.json"
+                retained.write_text('{"keep":true}')
+                owner = subprocess.Popen([sys.executable, "-X", "utf8", "-I", "-B", str(ROOT / "tools/watch.py"), "--watch-stdin", "--codex-home", str(home), "--port", "0"],
+                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+                lines = Queue()
+                def read_lines():
+                    for line in owner.stdout:
+                        lines.put(line)
+                    lines.put(None)
+                reader = threading.Thread(target=read_lines, daemon=True)
+                reader.start()
+                try:
+                    deadline = time.monotonic() + 25
+                    while True:
+                        try:
+                            line = lines.get(timeout=max(.01, deadline-time.monotonic()))
+                        except Empty:
+                            self.fail("Watcher did not start within 25 seconds")
+                        if line is None:
+                            self.fail("Watcher exited before listening: " + owner.stderr.read())
+                        if line.startswith('{"status": "listening"'):
+                            address = urlsplit(json.loads(line)["url"])
+                            break
+                    with socket.create_connection((address.hostname, address.port), timeout=1):
+                        pass
+                    if forced:
+                        owner.terminate()
+                    else:
+                        owner.stdin.close()
+                    owner.wait(timeout=20)
+                    if not forced:
+                        self.assertEqual(owner.returncode, 0, owner.stderr.read())
+                    stopped = False
+                    for _ in range(30):
+                        try:
+                            with socket.create_connection((address.hostname, address.port), timeout=.2):
+                                pass
+                        except OSError:
+                            stopped = True
+                            break
+                        time.sleep(.1)
+                    self.assertTrue(stopped, "Owned HTTP descendant still listens after watcher exit")
+                    self.assertEqual(retained.read_text(), '{"keep":true}')
+                finally:
+                    if owner.poll() is None:
+                        owner.kill()
+                        owner.wait(timeout=5)
+                    reader.join(timeout=5)
+                    for stream in (owner.stdin, owner.stdout, owner.stderr):
+                        stream.close()
+
     def test_termination_unwinds_and_restores_signal_handler(self):
         previous = signal.getsignal(signal.SIGTERM)
         with self.assertRaises(KeyboardInterrupt):

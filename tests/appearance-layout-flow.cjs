@@ -8,17 +8,26 @@ async page => {
     await page.getByRole('button',{name:'設定',exact:true}).click();const settings=page.locator('#settings-dialog');await settings.getByRole('tab',{name:'外觀',exact:true}).click();
     check(await page.locator('#theme-select option').count()===2,'obsolete slate theme removed');
     await page.locator('#accent-select').selectOption('custom');await page.locator('#accent-hex').fill('#a482e6');await page.locator('#accent-hex').press('Tab');
-    await page.locator('#font-family').fill('Arial, "Microsoft JhengHei", sans-serif');await page.locator('#font-family').press('Tab');
-    check(await page.evaluate(()=>getComputedStyle(document.documentElement).getPropertyValue('--accent')==='#a482e6'&&getComputedStyle(document.documentElement).fontFamily.startsWith('Arial')),'custom appearance applied');
-    check(await page.evaluate(()=>{const a=readConfiguration(configuration()).preferences.appearance;return a.accent==='custom'&&a.accentColor==='#a482e6'&&a.fontFamily.startsWith('Arial');}),'custom appearance export/import');
+    await page.locator('#font-family').selectOption('Microsoft JhengHei');
+    check(await page.evaluate(()=>getComputedStyle(document.documentElement).getPropertyValue('--accent')==='#a482e6'&&getComputedStyle(document.documentElement).fontFamily.includes('Microsoft JhengHei')),'system font appearance applied');
+    check(await page.evaluate(()=>{const a=readConfiguration(configuration()).preferences.appearance;return a.accent==='custom'&&a.accentColor==='#a482e6'&&a.fontFamily==='Microsoft JhengHei';}),'system font export/import');
     for(const patch of [{accentColor:'red'},{accentColor:''},{fontFamily:'url(https://example.invalid)'},{fontFamily:'Arial; color:red'}])check(await page.evaluate(patch=>{const value=structuredClone(configuration());Object.assign(value.preferences.appearance,patch);try{readConfiguration(value);return false;}catch{return true;}},patch),'unsafe appearance rejected');
-    await page.locator('#font-family').fill('url(https://example.invalid)');await page.locator('#font-family').press('Tab');check(await page.evaluate(()=>appearance.fontFamily.startsWith('Arial')),'invalid draft preserves applied font');
-    await page.locator('#font-family').fill('Arial, sans-serif');await page.locator('#font-family').press('Tab');
+    await page.evaluate(()=>{appearance.fontFamily='Arial, sans-serif';applyAppearance();});check(await page.locator('#font-family option[value="Arial, sans-serif"]').count()===1,'saved custom font remains selectable');
+    await page.locator('#font-family').selectOption('Segoe UI');
+    const menus=await page.evaluate(()=>{
+      const saved=appearance.mode,results=[];
+      for(const mode of ['dark','light']){
+        appearance.mode=mode;applyAppearance();const select=document.getElementById('font-family'),selected=getComputedStyle(select.selectedOptions[0]),other=getComputedStyle(select.options[0]);
+        results.push({mode,supported:CSS.supports('appearance','base-select'),appearance:getComputedStyle(select).appearance,selected:selected.backgroundColor,other:other.backgroundColor});
+      }
+      appearance.mode=saved;applyAppearance();return results;
+    });
+    check(menus.every(menu=>!menu.supported||menu.appearance==='base-select'&&menu.selected!==menu.other),'open select theme '+JSON.stringify(menus));
     for(const locale of ['en','ja','zh-TW']){await page.locator('#language-select').selectOption(locale);check(await page.locator('#theme-select option[value=workbench]').textContent()===({en:'Workbench',ja:'ワークベンチ','zh-TW':'工作台'})[locale],'theme translation');}
     await settings.getByRole('tab',{name:'更新與追蹤',exact:true}).click();check(await page.locator('#refresh-interval').evaluate(input=>getComputedStyle(input).appearance==='textfield'&&[...document.styleSheets].some(sheet=>[...sheet.cssRules].some(rule=>rule.selectorText?.includes('inner-spin-button')&&rule.style.appearance==='none'))),'number spinner removed');
     await page.locator('#refresh-interval').fill('10');await page.locator('#refresh-interval').press('ArrowUp');check(await page.locator('#refresh-interval').inputValue()==='11','native number keyboard retained');
     await page.locator('#settings-close').click();await page.reload();await page.waitForFunction(()=>data?.codex?.threads?.length>0);
-    check(await page.evaluate(()=>appearance.accentColor==='#a482e6'&&appearance.fontFamily==='Arial, sans-serif'),'custom appearance persists');
+    check(await page.evaluate(()=>appearance.accentColor==='#a482e6'&&appearance.fontFamily==='Segoe UI'),'system font persists');
     await page.evaluate(()=>{clearInterval(refreshTimer);appearance.accent='blue';appearance.fontFamily='';appearance.theme='slate';applyAppearance();saveView();});
     check(await page.evaluate(()=>appearance.theme==='workbench'&&!document.documentElement.style.getPropertyValue('--accent')&&!document.documentElement.style.getPropertyValue('--wb-accent')&&!document.documentElement.style.getPropertyValue('--wb-font-family')),'old theme migrates and overrides reset');
     await page.getByRole('tab',{name:'專案',exact:true}).click();await page.locator('#activity-tabs').getByRole('tab',{name:'驗證',exact:true}).click();

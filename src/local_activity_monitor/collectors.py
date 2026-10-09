@@ -15,7 +15,7 @@ import re
 import sqlite3
 import time
 
-from .codex_metadata import execution_metadata, read_metadata
+from .codex_metadata import execution_metadata, read_metadata, spawn_metadata
 from .codex_schedules import read_schedules
 from .codex_plugins import read_plugins
 from .payload_detail import bounded_payload, complete_payload, visible_context_record, payload_masking
@@ -241,6 +241,7 @@ class CodexCollector:
             if payload.get("thread_source") in ("user", "subagent", "guardian_review", "dot", "orbit", "automation", "schedule", "heartbeat"):
                 state["trigger"] = payload["thread_source"]
             state["execution"].update(execution_metadata(payload))
+            state["execution"].update(spawn_metadata(payload.get('source')))
             git = payload.get("git")
             if isinstance(git, dict):
                 state["execution"].update(execution_metadata({"git_branch": git.get("branch"), "git_sha": git.get("commit_hash")}))
@@ -1224,10 +1225,10 @@ class CodexCollector:
             metadata, dots, metadata_sources, schedules, plugins = metadata_cache["metadata"]
         else:
             self.project_details = {}
-            metadata = read_metadata(self.root.parent, threads, dots, metadata_sources, self.project_details, include_workdirs=self.features["worktrees"]) if self.features["metadata"] else {}
+            metadata = read_metadata(self.root.parent, threads, dots, metadata_sources, self.project_details, include_workdirs=self.features["worktrees"], select_recent=self.health == "waiting" and not self.files) if self.features["metadata"] else {}
             if self.features["metadata"]:
                 self.subagent_lifecycle(metadata, metadata_sources)
-            schedules = read_schedules(self.root.parent, metadata_sources) if self.features["metadata"] else {"items": [], "health": "disabled"}
+            schedules = read_schedules(self.root.parent, metadata_sources, metadata) if self.features["metadata"] else {"items": [], "health": "disabled"}
             plugins = read_plugins(self.root.parent, metadata_sources) if self.features["metadata"] else {"items": [], "health": "disabled"}
             if metadata_cache is not None:
                 metadata_cache["metadata"] = metadata, dots, metadata_sources, schedules, plugins
@@ -1242,6 +1243,7 @@ class CodexCollector:
             scoped_dots = [event for event in dot_events if contains(event, boundary)]
             dots.update(events=sorted(scoped_dots, key=lambda item:item.get("timestamp") or "", reverse=True)[:500], total=len(scoped_dots))
         dots.update(window=window, activity_items_scope="latest_loaded_snapshot")
+        dots['activity'] = [event for event in dots.get('activity',[]) if contains(event,boundary)]
         pending_status = {state["thread_id"] for state in self.files.values() if state.get("history_cursor") or state["offset"] is None or state["offset"] < state.get("source_size", 0)}
         rows, tools, nested_tools, git_events, skill_events, check_events, series, mcp_events, tool_series = [], Counter(), Counter(), [], [], [], Counter(), [], Counter()
         file_events, error_events, sqlite_events = [], [], []
@@ -1282,6 +1284,7 @@ class CodexCollector:
             if environment == "unknown" and not thread.get("metadata_only"):
                 environment = "local"
             row.update({"thread_name": entry.get("thread_name"), "environment": environment, "project_id": entry.get("project_id"), "project_name": entry.get("project_name"), "project_scope": entry.get("project_scope", "unknown"), "has_schedule": entry.get("has_schedule", False)})
+            row['host_id'] = entry.get('_host_id')
             for key in ("activity_type", "trigger", "model", "reasoning_effort", "created_at", "updated_at", "status"):
                 if key in entry and (not row.get(key) or row[key] in ("unknown", "observed") or thread.get("metadata_only")):
                     row[key] = entry[key]

@@ -1,10 +1,7 @@
 @echo off
 setlocal DisableDelayedExpansion
-"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\launch-windows.ps1" --console %*
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\launch-logged.ps1" --console %*
 set "MONITOR_EXIT=%ERRORLEVEL%"
-if not "%MONITOR_EXIT%"=="0" (
-  echo Monitor could not start. If already running, use its existing browser tab.
-  echo Otherwise inspect the error above. See README.md.
-  pause
-)
+rem Keep the result visible for normal early exits as well as failures.
+pause
 exit /b %MONITOR_EXIT%

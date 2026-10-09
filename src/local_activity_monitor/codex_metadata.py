@@ -75,11 +75,11 @@ PROJECT_ROOT_LIMIT = 5000
 SUBAGENT_LIMIT = 500
 
 
-def read_metadata(home, identities, dots=None, source_info=None, project_details=None, include_workdirs=False):
+def read_metadata(home, identities, dots=None, source_info=None, project_details=None, include_workdirs=False, select_recent=False):
     entries = {}
     def report(path, health, fields=(), **limits):
         if source_info is not None:
-            source_info[str(path)] = {"name": path.name, "location": str(path), "health": health, "fields": list(fields), **limits}
+            source_info[str(path)] = {"name": path.name, "location": str(path), "health": health, "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "fields": list(fields), **limits}
     def failed(path):
         try:
             health = "unavailable" if path.is_file() else "missing"
@@ -165,19 +165,24 @@ def read_metadata(home, identities, dots=None, source_info=None, project_details
                     if not {"id", "title"} <= set(wanted):
                         report(path, "unsupported")
                         continue
+                    if select_recent:
+                        order = next((key for key in ("updated_at_ms", "updated_at", "created_at_ms", "created_at") if key in columns), "id")
+                        remaining = max(0, CATALOG_LIMIT-len(selected))
+                        selected.update(row[0] for row in db.execute(f"SELECT id FROM threads ORDER BY {order} DESC LIMIT {remaining}") if isinstance(row[0], str) and re.fullmatch(r"[a-fA-F0-9-]{36}", row[0]))
                     edges = {}
+                    edge_limit = min(SUBAGENT_LIMIT, max(0, CATALOG_LIMIT-len(selected))) if select_recent else SUBAGENT_LIMIT
                     edge_columns = {row[1] for row in db.execute("PRAGMA table_info(thread_spawn_edges)")}
                     if {"parent_thread_id", "child_thread_id"} <= edge_columns:
                         # Select children of known parents only, including bounded descendants.
                         pending, visited = set(selected), set()
-                        while pending and len(edges) < SUBAGENT_LIMIT:
+                        while pending and len(edges) < edge_limit:
                             batch = sorted(pending-visited)[:400]
                             if not batch:
                                 break
                             visited.update(batch)
                             pending.difference_update(batch)
                             placeholders = ",".join("?" for _ in batch)
-                            for parent, child in db.execute(f"SELECT parent_thread_id,child_thread_id FROM thread_spawn_edges WHERE parent_thread_id IN ({placeholders}) ORDER BY child_thread_id LIMIT {SUBAGENT_LIMIT-len(edges)}", batch):
+                            for parent, child in db.execute(f"SELECT parent_thread_id,child_thread_id FROM thread_spawn_edges WHERE parent_thread_id IN ({placeholders}) ORDER BY child_thread_id LIMIT {edge_limit-len(edges)}", batch):
                                 if not all(isinstance(value, str) and re.fullmatch(r"[a-fA-F0-9-]{36}", value) for value in (parent, child)):
                                     continue
                                 edges[child] = parent
@@ -351,13 +356,18 @@ def read_metadata(home, identities, dots=None, source_info=None, project_details
                                 identity = (output["threadId"], output.get("turnId") if isinstance(output.get("turnId"), str) else None, when, kind)
                                 if identity not in seen:
                                     seen.add(identity)
-                                    dots["events"].append({"thread_id": output["threadId"], "timestamp": when, "artifact_type": kind})
+                                    host = output.get("hostId")
+                                    host = host if isinstance(host,str) and re.fullmatch(r"(?:local|remote-control:[A-Za-z0-9_-]{1,160})",host) else None
+                                    dots["events"].append({"thread_id": output["threadId"], "timestamp": when, "artifact_type": kind, "host_id":host})
                         if isinstance(output, dict) and isinstance(output.get("threadId"), str) and output["threadId"] in entries:
                             entries[output["threadId"]]["trigger"] = "dot"
                     if dots is not None:
                         dots["_retained_events"] = dots["events"]
                         dots["events"] = sorted(dots["events"], key=lambda item:item["timestamp"] or "", reverse=True)[:500]
-                report(path, "ok", ("project_name", "project_membership", "project_kind", "project_origin", "project_root_metadata", "legacy_project_id_mapping", "dot_thread_id", "artifact_type", "produced_at"), byte_limit=APP_STATE_LIMIT, project_limit=PROJECT_LIMIT, loaded_projects=legacy_project_rows)
+                if dots is not None:
+                    from .desktop_activity import desktop_activity
+                    desktop_activity(state, entries, dots)
+                report(path, "ok", ("project_name", "project_membership", "project_kind", "project_origin", "project_root_metadata", "legacy_project_id_mapping", "dot_thread_id", "artifact_type", "produced_at", "host_id", "remote_thread_summary", "dot_activity"), byte_limit=APP_STATE_LIMIT, project_limit=PROJECT_LIMIT, loaded_projects=legacy_project_rows)
             else:
                 report(path, "unsupported", byte_limit=APP_STATE_LIMIT)
         else:

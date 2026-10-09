@@ -35,6 +35,7 @@ from .mcp_records import CATEGORIES, EVENT_LIMIT as MCP_EVENT_LIMIT, TOOL_LIMIT 
 from .monitor_state import MonitorState
 from .worktree_info import WorktreeCollector
 from .error_records import DiagnosticCollector, error_summary, FAILURES
+from .api_records import api_summary
 from .error_history import ErrorHistory, error_identity
 from .payload_detail import paged_content
 from .activity_history import ActivityHistory, sql_identity, mcp_identity, merge_event
@@ -125,7 +126,7 @@ class Dashboard:
         self.activity = IdleActivity(home)
         source = Path(__file__).parent
         self.code_revision = hashlib.sha256(b"".join(path.read_bytes() for path in sorted(source.glob("*.py")))).hexdigest()[:12]+"-"+uuid.uuid4().hex[:8]
-        self.observations = {"usage": True, "codex_account": False, "codex": codex, "jev": True, "metadata": True, "git": True, "worktrees": True, "jev_calls": True, "skills": True, "checks": True, "tool_events": True, "mcp": True, "web": True, "files": True, "errors": True, "logs": True, "sqlite": True}
+        self.observations = {"usage": True, "codex_account": False, "codex": codex, "jev": True, "metadata": True, "git": True, "worktrees": True, "jev_calls": True, "skills": True, "checks": True, "tool_events": True, "mcp": True, "web": True, "files": True, "errors": True, "logs": True, "sqlite": True, "model_api": True}
         self.default_settings = {"interval": 10, "idle_minutes": 5, "activity_retention_days": ActivityHistory.DEFAULT_DAYS, "max_files": 20, "track_all": False, "observations": dict(self.observations), "mcp_sources": {}, "mcp_categories": {}, "tool_descriptions": {}, "mcp_descriptions": {}, "mcp_tags": {}}
         self.mcp_sources, self.mcp_categories, self.tool_descriptions, self.mcp_descriptions, self.mcp_tags = {}, {}, {}, {}, {}
         self.mcp_document_cache = {}
@@ -140,6 +141,9 @@ class Dashboard:
         self.stop = threading.Event()
         self.lock = threading.Lock()
         self.refresh_lock = threading.RLock()
+        self.update_condition = threading.Condition()
+        self.update_version = 0
+        self.event_clients = threading.BoundedSemaphore(8)
         self.cache = {}
         self.activity_cache = self.activity.snapshot(self.idle_minutes, self.interval)
         self.asset_signature, self.asset_revision = None, None
@@ -147,6 +151,21 @@ class Dashboard:
         self.phase_times = {}
         self.phase_started = None
         self.thread = threading.Thread(target=self.poll, name="metadata-collectors", daemon=True)
+
+    def preload(self):
+        """Read bounded catalog metadata before the first session collection."""
+        if not self.codex or not self.observations["codex"] or not self.observations["metadata"]:
+            return
+        try:
+            projections = self.codex.snapshot_windows()
+            base = {"label": "本機觀察統計", "health": "starting", "started_at": self.started_at,
+                    "updated_at": None, "initial_sections": ["catalog", "runtime"], "settings": self.settings(),
+                    "availability": {}, "mcp": {"servers": [], "events": [], "categories": CATEGORIES},
+                    "jev": {"health": "waiting", "enabled": False, "summary": {}, "recent": [], "series": []}}
+            with self.lock:
+                self.cache = {window: base | {"codex": projection} for window, projection in projections.items()}
+        except (OSError, ValueError, sqlite3.Error):
+            self.monitor.event("preload_failed")
 
     def retain_calls(self, states):
         sql, web, mcp, errors = [], [], [], []
@@ -175,10 +194,17 @@ class Dashboard:
                 self.phase_started = None
                 self._refresh()
                 self.phase("idle")
+            self.notify_update()
         except Exception as error:
             self.monitor.collecting("error")
             self.monitor.failed(error)
+            self.notify_update()
             raise
+
+    def notify_update(self):
+        with self.update_condition:
+            self.update_version += 1
+            self.update_condition.notify_all()
 
     def phase(self, name):
         if self.phase_started is not None:
@@ -249,7 +275,8 @@ class Dashboard:
                 return
             self.diagnostics.capture_logs = self.observations["logs"]
             self.diagnostics.capture_sql = self.observations["sqlite"]
-            if self.observations["codex"] and (self.observations["errors"] or self.observations["logs"] or self.observations["sqlite"]):
+            self.diagnostics.capture_api = self.observations["model_api"]
+            if self.observations["codex"] and (self.observations["errors"] or self.observations["logs"] or self.observations["sqlite"] or self.observations["model_api"]):
                 self.diagnostics.refresh()
             if self.observations["codex"]:
                 if not self.phase("history"):
@@ -327,6 +354,8 @@ class Dashboard:
                 projection["connection"] = connection
             cache = {window: {"version": 1, "revision": revision, "label": "本機觀察統計", "started_at": self.started_at, "updated_at": now(), "settings": settings, "default_settings": self.default_settings, "availability": availability, "mcp": scoped_mcp[window], "jev": self.jev.snapshot(window) if self.observations["jev"] and self.observations["mcp"] and self.mcp_sources.get("jev", True) else {"source": "jev", "health": "paused", "scope": self.jev.SCOPE, "enabled": enabled, "enabled_at": since, "summary": {}, "recent": [], "series": []}, "codex": projection} for window, projection in codex_windows.items()}
             for window, snapshot in cache.items():
+                api_enabled = self.observations["codex"] and self.observations["model_api"]
+                snapshot["model_api"] = api_summary([event for event in self.diagnostics.api_events if contains(event, cutoff(window))] if api_enabled else []) | {"enabled": api_enabled, "sources": self.diagnostics.log_sources(api_enabled)}
                 snapshot["frontend_revision"] = revision.rsplit("-", 1)[-1]
                 snapshot["backend_revision"] = self.code_revision
                 statuses = dict(mcp["recording_status"])
@@ -435,7 +464,7 @@ class Dashboard:
             self.activity.wake()
             self.cache_activity()
             self.max_files = value.get("max_files", self.max_files)
-            restart_diagnostics = any(observations.get(key) and not self.observations[key] for key in ("codex", "errors", "logs", "sqlite"))
+            restart_diagnostics = any(observations.get(key) and not self.observations[key] for key in ("codex", "errors", "logs", "sqlite", "model_api"))
             self.observations.update(observations)
             if restart_diagnostics:
                 self.diagnostics.files.clear()
@@ -444,11 +473,14 @@ class Dashboard:
                 self.diagnostics.events.clear()
                 self.diagnostics.logs.clear()
                 self.diagnostics.sql_events.clear()
+                self.diagnostics.api_events.clear()
             self.monitor.log_enabled = self.observations["logs"]
             if observations.get("logs") is False:
                 self.diagnostics.logs.clear()
             if observations.get("sqlite") is False:
                 self.diagnostics.sql_events.clear()
+            if observations.get("model_api") is False:
+                self.diagnostics.api_events.clear()
             source_changes = value.get("mcp_sources", {})
             next_sources = dict(source_changes) if replace else self.mcp_sources | source_changes
             reenable = any(next_sources.get(name, True) and enabled is False for name, enabled in self.mcp_sources.items())
@@ -626,7 +658,11 @@ class Dashboard:
 
     def cache_activity(self):
         with self.lock:
-            self.activity_cache = self.activity.snapshot(self.idle_minutes, self.interval)
+            value = self.activity.snapshot(self.idle_minutes, self.interval)
+            changed = self.activity_cache.get('paused') != value.get('paused')
+            self.activity_cache = value
+        if changed:
+            self.notify_update()
 
     def resume_refresh(self):
         with self.refresh_lock:
@@ -667,7 +703,7 @@ class Dashboard:
         logs = self.monitor.log_snapshot(False)
         result["logs"] = {"enabled": self.observations["logs"], "sources": self.diagnostics.log_sources(self.observations["codex"] and self.observations["logs"])+[logs], "retained": len(self.diagnostics.logs)+logs["retained"], "trimmed": self.diagnostics.log_trimmed}
         errors = result.setdefault("errors", {"events": [], "diagnostics": {}, "enabled": self.observations["errors"]})
-        program_errors = [{"timestamp": event["timestamp"], "category": "monitor", "source": "monitor", "severity": "error", "code": event.get("error_type") or "http_error", "http_status": event.get("http_status"), "reason": event["kind"]} for event in result["monitor"]["events"] if event["kind"] in ("refresh_failed", "http_response_error")]
+        program_errors = [{"timestamp": event["timestamp"], "category": "monitor", "source": "monitor", "severity": "error", "code": event.get("error_type") or "http_error", "http_status": event.get("http_status"), "reason": event["kind"]} for event in result["monitor"]["events"] if event["kind"] in ("refresh_failed", "http_response_error", "frontend_error")]
         history = self.error_history.snapshot() if self.observations["errors"] else []
         retained_errors = result.pop("_retained_error_events", errors["events"])
         merged = {error_identity(event):event for event in history+retained_errors+program_errors}
@@ -726,8 +762,8 @@ class Dashboard:
              'byte_limit': self.activity_history.BYTE_LIMIT, 'retention_days': self.activity_history.retention_days,
              'sql_records': len(self.activity_history.sql), 'web_records': len(self.activity_history.web), 'mcp_records': len(self.activity_history.mcp)})
         registry['activity_history']['mode'] = 'bounded_metadata_cache'
-        diagnostic_readers = self.diagnostics.log_sources(active and any(self.observations[key] for key in ("errors", "logs", "sqlite")))
-        add("diagnostics", "Codex diagnostics", ["errors", "logs", "sqlite"], "recent_metadata_and_24h_error_backfill",
+        diagnostic_readers = self.diagnostics.log_sources(active and any(self.observations[key] for key in ("errors", "logs", "sqlite", "model_api")))
+        add("diagnostics", "Codex diagnostics", ["errors", "logs", "sqlite", "model-api"], "recent_metadata_and_24h_error_backfill",
             [str(path) for path in self.diagnostics.files]+([str(self.diagnostics.sql_path)] if self.diagnostics.sql_path else []),
             "disabled" if not active or not any(self.observations[key] for key in ("errors", "logs", "sqlite")) else None,
             ["timestamp", "severity", "module", "code", "thread_id", "call_id", "request_id", "trace_id", "sql"],
@@ -749,6 +785,8 @@ class Dashboard:
             [str(self.monitor.journal), str(self.error_history.path)], monitor.get("health"),
             sorted(self.monitor.runtime), {"history_limit": monitor.get("history_limit"), "event_limit": monitor.get("event_limit"), "retained_samples": len(monitor.get("history", [])), "retained_events": len(monitor.get("events", [])), "byte_limit": self.monitor.JOURNAL_LIMIT*2, "error_history_limit": self.error_history.LIMIT, "error_history_byte_limit": self.error_history.BYTE_LIMIT})
         registry["monitor"]["mode"] = "bounded_metadata_cache"
+        for key in ('session','monitor'):
+            registry[key]['checked_at'] = snapshot.get('updated_at')
         return registry
 
 
@@ -786,7 +824,7 @@ def handler(dashboard, port):
             self.send_response(code)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(content)))
-            if code >= 400:
+            if code >= 400 and (getattr(self, "command", None) != "GET" or self.headers.get("Content-Length") is not None or self.headers.get("Transfer-Encoding") is not None):
                 self.close_connection = True
                 self.send_header("Connection", "close")
             self.send_header("Vary", "Accept-Encoding")
@@ -869,18 +907,49 @@ def handler(dashboard, port):
                 self.get_local(url)
 
         def get_local(self, url):
+            if url.path == "/api/events":
+                if url.query or not dashboard.event_clients.acquire(blocking=False):
+                    self.reply(400 if url.query else 503, b"Event stream unavailable")
+                    return
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Connection", "close")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.end_headers()
+                    self.close_connection = True
+                    self.wfile.write(b"retry: 3000\n\n")
+                    self.wfile.flush()
+                    previous = -1
+                    while not dashboard.stop.is_set():
+                        with dashboard.update_condition:
+                            dashboard.update_condition.wait_for(lambda: dashboard.stop.is_set() or dashboard.update_version != previous, timeout=15)
+                            current = dashboard.update_version
+                        if dashboard.stop.is_set():
+                            break
+                        event = f"id: {current}\nevent: snapshot\ndata: {{\"version\":{current}}}\n\n" if current != previous else ": heartbeat\n\n"
+                        self.wfile.write(event.encode("ascii"))
+                        self.wfile.flush()
+                        previous = current
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
+                    self.close_connection = True
+                finally:
+                    dashboard.event_clients.release()
+                return
             if url.path in ('/api/codex/context','/api/codex/agent-message'):
                 query = parse_qs(url.query,keep_blank_values=True)
-                allowed = {'thread_id','call_id','index'} if url.path.endswith('agent-message') else {'thread_id','call_id'}
-                if len(url.query)>256 or set(query)-allowed or 'thread_id' not in query or any(len(values)!=1 for values in query.values()) or not re.fullmatch(r'[a-fA-F0-9-]{36}',query['thread_id'][0]) or 'call_id' in query and not re.fullmatch(r'[A-Za-z0-9_.:-]{1,160}',query['call_id'][0]) or 'index' in query and not re.fullmatch(r'\d{1,2}',query['index'][0]):
+                allowed = {'thread_id','call_id','index','mask'} if url.path.endswith('agent-message') else {'thread_id','call_id','mask'}
+                if len(url.query)>256 or set(query)-allowed or 'thread_id' not in query or any(len(values)!=1 for values in query.values()) or query.get('mask',['1'])[0] not in ('0','1') or not re.fullmatch(r'[a-fA-F0-9-]{36}',query['thread_id'][0]) or 'call_id' in query and not re.fullmatch(r'[A-Za-z0-9_.:-]{1,160}',query['call_id'][0]) or 'index' in query and not re.fullmatch(r'\d{1,2}',query['index'][0]):
                     self.reply(400,b'Invalid context query')
                     return
                 result = None
                 if dashboard.codex and dashboard.observations['codex']:
-                    if url.path.endswith('agent-message') and 'call_id' in query:
-                        result = dashboard.codex.agent_message_detail(query['thread_id'][0],query['call_id'][0],int(query.get('index',['0'])[0]))
-                    elif url.path.endswith('context'):
-                        result = dashboard.codex.context_detail(query['thread_id'][0],query.get('call_id',[None])[0])
+                    with mask_payloads(query.get('mask',['1' if payload_masking.get() else '0'])[0] == '1'):
+                        if url.path.endswith('agent-message') and 'call_id' in query:
+                            result = dashboard.codex.agent_message_detail(query['thread_id'][0],query['call_id'][0],int(query.get('index',['0'])[0]))
+                        elif url.path.endswith('context'):
+                            result = dashboard.codex.context_detail(query['thread_id'][0],query.get('call_id',[None])[0])
                 self.reply(200 if result is not None else 409,json.dumps(result,ensure_ascii=False,allow_nan=False).encode('utf-8'),'application/json; charset=utf-8')
                 return
             if url.path in ("/api/codex/tool", "/api/codex/mcp", "/api/codex/git", "/api/codex/check", "/api/codex/sql", "/api/codex/error", "/api/codex/jev") and "lazy" in parse_qs(url.query, keep_blank_values=True):
@@ -1055,7 +1124,7 @@ def handler(dashboard, port):
         def do_POST(self):
             if not self.local_request():
                 return
-            if self.path not in ("/api/jev/recording", "/api/settings", "/api/refresh", "/api/mcp/file"):
+            if self.path not in ("/api/jev/recording", "/api/settings", "/api/refresh", "/api/mcp/file", "/api/diagnostics"):
                 self.reply(405, b"Unsupported operation")
                 return
             if self.headers.get("Content-Type", "").split(";", 1)[0].strip() != "application/json" or self.headers.get("Transfer-Encoding"):
@@ -1063,7 +1132,7 @@ def handler(dashboard, port):
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
-                if not 0 < length <= (262144 if self.path in ("/api/settings", "/api/mcp/file") else 512):
+                if not 0 < length <= (262144 if self.path in ("/api/settings", "/api/mcp/file") else 2048 if self.path == "/api/diagnostics" else 512):
                     raise ValueError()
                 value = json.loads(self.rfile.read(length))
                 if self.path == "/api/jev/recording" and (not isinstance(value, dict) or set(value) != {"enabled"} or type(value["enabled"]) is not bool):
@@ -1074,6 +1143,14 @@ def handler(dashboard, port):
                     raise ValueError()
             except (ValueError, TypeError):
                 self.reply(400, b"Invalid recording setting")
+                return
+            if self.path == "/api/diagnostics":
+                try:
+                    recorded = dashboard.monitor.frontend_failed(value)
+                except ValueError:
+                    self.reply(400, b"Invalid diagnostic metadata")
+                    return
+                self.reply(202, json.dumps({"recorded": recorded}).encode("utf-8"), "application/json; charset=utf-8")
                 return
             try:
                 result = dashboard.save_mcp_document(value["server"], value["document"], value["text"], value["sha256"]) if self.path == "/api/mcp/file" else dashboard.resume_refresh() if self.path == "/api/refresh" else dashboard.set_jev_recording(value["enabled"]) if self.path == "/api/jev/recording" else dashboard.set_settings(value)
@@ -1139,6 +1216,7 @@ def serve(argv=None, watch_stdin=False):
         print("Port is already in use. Keep the existing monitor open or choose another --port.", file=sys.stderr)
         return 1
     dashboard = Dashboard(home, args.codex, args.max_files)
+    dashboard.preload()
     server.RequestHandlerClass = handler(dashboard, server.server_port)
     dashboard.thread.start()
     url = f"http://127.0.0.1:{server.server_port}/"
@@ -1150,6 +1228,7 @@ def serve(argv=None, watch_stdin=False):
             try:
                 command = sys.stdin.readline()
                 if not command or command.strip() == "restart":
+                    dashboard.monitor.event("restart_requested" if command else "launcher_closed")
                     server.shutdown()
             except OSError:
                 pass
@@ -1160,6 +1239,8 @@ def serve(argv=None, watch_stdin=False):
         pass
     finally:
         dashboard.stop.set()
+        dashboard.notify_update()
+        dashboard.monitor.event("stopped")
         server.server_close()
         dashboard.thread.join(timeout=12)
     return 0

@@ -1,4 +1,5 @@
 import json
+from io import BytesIO
 from pathlib import Path
 import tempfile
 import threading
@@ -92,5 +93,24 @@ class MonitorTests(unittest.TestCase):
             instance.headers=headers;instance.path=path
             instance.do_GET();self.assertEqual(instance.reply.call_args.args[0],code)
         instance.do_POST();self.assertEqual(instance.reply.call_args.args[0],405)
+
+    def test_frontend_diagnostics_accept_only_local_bounded_metadata(self):
+        dashboard=Dashboard(self.home)
+        instance=object.__new__(handler(dashboard,8787));instance.path='/api/diagnostics';instance.reply=MagicMock()
+        value={'phase':'render','error_type':'NotFoundError','frontend_revision':None,'frames':[{'file':'index.html','function':'renderMonitor','line':1,'column':0}]}
+        raw=json.dumps(value).encode()
+        headers={'Host':'127.0.0.1:8787','Origin':'http://127.0.0.1:8787','Content-Type':'application/json','Content-Length':str(len(raw))}
+        instance.headers=headers;instance.rfile=BytesIO(raw);instance.do_POST()
+        self.assertEqual(instance.reply.call_args.args[0],202)
+        self.assertTrue(json.loads(instance.reply.call_args.args[1])['recorded'])
+        instance.rfile=BytesIO(raw);instance.do_POST()
+        self.assertFalse(json.loads(instance.reply.call_args.args[1])['recorded'])
+        for changes in ({'Origin':'https://attacker.invalid'}, {'Sec-Fetch-Site':'cross-site'}, {'Host':'attacker.invalid'}, {'Content-Length':'2049'}):
+            instance.headers={**headers,**changes};instance.rfile=BytesIO(raw);instance.do_POST()
+            self.assertEqual(instance.reply.call_args.args[0],400 if 'Content-Length' in changes else 403)
+        raw=json.dumps({**value,'message':'PRIVATE_BODY'}).encode()
+        instance.headers={**headers,'Content-Length':str(len(raw))};instance.rfile=BytesIO(raw);instance.do_POST()
+        self.assertEqual(instance.reply.call_args.args[0],400)
+        self.assertNotIn('PRIVATE',json.dumps(dashboard.monitor.log_snapshot()))
 
 if __name__=='__main__': unittest.main()

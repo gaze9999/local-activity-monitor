@@ -25,6 +25,21 @@ spec.loader.exec_module(loader)
 
 
 class UIAssetTests(unittest.TestCase):
+    def test_development_selection_requires_matching_pin_and_absolute_source(self):
+        with tempfile.TemporaryDirectory() as folder:
+            project=Path(folder).resolve();(project/'.local').mkdir()
+            source=project/'shared';source.mkdir()
+            (project/'workbench-ui.json').write_text(json.dumps({'revision':'a'*40}))
+            path=project/'.local/workbench-ui-development.json'
+            value={'version':1,'source':str(source),'revision':'a'*40}
+            path.write_text(json.dumps(value))
+            self.assertEqual(ui_assets.development_source(project),source)
+            for replacement in ({'revision':'b'*40},{'source':'relative/shared'},{'version':True},{'unexpected':1}):
+                path.write_text(json.dumps(value|replacement))
+                with self.assertRaises(ValueError):ui_assets.development_source(project)
+            path.unlink()
+            self.assertIsNone(ui_assets.development_source(project))
+
     def tearDown(self):
         ui_assets.load_ui_assets.cache_clear()
 

@@ -28,7 +28,7 @@ async page => {
     for(const width of [1600,820,390]){
       await page.setViewportSize({width,height:1000});await page.waitForTimeout(150);
       layouts.push(await page.evaluate(()=>{
-        const view=document.querySelector('#view-monitor'),grids=[...view.querySelectorAll('.wb-column-layout')].filter(grid=>grid.getBoundingClientRect().width),cards=grids.flatMap(grid=>[...grid.querySelectorAll(':scope>.panel')].filter(card=>card.getBoundingClientRect().height&&card.getBoundingClientRect().width));let overlaps=0;
+        const view=document.querySelector('#view-monitor'),grids=[...view.querySelectorAll('.panels')].filter(grid=>grid.getBoundingClientRect().width),cards=grids.flatMap(grid=>[...grid.querySelectorAll(':scope>.panel')].filter(card=>card.getBoundingClientRect().height&&card.getBoundingClientRect().width));let overlaps=0;
         for(let i=0;i<cards.length;i++)for(let j=i+1;j<cards.length;j++){const a=cards[i].getBoundingClientRect(),b=cards[j].getBoundingClientRect();if(a.left<b.right-.5&&b.left<a.right-.5&&a.top<b.bottom-.5&&b.top<a.bottom-.5)overlaps++;}
         const footer=view.querySelector(':scope>.source-reference'),box=footer.getBoundingClientRect();return {width:innerWidth,grids:grids.length,cards:cards.length,overlaps,overflow:document.documentElement.scrollWidth>innerWidth,footerFull:Math.abs(box.width-view.clientWidth)<3,footerBottom:cards.every(card=>card.getBoundingClientRect().bottom<=box.top+1),borders:cards.every(card=>parseFloat(getComputedStyle(card).borderTopWidth)>0)};
       }));

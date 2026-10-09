@@ -81,7 +81,16 @@ if ($MyInvocation.InvocationName -ne '.') {
             & (Join-Path $root 'launch-cli.exe') @forwarded | Out-Host
             exit $LASTEXITCODE
         }
-        exit (Start-Monitor $root $forwarded $install)
+        $monitorExit = Start-Monitor $root $forwarded $install
+        if ($monitorExit -ne 0) {
+            Write-Host '監測入口未正常完成, 請查看上方錯誤與 README.md 的啟動排查方式'
+        }
+        Write-Host ('監測入口已結束, 退出碼 ' + $monitorExit)
+        Write-Host '若上方顯示 already_running, 請使用原本的監測視窗與網頁'
+        if (Test-Path -LiteralPath (Join-Path $root '.local\startup-status.json') -PathType Leaf) {
+            Write-Host '啟動階段與退出結果記錄在 .local\startup-status.json'
+        }
+        exit $monitorExit
     } catch {
         Write-Host ('Setup or startup failed: ' + $_.Exception.Message)
         exit 1

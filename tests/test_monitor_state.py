@@ -10,6 +10,32 @@ from local_activity_monitor.server import Dashboard, configure
 
 
 class MonitorStateTests(unittest.TestCase):
+    def test_frontend_errors_are_bounded_deduplicated_and_persist_code_locations(self):
+        report = {'phase':'render', 'error_type':'NotFoundError', 'frontend_revision':'123456abcdef', 'frames':[{'file':'index.html','function':'renderMonitor','line':3736,'column':276}]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'monitor.jsonl'
+            state = MonitorState(path, defer_device=True)
+            self.assertTrue(state.frontend_failed(report))
+            self.assertFalse(state.frontend_failed(report))
+            for index in range(30):
+                state.frontend_failed({**report, 'frames':[{**report['frames'][0], 'line':index}]})
+            self.assertEqual(sum(e['kind']=='frontend_error' for e in state.logs),20)
+            restarted = MonitorState(path, defer_device=True)
+            error = next(e for e in restarted.log_snapshot()['entries'] if e['kind']=='frontend_error')
+            self.assertEqual(error['frames'], report['frames'])
+            self.assertEqual(error['severity'],'error')
+            self.assertEqual(error['frontend_revision'], report['frontend_revision'])
+        for invalid in ({**report,'message':'PRIVATE_MESSAGE'}, {**report,'frames':[{'file':'PRIVATE_URL','function':'render','line':1,'column':0}]}, {**report,'error_type':'secret=PRIVATE_KEY'}, {**report,'frames':report['frames']*9}, {**report,'frontend_revision':'PRIVATE_TEXT'}):
+            with self.assertRaises(ValueError):
+                state.frontend_failed(invalid)
+
+    def test_heartbeat_is_periodic_without_logging_every_refresh(self):
+        state = MonitorState(defer_device=True)
+        state.last_heartbeat = 0
+        state.refreshed({})
+        state.refreshed({})
+        self.assertEqual(sum(e['kind']=='heartbeat' for e in state.logs),1)
+
     def test_history_tracks_last_response_sizes_and_preserves_unknown_metrics(self):
         state=MonitorState()
         state.snapshot_bytes=1234
@@ -42,7 +68,7 @@ class MonitorStateTests(unittest.TestCase):
             cpus.assert_called_once_with()
         self.assertEqual(set(state.runtime), {'python', 'platform', 'architecture', 'pid', 'version',
                                              'system_release', 'system_version', 'python_implementation',
-                                             'process_bits', 'logical_cpus', 'processor', 'gpus'})
+                                         'process_bits', 'logical_cpus', 'processor', 'gpus', 'fonts'})
 
     def test_memory_capacity_and_available_memory_use_bounded_refresh(self):
         values = {'physical_memory_bytes': 16*1024**3, 'available_memory_bytes': 5*1024**3}

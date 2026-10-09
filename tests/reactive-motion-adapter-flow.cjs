@@ -1,4 +1,5 @@
 async page=>{
+  await page.setViewportSize({width:1366,height:900});
   await page.reload();await page.waitForFunction(()=>data?.updated_at&&!busy);
   const result=await page.evaluate(async()=>{
     if(!data.codex.threads.every(thread=>thread.model?.startsWith('demo-model-')))throw Error('Synthetic fixture required');
@@ -25,5 +26,5 @@ async page=>{
     }finally{
       for(const root of [grid,body,head,a,b,c])WorkbenchUI.cancelChildMotion(root);grid.remove();wrap.remove();tableViews.delete(key);delete tableStates[key];delete preferences.summaries[grid.id];summaryLibrary.delete(grid.id);appearance.reduceMotion=savedMotion;WorkbenchUI.setMotion(document.documentElement,!savedMotion);
     }
-  });console.log(JSON.stringify(result));
+  });return result;
 }

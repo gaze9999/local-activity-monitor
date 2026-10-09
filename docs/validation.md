@@ -52,11 +52,20 @@ python tests/serve_loading_fixture.py
 | `parser-summary-motion-flow.cjs` | 結構解析、摘要、減少動畫及設定匯入 |
 | `console-sql-flow.cjs` | console 呈現、SQL 外層工具回覆、複製與捲軸 |
 | `context-agent-flow.cjs` | 代理訊息、公開 Context 摘要、遮蔽切換及舊設定相容性 |
+| `context-layout-flow.cjs` | 父子 Context、列點選、欄位重排後的入口、展開中斷、長程式碼與三語兩行狀態列 |
+| `tab-consistency-flow.cjs` | 八個主頁及各子頁的卡片、表格、欄位、設定相容與四種寬度 |
+| `model-api-flow.cjs` | 模型 API 事件分類、明細、缺值與來源 |
 | `reactive-motion-adapter-flow.cjs` | 卡片、資料列與欄位插入 / 移出, 保留節點與目標計數 |
 | `history-flow.cjs` | SQLite 歷史總數、游標分頁、錯誤後重試 |
 | `history-chart-flow.cjs` | 完整保存範圍統計與總覽副本獨立範圍 |
 | `reconnect-flow.cjs` | 中斷後自動重連與保留畫面 |
 | `restart-reset-flow.cjs` | 後端更新及還原預設不重新載入整頁 |
+| `event-stream-flow.cjs` | 本機 SSE、重複通知、後端重啟與重連、定時查詢備援及連線關閉 |
+| `followup-layout-flow.cjs` | 空圖表恢復、精簡欄位、Context 順序、摘要、列明細、空資料提示及首尾頁 |
+| `startup-preload-flow.cjs` | 首輪活動整理前的對話目錄與完整結果切換, 使用隔離回應 |
+| `viewport-detail-flow.cjs` | 截圖比例、不同字級與語系、兩行狀態、摘要與子頁籤分區、My dots 明細 |
+
+`test_startup_preload.py` 核對 state 目錄查詢的 2,000 筆上限、session 讀取量為 0、未選取 prompt / credential 欄位、停用後不讀取及完整更新時間尚未產生. 瀏覽器模擬回應驗證呈現, 原生 fixture 可加 `--startup-delay 35`, 核對 HTTP 在整理前提供目錄, 整理後提供完整快照
 
 ## 套件建置
 

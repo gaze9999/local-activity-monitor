@@ -9,7 +9,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from prepare_ui import PreparationError, ensure_ui, latest_pin, read_pin, remove_temporary, unsafe_path, verify_offline
+from prepare_ui import PreparationError, ensure_ui, latest_pin, offline_pin, read_pin, remove_temporary, unsafe_path, verify_offline
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from local_activity_monitor.frontend_assets import FILES, FrontendAssets
 
@@ -21,8 +21,7 @@ def build(root, source=None, *, latest=False, revision=None):
     library, destination = root / "src/local_activity_monitor/_workbench", root / "src/local_activity_monitor/_web"
     if revision is not None and (latest or not re.fullmatch(r"[a-f0-9]{40}", revision)):
         raise PreparationError("明確 revision 需為完整 SHA, 並與 --latest 分開使用")
-    if library.exists() or library.is_symlink():
-        verify_offline(library, pin)
+    asset_pin = offline_pin(library, pin) if library.exists() or library.is_symlink() else None
     if destination.exists() or destination.is_symlink():
         if unsafe_path(destination):
             raise PreparationError("LAM 頁面建置位置不安全")
@@ -51,7 +50,7 @@ def build(root, source=None, *, latest=False, revision=None):
         inputs[name].decode("utf-8")
     fingerprint = hashlib.sha256(json.dumps({"format": 1, "revision": selected["revision"],
                             "sources": {name: hashlib.sha256(content).hexdigest() for name, content in inputs.items()}}, sort_keys=True).encode()).hexdigest()
-    if existing and existing.manifest["inputs"] == fingerprint and library.is_dir():
+    if existing and existing.manifest["inputs"] == fingerprint and asset_pin == selected:
         return "LAM 頁面已是最新建置, Workbench UI " + selected["revision"][:12]
     staging = root / ".local"
     if unsafe_path(staging) or staging.resolve() != root / ".local":
@@ -63,7 +62,7 @@ def build(root, source=None, *, latest=False, revision=None):
     installed = []
     try:
         candidate = library
-        if selected != pin or not library.exists():
+        if selected != asset_pin:
             candidate = temporary / "_workbench"
             try:
                 ensure_ui(root, source, pin=selected, destination=candidate)
@@ -83,7 +82,7 @@ def build(root, source=None, *, latest=False, revision=None):
         if read_pin(root) != pin:
             raise PreparationError("建置期間 WBUI 版本已變更, 保留既有內容")
         if library.exists():
-            verify_offline(library, pin)
+            verify_offline(library, asset_pin)
         if destination.exists():
             FrontendAssets(destination)
         # The server composes the validated JS/CSS into one CSP-hashed response.

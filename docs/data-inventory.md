@@ -8,6 +8,7 @@
 
 - `null` 或未提供欄位表示來源沒有可用數值, 介面使用 `--`. 已確認的 `0` 與 `false` 保留原值
 - Token 使用各對話最後讀取到的累計值, 不加總歷次快照. Cached input 已包含在 Input, 不再次加入 Total
+- 平均 Token / 秒使用對話最新累計 Token 除以已記錄工作秒數, 工作時間包含工具執行與等待. 缺少 Token 或正數工作時間時顯示 `--`
 - 額度使用來源最後回報的 `updated_at`, 視窗長度, 使用比例與 `resets_at`. 剩餘比例為 `100 - used_percent`, 到達重設時間後等待新的來源回報, 不自行推估已重設
 - 排行預設 5 項與表格每頁 10 筆是顯示設定. 分頁不增加來源讀取量, 也不表示只收集這些筆數
 - 來源讀取預算, 記憶體保存上限, API 回傳上限與來源本身的歷史總量分開理解. 統計只使用已載入且符合範圍的資料
@@ -18,7 +19,7 @@
 | --- | --- | --- | --- |
 | Codex session JSONL | Thread ID, 時間, Model, Reasoning, 執行設定, lifecycle, 最新 Token, 工具呼叫與回傳, literal 操作 metadata | 掃描全部可取得的 session 檔案, 由檔頭分批讀取, 後續依已讀取位置做差異讀取. 每份來源每輪最多 1 MiB, 一般 refresh 共用 8 MiB 讀取預算, 包含差異讀取及 lifecycle / 錯誤歷史的分批回補. 不以追蹤檔案數量篩選來源, 記憶體保留工具呼叫最多 50,000 筆, 總暫存上限 8 MiB | 不讀取完整對話內容作為監測資料. 檔案輪替, 上限及尚未回補的歷史可能造成缺漏. 檔案清單最多列出 20 個實際位置, 不是追蹤檔案上限 |
 | Codex / ChatGPT catalog | 對話名稱, 建立及更新時間, 類型, 主機位置, 專案, Model, Reasoning, catalog 狀態, 排程關聯 | `local_thread_catalog` 最近 2,000 列, automation 關聯只查已選 Thread IDs, 分批彙整為每個 Thread 一列並分開報告查詢欄位與筆數, `state_*.sqlite` 以已選 Thread IDs 分批查詢, 每批最多 400 個 ID, 使用支援的最新 state DB | SQLite 使用唯讀連線, 只選需要的欄位. 缺少 schema 或欄位時無法補齊. 不讀取私人 prompt / response 欄位 |
-| Session index 與 app state | index 補充對話名稱, app state 補充專案名稱與 membership, Dot Thread ID, artifact 類型與產生時間 | index 讀取最後 1 MiB. app state 檔案上限 16 MiB, Dot outputs 最多檢查 2,000 個, 回傳最近最多 500 個去重事件 | 大型或格式不支援的 app state 會回報健康狀態. 不回傳其他 app state 或私人路徑 |
+| Session index 與 app state | index 補充對話名稱, app state 補充專案與 membership、Dot 產出、遠端對話與近期活動電腦 | index 讀取最後 1 MiB. app state 檔案上限 16 MiB, Dot outputs 最多檢查 2,000 個, 回傳最近最多 500 個去重事件. 遠端摘要每個來源最多 1,000 筆, 活動快取最多 200 組, 每組最多 1,000 筆, 電腦最多 100 個 | 排程定義與目前連線狀態需另有讀取入口. 只回傳所選 metadata |
 | Lifecycle / Skills checkpoint | 已確認 running / completed, lifecycle 時間與 offset, Thread / Call / Skill 識別碼與讀取時間 | 記憶體工作集合最多 1,000 個 lifecycle 項目、500 筆 Skills 與合計 512 KiB, SQLite 持久化不依筆數刪除. Skills 活動預設保存 90 天, 設定 0 時不自動刪除, 最新 lifecycle checkpoint 屬於來源恢復狀態, 不套用活動期限 | 只保存已確認事件. Skills 統計檔案讀取事件. 來源資料缺漏與快取不可用會限制可恢復資料 |
 | 帳戶用量與額度快照 | limit ID, plan type, primary / secondary 視窗, used / remaining percent, reset time, credits balance / has_credits / unlimited | 從 session 的 `token_count.rate_limits` 選取最近有效快照. 選配官方帳戶查詢使用已登入 Codex CLI, 至少快取 60 秒 | 欄位及時間依最近來源回報, 未提供時保持缺值 |
 | MCP 設定及工具紀錄 | 動態來源, 啟用狀態, 用途, 分類與 tag, 工具, 操作, Thread / Call ID, 時間, 回傳狀態, 錯誤, 耗時, 識別碼與有單位的指標 | 未知來源可從設定或已觀察事件加入. 摘要以保留事件計算, API 事件列表最多 1,000 筆. 每次結果投影有欄位數與型別限制 | exec 辨識僅表示程式碼中出現呼叫位置. 混合工具回傳不當成個別 MCP 的結果. 不保留任意 payload, credentials 或無來源定義的數字 |
@@ -30,6 +31,7 @@
 | 瀏覽器執行環境 | 目前頁面的瀏覽器名稱與回報版本、語言與時區 | 使用目前瀏覽器提供的 `navigator` 與 Intl 資訊, 只在前端顯示 | 未回報的資訊維持缺值, 不列舉其他已安裝瀏覽器, 不呼叫高熵 client hints, 不送至後端或保存 |
 | SQL / SQLite metadata 與按需內容 | SQL 操作類型, statement 類別, engine, 可確認的 DB 位置, 外層工具時間, 個別 SQL 時間, rows_affected / rows_returned, 來源與紀錄識別碼 | session literal 辨識與診斷 SQL 合併後回傳最多 500 筆. 點開已觀察的紀錄才讀取內容. session 內容限制在已追蹤檔案的設定檔尾範圍, 完整取得的 SQL 經遮蔽後分頁, 每頁 32,768 字元, 以 revision 核對後續內容 | 不執行 SQL, 不讀取查詢結果. 舊紀錄仍有 metadata, 但移出檔尾或來源變更後可能無法取得內容. 個別 SQL 耗時及列數僅使用診斷來源提供的值, 不以外層工具時間替代 |
 | Desktop / Core 診斷與 Log | severity, module, code, Thread / Call / Request / Trace ID, 檔案及 record ID, 錯誤摘要, 關聯 SQL | Desktop 最多追蹤 8 個檔案, 初次各檔取最近 256 KiB, 差異與歷史分別使用 1 MiB 預算. Core 每次差異及歷史查詢各最多 2,000 列. 錯誤歷史回補範圍 24 小時. 診斷錯誤與 Log 各保留最多 1,000 筆, SQL 診斷最多 500 筆 | 每次查詢上限不是 DB 總量上限. 不支援格式, 過長行, 截斷及尚待回補會影響範圍. Log 等級保留來源英文值 |
+| Codex 模型 API 診斷 | 呼叫 / 連線 / 重試分類, Model / Provider, 傳輸方式, API 路徑, HTTP status, Request / Trace / Turn ID, 來源耗時與單次 Token | 共用 Desktop / Core 診斷讀取預算, 只投影已辨識模組的固定欄位, 每筆最多讀取 8,192 字元, 記憶體保留最近 1,000 筆去重事件, 重啟後分批重讀來源最近 24 小時 | 不修改來源紀錄設定, 不保存請求 / 回應本文. WebSocket 送出成功不代表回應完成, 連線與重試不計入呼叫數, 缺少單次 Token 不從累計用量推估 |
 | 程式 runtime 與保存資訊 | 版本, 系統, Python, PID, 開啟 / 更新 / 運行時間, refresh / CPU 時間, 讀取量, HTTP 次數及錯誤, 回應及壓縮大小, 保存上限與來源健康狀態 | 效能樣本最多 360 筆, 狀態事件最多 200 筆, 程式 Log 最多 1,000 筆. journal 每份 64 KiB 並保留一份輪替檔. 錯誤 metadata 記憶體工作集合最多 1,000 筆及 512 KiB, SQLite 歷史預設保存 90 天, 0 表示不自動刪除, 不依筆數刪除 | 效能樣本與狀態事件存在記憶體, 重啟後重新累積. journal 與錯誤 checkpoint 可跨重啟保存, 不包含完整對話或工具 payload |
 
 子代理程式與專案頁只呈現已載入 metadata, 父子關聯與專案對話數依已載入範圍計算. 最新狀態, 累計 Token 與額度不套用操作事件時間篩選, 時間未知的事件只在全部範圍顯示
@@ -77,9 +79,11 @@
 - [API, 合併資料與動態來源範圍](../src/local_activity_monitor/server.py)
 ## 裝置與活動新增欄位
 
+字型選單使用目前作業系統提供的字型家族名稱, Windows 透過 GDI, macOS 透過 CoreText, Linux 使用已存在的 `fc-list`. 回傳最多 500 個去重名稱, 不回傳字型檔案位置. 字型清單與裝置資訊一起讀取, 不在每輪活動更新重新列舉
+
 - 裝置容量: 處理器名稱, 可用邏輯核心, 實體與可用記憶體, GPU 型號, 專用記憶體, 系統共享記憶體上限, 驅動版本. 使用 Windows 系統 API, Linux `/proc` / DRM 與可用的廠商工具, macOS 系統 metadata, 依平台與硬體能取得的欄位顯示
 - 裝置使用量: CPU 以兩次系統計數器差值計算, Windows 使用 `GetSystemTimes`, Linux 使用 `/proc/stat`, macOS 使用 Mach CPU ticks. Windows 超過 64 個邏輯處理器時標示目前處理器群組範圍. 已使用記憶體由實體容量減去可用量, 每次完整更新最多每 5 秒重新取樣
-- 檔案: 來源 literal 參數的讀寫範圍, 單一獨立檔案工具回傳的 `bytes_read` / `bytes_written`, 送出文字的 UTF-8 大小. 目前檔案大小與更新時間由使用者點擊時取得, 文件內容不加入活動 snapshot
+- 檔案: 來源 literal 參數的讀寫範圍, 單一獨立檔案工具回傳的 `bytes_read` / `bytes_written`, 送出文字的 UTF-8 大小. 進入檔案頁時自動取得目前檔案大小與修改時間, 顯示期間每分鐘更新, 也可手動重新檢查. 每次最多檢查 100 個已觀察檔案, 文件內容不加入活動 snapshot
 - 網路: 網址及網站計次, 對話數, 不同頁面數, 首次與最近參考時間, 操作類型與來源. 計次基於已載入的工具事件, 不是 HTTP 流量計數
 - MCP 活動: 選定摘要與數值指標保存至 SQLite, 預設保留 90 天, 可設定 0 - 3650 天, 0 表示不自動刪除, 記憶體工作集合仍保留容量限制, 配合來源開關及頁面時間範圍顯示. 可編輯文件內容不加入 snapshot 或活動快取
 

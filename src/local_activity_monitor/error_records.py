@@ -14,6 +14,7 @@ from .mcp_records import decoded_output
 from .operation_records import redact
 from .payload_detail import payload_masking
 from .sqlite_records import diagnostic_content, sql_content, sql_diagnostic
+from .api_records import api_diagnostic
 
 IDENTIFIER = re.compile(r"[a-zA-Z0-9_./:-]{1,160}\Z")
 UUID = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
@@ -131,6 +132,8 @@ class DiagnosticCollector:
         self.events = deque(maxlen=self.EVENT_LIMIT)
         self.logs = deque(maxlen=self.EVENT_LIMIT)
         self.sql_events = deque(maxlen=500)
+        self.api_events = deque(maxlen=1000)
+        self.capture_api = True
         self.capture_sql = True
         self.log_trimmed = 0
         self.capture_logs = True
@@ -156,6 +159,21 @@ class DiagnosticCollector:
             if historical:
                 self.events.remove(min(self.events, key=lambda item:item["timestamp"]))
         self.events.append(event)
+
+    def observe_api(self, module, body, context):
+        projected = api_diagnostic(module, body) if self.capture_api else None
+        if projected is None:
+            return
+        event = {key: context[key] for key in ("timestamp", "source", "module", "file", "record_id", "record_offset", "thread_id") if key in context}
+        event.update(projected, observation_id=diagnostic_id(context))
+        if any(item["observation_id"] == event["observation_id"] for item in self.api_events):
+            return
+        if len(self.api_events) == self.api_events.maxlen:
+            oldest = min(self.api_events, key=lambda item: item["timestamp"])
+            if event["timestamp"] < oldest["timestamp"]:
+                return
+            self.api_events.remove(oldest)
+        self.api_events.append(event)
 
     def desktop_line(self, line, file=None, historical=False, offset=None):
         stats = self.stats["desktop"]
@@ -188,6 +206,7 @@ class DiagnosticCollector:
         event = {"timestamp": when, "category": category, "code": fields.get("errorCode") or code, "reason": code, "error_type": fields.get("errorName"), "method": fields.get("method"), "source": "codex_desktop", "module": source, "thread_id": thread, "severity": "warning" if level in ("warn", "warning") else level}
         event.update(diagnostic_details(body), file=file, record_offset=offset, record_hash=hashlib.sha256(line.encode()).hexdigest())
         event["content_id"] = diagnostic_id(event)
+        self.observe_api(source, body, event)
         stats["parsed_lines"] += 1
         sql = sql_diagnostic(source, body) if self.capture_sql else None
         if sql:
@@ -374,9 +393,10 @@ class DiagnosticCollector:
                     self.sql_cursor, self.sql_history = None, None
                 thread_column = "thread_id" if "thread_id" in columns else "NULL"
                 sql_targets = " OR lower(target) LIKE '%sql%' OR lower(target) LIKE '%database%' OR lower(target) LIKE '%state_db%'" if self.capture_sql else ""
+                api_targets = " OR target LIKE 'codex_api::%' OR target='codex_otel.log_only' OR target='codex_core::responses_retry'" if self.capture_api else ""
                 candidates = [column for column in ('feedback_log_body', 'message') if column in columns]
                 body_source = "coalesce("+",".join("nullif("+column+",'')" for column in candidates)+")" if len(candidates)>1 else candidates[0] if candidates else "NULL"
-                body_column = "CASE WHEN upper(level) IN ('ERROR','FATAL','CRITICAL','WARN','WARNING')"+sql_targets+" THEN substr("+body_source+",1,8192) END"
+                body_column = "CASE WHEN upper(level) IN ('ERROR','FATAL','CRITICAL','WARN','WARNING')"+sql_targets+api_targets+" THEN substr("+body_source+",1,8192) END"
                 fields = f"id,ts,level,target,{thread_column},{body_column}"
                 initial = self.sql_cursor is None
                 rows = db.execute(f"SELECT {fields} FROM logs WHERE id>? ORDER BY id {'DESC' if initial else 'ASC'} LIMIT 2000", (self.sql_cursor or 0,)).fetchall()
@@ -408,6 +428,7 @@ class DiagnosticCollector:
                     event = {"timestamp": when, "category": category, "code": code, "reason": code, "source": "codex_core", "module": source, "thread_id": thread if isinstance(thread, str) and re.fullmatch(UUID, thread) else None, "severity": "warning" if level in ("warn", "warning") else level, "file": path.name, "record_id": identity}
                     event.update(diagnostic_details(body))
                     event["content_id"] = diagnostic_id(event)
+                    self.observe_api(source, body, event)
                     stats["parsed_lines"] += 1
                     sql = sql_diagnostic(source, body) if self.capture_sql else None
                     if sql:

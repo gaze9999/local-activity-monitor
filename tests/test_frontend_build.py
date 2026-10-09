@@ -32,7 +32,7 @@ class FrontendBuildTests(unittest.TestCase):
         (self.root / "workbench-ui.json").write_text(json.dumps(self.pin))
         shutil.copytree(ROOT / "frontend", self.root / "frontend")
         self.library = self.root / "src/local_activity_monitor/_workbench"
-        shutil.copytree(load_ui_assets().root, self.library, ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(ROOT / 'src/local_activity_monitor/_workbench', self.library, ignore=shutil.ignore_patterns("__pycache__"))
         self.app = self.root / "src/local_activity_monitor/_web"
 
     def test_cli_status_is_utf8_with_legacy_output_encoding(self):
@@ -67,6 +67,41 @@ class FrontendBuildTests(unittest.TestCase):
         with patch.object(builder, "latest_pin", side_effect=builder.PreparationError("offline")):
             builder.build(self.root, latest=True)
         self.assertEqual((self.app / "manifest.json").read_bytes(), before)
+
+    def test_changed_pin_rebuilds_verified_old_bundle(self):
+        builder.build(self.root)
+        updated = {**self.pin, "revision": "a" * 40}
+        (self.root / "workbench-ui.json").write_text(json.dumps(updated))
+        def prepare(root, source, *, pin, destination):
+            shutil.copytree(self.library, destination)
+            manifest = json.loads((destination / "manifest.json").read_text())
+            manifest.update(pin)
+            (destination / "manifest.json").write_text(json.dumps(manifest))
+        with patch.object(builder, "latest_pin", return_value=updated) as remote, patch.object(builder, "ensure_ui", side_effect=prepare):
+            builder.build(self.root, latest=True)
+            remote.assert_called_once()
+        builder.verify_offline(self.library, updated)
+        self.assertEqual(FrontendAssets(self.app).manifest["workbench_revision"], updated["revision"])
+
+    def test_changed_pin_preserves_old_bundle_when_fetch_fails(self):
+        builder.build(self.root)
+        before = (self.app / "manifest.json").read_bytes()
+        (self.root / "workbench-ui.json").write_text(json.dumps({**self.pin, "revision": "a" * 40}))
+        with patch.object(builder, "ensure_ui", side_effect=builder.PreparationError("offline")):
+            with self.assertRaises(builder.PreparationError):
+                builder.build(self.root)
+        builder.verify_offline(self.library, self.pin)
+        self.assertEqual((self.app / "manifest.json").read_bytes(), before)
+
+    def test_changed_pin_rejects_corrupt_old_bundle_before_network(self):
+        (self.root / "workbench-ui.json").write_text(json.dumps({**self.pin, "revision": "a" * 40}))
+        (self.library / "workbench-ui.js").write_text("corrupt")
+        with patch.object(builder, "latest_pin") as remote, patch.object(builder, "ensure_ui") as prepare:
+            with self.assertRaises(builder.PreparationError):
+                builder.build(self.root, latest=True)
+            remote.assert_not_called()
+            prepare.assert_not_called()
+        self.assertEqual((self.library / "workbench-ui.js").read_text(), "corrupt")
 
     def test_unknown_files_and_corruption_are_preserved_before_network(self):
         builder.build(self.root)

@@ -2,13 +2,18 @@
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
+import argparse
 import json
 from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+import threading
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--startup-delay', type=float, default=0)
+    options = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="lam-loading-fixture-") as folder:
         root = Path(__file__).resolve().parents[1]
         base = Path(folder)
@@ -41,6 +46,14 @@ def main():
             def add(kind, payload, when):
                 records.append({'type': kind, 'timestamp': stamp(when), 'payload': payload})
             add('session_meta', {'id': identity, 'originator': 'Codex Desktop', 'cwd': str(project), 'cli_version': '0.160.0'}, began)
+            if index == 1:
+                records[0]['payload']['source'] = {'subagent':{'thread_spawn':{'parent_thread_id':'00000000-0000-4000-8000-000000000001','agent_path':'/root/worker'}}}
+            add('response_item',{'type':'message','role':'user','content':[{'type':'input_text','text':'PARENT_CONTEXT_ONLY' if index == 0 else 'CHILD_CONTEXT_ONLY' if index == 1 else 'DEMO_CONTEXT'}]},began)
+            if index == 0:
+                add('response_item',{'type':'function_call','name':'collaboration.send_message','call_id':'demo_agent_parent','arguments':json.dumps({'target':'/root/worker','message':'PARENT_SENT_ONLY'})},began+timedelta(seconds=1))
+                add('response_item',{'type':'function_call_output','call_id':'demo_agent_parent','output':'Parent message accepted'},began+timedelta(seconds=2))
+            elif index == 1:
+                add('response_item',{'type':'message','role':'user','content':[{'type':'input_text','text':'Message Type: MESSAGE\nTask name: /root/worker\nSender: /root\nPayload:\nCHILD_RECEIVED_ONLY'}]},began+timedelta(seconds=1))
             add('turn_context', {'model': ['demo-model-a', 'demo-model-b', 'demo-model-c'][index % 3], 'reasoning_effort': ['high', 'medium', 'low'][index % 3]}, began)
             add('event_msg', {'type': 'task_started'}, began)
             for step in range(8):
@@ -77,6 +90,13 @@ def main():
         with closing(sqlite3.connect(home / 'logs_10.sqlite')) as db, db:
             db.execute('CREATE TABLE logs(id INTEGER PRIMARY KEY,ts REAL,level TEXT,target TEXT,feedback_log_body TEXT)')
             db.executemany('INSERT INTO logs VALUES(?,?,?,?,?)', [(index+1, (anchor-timedelta(minutes=index*12)).timestamp(), ['INFO', 'WARN', 'ERROR'][index%3], ['demo_docs', 'demo_search', 'demo_checks'][index%3], 'Synthetic demo log only') for index in range(12)])
+            db.executemany('INSERT INTO logs VALUES(?,?,?,?,?)', [
+                (20, anchor.timestamp(), 'INFO', 'codex_otel.log_only', 'event.name="codex.api_request" endpoint="/responses" model=demo-model-a provider=OpenAI status_code=200 duration_ms=0 input_tokens=0 output_tokens=8 request_id=req_demo thread_id=00000000-0000-4000-8000-000000000001'),
+                (21, anchor.timestamp(), 'INFO', 'codex_otel.log_only', 'event.name="codex.websocket.request" model=demo-model-b success="true" duration_ms=3'),
+                (22, anchor.timestamp(), 'INFO', 'codex_api::endpoint::responses_websocket', 'successfully connected to websocket: ws://synthetic.invalid model=demo-model-a provider=OpenAI transport="responses_websocket"'),
+                (23, anchor.timestamp(), 'WARN', 'codex_core::responses_retry', 'stream disconnected retries=1 model=demo-model-b'),
+                (24, anchor.timestamp(), 'ERROR', 'codex_otel.log_only', 'event.name="codex.api_request" endpoint="/responses" model=demo-model-c status_code=429 request_id=req_demo_failed errorMessage="PRIVATE"'),
+            ])
 
         sys.path.insert(0, str(root / 'src'))
         from local_activity_monitor.server import Dashboard, handler
@@ -86,27 +106,43 @@ def main():
         dashboard.monitor.load_device = lambda: None
         dashboard.account.snapshot = lambda enabled=False: {'health': 'disabled', 'limits': {}, 'account_usage': None, 'methods': {name: {'health': 'disabled'} for name in ('account/read', 'account/rateLimits/read', 'account/usage/read')}}
         dashboard.started_at = stamp(anchor-timedelta(hours=2))
-        dashboard.refresh()
-        for snapshot in dashboard.cache.values():
-            snapshot['updated_at'] = stamp(anchor)
+        def collect():
+            dashboard.refresh()
+            for snapshot in dashboard.cache.values():
+                snapshot['updated_at'] = stamp(anchor)
+        if options.startup_delay:
+            dashboard.preload()
+        else:
+            collect()
         original_snapshot = dashboard.snapshot
         def demo_snapshot(window='all'):
             value = original_snapshot(window)
-            value['codex']['usage']['credits'] = {'balance': 0, 'has_credits': False, 'unlimited': False}
-            value['monitor'] = {'version': __version__, 'uptime_seconds': 7200, 'health': 'ok', 'requests': 24, 'errors': 0, 'collection': {'phase': 'idle'}, 'device_ready': False, 'history': [], 'events': []}
+            if value['codex'].get('usage'):
+                value['codex']['usage']['credits'] = {'balance': 0, 'has_credits': False, 'unlimited': False}
+            value['monitor'] = {'version': __version__, 'uptime_seconds': 7200, 'health': 'ok', 'requests': 24, 'errors': 0, 'collection': {'phase': 'idle'}, 'device_ready': True, 'gpus':[{'name':'Demo single GPU','dedicated_memory_bytes':8*1024**3,'shared_memory_bytes':16*1024**3,'driver_version':'demo'}], 'fonts':['Segoe UI','Microsoft JhengHei'], 'history': [], 'events': []}
             return value
         dashboard.snapshot = demo_snapshot
         server = ThreadingHTTPServer(('127.0.0.1', 0), handler(dashboard, 0))
         server.RequestHandlerClass = handler(dashboard, server.server_port)
         (base / 'service.json').write_text(json.dumps({'port': server.server_port, 'synthetic': True}), encoding='utf-8')
         print(json.dumps({'url': f'http://127.0.0.1:{server.server_port}/', 'synthetic': True, 'threads': len(threads)}), flush=True)
+        worker = None
+        if options.startup_delay:
+            def delayed_collect():
+                if not dashboard.stop.wait(options.startup_delay):
+                    collect()
+            worker = threading.Thread(target=delayed_collect, daemon=True)
+            worker.start()
         try:
             server.serve_forever()
         except KeyboardInterrupt:
             pass
         finally:
             dashboard.stop.set()
+            dashboard.notify_update()
             server.server_close()
+            if worker:
+                worker.join(timeout=5)
 
 
 if __name__ == "__main__":
