@@ -52,7 +52,7 @@ python tests/serve_loading_fixture.py
 | `parser-summary-motion-flow.cjs` | 結構解析、摘要、減少動畫及設定匯入 |
 | `console-sql-flow.cjs` | console 呈現、SQL 外層工具回覆、複製與捲軸 |
 | `context-agent-flow.cjs` | 代理訊息、公開 Context 摘要、遮蔽切換及舊設定相容性 |
-| `context-layout-flow.cjs` | 父子 Context、列點選、欄位重排後的入口、展開中斷、長程式碼與三語兩行狀態列 |
+| `context-layout-flow.cjs` | 父子 Context、對話明細 Context 延後讀取與快取、列點選、欄位重排後的入口、展開中斷、長程式碼、窄螢幕明細與三語兩行狀態列 |
 | `tab-consistency-flow.cjs` | 八個主頁及各子頁的卡片、表格、欄位、設定相容與四種寬度 |
 | `model-api-flow.cjs` | 模型 API 事件分類、明細、缺值與來源 |
 | `reactive-motion-adapter-flow.cjs` | 卡片、資料列與欄位插入 / 移出, 保留節點與目標計數 |
@@ -66,6 +66,23 @@ python tests/serve_loading_fixture.py
 | `viewport-detail-flow.cjs` | 截圖比例、不同字級與語系、兩行狀態、摘要與子頁籤分區、My dots 明細 |
 
 `test_startup_preload.py` 核對 state 目錄查詢的 2,000 筆上限、session 讀取量為 0、未選取 prompt / credential 欄位、停用後不讀取及完整更新時間尚未產生. 瀏覽器模擬回應驗證呈現, 原生 fixture 可加 `--startup-delay 35`, 核對 HTTP 在整理前提供目錄, 整理後提供完整快照
+
+## 更新後的正式資料驗收
+
+更新後端後重新啟動服務, 再重新載入頁面. `/api/activity` 的 `code_revision` 與快照的 `backend_revision` 識別後端工作階段, `frontend_revision` 識別前端資產, 兩者分別核對. 使用 `tools/watch.py` 時, 確認其所屬後端已完成重新啟動
+
+| 項目 | 驗收內容 |
+| --- | --- |
+| 來源計數 | 頁首可讀取 / 啟用數與來源 Log 共用讀取器清單, 停用列另計, 檢查時間與讀取結果相符 |
+| 驗證與 MCP | 從已觀察操作核對分類、工具回傳、時間及耗時, 空資料時追查來源、篩選範圍與回補進度 |
+| 父子 Context | Context 列開啟目前對話內容, 對話列表列開啟明細後切入 Context 才讀取, 切換分頁保留內容, 代理訊息與父對話入口維持對應, 核對更新、欄位重排與取消要求 |
+| My dots 與排程 | 核對桌面快取中的活動及電腦, 即時連線與完整遠端排程仍列待實作 |
+| 裝置資訊 | 依實體顯示卡識別核對數量, 在對應平台驗證字型、取樣時間與使用量 |
+| 效能 | 固定資料、設定及取樣條件, 比較冷啟動、回補、增量與長時間更新, 分開記錄 CPU、耗時、讀取量及快照大小 |
+
+`test_http_snapshot.py` 的大型 HTTP 本文案例會先檢查標準函式庫 HTTP 基準, 基準失敗時跳過該案例. `test_history_store.py` 與 `test_plugins.py` 的符號連結案例在無法建立連結時跳過. 驗收結果需列出實際跳過原因, 大型本文另以目標瀏覽器檢查 gzip 與未壓縮回應
+
+macOS / Linux 實機啟動與字型、Firefox / WebKit、觸控、輔助技術及平台下載包的待驗收項目見[功能清單](features.md)
 
 ## 套件建置
 

@@ -1,5 +1,5 @@
 """Retain confirmed lifecycle checkpoints across collector restarts."""
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import sqlite3
 import re
@@ -18,6 +18,8 @@ class ThreadState:
         self.skills = []
         self.saved, self.next_save = None, 0
         self.load_health, self.write_health = "missing", None
+        self.load_checked_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        self.write_checked_at = None
         try:
             raw = self.store.load(self.BYTE_LIMIT)
             if raw is not None:
@@ -103,6 +105,7 @@ class ThreadState:
                 lifecycle_changed |= self.entries.get(key, {}).get('task_time') != clean['task_time']
                 self.entries[key] = clean
         try:
+            self.write_checked_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
             self.store.save(json.dumps({'version':1, 'entries':self.entries, 'skills':list(skills.values())}, separators=(',', ':')).encode())
         except (OSError, sqlite3.Error):
             self.write_health = 'unavailable'
@@ -120,6 +123,7 @@ class ThreadState:
         if raw == self.saved:
             return
         try:
+            self.write_checked_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
             self.store.save(raw)
             self.saved = raw
             self.write_health = "ok"

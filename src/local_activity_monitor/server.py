@@ -369,7 +369,7 @@ class Dashboard:
                             state.update(config_flag, key="config.recording_enabled")
                     statuses["jev"] = state
                 snapshot["mcp"]["recording_status"] = statuses
-                snapshot["mcp"]["telemetry"] = {"jev": {key: snapshot["jev"][key] for key in ("enabled", "enabled_at", "health", "scope", "summary", "recent", "series")} | {"window": snapshot["jev"].get("window"), "reader": {"locations": [str(database)] if database else [], "record_limit": self.jev.RECENT_LIMIT, "series_limit": self.jev.SERIES_LIMIT}}} if availability["jev"] else {}
+                snapshot["mcp"]["telemetry"] = {"jev": {key: snapshot["jev"][key] for key in ("enabled", "enabled_at", "health", "scope", "summary", "recent", "series")} | {"window": snapshot["jev"].get("window"), "reader": {"locations": [str(database)] if database else [], "record_limit": self.jev.RECENT_LIMIT, "series_limit": self.jev.SERIES_LIMIT, **{key: value for key, value in snapshot["jev"].get("reader", {}).items() if key in ("checked_at", "error_type")}}}} if availability["jev"] else {}
                 jev_errors = []
                 if self.observations["errors"]:
                     for event in snapshot["jev"]["recent"]:
@@ -649,7 +649,7 @@ class Dashboard:
             boundary = cutoff(window)
             entries = [event for event in {error_identity(event): event for event in entries}.values() if contains(event, boundary)]
             entries.sort(key=lambda event: event.get("timestamp") or "", reverse=True)
-            return {"enabled": self.observations["logs"], "entries": copy.deepcopy(entries[:2000]), "total": len(entries), "limit": 2000, "trimmed": self.diagnostics.log_trimmed, "sources": self.diagnostics.log_sources(self.observations["codex"] and self.observations["logs"])+[monitor, {"source": "session", "health": codex.get("health", "waiting"), "files": [], "file_count": codex.get("files"), "checked_at": cached.get("updated_at"), "read_bytes": codex.get("bytes_read"), "unsupported_lines": codex.get("malformed_lines"), "backfill_pending": codex.get("error_backfill_pending")}, {"source": "jev_telemetry", "health": jev.get("health", "waiting"), "files": [], "checked_at": cached.get("updated_at")}]}
+            return {"enabled": self.observations["logs"], "entries": copy.deepcopy(entries[:2000]), "total": len(entries), "limit": 2000, "trimmed": self.diagnostics.log_trimmed, "sources": self.diagnostics.log_sources(self.observations["codex"] and self.observations["logs"])+[monitor, {"source": "session", "health": codex.get("health", "waiting"), "files": [], "file_count": codex.get("files"), "checked_at": cached.get("updated_at"), "read_bytes": codex.get("bytes_read"), "unsupported_lines": codex.get("malformed_lines"), "backfill_pending": codex.get("error_backfill_pending")}, {"source": "jev_telemetry", "health": jev.get("health", "waiting"), "files": [], "checked_at": jev.get("reader", {}).get("checked_at")}]}
 
     def activity_status(self):
         # Readers use the last complete activity check instead of waiting for scans.
@@ -753,7 +753,8 @@ class Dashboard:
             [checkpoint["location"]] if checkpoint.get("location") else [], "disabled" if not active else checkpoint.get("write_health") or checkpoint.get("load_health"),
             ["thread_id", "status", "task_time", "task_start", "offset", "skill", "call_id"],
             {key: value for key, value in checkpoint.items() if type(value) is int},
-            [{"name": "Checkpoint " + phase, "health": checkpoint[key]} for phase, key in (("load", "load_health"), ("save", "write_health")) if checkpoint.get(key)])
+            [{"name": "Checkpoint " + phase, "health": checkpoint[key], "checked_at": checkpoint.get(time_key)}
+             for phase, key, time_key in (("load", "load_health", "load_checked_at"), ("save", "write_health", "write_checked_at")) if checkpoint.get(key)])
         registry["thread_state"]["mode"] = "bounded_metadata_cache"
         add('activity_history', 'Activity history', ['sqlite', 'web', 'mcp'], 'retained_activity_metadata',
             [str(self.activity_history.path)], self.activity_history.health if active else 'disabled',
@@ -762,6 +763,7 @@ class Dashboard:
              'byte_limit': self.activity_history.BYTE_LIMIT, 'retention_days': self.activity_history.retention_days,
              'sql_records': len(self.activity_history.sql), 'web_records': len(self.activity_history.web), 'mcp_records': len(self.activity_history.mcp)})
         registry['activity_history']['mode'] = 'bounded_metadata_cache'
+        registry['activity_history']['checked_at'] = self.activity_history.checked_at
         diagnostic_readers = self.diagnostics.log_sources(active and any(self.observations[key] for key in ("errors", "logs", "sqlite", "model_api")))
         add("diagnostics", "Codex diagnostics", ["errors", "logs", "sqlite", "model-api"], "recent_metadata_and_24h_error_backfill",
             [str(path) for path in self.diagnostics.files]+([str(self.diagnostics.sql_path)] if self.diagnostics.sql_path else []),

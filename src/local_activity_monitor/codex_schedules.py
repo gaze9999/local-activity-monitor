@@ -1,5 +1,6 @@
 """Read bounded schedule metadata without prompts, account IDs or run messages."""
 from contextlib import closing
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import sqlite3
@@ -20,7 +21,7 @@ def timestamp(value):
 def read_schedules(home: Path, source_info=None, metadata=None):
     path = home/"sqlite/codex-dev.db"
     result = {"items": [], "health": "missing", "row_limit": SCHEDULE_LIMIT, "run_limit": RUN_LIMIT}
-    report = {"name": "automations", "location": str(path), "health": "missing", "fields": [],
+    report = {"name": "automations", "location": str(path), "health": "missing", "checked_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"), "fields": [],
               "row_limit": SCHEDULE_LIMIT, "run_limit": RUN_LIMIT, "rows_read": 0, "runs_read": 0}
     try:
         with closing(sqlite3.connect(path.as_uri()+"?mode=ro", uri=True, timeout=.08)) as db:

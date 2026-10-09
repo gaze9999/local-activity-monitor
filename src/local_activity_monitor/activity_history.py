@@ -46,6 +46,7 @@ class ActivityHistory:
         self.path, self.sql, self.web, self.mcp, self.saved = self.store.path, [], [], [], None
         self.retention_days = self.DEFAULT_DAYS
         self.health = "ok"
+        self.checked_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         self.last_incoming = None
         self.last_prune_day = None
         try:
@@ -135,6 +136,7 @@ class ActivityHistory:
         if incoming_raw == self.last_incoming and self.last_prune_day == day and not expired and self.health == 'ok':
             return
         storage_error = None
+        self.checked_at = current.isoformat(timespec="milliseconds").replace("+00:00", "Z")
         try:
             self.store.save(incoming_raw)
             if self.last_prune_day != day or expired:

@@ -1,5 +1,6 @@
 """Schedule projection, privacy and bounded source checks."""
 from contextlib import closing
+from datetime import datetime
 import json
 from pathlib import Path
 import sqlite3
@@ -37,6 +38,7 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(item["last_run_status"], "completed")
         self.assertNotIn("PRIVATE", json.dumps([result, report]))
         self.assertEqual(next(iter(report.values()))["runs_read"], 1)
+        self.assertTrue(datetime.fromisoformat(next(iter(report.values()))['checked_at'].replace('Z', '+00:00')).tzinfo)
         with self.database() as db:
             self.assertEqual(db.execute("SELECT prompt FROM automations").fetchone()[0], "PRIVATE_PROMPT")
 
@@ -77,6 +79,9 @@ class ScheduleTests(unittest.TestCase):
         first = collector.snapshot(metadata_cache=cache)
         second = collector.snapshot(metadata_cache=cache)
         self.assertEqual(first["schedules"], second["schedules"])
+        first_check = next(source for source in first['metadata_sources'] if source['name']=='automations')['checked_at']
+        second_check = next(source for source in second['metadata_sources'] if source['name']=='automations')['checked_at']
+        self.assertEqual(first_check, second_check)
         self.assertEqual(first["schedules"]["items"][0]["id"], "fixture")
         collector.features["metadata"] = False
         self.assertEqual(collector.snapshot()["schedules"]["health"], "disabled")
