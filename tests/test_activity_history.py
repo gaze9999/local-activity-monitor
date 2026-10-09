@@ -10,6 +10,55 @@ from local_activity_monitor.server import Dashboard
 
 
 class ActivityHistoryTests(unittest.TestCase):
+    def test_snapshot_keeps_time_filtering_and_nested_values_independent(self):
+        initial = datetime.now(timezone.utc)
+        recent = self.web | {'timestamp': (initial-timedelta(days=2)).isoformat()}
+        future = self.web | {'call_id': 'future', 'timestamp': (initial+timedelta(seconds=30)).isoformat()}
+        with patch('local_activity_monitor.activity_history.datetime', wraps=datetime) as clock:
+            clock.now.return_value = initial
+            history = ActivityHistory(self.path)
+            history.update([], [recent, future])
+            snapshot = history.snapshot('web')
+            snapshot[0]['metadata']['references'].append('https://example.com/local-only')
+            self.assertNotIn('https://example.com/local-only', history.snapshot('web')[0]['metadata']['references'])
+            history.retention_days = 1
+            self.assertEqual([event['call_id'] for event in history.snapshot('web')], ['future'])
+            clock.now.return_value = initial-timedelta(minutes=1)
+            self.assertEqual(history.snapshot('web'), [])
+            self.assertEqual(len(history.web), 2)
+
+    def test_unchanged_input_over_working_byte_limit_skips_storage_and_keeps_full_history(self):
+        history = ActivityHistory(self.path)
+        history.BYTE_LIMIT = 1024
+        events = [self.web | {'call_id': str(index)} for index in range(80)]
+        history.update([], events)
+        checked = history.checked_at
+        self.assertEqual(history.store.page('web')['total'], 80)
+        self.assertLessEqual(len(history.encode()), history.BYTE_LIMIT)
+        with patch.object(history.store, 'save', side_effect=AssertionError('Unchanged large input should not save')):
+            history.update([], events)
+        self.assertEqual(history.checked_at, checked)
+        self.assertLessEqual(len(history.last_incoming), history.BYTE_LIMIT)
+        changed = events[0] | {'duration_ms': 0, 'result': {'references': ['https://example.com/changed']}}
+        history.update([], [changed]+events[1:])
+        self.assertEqual(history.store.page('web')['total'], 80)
+        saved = next(event for event in history.store.page('web', limit=200)['items'] if event['call_id'] == '0')
+        self.assertEqual(saved['duration_ms'], 0)
+        self.assertIn('https://example.com/changed', saved['result']['references'])
+        self.assertLessEqual(len(history.encode()), history.BYTE_LIMIT)
+
+    def test_successful_retry_of_unchanged_saved_view_restores_skip(self):
+        history = ActivityHistory(self.path)
+        history.update([self.sql], [])
+        with patch.object(history.store, 'save', side_effect=PermissionError):
+            history.update([self.sql | {'duration_ms': 1}], [])
+        self.assertEqual(history.health, 'unavailable')
+        history.update([self.sql], [])
+        self.assertEqual(history.health, 'ok')
+        with patch.object(history.store, 'save', side_effect=AssertionError('Successful retry should allow skipping')):
+            history.update([self.sql], [])
+        self.assertEqual(history.store.page('sql')['total'], 1)
+
     def test_check_time_stays_stable_when_update_skips_storage(self):
         initial = datetime.now(timezone.utc)
         with patch('local_activity_monitor.activity_history.datetime', wraps=datetime) as clock:

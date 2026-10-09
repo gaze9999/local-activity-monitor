@@ -1,5 +1,7 @@
 {
   "en": {
+    "概要": "Overview",
+    "紀錄": "Records",
     "等待額度資料": "Waiting for allowance data",
     "可讀來源 ": "Readable sources ",
     "本輪啟用來源中, 最近檢查正常的來源數量, 不代表遠端服務連線數": "Enabled sources whose latest check succeeded, not a count of remote service connections",
@@ -31,6 +33,8 @@
     "代理訊息": "Agent messages",
     "只顯示已記錄的代理通訊, 未記錄的回覆與關聯不推測": "Shows recorded agent communication without inferring unrecorded replies or relationships",
     "來源未記錄代理訊息": "The source has no recorded agent messages",
+    "目前範圍沒有代理訊息紀錄": "No agent messages in the current scope",
+    "代理訊息仍在整理中": "Agent messages are still being collected",
     "傳送者": "Sender",
     "接收者": "Recipient",
     "子工作名稱": "Subtask name",
@@ -2189,6 +2193,8 @@
     "最近檢查成功 / 已啟用資料來源, 對應來源 Log 的檢查列": "Latest successful checks / enabled sources, matching the checks in Source logs"
   },
   "ja": {
+    "概要": "概要",
+    "紀錄": "記録",
     "等待額度資料": "利用枠データを待っています",
     "可讀來源 ": "読み取り可能なソース ",
     "本輪啟用來源中, 最近檢查正常的來源數量, 不代表遠端服務連線數": "有効なソースのうち直近の確認が正常だった数です。リモートサービスの接続数ではありません",
@@ -2220,6 +2226,8 @@
     "代理訊息": "エージェントメッセージ",
     "只顯示已記錄的代理通訊, 未記錄的回覆與關聯不推測": "記録されたエージェント間の通信を表示し、未記録の返信や関係は推測しません",
     "來源未記錄代理訊息": "エージェントメッセージはソースに記録されていません",
+    "目前範圍沒有代理訊息紀錄": "現在の範囲にエージェントメッセージはありません",
+    "代理訊息仍在整理中": "エージェントメッセージを整理中です",
     "傳送者": "送信者",
     "接收者": "受信者",
     "子工作名稱": "サブタスク名",

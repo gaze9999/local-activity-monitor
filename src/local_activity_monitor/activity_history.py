@@ -1,5 +1,7 @@
 """Retain bounded activity metadata without request or response bodies."""
 from datetime import datetime, timedelta, timezone
+from copy import deepcopy
+import hashlib
 import json
 import sqlite3
 
@@ -129,11 +131,12 @@ class ActivityHistory:
                     'web': self.project(list(web), 'web', False),
                     'mcp': self.project(list(mcp), 'mcp', False)}
         incoming_raw = json.dumps(incoming, ensure_ascii=True, separators=(',', ':')).encode()
+        incoming_digest = hashlib.sha256(incoming_raw).digest()
         current = datetime.now(timezone.utc)
         day = (current.date(), self.retention_days)
         boundary = current-timedelta(days=self.retention_days) if self.retention_days else datetime.min.replace(tzinfo=timezone.utc)
         expired = any(rows and datetime.fromisoformat(rows[-1]['timestamp'].replace('Z','+00:00'))<boundary for rows in (self.sql,self.web,self.mcp,incoming['sql'],incoming['web'],incoming['mcp']))
-        if incoming_raw == self.last_incoming and self.last_prune_day == day and not expired and self.health == 'ok':
+        if incoming_digest == self.last_incoming and self.last_prune_day == day and not expired and self.health == 'ok':
             return
         storage_error = None
         self.checked_at = current.isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -163,12 +166,12 @@ class ActivityHistory:
         if storage_error is not None:
             return
         if raw==self.saved:
-            self.last_incoming = incoming_raw if len(incoming_raw)<=self.BYTE_LIMIT else None
+            self.last_incoming, self.health = incoming_digest, 'ok'
             return
         try:
             self.store.save(raw)
             self.saved, self.health = raw, 'ok'
-            self.last_incoming = incoming_raw if len(incoming_raw)<=self.BYTE_LIMIT else None
+            self.last_incoming = incoming_digest
         except (OSError, sqlite3.Error):
             self.health = 'unavailable'
 
@@ -176,4 +179,10 @@ class ActivityHistory:
         return json.dumps({'version': 3, 'retention_days': self.retention_days, 'sql': self.sql, 'web': self.web, 'mcp': self.mcp}, ensure_ascii=True, separators=(',', ':')).encode()
 
     def snapshot(self, kind):
-        return self.project(self.sql if kind=='sql' else self.web if kind=='web' else self.mcp, kind)
+        current = datetime.now(timezone.utc)
+        boundary = current-timedelta(days=self.retention_days) if self.retention_days else datetime.min.replace(tzinfo=timezone.utc)
+        ceiling = current+timedelta(minutes=1)
+        rows = self.sql if kind=='sql' else self.web if kind=='web' else self.mcp
+        # Stored rows crossed the metadata boundary on load/update. Keep time
+        # filtering live and return independent values without projecting again.
+        return [deepcopy(event) for event in rows if boundary<=datetime.fromisoformat(event['timestamp'].replace('Z','+00:00'))<=ceiling]
