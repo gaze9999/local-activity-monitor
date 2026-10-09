@@ -21,6 +21,10 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 測試使用暫存 metadata、SQLite 與來源 fixture, 涵蓋資料投影、差異讀取、checkpoint、內容遮蔽、來源快取、HTTP 邊界、啟動及建置回復
 
+`v0.11.0` 交付前固定 WBUI `v0.7.0` 的提交 `19a81a7`, 兩組資產 manifest 與完整 SHA 相符. 本機原生環境執行歷史、時間範圍、保存、HTTP、前端建置與資產檢查, 67 項中 65 項通過, 2 項因無法建立 symlink 與大型 HTTP 標準函式庫基準逾時略過. 三個 Node 使用端檢查通過. 正式固定資產方式的合成服務另通過四類表格換頁與 23 種明細流程, 包含三語、四種寬度、連點、取消、焦點與長網址提示
+
+`test_activity_history.py` 核對超過 1 MiB 的未變更輸入不重寫、完整 SQLite 保存與有界畫面資料、失敗後重試、快照獨立複製及即時保存期限篩選
+
 `test_history_store.py` 檢查分區共用、舊資料匯入、版本升級備份、遷移失敗回復、寫入鎖定及不支援格式. `test_process_lifecycle.py` 檢查終止訊號、父程序控制串流關閉、Windows 隱藏子程序清理與資料保留
 
 JavaScript 檢查需要 Node.js 22+:
@@ -49,14 +53,16 @@ python tests/serve_loading_fixture.py
 | `font-resize-flow.cjs` | 字級、字型與視窗縮放 |
 | `distribution-feedback-flow.cjs` | 分布圖、讀值及更新狀態 |
 | `output-detail-flow.cjs` | 原文、內容分頁、取消與明細清理 |
+| `detail-tabs-flow.cjs` | 23 種明細的概要首分頁與單一頂端導覽, 保留歷史資料查詢分類, 檔案執行內容延後讀取、遮蔽、快取、重試、取消與快速返回, 編輯草稿、三語四種畫面尺寸及背景更新後的長網址圖例提示 |
 | `parser-summary-motion-flow.cjs` | 結構解析、摘要、減少動畫及設定匯入 |
 | `console-sql-flow.cjs` | console 呈現、SQL 外層工具回覆、複製與捲軸 |
-| `context-agent-flow.cjs` | 代理訊息、公開 Context 摘要、遮蔽切換及舊設定相容性 |
+| `context-agent-flow.cjs` | 代理訊息、公開 Context 摘要、遮蔽切換、舊設定相容性及三語空紀錄 / 整理中提示 |
 | `context-layout-flow.cjs` | 父子 Context、對話明細 Context 延後讀取與快取、列點選、欄位重排後的入口、展開中斷、長程式碼、窄螢幕明細與三語兩行狀態列 |
 | `tab-consistency-flow.cjs` | 八個主頁及各子頁的卡片、表格、欄位、設定相容與四種寬度 |
 | `model-api-flow.cjs` | 模型 API 事件分類、明細、缺值與來源 |
 | `reactive-motion-adapter-flow.cjs` | 卡片、資料列與欄位插入 / 移出, 保留節點與目標計數 |
 | `history-flow.cjs` | SQLite 歷史總數、游標分頁、錯誤後重試 |
+| `pagination-motion-flow.cjs` | 對話、一般表格、歷史與說明分頁的左右滑動、快速連點、SVG 按鈕置中與一致高度、減少動畫及四種畫面寬度的溢出 / 按鈕重疊 |
 | `history-chart-flow.cjs` | 完整保存範圍統計與總覽副本獨立範圍 |
 | `reconnect-flow.cjs` | 中斷後自動重連與保留畫面 |
 | `restart-reset-flow.cjs` | 後端更新及還原預設不重新載入整頁 |

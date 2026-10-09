@@ -30,11 +30,9 @@ git clone https://github.com/gaze9999/local-activity-monitor.git
 cd local-activity-monitor
 ```
 
-| 系統 | 啟動方式 |
-| --- | --- |
-| Windows | `launch-cli.cmd` 或 `launch-cli.ps1` |
-| macOS | 雙擊 `launch-cli.command` 或執行 `sh launch-cli.sh` |
-| Linux | `sh launch-cli.sh` |
+- `launch-cli.cmd`: Windows 入口
+- `launch-cli.command`: macOS 入口
+- `launch-cli.py`: 各系統共用的原始碼入口, 免安裝包以 `launch-portable.py` 打包成執行檔
 
 入口優先使用儲存庫內的 `.venv`, 其次使用已安裝的 Python, 自動建置頁面並開啟 `http://127.0.0.1:8787/`. 終端按 Ctrl+C 停止服務. 可加入 `--port 8790` 指定連接埠, `--codex-home` 指定 Codex 資料目錄
 

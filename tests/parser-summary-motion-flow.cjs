@@ -58,7 +58,7 @@ async page => {
       const sql="select 0 as count from demo where note = '[已隱藏]';\n"+Array.from({length:900},(_,i)=>'-- Synthetic comment '+i+' '+'.'.repeat(35)).join('\n')+'\nselect 1 as final_value;';
       const io=window.IntersectionObserver;window.IntersectionObserver=undefined;let reads=0;
       const value={content_page:true,format:'text',text:sql.slice(0,32768),next:32768,total:sql.length,load:async()=>{reads++;return {text:sql.slice(32768),next:null};}};
-      openDetail({kind:'sqlite',event:{id:'synthetic-sql',timestamp:new Date().toISOString(),statement:'SELECT',operation:'select',engine:'demo',tool:'exec'},sqlLoaded:true,sqlContent:{sql:value}});
+      openDetail({kind:'sqlite',modalSection:'execution',event:{id:'synthetic-sql',timestamp:new Date().toISOString(),statement:'SELECT',operation:'select',engine:'demo',tool:'exec'},sqlLoaded:true,sqlContent:{sql:value}});
       window.IntersectionObserver=io;window.parserFixture={sql,reads:()=>reads};
     });
     const dialog=page.locator('#detail-dialog'),sqlOutput=dialog.locator('.wb-output').first();check(await dialog.locator('.wb-output').count()===2,'SQL and containing tool response use shared parsed output');
@@ -69,11 +69,11 @@ async page => {
     await sqlOutput.getByRole('button',{name:'原文',exact:true}).click();await page.evaluate(async()=>{const view=[...payloadViews.values()][0];for(let i=0;i<80&&!view.element.querySelector('.wb-output-content>.wb-load-sentinel').hidden;i++){await view.loadMore();await new Promise(resolve=>setTimeout(resolve,20));}});
     check((await sqlOutput.locator('code').allTextContents()).join('')===await page.evaluate(()=>parserFixture.sql),'SQL raw exact and complete');await closeModal();
     const yaml='enabled: false\ncount: 0\nmissing: null\nname: "<img src=x onerror=alert(1)>"\n';
-    await page.evaluate(yaml=>openDetail({kind:'mcp-file',server:'demo_docs',file:{name:'demo.yaml'},documentContent:{id:'synthetic-yaml',path:'demo.yaml',format:'yaml',text:yaml,editable:false}}),yaml);
+    await page.evaluate(yaml=>openDetail({kind:'mcp-file',modalSection:'content',server:'demo_docs',file:{name:'demo.yaml'},documentContent:{id:'synthetic-yaml',path:'demo.yaml',format:'yaml',text:yaml,editable:false}}),yaml);
     const yamlCount=await dialog.locator('.wb-output').count(),unsafeCount=await dialog.locator('img,script').count();check(yamlCount===1&&!unsafeCount,'YAML file uses safe shared parser '+JSON.stringify({yamlCount,unsafeCount,text:await dialog.innerText()}));
     check((await dialog.locator('code').allTextContents()).join('').includes('false')&&(await dialog.locator('code').allTextContents()).join('').includes('null'),'YAML preserves false zero null');
     await dialog.getByRole('button',{name:'原文',exact:true}).click();check(await dialog.locator('code').textContent()===yaml,'YAML raw exact');await closeModal();
-    await page.evaluate(()=>openDetail({kind:'mcp-file',server:'demo_docs',file:{name:'edit.yaml'},documentContent:{id:'synthetic-edit',path:'edit.yaml',format:'yaml',text:'count: 0\n',editable:true}}));
+    await page.evaluate(()=>openDetail({kind:'mcp-file',modalSection:'content',server:'demo_docs',file:{name:'edit.yaml'},documentContent:{id:'synthetic-edit',path:'edit.yaml',format:'yaml',text:'count: 0\n',editable:true}}));
     const fold=dialog.locator('details').filter({has:page.getByText('內容預覽',{exact:true})}),editor=dialog.getByRole('textbox',{name:'檔案內容',exact:true});
     await fold.evaluate(node=>node.open=false);await fold.locator('summary').click();await dialog.locator('.wb-output').waitFor();await fold.locator('summary').click();await editor.fill('count: 1\n');await fold.locator('summary').click();
     await page.waitForFunction(()=>document.querySelector('#detail-dialog .wb-output code')?.textContent.includes('1'));
