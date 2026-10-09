@@ -336,13 +336,19 @@ exit (Start-Monitor {quote(self.root)} @('--codex-home', 'folder with spaces') (
         shutil.copyfile(ROOT / "launch-cli.cmd", checkout / "launch-cli.cmd")
         (checkout / "tools").mkdir()
         shutil.copyfile(ROOT / "tools/launch-windows.ps1", checkout / "tools/launch-windows.ps1")
-        (checkout / "tools/launch-cli.py").write_text("import json, sys\nprint(json.dumps(sys.argv[1:]))\n")
+        for file in ("launch-logged.ps1", "launch-log.ps1"):
+            shutil.copyfile(ROOT / "tools" / file, checkout / "tools" / file)
         arguments = ["--codex-home", "資料夾 🐍 with spaces"]
         command = subprocess.list2cmdline([str(checkout / "launch-cli.cmd"), *arguments])
-        result = subprocess.run('"' + os.environ["COMSPEC"] + '" /d /s /c "' + command + '"', input="", capture_output=True,
-                                text=True, encoding='utf-8', env=self.env, timeout=15)
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertEqual(json.loads(result.stdout.strip()), arguments)
+        for code in (0, 17):
+            with self.subTest(exit_code=code):
+                (checkout / "tools/launch-cli.py").write_text(f"import json, sys\nprint(json.dumps(sys.argv[1:]))\nsys.exit({code})\n")
+                result = subprocess.run('"' + os.environ["COMSPEC"] + '" /d /s /c "' + command + '"', input="", capture_output=True,
+                                        text=True, encoding='utf-8', env=self.env, timeout=15)
+                self.assertEqual(result.returncode, code, result.stderr + result.stdout)
+                output = next(line for line in result.stdout.splitlines() if line.startswith("["))
+                self.assertEqual(json.loads(output), arguments)
+                self.assertIn(f"退出碼 {code}", result.stdout)
 
     def test_powershell_entry_points_preserve_mode_and_unicode_arguments(self):
         for entry, mode in (("launch-cli.ps1", "--console"),):
@@ -350,6 +356,8 @@ exit (Start-Monitor {quote(self.root)} @('--codex-home', 'folder with spaces') (
                 checkout = self.root / entry.replace(".ps1", " 資料夾 🐍 with spaces")
                 (checkout / "tools").mkdir(parents=True)
                 shutil.copyfile(ROOT / entry, checkout / entry)
+                for file in ("launch-logged.ps1", "launch-log.ps1"):
+                    shutil.copyfile(ROOT / "tools" / file, checkout / "tools" / file)
                 (checkout / "tools/launch-windows.ps1").write_text("[IO.File]::WriteAllText($env:MOCK_LAUNCH_LOG, (ConvertTo-Json -InputObject @($args) -Compress), [Text.Encoding]::UTF8)\nexit 0\n")
                 arguments = ["--fixture", "資料夾 🐍 with spaces"]
                 result = subprocess.run([POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(checkout / entry), *arguments], capture_output=True, text=True, env=self.env, timeout=15)

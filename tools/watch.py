@@ -7,6 +7,7 @@ from threading import Event, Thread
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from local_activity_monitor.process_lifecycle import cli_lifetime
+from local_activity_monitor.ui_assets import development_source
 
 
 def signature(root):
@@ -14,10 +15,14 @@ def signature(root):
     paths = list((root/"src/local_activity_monitor").rglob("*.py"))
     paths.extend(path for path in (root/"frontend").glob("*") if path.is_file())
     paths.extend((root / "tools/build_frontend.py", root / "workbench-ui.json"))
+    paths.append(root / ".local/workbench-ui-development.json")
+    selected = development_source(root)
+    if selected:
+        paths.extend((selected / "src" / name) for name in ("workbench-ui.js", "workbench-ui.css", "workbench-ui.mjs", "workbench-loader.js"))
     for path in sorted(paths):
         try:
             stat = path.stat()
-            result.append((str(path.relative_to(root)), stat.st_mtime_ns, stat.st_size))
+            result.append((str(path), stat.st_mtime_ns, stat.st_size))
         except OSError:
             continue
     return tuple(result)
@@ -43,7 +48,11 @@ def stop_child(child):
             child.wait(timeout=5)
     finally:
         if child.stdin:
-            child.stdin.close()
+            try:
+                child.stdin.close()
+            except OSError:
+                # The child may already have closed its control pipe on interrupt.
+                pass
 
 
 def supervise(root, args, stop=None):

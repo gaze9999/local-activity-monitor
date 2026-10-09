@@ -207,6 +207,15 @@ class ActivityDetailsTests(unittest.TestCase):
         skills,checks=workflow_operations({"name":"exec_command","arguments":json.dumps({"cmd":"echo 'npm test; cat /skills/not-used/SKILL.md'"})})
         self.assertEqual((skills,checks),([],[]))
 
+    def test_nested_managed_python_validation_is_literal_only(self):
+        command="& 'C:\\Runtime\\python.exe' -X utf8 -m unittest discover -s tests"
+        source='await Promise.allSettled([tools.exec_command('+json.dumps({'cmd':command})+')]);'
+        _,checks=workflow_operations({'name':'exec','input':source})
+        self.assertEqual(len(checks),1)
+        self.assertEqual(checks[0]['operation'],'python -m unittest')
+        _,checks=workflow_operations({'name':'exec_command','arguments':json.dumps({'cmd':'Write-Output "python -m unittest"'})})
+        self.assertEqual(checks,[])
+
     def test_nested_tool_names_include_dynamic_arguments_without_payloads(self):
         self.write("session_meta",{"id":THREAD})
         self.write("response_item",{"type":"custom_tool_call","name":"exec","call_id":"c","input":'text("tools.fake({})"); await tools.web__run({search_query:[{q:"PRIVATE_QUERY"}]}); await tools.exec_command(commandArgs); /* tools.fake({}) */'})
@@ -284,6 +293,16 @@ class ActivityDetailsTests(unittest.TestCase):
             self.assertEqual(int(headers["Content-Length"]),len(actual))
             self.assertEqual(gzip.decompress(actual) if headers.get("Content-Encoding")=="gzip" else actual,payload)
             self.assertEqual("Content-Encoding" in headers,encoding=="gzip, deflate")
+
+    def test_error_keepalive_only_for_bodyless_get(self):
+        for command,headers,close in [('GET',{},False),('GET',{'Content-Length':'1'},True),('GET',{'Transfer-Encoding':'chunked'},True),('POST',{},True)]:
+            with self.subTest(command=command,headers=headers):
+                instance=object.__new__(handler(Dashboard(self.home),8787))
+                instance.command=command;instance.headers=headers;instance.close_connection=False
+                instance.send_response=MagicMock();instance.send_header=MagicMock();instance.end_headers=MagicMock();instance.wfile=io.BytesIO()
+                instance.reply(400,b'Invalid request')
+                self.assertEqual(instance.close_connection,close)
+                self.assertEqual(dict(call.args for call in instance.send_header.call_args_list).get('Connection')=='close',close)
 
     def test_page_embeds_current_script_with_matching_csp_hash(self):
         instance=object.__new__(handler(Dashboard(self.home),8787))

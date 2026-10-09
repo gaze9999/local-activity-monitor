@@ -1,5 +1,6 @@
 """Read available GPU metadata once, with platform-specific capability fallbacks."""
 import csv
+from collections import Counter
 import ctypes
 from itertools import islice
 import json
@@ -27,8 +28,48 @@ def _method(pointer, index, result, *arguments):
     return ctypes.WINFUNCTYPE(result, ctypes.c_void_p, *arguments)(table[index])
 
 
+def _windows_adapter_counts():
+    """Count present PCI display devices, excluding virtual display interfaces."""
+    guid_type = ctypes.c_ubyte*16
+    class DeviceInfo(ctypes.Structure):
+        _fields_ = [('size',ctypes.c_uint32),('guid',guid_type),('instance',ctypes.c_uint32),('reserved',ctypes.c_void_p)]
+    handle = None
+    try:
+        setup = ctypes.WinDLL('setupapi.dll', winmode=0x800)
+        setup.SetupDiGetClassDevsW.argtypes = [ctypes.POINTER(guid_type),ctypes.c_wchar_p,ctypes.c_void_p,ctypes.c_uint32]
+        setup.SetupDiGetClassDevsW.restype = ctypes.c_void_p
+        setup.SetupDiEnumDeviceInfo.argtypes = [ctypes.c_void_p,ctypes.c_uint32,ctypes.POINTER(DeviceInfo)]
+        setup.SetupDiEnumDeviceInfo.restype = ctypes.c_int
+        setup.SetupDiGetDeviceInstanceIdW.argtypes = [ctypes.c_void_p,ctypes.POINTER(DeviceInfo),ctypes.c_wchar_p,ctypes.c_uint32,ctypes.POINTER(ctypes.c_uint32)]
+        setup.SetupDiGetDeviceInstanceIdW.restype = ctypes.c_int
+        setup.SetupDiDestroyDeviceInfoList.argtypes = [ctypes.c_void_p]
+        setup.SetupDiDestroyDeviceInfoList.restype = ctypes.c_int
+        guid = guid_type.from_buffer_copy(UUID('4d36e968-e325-11ce-bfc1-08002be10318').bytes_le)
+        handle = setup.SetupDiGetClassDevsW(ctypes.byref(guid),None,None,2)
+        if handle in (None,ctypes.c_void_p(-1).value):
+            handle = None
+            return None
+        counts = Counter()
+        for index in range(64):
+            info = DeviceInfo();info.size = ctypes.sizeof(info)
+            if not setup.SetupDiEnumDeviceInfo(handle,index,ctypes.byref(info)):
+                break
+            identity = ctypes.create_unicode_buffer(512)
+            if setup.SetupDiGetDeviceInstanceIdW(handle,ctypes.byref(info),identity,512,None):
+                match = re.match(r'PCI\\VEN_([0-9A-F]{4})&DEV_([0-9A-F]{4})&SUBSYS_([0-9A-F]{8})',identity.value,re.I)
+                if match:
+                    counts[tuple(int(value,16) for value in match.groups())] += 1
+        return counts
+    except (OSError,AttributeError,ValueError,TypeError):
+        return None
+    finally:
+        if handle:
+            setup.SetupDiDestroyDeviceInfoList(handle)
+
+
 def _windows_gpus():
-    gpus, factory = [], ctypes.c_void_p()
+    gpus, factory, seen, counts = [], ctypes.c_void_p(), set(), _windows_adapter_counts()
+    physical = Counter()
     guid_type = ctypes.c_ubyte*16
     factory_id = guid_type.from_buffer_copy(UUID("770aae78-f26f-4dba-a829-253c83d1b387").bytes_le)
     device_id = guid_type.from_buffer_copy(UUID("54ec77fa-1377-44e6-8c32-88fd5f44c84c").bytes_le)
@@ -46,8 +87,17 @@ def _windows_gpus():
                 break
             try:
                 description, version = AdapterDescription(), ctypes.c_uint64()
-                if _method(adapter, 10, ctypes.c_int32, ctypes.POINTER(AdapterDescription))(adapter, ctypes.byref(description)) != 0 or description.flags & 2:
-                    continue  # Skip software adapters.
+                if _method(adapter, 10, ctypes.c_int32, ctypes.POINTER(AdapterDescription))(adapter, ctypes.byref(description)) != 0 or description.flags & 3:
+                    continue  # Skip remote and software adapters.
+                identity = tuple(description.luid)
+                if any(identity) and identity in seen:
+                    continue
+                seen.add(identity)
+                device = (description.vendor,description.device,description.subsystem)
+                if counts is not None and counts.get(device):
+                    if physical[device] >= counts[device]:
+                        continue
+                    physical[device] += 1
                 driver = None
                 if _method(adapter, 9, ctypes.c_int32, ctypes.POINTER(guid_type), ctypes.POINTER(ctypes.c_uint64))(adapter, ctypes.byref(device_id), ctypes.byref(version)) == 0:
                     driver = ".".join(str((version.value >> shift) & 0xffff) for shift in (48, 32, 16, 0))

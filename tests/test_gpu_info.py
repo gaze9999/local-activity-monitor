@@ -127,9 +127,28 @@ class GPUInfoTests(unittest.TestCase):
 
     def test_32_bit_windows_does_not_report_truncated_capacity(self):
         library, member, released = self.fixture([('GPU', 8*1024**3, 8*1024**3, 0)])
-        with patch('local_activity_monitor.gpu_info.sys.platform', 'win32'), patch.object(ctypes, 'WinDLL', return_value=library, create=True), patch('local_activity_monitor.gpu_info._method', side_effect=member), patch('local_activity_monitor.gpu_info.ctypes.sizeof', return_value=4):
+        with patch('local_activity_monitor.gpu_info.sys.platform', 'win32'), patch.object(ctypes, 'WinDLL', return_value=library, create=True), patch('local_activity_monitor.gpu_info._method', side_effect=member), patch('local_activity_monitor.gpu_info._windows_adapter_counts', return_value=None), patch('local_activity_monitor.gpu_info.ctypes.sizeof', return_value=4):
             result = gpu_info()[0]
         self.assertIsNone(result['dedicated_memory_bytes'])
         self.assertIsNone(result['shared_memory_bytes'])
         self.assertEqual(result['driver_version'], '32.1.101.7076')
         self.assertEqual(released, [2, 1])
+
+    def test_physical_device_counts_deduplicate_interfaces_without_merging_two_cards(self):
+        for physical, expected in ((1, 1), (2, 2), (None, 3)):
+            with self.subTest(physical=physical):
+                library, member, released = self.fixture([('Same GPU',8*1024**3,0,0)]*3)
+                def identified(pointer,index,result,*arguments):
+                    method = member(pointer,index,result,*arguments)
+                    if index != 10:
+                        return method
+                    def describe(adapter,output):
+                        status = method(adapter,output)
+                        output._obj.vendor,output._obj.device,output._obj.subsystem = 0x10de,0x2484,123
+                        output._obj.luid[0] = adapter.value
+                        return status
+                    return describe
+                counts = {(0x10de,0x2484,123):physical} if physical is not None else None
+                with patch('local_activity_monitor.gpu_info.sys.platform','win32'),patch.object(ctypes,'WinDLL',return_value=library,create=True),patch('local_activity_monitor.gpu_info._method',side_effect=identified),patch('local_activity_monitor.gpu_info._windows_adapter_counts',return_value=counts):
+                    self.assertEqual(len(gpu_info()),expected)
+                self.assertEqual(released,[2,3,4,1])

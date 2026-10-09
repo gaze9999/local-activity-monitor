@@ -1,5 +1,7 @@
 async page=>{
+  await page.setViewportSize({width:1366,height:900});
   await page.reload();await page.waitForFunction(()=>data?.updated_at&&!busy);
+  await page.evaluate(()=>{locale='zh-TW';applyLanguage();});
   const errors=[];page.on('pageerror',error=>errors.push(error.message));
   const initial=await page.evaluate(()=>{if(!data.codex.threads.every(t=>t.model?.startsWith('demo-model-')))throw Error('Synthetic fixture required');window.fixtureDocument=document.documentElement;preferences.settings={...data.settings,interval:17};document.getElementById('thread-search').value='preserved filter';return {settings:data.settings,revision:data.revision};});
   let requests=0;
@@ -7,7 +9,7 @@ async page=>{
   await page.evaluate(()=>refresh());await page.evaluate(()=>refresh());
   const restarted=await page.evaluate(()=>({sameDocument:window.fixtureDocument===document.documentElement,filter:document.getElementById('thread-search').value,interval:data.settings.interval,pending:pendingRevision}));
   if(!restarted.sameDocument||restarted.filter!=='preserved filter'||restarted.interval!==17||restarted.pending)throw Error(JSON.stringify(restarted));
-  await page.unroute('**/api/snapshot?**');
+  await page.unrouteAll({behavior:'wait'});
   await page.evaluate(()=>{loadedBackendRevision=null;preferences.copy={'工具':'CUSTOM_COPY'};appearance.font=18;display.table=20;tableStates['sqlite-rows']={size:20,page:2};chartViews.get('overview-tools-chart').settings.top=99;overviewOrder.reverse();applyOverview();saveView();});
   await page.getByRole('button',{name:'設定',exact:true}).click();
   await page.locator('#settings-dialog').getByRole('tab',{name:'設定檔',exact:true}).click();

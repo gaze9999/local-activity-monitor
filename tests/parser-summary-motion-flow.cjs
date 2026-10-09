@@ -63,10 +63,10 @@ async page => {
     });
     const dialog=page.locator('#detail-dialog'),sqlOutput=dialog.locator('.wb-output').first();check(await dialog.locator('.wb-output').count()===2,'SQL and containing tool response use shared parsed output');
     check(await page.evaluate(()=>parserFixture.reads()===0),'SQL paging stays lazy');
-    await page.evaluate(async()=>{const view=[...payloadViews.values()][0];for(let i=0;i<40&&!view.element.querySelector('.wb-output-content>.wb-button').hidden;i++)await view.loadMore();});
+    await page.evaluate(async()=>{const view=[...payloadViews.values()][0];for(let i=0;i<80&&!view.element.querySelector('.wb-output-content>.wb-load-sentinel').hidden;i++){await view.loadMore();await new Promise(resolve=>setTimeout(resolve,20));}});
     check((await sqlOutput.locator('code').allTextContents()).join('')===await page.evaluate(()=>WorkbenchUI.formatSql(parserFixture.sql)),'complete SQL formatting beyond first page');
     check(await sqlOutput.locator('.wb-code-keyword').count()>0,'SQL colors');
-    await sqlOutput.getByRole('button',{name:'原文',exact:true}).click();await page.evaluate(async()=>{const view=[...payloadViews.values()][0];for(let i=0;i<40&&!view.element.querySelector('.wb-output-content>.wb-button').hidden;i++)await view.loadMore();});
+    await sqlOutput.getByRole('button',{name:'原文',exact:true}).click();await page.evaluate(async()=>{const view=[...payloadViews.values()][0];for(let i=0;i<80&&!view.element.querySelector('.wb-output-content>.wb-load-sentinel').hidden;i++){await view.loadMore();await new Promise(resolve=>setTimeout(resolve,20));}});
     check((await sqlOutput.locator('code').allTextContents()).join('')===await page.evaluate(()=>parserFixture.sql),'SQL raw exact and complete');await closeModal();
     const yaml='enabled: false\ncount: 0\nmissing: null\nname: "<img src=x onerror=alert(1)>"\n';
     await page.evaluate(yaml=>openDetail({kind:'mcp-file',server:'demo_docs',file:{name:'demo.yaml'},documentContent:{id:'synthetic-yaml',path:'demo.yaml',format:'yaml',text:yaml,editable:false}}),yaml);

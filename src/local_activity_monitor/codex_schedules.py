@@ -17,7 +17,7 @@ def timestamp(value):
     return date(value/1000 if type(value) in (int, float) and value > 100_000_000_000 else value)
 
 
-def read_schedules(home: Path, source_info=None):
+def read_schedules(home: Path, source_info=None, metadata=None):
     path = home/"sqlite/codex-dev.db"
     result = {"items": [], "health": "missing", "row_limit": SCHEDULE_LIMIT, "run_limit": RUN_LIMIT}
     report = {"name": "automations", "location": str(path), "health": "missing", "fields": [],
@@ -69,6 +69,11 @@ def read_schedules(home: Path, source_info=None):
                             item["last_run_status"] = status
     except (OSError, sqlite3.Error):
         result["health"] = report["health"] = "unavailable" if path.is_file() else "missing"
+    result['remote_health'] = 'cache_only'
+    result['remote_activities'] = [{
+        'thread_id':identity, 'name':entry.get('thread_name'), 'host_id':entry.get('_host_id'),
+        'kind':entry.get('trigger'), 'last_run_at':entry.get('updated_at'), 'status':entry.get('status')
+    } for identity,entry in (metadata or {}).items() if entry.get('environment') == 'remote' and entry.get('trigger') in ('schedule','automation','heartbeat','dot','orbit')][:SCHEDULE_LIMIT]
     if source_info is not None:
         source_info[str(path)+"#automations"] = report
     return result

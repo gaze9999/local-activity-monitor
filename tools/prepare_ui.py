@@ -131,13 +131,29 @@ def verify_offline(destination, pin, *, loader=None):
         raise PreparationError("既有離線 UI 不完整或 checksum/pin 不符, 已保留原內容") from None
 
 
+def offline_pin(destination, pin):
+    """Validate an existing bundle against its own revision before rebuilding."""
+    try:
+        path = destination / "manifest.json"
+        if unsafe_path(destination) or unsafe_path(path) or not path.is_file() or path.stat().st_size > 65536:
+            raise ValueError()
+        revision = json.loads(path.read_text(encoding="utf-8"))["revision"]
+        if not isinstance(revision, str) or not re.fullmatch(r"[a-f0-9]{40}", revision):
+            raise ValueError()
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        raise PreparationError("既有離線 UI 版本資訊無效, 已保留原內容") from None
+    recorded = {**pin, "revision": revision}
+    verify_offline(destination, recorded)
+    return recorded
+
+
 def latest_pin(root):
     """Resolve the highest stable version tag, including annotated tag peeling."""
     pin = read_pin(root)
     current = None
     library = Path(root) / "src/local_activity_monitor/_workbench"
     if library.is_dir():
-        verify_offline(library, pin)
+        offline_pin(library, pin)
         match = re.search(r'global\.WorkbenchUI\s*=\s*Object\.freeze\(\{\s*version:\s*"((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))"', (library / "workbench-ui.js").read_text(encoding="utf-8"))
         if not match:
             raise PreparationError("無法確認目前 WBUI 版本, 沿用已記錄版本")

@@ -35,6 +35,15 @@ class WatchTests(unittest.TestCase):
         watch.stop_child(child)
         child.terminate.assert_called_once();child.kill.assert_called_once()
 
+    def test_closed_control_pipe_does_not_replace_shutdown_result(self):
+        child=MagicMock();child.poll.return_value=None
+        child.stdin.write.side_effect=BrokenPipeError()
+        child.stdin.close.side_effect=OSError(22,"Invalid argument")
+        watch.stop_child(child)
+        child.terminate.assert_called_once()
+        child.wait.assert_called_once_with(timeout=15)
+        child.stdin.close.assert_called_once()
+
     def test_signature_detects_source_change(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);source=root/"src/local_activity_monitor";source.mkdir(parents=True)

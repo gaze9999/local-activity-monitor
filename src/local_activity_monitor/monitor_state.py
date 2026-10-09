@@ -2,7 +2,7 @@
 from collections import deque
 from datetime import datetime, timezone
 from . import __version__
-from .device_info import memory_info, processor_name, CpuUsage
+from .device_info import memory_info, processor_name, CpuUsage, system_fonts
 from .gpu_info import gpu_info
 import os
 import platform
@@ -15,6 +15,26 @@ import time
 
 def stamp():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def frontend_report(value):
+    """Accept code locations only, never messages, URLs or arbitrary log content."""
+    if not isinstance(value, dict) or set(value) != {"phase", "error_type", "frames", "frontend_revision"}:
+        raise ValueError("Invalid frontend diagnostic")
+    if value["phase"] not in ("render", "script", "promise") or not isinstance(value["error_type"], str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,79}", value["error_type"]):
+        raise ValueError("Invalid frontend diagnostic")
+    revision = value["frontend_revision"]
+    if revision is not None and (not isinstance(revision, str) or not re.fullmatch(r"[a-f0-9]{12}", revision)):
+        raise ValueError("Invalid frontend revision")
+    frames = value["frames"]
+    if not isinstance(frames, list) or len(frames) > 8:
+        raise ValueError("Invalid frontend frames")
+    for frame in frames:
+        if not isinstance(frame, dict) or set(frame) != {"file", "function", "line", "column"} or frame["file"] not in ("index.html", "app.js", "workbench-ui.js"):
+            raise ValueError("Invalid frontend frame")
+        if not isinstance(frame["function"], str) or not re.fullmatch(r"[A-Za-z0-9_.$<>]{1,80}", frame["function"]) or any(type(frame[key]) is not int or not 0 <= frame[key] <= 10_000_000 for key in ("line", "column")):
+            raise ValueError("Invalid frontend frame")
+    return {"phase": value["phase"], "frontend_revision": revision, "frames": [dict(frame) for frame in frames]}
 
 
 class MonitorState:
@@ -35,6 +55,8 @@ class MonitorState:
         self.log_error_type = None
         self.log_checked_at = None
         self.log_skipped = self.log_bytes = 0
+        self.client_reports = deque(maxlen=20)
+        self.last_heartbeat = time.monotonic()
         self.refreshes = self.errors = self.requests = self.http_errors = 0
         self.health, self.error_type, self.last_error_at = "starting", None, None
         cpu_count = getattr(os, "process_cpu_count", os.cpu_count)()
@@ -63,9 +85,9 @@ class MonitorState:
         if self.device_ready:
             return
         # Hardware queries run in the collector worker, outside the snapshot lock.
-        processor, gpus, memory = processor_name(), gpu_info(), memory_info()
+        processor, gpus, memory, fonts = processor_name(), gpu_info(), memory_info(), system_fonts()
         with self.lock:
-            self.runtime.update(processor=processor, gpus=gpus)
+            self.runtime.update(processor=processor, gpus=gpus, fonts=fonts)
             self.memory = memory
             self.device_ready = True
             self.device_checked_at = stamp()
@@ -102,6 +124,8 @@ class MonitorState:
                             raise ValueError()
                         if type(value.get("http_status")) is int and 100 <= value["http_status"] <= 599:
                             event["http_status"] = value["http_status"]
+                        if event["kind"] == "frontend_error":
+                            event.update(frontend_report({key: value.get(key) for key in ("phase", "error_type", "frames", "frontend_revision")}))
                         self.logs.append(event)
                     except (ValueError, TypeError):
                         self.log_skipped += 1
@@ -140,6 +164,19 @@ class MonitorState:
         with self.lock:
             self.append_event({"timestamp": stamp(), "kind": kind, "error_type": error_type})
 
+    def frontend_failed(self, value):
+        report = frontend_report(value)
+        signature = json.dumps(value, sort_keys=True)
+        with self.lock:
+            current = time.monotonic()
+            while self.client_reports and current - self.client_reports[0][0] >= 60:
+                self.client_reports.popleft()
+            if len(self.client_reports) >= 20 or any(key == signature for _, key in self.client_reports):
+                return False
+            self.client_reports.append((current, signature))
+            self.append_event({"timestamp": stamp(), "kind": "frontend_error", "error_type": value["error_type"], **report})
+            return True
+
     def failed(self, error):
         with self.lock:
             self.errors += 1
@@ -156,6 +193,9 @@ class MonitorState:
                 self.append_event({"timestamp": stamp(), "kind": "recovered", "error_type": None})
             self.health, self.error_type = "ok", None
             self.refreshes += 1
+            if time.monotonic() - self.last_heartbeat >= 60:
+                self.append_event({"timestamp": stamp(), "kind": "heartbeat", "error_type": None})
+                self.last_heartbeat = time.monotonic()
             self.history.append({"time": stamp(), "snapshot_bytes": self.snapshot_bytes, "transfer_bytes": self.transfer_bytes, **metrics})
 
     def requested(self, code, snapshot_bytes=None, transfer_bytes=None):
@@ -173,7 +213,7 @@ class MonitorState:
         with self.lock:
             result = {"source": "monitor", "health": self.log_health if self.log_enabled else "disabled", "checked_at": self.log_checked_at, "error_type": self.log_error_type, "files": [{"name": self.journal.name}] if self.journal else [], "bytes": self.log_bytes, "byte_limit": self.JOURNAL_LIMIT*2, "retained": len(self.logs), "unsupported_lines": self.log_skipped}
             if include_entries:
-                result["entries"] = [dict(event, source="monitor", severity="error" if event["kind"] in ("refresh_failed", "http_response_error") else "info", code=event["kind"], module="local_activity_monitor", file=self.journal.name if self.journal else None) for event in self.logs] if self.log_enabled else []
+                result["entries"] = [dict(event, source="monitor", severity="error" if event["kind"] in ("refresh_failed", "http_response_error", "frontend_error") else "info", code=event["kind"], module="local_activity_monitor", file=self.journal.name if self.journal else None) for event in self.logs] if self.log_enabled else []
             return result
 
     def snapshot(self):

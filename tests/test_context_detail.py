@@ -20,7 +20,7 @@ class ContextDetailTests(unittest.TestCase):
             identity = '00000000-0000-4000-8000-000000000001'
             stamp = datetime.now(timezone.utc).isoformat()
             payloads = [
-                ('session_meta', {'id':identity}),
+                ('session_meta', {'id':identity,'source':{'subagent':{'thread_spawn':{'parent_thread_id':'00000000-0000-4000-8000-000000000002','agent_path':'/root/child'}}}}),
                 ('response_item', {'type':'message','role':'user','content':[{'type':'input_text','text':'Visible context api_key=PRIVATE_KEY'}]}),
                 ('response_item', {'type':'reasoning','content':[{'type':'reasoning_text','text':'HIDDEN_REASONING'}],'summary':[{'type':'summary_text','text':'Public summary'}]}),
                 ('response_item', {'type':'message','role':'assistant','channel':'analysis','content':[{'type':'output_text','text':'HIDDEN_ANALYSIS'}]}),
@@ -56,6 +56,8 @@ class ContextDetailTests(unittest.TestCase):
                 self.assertIn('PRIVATE_BODY',json.dumps(first.codex.agent_message_detail(identity,'send1')))
             self.assertTrue(first.codex.context_detail(identity)['masked'])
             rows = first.codex.snapshot()['threads']
+            self.assertEqual(rows[0]['execution']['parent_thread_id'],'00000000-0000-4000-8000-000000000002')
+            self.assertEqual(rows[0]['execution']['agent_path'],'/root/child')
             self.assertEqual({event['direction'] for event in rows[0]['agent_messages']},{'incoming','outgoing'})
             self.assertNotIn('PRIVATE_MESSAGE',json.dumps(rows))
             with closing(first.codex.session_checkpoint.store.connect()) as db:

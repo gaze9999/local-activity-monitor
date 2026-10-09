@@ -12,6 +12,7 @@ dist/
 *.db-*
 *.jsonl
 *.log
+*.log.[0-9]*
 *.bak
 state/
 

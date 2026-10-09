@@ -5,6 +5,76 @@ from pathlib import Path
 import platform
 import subprocess
 import sys
+import re
+import shutil
+
+
+def _native_fonts():
+    families = set()
+    if sys.platform == 'win32':
+        class Font(ctypes.Structure):
+            _fields_ = [(name,ctypes.c_int32) for name in ('height','width','escape','orientation','weight')]+[(name,ctypes.c_ubyte) for name in ('italic','underline','strike','charset','precision','clip','quality','pitch')]+[('face',ctypes.c_wchar*32)]
+        gdi = ctypes.WinDLL('gdi32.dll',winmode=0x800)
+        gdi.CreateCompatibleDC.argtypes = [ctypes.c_void_p];gdi.CreateCompatibleDC.restype = ctypes.c_void_p
+        gdi.DeleteDC.argtypes = [ctypes.c_void_p];gdi.DeleteDC.restype = ctypes.c_int
+        callback_type = ctypes.WINFUNCTYPE(ctypes.c_int,ctypes.POINTER(Font),ctypes.c_void_p,ctypes.c_uint32,ctypes.c_ssize_t)
+        def collect(font,metrics,kind,context):
+            families.add(font.contents.face.lstrip('@'))
+            return int(len(families)<2000)
+        callback = callback_type(collect)
+        gdi.EnumFontFamiliesExW.argtypes = [ctypes.c_void_p,ctypes.POINTER(Font),callback_type,ctypes.c_ssize_t,ctypes.c_uint32]
+        gdi.EnumFontFamiliesExW.restype = ctypes.c_int
+        dc = gdi.CreateCompatibleDC(None)
+        if dc:
+            try:
+                font = Font();font.charset = 1
+                gdi.EnumFontFamiliesExW(dc,ctypes.byref(font),callback,0,0)
+            finally:
+                gdi.DeleteDC(dc)
+    elif sys.platform == 'darwin':
+        core = ctypes.CDLL('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
+        text = ctypes.CDLL('/System/Library/Frameworks/CoreText.framework/CoreText')
+        text.CTFontManagerCopyAvailableFontFamilyNames.argtypes = [];text.CTFontManagerCopyAvailableFontFamilyNames.restype = ctypes.c_void_p
+        core.CFArrayGetCount.argtypes = [ctypes.c_void_p];core.CFArrayGetCount.restype = ctypes.c_ssize_t
+        core.CFArrayGetValueAtIndex.argtypes = [ctypes.c_void_p,ctypes.c_ssize_t];core.CFArrayGetValueAtIndex.restype = ctypes.c_void_p
+        core.CFStringGetCString.argtypes = [ctypes.c_void_p,ctypes.c_char_p,ctypes.c_ssize_t,ctypes.c_uint32];core.CFStringGetCString.restype = ctypes.c_bool
+        core.CFRelease.argtypes = [ctypes.c_void_p];core.CFRelease.restype = None
+        names = text.CTFontManagerCopyAvailableFontFamilyNames()
+        if names:
+            try:
+                for index in range(min(core.CFArrayGetCount(names),2000)):
+                    buffer = ctypes.create_string_buffer(1024)
+                    if core.CFStringGetCString(core.CFArrayGetValueAtIndex(names,index),buffer,1024,0x08000100):
+                        families.add(buffer.value.decode('utf-8'))
+            finally:
+                core.CFRelease(names)
+    return families
+
+
+def system_fonts():
+    """Return bounded local family names, never font file locations."""
+    families = set()
+    try:
+        if sys.platform in ('win32','darwin'):
+            families.update(_native_fonts())
+        if sys.platform == 'win32' and not families:
+            import winreg
+            for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                try:
+                    with winreg.OpenKey(hive, r'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts') as key:
+                        for index in range(min(winreg.QueryInfoKey(key)[1], 2000)):
+                            label = winreg.EnumValue(key, index)[0]
+                            label = re.sub(r'\s*\([^()]*\)\s*$', '', label)
+                            families.update(value.strip() for value in label.split(' & '))
+                except OSError:
+                    continue
+        elif sys.platform.startswith('linux') and shutil.which('fc-list'):
+            result = subprocess.run(['fc-list', '--format', '%{family}\n'], capture_output=True, timeout=3, text=True, encoding='utf-8', errors='replace')
+            if result.returncode == 0:
+                families.update(value.strip() for line in result.stdout[:262144].splitlines() for value in line.split(','))
+    except (OSError, AttributeError, ValueError, subprocess.TimeoutExpired):
+        pass
+    return sorted(value for value in families if value and len(value) <= 160 and re.fullmatch(r"[\w\s'._-]+", value))[:500]
 
 
 def cpu_times():

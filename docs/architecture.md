@@ -4,6 +4,8 @@
 
 Python 3.10+ 標準函式庫, 原生 HTML / JavaScript / CSS, setuptools package assets. 服務綁定 loopback, `Host` / `Origin` / `Sec-Fetch-Site` 驗證保留. 來源資料庫採唯讀連線, LAM 的回補資料庫使用交易寫入
 
+沒有請求本文的 GET 錯誤回應沿用 HTTP keep-alive, 讓呼叫端完整讀取狀態、表頭及本文. POST 與帶有 Content-Length / Transfer-Encoding 的錯誤請求仍關閉連線, 保留未讀本文的邊界
+
 | 檔案 | 責任 |
 | --- | --- |
 | 根目錄平台入口 / `tools/launch-cli.py` | 使用既有 Python 直接啟動原始碼, 預設不安裝 |
@@ -36,11 +38,11 @@ Python 3.10+ 標準函式庫, 原生 HTML / JavaScript / CSS, setuptools package
 
 Session 中出現 `mcp__server__tool` 時自動建立來源. 已啟用的 Codex App / Review / Security / CUA plugins 也會提供對應來源. 來源來自設定或既有紀錄, 不執行背景 API 探測. 缺少來源的電腦不會顯示其項目, 原有瀏覽器偏好也不會憑空建立來源
 
-Plugins 清單另選取設定與快取 manifest 的名稱, 供應商, 版本, 啟用狀態與技能 / MCP 數量, 設定啟用狀態與快取分列. 子代理程式透過唯讀 thread_spawn_edges 補齊關聯 metadata, 最多 500 個相關對話, 每份狀態回查最多 64 KiB 並共用每輪 8 MiB 預算
+Plugins 清單另選取設定與快取 manifest 的名稱, 供應商, 版本, 啟用狀態與技能 / MCP 數量, 設定啟用狀態與快取分列. 子代理程式透過 session 的 thread_spawn 與唯讀 thread_spawn_edges 補齊關聯 metadata, 最多 500 個相關對話, 每份狀態回查最多 64 KiB 並共用每輪 8 MiB 預算
 
 官方帳戶來源預設關閉, 啟用時建立自己的 Codex app-server stdio 子程序, 只發送 initialize / initialized 與三個 account 唯讀方法, 結束後釋放程序及串流. 使用既有登入, 不讀取 auth.json, 不將 email, 帳戶 ID 或 credentials 投影至頁面. 成功與失敗均快取至少 60 秒, 整次逾時 10 秒, stdout 上限 1 MiB. rateLimitsByLimitId 優先於 legacy rateLimits, primary / secondary 可為 null, 視窗名稱依 windowDurationMins, 不假設 primary 為短期額度. account/usage/read 的帳戶統計與本機對話累計分開
 
-Work、My dots 與排程使用本機來源, 雲端清單尚未串接
+My dots 與遠端對話活動選取 Codex 桌面快取中的 host / thread / timestamp. 即時裝置連線與遠端排程定義尚未串接, 實作狀態見 [功能清單](features.md)
 
 已知來源使用分類預設, 新來源使用通用分類. 來源分類與工具說明可以在頁面修改. 呼叫若將 namespace 與 name 分開儲存, 會合併完整識別名稱. 不同 MCP 的同名工具分開統計. 新工具沒有特定 adapter 時仍顯示名稱, 操作, 時間, 資源 ID 及可辨識的結果
 
@@ -183,7 +185,7 @@ HTTP 服務提供等待狀態後, 單一收集 worker 依序讀取 session、統
 
 `GET /api/history` 依 namespace 與 section 查詢歷史, 每頁 1 - 200 筆, 可使用回傳的 next_cursor 依時間與穩定識別碼接續查詢, 最後一頁回傳 null. offset 上限 1000000, 可指定 since, 資料庫計算 total, 受來源檢查開關及現有 Host / Origin 限制. 這個 API 的保存範圍與畫面最近 24 小時等查詢範圍分開
 
-本機與遠端共用的 HTTP 查詢 / SSE 通知設計見 [遠端存取](remote-access.md). 收集批次完成寫入與投影後發布資料版本, 前端合併變動通知再查詢目前畫面需要的資料, WBUI 局部更新並保留分頁、捲動及 modal. 本輪只納入設計, 實際仍採定時 HTTP 查詢, 尚未開放對外監聽或串流通知
+本機 `GET /api/events` 已提供 SSE 版本通知, 收集批次完成後通知前端查詢快照, 串流失敗時使用定時 HTTP 查詢. 前端保留分頁、捲動與 modal, 背景頁面關閉串流, 回到前景重新訂閱. 遠端候選入口與登入規格見 [遠端存取](remote-access.md), 服務維持 loopback
 
 `session_cursors` 保存每個來源最新的 metadata-only 讀取狀態, 供重啟恢復. `session_calls` 另存有界呼叫工作集合, 個別變動以 Call ID 更新, 不把整批呼叫重寫至 cursor JSON. 退休呼叫先保存白名單活動歷史, 再移除恢復用工作集合. 這兩表與 threads 的最新 lifecycle checkpoint 是來源恢復狀態, 不是活動歷史, 不依 90 天活動期限刪除. SQL / 網路 / MCP / Skills / 錯誤活動歷史預設保存 90 天, 設定 0 時不自動刪除
 

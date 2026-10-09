@@ -18,6 +18,12 @@ async page=>{
   await page.locator('#detail-content').getByRole('button',{name:'上一頁',exact:true}).click();
   await page.waitForFunction(()=>detail.historyIndex===0&&!detail.historyLoading);
   if(await page.locator('#detail-content tbody').textContent()!==first)throw Error('Page did not restore');
+  await page.locator('#detail-content').getByRole('button',{name:'最後一頁',exact:true}).click();
+  await page.waitForFunction(()=>detail.historyIndex===Math.ceil(detail.historyPage.total/detail.historyLimit)-1&&!detail.historyLoading);
+  if(!await page.locator('#detail-content').getByRole('button',{name:'下一頁',exact:true}).isDisabled())throw Error('Last page boundary');
+  await page.locator('#detail-content').getByRole('button',{name:'上一頁',exact:true}).click();await page.waitForFunction(()=>!detail.historyLoading);
+  await page.locator('#detail-content').getByRole('button',{name:'第一頁',exact:true}).click();await page.waitForFunction(()=>detail.historyIndex===0&&!detail.historyLoading);
+  if(await page.locator('#detail-content tbody').textContent()!==first)throw Error('First page after last');
   await page.locator('#detail-dialog').evaluate(el=>el.close());
   await page.route('**/api/history?**',route=>route.fulfill({status:503,body:'Unavailable'}));
   await page.evaluate(()=>openHistory('activity','mcp'));await page.waitForFunction(()=>detail.historyError&&!detail.historyLoading);

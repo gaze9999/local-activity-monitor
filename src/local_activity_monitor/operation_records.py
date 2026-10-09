@@ -1,4 +1,4 @@
-"""Recognize literal Git / Jev tool operations; never execute recorded code."""
+"""Recognize literal tool and command metadata without executing recorded code."""
 import json
 import math
 from pathlib import PurePosixPath, PureWindowsPath
@@ -388,6 +388,13 @@ def workflow_operations(payload, include_skills=True, include_checks=True, calls
             continue
         for command in shell_parts(args["cmd"]):
             command = command.strip()
+            executable = re.match(r'''^(?:&\s*)?(?:"([^"\n]+)"|'([^'\n]+)'|([^\s]+))\s+(.*)$''', command)
+            if executable:
+                name = next(item for item in executable.groups()[:3] if item).replace("\\", "/").rsplit("/", 1)[-1]
+                name = re.sub(r"\.(?:exe|cmd|ps1)$", "", name, flags=re.I)
+                if name.lower() in ("python", "python3", "py", "node", "npm", "pnpm", "yarn", "bun", "dotnet", "cargo", "go", "pytest", "mypy", "tsc", "ruff"):
+                    flags = re.sub(r"^(?:(?:-[BIu]|-X\s+\S+|-I|-B)\s+)+", "", executable[4])
+                    command = name.lower()+" "+flags
             if include_skills and re.match(r"(?:Get-Content|cat|type|sed|more)\b", command, re.I):
                 names = dict.fromkeys(re.findall(r"[/\\]([^/\\\s\"']+)[/\\]SKILL\.md\b", command, re.I))
                 if include_paths:

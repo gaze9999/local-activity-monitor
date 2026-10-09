@@ -25,7 +25,7 @@
 | summaries | 各摘要區的 count, order, hidden 與 titles |
 | contentMasking | 訊息、工具執行回覆、SQL、錯誤與 Context 的按需明細遮蔽, 預設 true |
 | sqlMasking | 舊 SQL 遮蔽設定相容欄位, 與 contentMasking 同步 |
-| tableSchema | 欄位相容版本, 目前為 8 |
+| tableSchema | 欄位相容版本, 目前為 10 |
 | copy | 預設完整標籤 / tooltip → 自訂文字 |
 | settings | interval, idle_minutes, activity_retention_days, max_files, track_all, observations, mcp_sources, mcp_categories, tool_descriptions, mcp_descriptions, mcp_tags |
 
@@ -67,7 +67,7 @@
 
 localStorage 依 origin 隔離. 後端觀察設定保存於目前程序, 網頁重新連線後套用瀏覽器值. 來源紀錄狀態維持該來源設定, Jev 本機 telemetry 使用 CODEX_HOME 的 opt-in 檔. 設定檔不含活動紀錄, 原始 Log, credentials, session 本文或 Jev payload. 自訂說明, 搜尋與 filter 文字會包含在 JSON
 
-來源紀錄範圍同時套用列表與操作統計, 來源時間缺值只在全部範圍顯示. 最新對話狀態, 累計 Token 與帳戶額度保留來源回報值. 舊版有效 window 值可遷移, 字級下拉選單即時套用並保存, 自訂字型與色碼在確認輸入後套用, 無效內容保留已套用的值
+來源紀錄範圍同時套用列表與操作統計, 來源時間缺值只在全部範圍顯示. 最新對話狀態, 累計 Token 與帳戶額度保留來源值. 舊版有效 window 值可遷移, 字級與系統字型選單即時套用並保存, 自訂色碼在確認輸入後套用, 無效內容保留已套用的值
 
 cardVisibility 最多 500 項, 保留已有的明確顯示選擇. 省略時套用各分頁預設, 摘要項目使用 summaries 的配置, 總覽使用 overview 的配置. tableSchema 7 新增對話快取命中率欄位, 舊版排序 index 依原欄位移位
 
