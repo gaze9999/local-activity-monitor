@@ -2,15 +2,15 @@
 
 本機 SSE 已實作, 服務維持 loopback 與 Host / Origin 限制. 本文件其餘章節定義後續遠端串接、配對與登入, 遠端部分尚未實作
 
-LAM 採 HTTP API 查詢與操作, SSE 傳送資料更新通知, WBUI 被動訂閱資料並局部更新畫面. 定時查詢保留為本機入口及串流中斷時的替代方式
+LAM 的本機畫面由 SSE 接收快照與 Log, WBUI 使用收到的投影更新畫面. HTTP API 處理設定、手動收集與按需明細
 
 ## 已實作的本機 SSE
 
-`GET /api/events` 使用 `text/event-stream`, 每個畫面共用一條連線, 伺服器最多接受 8 條. 連線開始傳送 `retry: 3000`, 再傳送目前版本的 `snapshot` 事件, `id` 與 `data: {"version":N}` 對應同一個更新序號. 通知後由前端重新查詢快照, 通知不攜帶活動本文
+`GET /api/events?window=24h` 使用 `text/event-stream`, window 接受既有來源時間範圍, 預設 24h. 每個畫面共用一條連線, 伺服器最多接受 8 條. 連線開始傳送目前的 `snapshot` 事件, `id` 與 data 的 version 對應同一個序號, data 包含 `{version, window, snapshot, logs}`. 快照與 Log 沿既有欄位及容量限制, 原文明細維持按需讀取
 
-每 15 秒傳送心跳, 心跳不增加資料版本. 收集成功、收集失敗及暫停狀態變更通知前端更新. 頁面進入背景或關閉時結束串流, 回到前景後重新訂閱並查詢目前快照. 串流失敗時沿用設定的定時查詢, 恢復後合併更新要求
+原生檔案通知觸發收集, 完成或失敗後發布可用結果, 歷史回補按預算接續處理. 每 15 秒的心跳只維持通訊, 不收集資料或增加資料版本. 頁面進入背景或關閉時結束串流並釋放連線, 回到前景後重新訂閱. [EventSource](https://html.spec.whatwg.org/multipage/server-sent-events.html) 依瀏覽器處理重新連線, 用戶端收到最新快照後恢復, 不另外安排定時查詢
 
-本機入口不接受額外查詢參數, 保留 Host、Origin 與 Fetch Metadata 檢查. 後續章節的 `connect`、`query`、`instance_id` 與資源通知屬於遠端候選規格, 與本機已實作的版本通知分開
+本機入口只接受單一 window 參數, 保留 Host、Origin 與 Fetch Metadata 檢查. 後續章節的 `connect`、`query`、`instance_id` 與資源通知屬於遠端候選規格, 與本機已實作的版本通知分開
 
 ## 責任與介面
 

@@ -254,10 +254,9 @@ class ContentDetailsTests(unittest.TestCase):
         self.assertEqual(self.get('/api/mcp/files?server=future&path=private')[0],400)
 
     def test_manual_resume_and_idle_settings_validation(self):
-        self.assertEqual(self.app.settings()['idle_minutes'],5)
+        self.assertNotIn('idle_minutes',self.app.settings())
         for invalid in (True,-1,1441,'5'):
             with self.assertRaises(ValueError):self.app.set_settings({'idle_minutes':invalid})
-        self.app.activity.paused=True
         self.assertEqual(self.post('/api/refresh',{}),200)
-        self.assertFalse(self.app.activity.paused)
+        self.assertFalse(self.app.activity_status()['paused'])
         self.assertEqual(self.post('/api/refresh',{'path':'private'}),400)

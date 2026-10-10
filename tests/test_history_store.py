@@ -14,6 +14,34 @@ from local_activity_monitor.thread_state import ThreadState
 
 
 class HistoryStoreTests(unittest.TestCase):
+    def test_batch_aggregates_share_snapshot_and_keep_results_independent(self):
+        self.value['mcp'] = [{'timestamp':'2026-10-10T00:00:00Z', 'server':'included', 'call_id':'first', 'nested':False},
+                             {'timestamp':'2026-10-10T00:00:00Z', 'server':'excluded', 'call_id':'second'}]
+        self.store.save(json.dumps(self.value))
+        aggregate = self.store._aggregate
+        calls = 0
+        def changed_source(db, where, args):
+            nonlocal calls
+            result = aggregate(db, where, args)
+            calls += 1
+            if calls == 1:
+                self.store.save(json.dumps(self.value|{'mcp':[{'timestamp':'2026-10-10T00:01:00Z', 'server':'included', 'call_id':'third'}]}))
+            return result
+        with patch.object(self.store, '_aggregate', side_effect=changed_source):
+            results = self.store.aggregate_many('mcp', [None, '2026-10-10T00:00:00Z'], ['excluded'])
+        self.assertEqual([result['total'] for result in results], [1, 1])
+        self.assertEqual(self.store.aggregate('mcp', excluded_sources=['excluded'])['total'], 2)
+        results[0]['servers']['included']['total'] = 99
+        self.assertEqual(results[1]['servers']['included']['total'], 1)
+        self.assertEqual(self.store.aggregate_many('mcp', ['2026-10-11T00:00:00Z'])[0]['total'], 0)
+
+    def test_batch_aggregate_validates_ranges_even_without_database(self):
+        store = history_store.HistoryStore(self.root/'missing'/'activity-history.json', 'activity')
+        self.assertEqual([result['total'] for result in store.aggregate_many('sql', [None, '2026-10-10T00:00:00Z'])], [0, 0])
+        for boundaries in ([], [None]*17, ['2026-10-10'], [123]):
+            with self.subTest(boundaries=boundaries), self.assertRaises(ValueError):
+                store.aggregate_many('sql', boundaries)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="LAM SQLite ")
         self.addCleanup(self.temp.cleanup)

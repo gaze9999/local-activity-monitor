@@ -32,7 +32,7 @@ cd local-activity-monitor
 
 - `launch-cli.cmd`: Windows 入口
 - `launch-cli.command`: macOS 入口
-- `launch-cli.py`: 各系統共用的原始碼入口, 免安裝包以 `launch-portable.py` 打包成執行檔
+- `tools/launch-cli.py`: 各系統共用的原始碼入口, 免安裝包以 `tools/launch-portable.py` 打包成執行檔
 
 入口優先使用儲存庫內的 `.venv`, 其次使用已安裝的 Python, 自動建置頁面並開啟 `http://127.0.0.1:8787/`. 終端按 Ctrl+C 停止服務. 可加入 `--port 8790` 指定連接埠, `--codex-home` 指定 Codex 資料目錄
 
@@ -46,7 +46,7 @@ Windows 的 `launch-cli.cmd` 在入口結束後會顯示退出碼並等待按鍵
 
 原始碼入口會將最近一次啟動階段寫入 `.local/startup-status.json`, 包含 Python 版本與位置, 程序 ID, 更新時間, 已確認的 loopback URL 與可取得的退出碼. 不保存啟動參數或完整 Log. 狀態檔是最近一次寫入的結果, 強制關閉視窗後可能停留在 `listening`, 不能單憑此檔判斷服務仍在運作
 
-Windows 原始碼的 `.cmd` 與 `.ps1` 入口另保存 `.local/startup-logs/startup-*.log`, 從 Python 啟動前記錄 bootstrap, 建置與監測程序的 stdout / stderr, 包含錯誤堆疊及可取得的退出碼. 每行寫入後立即刷新, 強制關閉時仍保留已寫入內容, 沒有 `wrapper_exit` 或退出碼為 `unknown` 時表示未取得完整退出結果
+Windows 原始碼的 `.cmd` 入口另保存 `.local/startup-logs/startup-*.log`, 從 Python 啟動前記錄 bootstrap, 建置與監測程序的 stdout / stderr, 包含錯誤堆疊及可取得的退出碼. 每行寫入後立即刷新, 強制關閉時仍保留已寫入內容, 沒有 `wrapper_exit` 或退出碼為 `unknown` 時表示未取得完整退出結果
 
 啟動 Log 在運作中循環輪替, 每個檔案最多 1 MiB, 滿額後依序保留 `.log.1` 至 `.log.3`, 最新訊息持續寫入 `.log`. 超長單行會截斷, 啟動時保留最近 10 組 Log, 每組最多 4 MiB, 使用中的舊記錄不強制刪除. 可辨識的 API key, Bearer, 密碼與 URL 認證資訊會遮蔽, 記錄只保存在忽略追蹤的 `.local/`, 不複製 Codex 對話或模型回應
 
@@ -109,7 +109,7 @@ local-activity-monitor --codex --open
 
 | 套件 | 啟動方式 |
 | --- | --- |
-| `windows-x64-cli.zip` | 解壓縮後使用 `launch-cli.cmd`、`launch-cli.ps1` 或 `launch-cli.exe` |
+| `windows-x64-cli.zip` | 解壓縮後使用 `launch-cli.cmd`, 入口呼叫包內的 `launch-cli.exe` |
 | `macos-arm64-cli.tar.gz` | Apple Silicon, 使用 `launch-cli.command` 或 `launch-cli` |
 | `macos-x64-cli.tar.gz` | Intel Mac, 使用 `launch-cli.command` 或 `launch-cli` |
 | `linux-x64-cli.tar.gz` / `linux-arm64-cli.tar.gz` | 使用 `launch-cli.sh` 或 `launch-cli` |

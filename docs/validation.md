@@ -21,7 +21,29 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 測試使用暫存 metadata、SQLite 與來源 fixture, 涵蓋資料投影、差異讀取、checkpoint、內容遮蔽、來源快取、HTTP 邊界、啟動及建置回復
 
+Windows 的來源更新與閒置 I/O 比較使用 `tools/benchmark_source_updates.py`, 先完成啟動整理再量測. 舊版從指定 Git 提交擷取, 新版凍結目前原始碼, 使用相同 12 檔合成資料, 每組獨立 home, 不開啟 HTTP、帳戶 API、硬體查詢或 Debug. 舊版預設 10 秒輪詢, 另以已滿 5 分鐘的 fixture 狀態檢查閒置模式. 兩版交換順序執行, 程序 I/O 計數先以 256 KiB 讀寫校準, 結果保存於 `.local/source-update-io-performance.json`
+
+```powershell
+python -X utf8 -B tools/benchmark_source_updates.py --baseline a1cc7fe --duration 65 --runs 2
+python -X utf8 -B tools/benchmark_source_updates.py --baseline a1cc7fe --case active --duration 35 --runs 2
+```
+
+`active` 模式由獨立程序每秒追加一筆資料, 最後保留 15 秒讓兩版讀完相同內容, 核對最新 Token 值. 產生資料的程序 I/O 與 CPU 排除於量測, 結果保存於 `.local/source-update-io-active-performance.json`
+
+比較未提交的原始碼時, 先保存修改前的來源, 再以 `--baseline-source` 選取該副本. 副本與輸出均放在 checkout 的 `.local`, 每組結果保存兩版 SHA-256, 並另記首次整理的 CPU、耗時與 I/O
+
+```powershell
+python -X utf8 -B -c "from pathlib import Path; from tools.benchmark_source_updates import freeze_sources; print(freeze_sources(Path('.local/before-source')))"
+# 修改原始碼後執行
+python -X utf8 -B tools/benchmark_source_updates.py --baseline-source .local/before-source --case active --duration 35 --runs 2 --output .local/optimized-active.json
+python -X utf8 -B tools/benchmark_source_updates.py --baseline-source .local/before-source --duration 65 --runs 2 --output .local/optimized-idle.json
+```
+
+`aggregate_many` 核對同一唯讀交易的時間範圍、來源篩選、空結果與獨立副本, 並模擬讀取期間另一個 writer 新增資料. 錯誤與對話狀態檢查相同輸入略過、完整保存、offset 變更及失敗重試
+
 `v0.11.0` 交付前固定 WBUI `v0.7.0` 的提交 `19a81a7`, 兩組資產 manifest 與完整 SHA 相符. 本機原生環境執行歷史、時間範圍、保存、HTTP、前端建置與資產檢查, 67 項中 65 項通過, 2 項因無法建立 symlink 與大型 HTTP 標準函式庫基準逾時略過. 三個 Node 使用端檢查通過. 正式固定資產方式的合成服務另通過四類表格換頁與 23 種明細流程, 包含三語、四種寬度、連點、取消、焦點與長網址提示
+
+`v0.12.0` 交付前在 Windows、Python 3.12.14 執行完整 474 項測試, 471 項通過, 2 項因無法建立 symlink、1 項因大型 HTTP 標準函式庫基準逾時略過. 固定 WBUI `19a81a7` 的前端建置、資產檢查、JavaScript 語法及三個 Node 使用端檢查通過. Edge 154.0.4258.62 的隔離合成服務通過 12 類流程, 涵蓋 SSE、重連、還原設定、載入、啟動預載、互動期間保留表格、Debug、歷史圖表、換頁、摘要與直螢幕. 分頁 SVG 的水平與垂直中心偏移均為 0, 各按鈕高度一致, 未出現頁面程式錯誤. 正式資料的長時間效能及五平台原生包仍依後續驗收流程核對
 
 `test_activity_history.py` 核對超過 1 MiB 的未變更輸入不重寫、完整 SQLite 保存與有界畫面資料、失敗後重試、快照獨立複製及即時保存期限篩選
 
@@ -66,7 +88,10 @@ python tests/serve_loading_fixture.py
 | `history-chart-flow.cjs` | 完整保存範圍統計與總覽副本獨立範圍 |
 | `reconnect-flow.cjs` | 中斷後自動重連與保留畫面 |
 | `restart-reset-flow.cjs` | 後端更新及還原預設不重新載入整頁 |
-| `event-stream-flow.cjs` | 本機 SSE、重複通知、後端重啟與重連、定時查詢備援及連線關閉 |
+| `event-stream-flow.cjs` | SSE 快照與 Log、重複及晚到資料、後端重啟與重連、連線關閉 |
+| `debug-flow.cjs` | Debug 開關、監測程式 Tab 與明細、心跳不觸發來源收集、停止記錄及三語排版 |
+| `stream-burst-flow.cjs` | 接受 page 與 CDP session, 1200 筆快照與獨立 / 混合 Debug 事件合併渲染、最新資料與回收後 heap / DOM 保留量 |
+| `table-stream-interaction-flow.cjs` | SSE 更新期間保留滑鼠與鍵盤目標, 離開後套用最新排序, 對話及 SQL 表格 |
 | `followup-layout-flow.cjs` | 空圖表恢復、精簡欄位、Context 順序、摘要、列明細、空資料提示及首尾頁 |
 | `startup-preload-flow.cjs` | 首輪活動整理前的對話目錄與完整結果切換, 使用隔離回應 |
 | `viewport-detail-flow.cjs` | 截圖比例、不同字級與語系、兩行狀態、摘要與子頁籤分區、My dots 明細 |

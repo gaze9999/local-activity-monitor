@@ -108,11 +108,10 @@ let pendingFileProject=preferences.inputs?.["filter-file-project"],pendingFileTo
 let loadedRevision=null,loadedFrontendRevision=null,loadedBackendRevision=null,pendingRevision=null,preferencesApplied=false,pendingProject=preferences.inputs?.["filter-project"],pendingGit=preferences.inputs?.["filter-git"],pendingReasoning=preferences.inputs?.["filter-reasoning"],pendingModel=preferences.inputs?.["filter-model"];
 let threadIndex=new Map();
 let logData=null,logBusy=false,logQueued=false;
-let data = null, page = 1, pageCount = 1, refreshTimer = null, refreshSeconds = 10;
-let idlePaused=false,activityBusy=false,scheduledSeconds=0;
-let connectionLost=false,reconnectTimer=null,reconnectFailures=0;
+let data = null, page = 1, pageCount = 1;
+let connectionLost=false;
 const fileSnapshots=new Map(),fileSnapshotRequests=new Set(),fileSnapshotAttempts=new Map();let fileSummaryBusy=false;
-let busy = false, refreshQueued = false, settingsBusy = false, version = 0, detail = null;
+let busy = false, settingsBusy = false, version = 0, detail = null;
 let lazyLimit=50,mcpPage=1,docsPage=1,docTools=[],chartSelection=null;
 const docDrafts=new Map();
 const chartViews=new Map(),systemDark=matchMedia("(prefers-color-scheme: dark)");
@@ -146,7 +145,7 @@ function feedback(id,text,state="success"){
 function setPageIcon(control,name,label=control.getAttribute("aria-label")||control.textContent){control.classList.add("wb-button");try{WorkbenchUI.setButtonIcon(control,name,label);}catch(error){if(!["first","last"].includes(name)||!(error instanceof TypeError)||error.message!=="Unknown icon")throw error;WorkbenchUI.setButtonIcon(control,name==="first"?"previous":"next",label);}if(["first","last","previous","next"].includes(name))control.dataset.pageIcon=name;return control;}
 function applyActionIcons(){
   for(const el of document.querySelectorAll('button')){
-    const glyph=el.textContent.trim(),name=el.dataset.pageIcon||el.dataset.wbIcon||({"⚙":"settings","◐":"theme","×":"close","✎":"edit","←":"previous","→":"next","⇤":"first","⇥":"last"}[glyph])||(/-close$/.test(el.id)?"close":/-first$/.test(el.id)?"first":/-last$/.test(el.id)?"last":/-prev$/.test(el.id)?"previous":/-next$/.test(el.id)?"next":el.id==="resume-refresh"?"refresh":null);
+    const glyph=el.textContent.trim(),name=el.dataset.pageIcon||el.dataset.wbIcon||({"⚙":"settings","◐":"theme","×":"close","✎":"edit","←":"previous","→":"next","⇤":"first","⇥":"last"}[glyph])||(/-close$/.test(el.id)?"close":/-first$/.test(el.id)?"first":/-last$/.test(el.id)?"last":/-prev$/.test(el.id)?"previous":/-next$/.test(el.id)?"next":null);
     if(name)setPageIcon(el,name,el.getAttribute("aria-label")||el.title||(/^(first|last|previous|next)$/.test(name)?ui({first:"第一頁",last:"最後一頁",previous:"上一頁",next:"下一頁"}[name]):null)||ui(name==="settings"?"設定":name==="close"?"關閉":"立即更新"));
   }
 }
@@ -627,7 +626,7 @@ function renderNavigationSummaries(){
   cards("tool-cards",[[ui("工具呼叫"),fmt(data.initial_sections?null:c.observed_tool_calls??0),""],[ui("工具種類"),fmt(Object.keys(tools).length),""],[ui("exec 辨識"),fmt(Object.values(nested).reduce((n,value)=>n+value,0)),ui("內層工具 ")+fmt(Object.keys(nested).length)+ui(" 種")],[ui("有回傳時間"),fmt(threads.flatMap(t=>t.tool_events||[]).filter(e=>e.completed_at).length),""]]);
   if(conversationSource!=="conversations")cards("codex-cards",[[ui("對話"),fmt(threads.length),ui("已載入對話")],[ui("執行中"),fmt(threads.filter(thread=>thread.status==="running").length),""],[ui("工具呼叫"),fmt(data.initial_sections?null:c.observed_tool_calls??0),""],[ui("最近活動"),when(threads.map(thread=>thread.updated_at).filter(Boolean).sort().at(-1)),""]]);
   cards("projects-cards",[[ui("專案"),fmt(projects.length),ui("本機 ")+fmt(projects.filter(project=>project.kind==="local").length)+" · "+ui("雲端 ")+fmt(projects.filter(project=>project.kind==="cloud").length)],[ui("有專案資訊的對話"),fmt(threads.filter(thread=>thread.project_id).length),ui("已載入對話")],[ui("Git 操作"),fmt(c.git?.events?.length||0),ui("來源記錄的版本控制操作")],[ui("驗證操作"),fmt(c.checks?.length||0),ui("測試, 建置與檢查操作")]]);
-  cards("data-cards",[[ui("網路操作"),fmt(web.length),ui("參考網址 ")+fmt(new Set(references(web).map(event=>event.url)).size)],[ui("檔案操作"),fmt(files.length),ui("不同檔案位置 ")+fmt(new Set(files.map(fileLocation)).size)],[ui("SQL 操作"),fmt(sql.length),ui("來源記錄的資料庫操作")],[ui("涉及對話"),fmt(related.size),ui("有資料操作紀錄的對話")]]);
+  cards("data-cards",[[ui("網路操作"),fmt(web.length),ui("參考網址 ")+fmt(new Set(references(web).map(event=>event.url)).size)],[ui("檔案操作"),fmt(c.file_activity?.total??files.length),ui("明細 ")+fmt(files.length)+ui(" 筆")+" · "+ui("不同檔案位置 ")+fmt(new Set(files.map(fileLocation)).size)],[ui("SQL 操作"),fmt(sql.length),ui("來源記錄的資料庫操作")],[ui("涉及對話"),fmt(related.size),ui("有資料操作紀錄的對話")]]);
 }
 function pluginStatus(item){return ui(item.config_present?item.enabled===false?"已停用":item.enabled===true?"已啟用":"已設定":"已快取");}
 function renderPlugins(){const plugins=data.codex.plugins,items=plugins?.items||[];replaceRows("plugin-rows",...items.map(item=>{const row=node("tr");cell(row,item.name||item.id);cell(row,item.provider||ui("未知"));cell(row,item.version||ui("尚未提供"));const status=window.WorkbenchUI?.tag(pluginStatus(item),item.enabled===false?"neutral":item.enabled===true?"success":"category")||tag(pluginStatus(item));cell(row).append(status);valueCell(row,item.skills_count);valueCell(row,item.mcp_count);return clickableRow(row,()=>openDetail({kind:"plugin",plugin:item}));}));$("plugin-empty").textContent=items.length?"":ui(plugins?.health==="unavailable"?"目前無法讀取 Plugins 資料":"目前沒有可取得的 Plugins 資料");}
@@ -910,14 +909,14 @@ function render(next){
   $("program-version").textContent=data.monitor?.version?"v"+data.monitor.version:"--";document.documentElement.dataset.revision=data.revision||"";$("program-started").textContent=ui("啟動 ")+when(data.started_at);$("program-started").dateTime=data.started_at||"";$("program-started").title=ui("此監測程式的啟動時間");$("program-uptime").title=ui("此監測程式持續執行的時間")+"\n"+ui("啟動 ")+when(data.started_at);if(Number.isFinite(data.monitor?.uptime_seconds))uptimeSample={seconds:data.monitor.uptime_seconds,received:performance.now()};renderUptime();
   renderConnectionStatus();
   renderHeaderQuota(c.usage);
-  $("live").textContent=ui(data.monitor?.health==="error"?data.updated_at?"資料整理失敗, 顯示上次結果":"資料整理失敗, 等待重試":data.updated_at?"已連線":data.initial_sections?"載入活動中":"正在整理資料");
+  $("live").textContent=ui(data.activity?.watch_health==="unavailable"?"來源監聽失敗, 請重新啟動服務":data.monitor?.health==="error"?data.updated_at?"資料整理失敗, 顯示上次結果":"資料整理失敗, 等待重試":data.updated_at?"已連線":data.initial_sections?"載入活動中":"正在整理資料");
   const duration=threads.filter(t=>t.task_duration_ms!=null).reduce((n,t)=>n+t.task_duration_ms,0);
   cards("overview-cards",[[ui("對話"),fmt(threads.length),ui("執行中 ")+fmt(threads.filter(t=>t.status==="running").length)+ui(" 個")],[ui("工具呼叫"),fmt(data.initial_sections?null:c.observed_tool_calls??0),ui("工具種類 ")+fmt(Object.keys(c.tools||{}).length)],[ui("工作累計時間"),data.initial_sections?"--":fmt(Math.round(duration/60000))+ui(" 分鐘"),ui("已取得時間的對話 ")+fmt(threads.filter(t=>t.task_duration_ms!=null).length)+ui(" 個")],[ui("資料來源"),fmt(data.mcp?.servers?.length||0),ui("檔案修改 ")+fmt(threads.reduce((n,t)=>n+(t.file_changes?.length||0),0))+ui(" 筆")]]);
 
   renderNavigationSummaries();renderErrors();renderVisibleContent();renderSources();if(!$("view-errors").hidden&&!$("view-logs").hidden||overviewNeeds("view-logs"))loadLogs();
   renderCharts();if(!$("view-overview").hidden)renderHighlights();
-  $("updated").textContent=data.updated_at?ui("更新 ")+new Date(data.updated_at).toLocaleTimeString(locale,{hour12:false}):ui("尚未更新");$("updated").title=when(data.updated_at)+"\n"+$("refresh-note").textContent+"\n"+ui("啟動 ")+when(data.started_at);$("updated").dateTime=data.updated_at||"";
-  if(!settingsBusy&&data.settings){if(document.activeElement!==$("refresh-interval"))$("refresh-interval").value=data.settings.interval;syncIdleSettings();syncRefreshState(data.activity);schedule(data.updated_at?data.settings.interval:1);}
+  $("updated").textContent=data.updated_at?ui("更新 ")+new Date(data.updated_at).toLocaleTimeString(locale,{hour12:false}):ui("尚未更新");$("updated").title=when(data.updated_at)+"\n"+ui("啟動 ")+when(data.started_at);$("updated").dateTime=data.updated_at||"";
+  if(!settingsBusy&&data.settings){syncRetentionSettings();}
   attachTables(true);
   setSnapshotState(next.updated_at?"ready":"loading");
   if(next.updated_at&&pageMetrics.snapshot().firstData==null)requestAnimationFrame(()=>{pageMetrics.firstData(performance.now());updatePageMetrics();});
@@ -978,7 +977,7 @@ function renderSQLite(){
   $("sqlite-scope").textContent=data.settings.observations.sqlite===false?ui("SQL 操作檢查已停用"):ui("從工具呼叫與 SQL 診斷辨識操作類型")+" · "+fmt(aggregate?.total??events.length)+ui(" 筆操作")+(aggregate?ui(" · SQLite 保存範圍統計"):"");
   cards("sqlite-cards",[[ui("SQL 操作"),fmt(events.length),ui("最近保留的操作紀錄")],[ui("資料庫"),fmt(new Set(events.map(sqlLocation).filter(Boolean)).size),ui("可確認的檔案與記憶體資料庫")],[ui("SQL 診斷紀錄"),fmt(events.filter(e=>e.recognition==="diagnostic_log").length),ui("來源實際提供的 SQL metadata")],[ui("工具失敗"),fmt(new Set(events.filter(e=>e.result==="failed").map(e=>e.thread_id+":"+e.call_id)).size),ui("整次工具呼叫的回傳狀態")]]);
   replaceRows("sqlite-rows",...events.map(event=>{const row=node("tr");cell(row,when(event.timestamp));cell(row,event.statement,"mono");cell(row,sqlLabels[event.operation]||event.operation);cell(row,event.engine);cell(row,sqlLocation(event)||"--","path-cell mono");cell(row).append(tag(sqlResults[event.result]||event.result));if(event.thread_id)eventThreadCell(row,event);else cell(row,"--");projectCell(row,event);cell(row,sqlMethod(event));cell(row,event.tool||"--","mono");valueCell(row,event.container_duration_ms);cell(row,event.call_id||"--","mono");cell(row,event.source?logSource(event.source):ui("對話紀錄"));valueCell(row,event.duration_ms);valueCell(row,event.rows_affected);valueCell(row,event.rows_returned);return clickableRow(row,()=>openDetail({kind:"sqlite",event}));}));
-  $("sqlite-empty").textContent=events.length?"":ui("無");
+  $("sqlite-empty").textContent=events.length?"":ui("目前時間範圍沒有 SQL 紀錄");
   const measured=events.filter(event=>Number.isFinite(event.duration_ms));$("sqlite-measured").replaceChildren(node("h4",ui("SQL 耗時統計")),measured.length?statisticLabels(statistics(measured.map(event=>event.duration_ms)),"ms",ui("僅統計來源有提供耗時的 SQL 紀錄")):node("p","--","muted"));
 }
 const sourceScopes=editableLabels({loaded_project_roots_and_codex_managed_worktrees:"唯讀檢查已載入專案與 Codex 管理目錄的 Git 工作樹",retained_activity_metadata:"SQL, 網路與 MCP 活動摘要保存至 SQLite, 預設 90 天, 設定 0 時不自動刪除. 筆數與容量上限只限制記憶體工作集合",
@@ -1048,7 +1047,7 @@ async function loadLogs(){
   for(const panel of $("view-logs").querySelectorAll(".panel"))setPanelDataState(panel,logData?"refreshing":"loading");
   if(!logData)$("log-message").textContent=ui("正在讀取 Log 紀錄");
   try{
-    const window=activeSourceWindow(),current=version,response=await request("/api/logs?window="+encodeURIComponent(window),{cache:"no-store"});if(!response.ok)throw new Error();if(current!==version||window!==activeSourceWindow())return;logData=response.data;
+    if(!logData)await refresh();if(!logData)throw new Error();
     if(!data)return;if($("view-logs").hidden){if(overviewNeeds("view-logs"))renderCharts();return;}
     renderLogSummary();
     replaceRows("log-rows",...(logData?.entries||[]).map(event=>{const row=node("tr");cell(row,when(event.timestamp));cell(row).append(severityTag(event.severity));cell(row,logSource(event.source));cell(row,event.module||"--","mono");cell(row,logMessage(event));cell(row,event.code||"--","mono");if(event.thread_id)eventThreadCell(row,event);else cell(row,"--");projectCell(row,event);cell(row,event.method||event.tool||"--","mono");cell(row,event.error_type||"--","mono");cell(row,event.file||"--","mono");valueCell(row,event.record_id);return clickableRow(row,()=>openDetail({kind:"log",event}));}));
@@ -1065,7 +1064,17 @@ function browserEnvironment(){
 }
 function cliVersionList(versions){if(!versions.length)return "--";const list=node("div",null,"version-list");for(const version of versions.slice(0,5))list.append(node("div",version,"mono"));if(versions.length>5)list.append(button(ui("查看全部版本")+" ("+fmt(versions.length)+")",()=>openDetail({kind:"cli-versions",versions}),"link"));return list;}
 function collectionPhase(phase){return ui(({waiting:"等待整理",sessions:"對話紀錄",projections:"統計投影",worktrees:"工作樹",account:"帳戶資料",diagnostics:"診斷紀錄",history:"歷史回補",mcp:"MCP 來源",jev:"Jev 紀錄",hardware:"硬體資訊",complete:"完成整理",idle:"等待更新",stopped:"已停止",error:"整理失敗"})[phase]||"等待整理");}
+function debugKind(kind){return ui(({enabled:"已啟用",disabled:"已停用",collection:"資料整理",stream_open:"串流連線",stream_frame:"快照推送",stream_close:"串流關閉",stream_error:"串流錯誤",heartbeat:"連線心跳"})[kind]||kind);}
+function renderMonitorDebug(){
+  const value=data.monitor?.debug||{},records=value.records||[],latest=records[0],control=$("debug-mode");
+  if(!settingsBusy)control.checked=!!data.settings?.debug_mode;
+  $("monitor-debug-data").replaceChildren(metadataList([[ui("記錄狀態"),ui(value.health==="unavailable"?"寫入失敗":value.enabled?"記錄中":"已停用"),value.error_type||""],[ui("SSE 連線數"),fmt(value.active_streams)],[ui("記錄檔容量"),fmt(value.bytes)+" B / "+(Number.isFinite(value.byte_limit)?measure(value.byte_limit,"bytes"):"--")],[ui("最近記錄"),when(latest?.timestamp)],[ui("程序記憶體"),Number.isFinite(latest?.rss_bytes)?measure(latest.rss_bytes,"bytes"):"--"],[ui("程序累計 CPU (ms)"),fmt(latest?.process_cpu_ms)]]));
+  replaceRows("debug-rows",...records.map(record=>{const row=node("tr");cell(row,when(record.timestamp));cell(row,debugKind(record.kind));valueCell(row,record.refresh_ms??(record.serialization_ms!=null?record.serialization_ms+(record.write_ms||0):null));for(const key of ["cpu_ms","process_cpu_ms","rss_bytes","read_bytes","transfer_bytes"])valueCell(row,record[key]);return clickableRow(row,()=>openDetail({kind:"performance",record}));}));
+  $("debug-empty").textContent=records.length?ui("點開紀錄可查看階段耗時與緩衝區資訊"):ui("開啟 Debug 模式後開始記錄");
+}
+$("debug-mode").addEventListener("change",async event=>{const control=event.target,enabled=control.checked;control.disabled=true;try{await changeSettings({debug_mode:enabled});}catch{control.checked=!enabled;}finally{control.disabled=false;}});
 function renderMonitor(){
+  renderMonitorDebug();
   const m=data.monitor||{},c=data.codex,enabled=Object.values(data.settings?.observations||{}).filter(Boolean).length;
   const activeHelp=document.activeElement.closest("#monitor-environment .metadata-help"),helpRoot=activeHelp?.closest("[id]")?.id,helpIndex=activeHelp?[...activeHelp.parentElement.querySelectorAll(".metadata-help")].indexOf(activeHelp):-1,helpDismissed=activeHelp?.classList.contains("help-dismissed");
   cards("monitor-cards",[[ui("整理狀態"),ui(m.health==="error"?"整理失敗":m.health==="ok"?"正常":"啟動中"),ui("累計錯誤 ")+fmt(m.errors||0)+ui(" 次")],[ui("執行時間"),fmt(Math.floor((m.uptime_seconds||0)/60))+ui(" 分鐘"),ui("已整理 ")+fmt(m.refreshes||0)+ui(" 次")],[ui("本輪整理耗時"),fmt(m.refresh_ms)+" ms",ui("CPU 時間 ")+fmt(m.cpu_ms)+" ms"],[ui("保留工具紀錄"),fmt(m.retained_calls||0),ui("上限 ")+fmt(m.call_limit)+ui(" 筆")]]);
@@ -1099,8 +1108,8 @@ function renderMonitor(){
     [ui("累計移除的舊工具紀錄"),fmt(m.trimmed_calls||0),ui("工具紀錄超過每個 session 或整體保留上限時, 移除舊資料的累計筆數. 重新建立 Codex 檢查後重新累積")],
     [ui("累計 session 讀取量 (bytes)"),fmt(c.bytes_read),ui("目前 Codex 檢查累計讀取的 session 位元組數, 包含初次尾端, 增量與狀態回查. 重新建立 Codex 檢查後重新累積")],
     [ui("損壞紀錄 (行)"),fmt(c.malformed_lines),ui("讀到無法解析為 JSON 的完整行數. 未寫完的最後一行會先暫存等待, 不直接算成損壞")],
-    [ui("上次資料大小 (bytes)"),fmt(m.snapshot_bytes),ui("最近一次資料 API 回應的 JSON 大小, 尚未 gzip 壓縮")],
-    [ui("上次傳輸大小 (bytes)"),fmt(m.transfer_bytes),ui("最近一次資料 API 回應實際送出的內容大小. 使用 gzip 時為壓縮後大小, 不包含 HTTP header")],
+    [ui("上次資料大小 (bytes)"),fmt(m.snapshot_bytes),ui("最近一次資料回應的 JSON 大小, 尚未壓縮")],
+    [ui("上次傳輸大小 (bytes)"),fmt(m.transfer_bytes),ui("最近一次資料回應或 SSE 快照事件的內容大小, 不包含 HTTP header 與 Debug 事件")],
     [ui("Jev 資料庫大小 (bytes)"),fmt(m.jev_database_bytes),ui("Jev 的 SQLite 主資料庫檔案大小, 不含 WAL / SHM 暫存檔")]
   ]));
   if(helpIndex>=0){const term=$(helpRoot)?.querySelectorAll(".metadata-help")[helpIndex];if(term){term.classList.toggle("help-dismissed",!!helpDismissed);term.focus({preventScroll:true});}}
@@ -1109,8 +1118,8 @@ function renderMonitor(){
   replaceRows("monitor-event-rows",...(m.events||[]).map(event=>{const row=node("tr");cell(row,when(event.timestamp));cell(row,names[event.kind]||event.kind);cell(row,event.error_type||"--","mono");return row;}));
 }
 function renderConnectionStatus(stale=connectionLost){
-  const value=data?.codex?.connection||{},names={response:"已連線",error:"連線錯誤",paused:"檢查停用",idle:"閒置",unknown:"待確認"},status=$("codex-live"),state=stale?"unknown":data?.settings?.observations?.codex===false?"paused":idlePaused||data?.activity?.paused?"idle":Date.now()-Date.parse(value.observed_at)>(value.recent_seconds||300)*1000?"unknown":value.state||"unknown";
-  const source=data?.codex||{},fallback=source.health==="missing"?"未找到來源":source.health==="unavailable"||source.health==="partly_unavailable"?"來源讀取異常":source.health==="ok"?(source.files>0||source.threads?.length?"來源可讀取":"等待活動"):"待確認";status.textContent=ui(stale?"資料未更新":state==="unknown"?fallback:names[state]||fallback);$("codex-connection").dataset.state=state;$("lam-connection").dataset.state=stale?"error":"response";
+  const value=data?.codex?.connection||{},names={response:"已連線",error:"連線錯誤",paused:"檢查停用",idle:"閒置",unknown:"待確認"},status=$("codex-live"),state=stale?"unknown":data?.settings?.observations?.codex===false?"paused":Date.now()-Date.parse(value.observed_at)>(value.recent_seconds||300)*1000?"unknown":value.state||"unknown";
+  const source=data?.codex||{},fallback=source.health==="missing"?"未找到來源":source.health==="unavailable"||source.health==="partly_unavailable"?"來源讀取異常":source.health==="ok"?(source.files>0||source.threads?.length?"來源可讀取":"等待活動"):"待確認";status.textContent=ui(stale?"資料未更新":state==="unknown"?fallback:names[state]||fallback);$("codex-connection").dataset.state=state;$("lam-connection").dataset.state=stale||data?.activity?.watch_health==="unavailable"||data?.monitor?.health==="error"?"error":"response";
   const evidence={model_usage:"模型用量回報",connection_error:"連線錯誤紀錄"},parts=[ui("最近 5 分鐘有模型用量更新時顯示已連線"),ui("最後回應")+": "+when(value.last_response_at),ui("最近檢查時間")+": "+when(value.observed_at)];if(value.evidence)parts.push(ui("依據")+": "+ui(evidence[value.evidence]||value.evidence));bindHelp($("codex-connection"),parts.join(". "));
 }
 const highlightDescriptions={tools:"查看已載入紀錄中的工具呼叫次數與工具種類",git:"查看目前來源範圍內的 Git 操作與所屬對話",skills:"查看技能文件讀取次數與關聯對話",checks:"查看 test, build, lint 與型別檢查操作",files:"查看目前來源範圍內的檔案讀寫與修改紀錄",web:"查看網路工具操作與參考網址",errors:"查看來源範圍內的錯誤與警告紀錄",logs:"查看來源 Log 的執行紀錄與讀取狀態",sqlite:"查看已辨識的 SQL 操作與診斷紀錄"};
@@ -1298,7 +1307,11 @@ function renderDetail(){
   clearDetailTabs();
   if(!detail||!data)return;
   const content=$("detail-content"),restore=renderedDetail===detail,sections=restore?detailFoldKeys(content):[],folds=new Map(sections.map(([key,el])=>[key,el.open])),scroll=content.scrollTop,payloadScroll=restore?[...content.querySelectorAll(".payload,.table-wrap")].map(el=>[el.scrollTop,el.scrollLeft]):null,focus=sections.find(([,el])=>el.querySelector(":scope>summary")===document.activeElement)?.[0];renderedDetail=detail;clearSkillTree();clearPayloadObservers(content);for(const body of content.querySelectorAll("tbody"))WorkbenchUI.cancelChildMotion?.(body);content.replaceChildren();
-  if(detail.kind==="plugin"){
+  if(detail.kind==="performance"){
+    const record=detail.record;$("detail-title").textContent=ui("效能診斷")+" · "+debugKind(record.kind);
+    content.append(metadataList([[ui("程序累計 CPU (ms)"),fmt(record.process_cpu_ms)],[ui("程序記憶體"),memorySize(record.rss_bytes)],[ui("程序記憶體峰值"),memorySize(record.peak_rss_bytes)],[ui("序列化耗時 (ms)"),fmt(record.serialization_ms)],[ui("寫入耗時 (ms)"),fmt(record.write_ms)],[ui("保留工具紀錄"),fmt(record.retained_calls)],[ui("緩衝區 (bytes)"),fmt(record.buffer_bytes)],[ui("超出上限移除 (筆)"),fmt(record.trimmed_calls)],[ui("SSE 傳輸量 (bytes)"),fmt(record.transfer_bytes)],[ui("執行時間 (ms)"),fmt(record.uptime_ms)],[ui("工作階段"),record.session||"--"],[ui("版本"),record.revision||"--"]]));
+    const phases=Object.entries(record.phase_metrics||{});if(phases.length)content.append(table([ui("階段"),ui("耗時 (ms)"),ui("CPU 時間 (ms)")],phases.map(([phase,metrics])=>{const row=node("tr");cell(row,collectionPhase(phase));valueCell(row,metrics.elapsed_ms);valueCell(row,metrics.cpu_ms);return row;})));
+  }else if(detail.kind==="plugin"){
     const item=detail.plugin;$("detail-title").textContent=item.name||item.id;content.append(metadataList([["Plugins",item.name],[ui("供應商"),item.provider],[ui("版本"),item.version||ui("尚未提供")],[ui("設定狀態"),pluginStatus(item)],[ui("技能數"),fmt(item.skills_count)],[ui("MCP 來源"),fmt(item.mcp_count)]]),structuredPayload(ui("技能"),item.skills??ui("來源未提供技能清單")),structuredPayload(ui("MCP 來源"),item.mcp_servers??ui("來源未提供 MCP 清單")),structuredPayload(ui("外掛資料"),item));
   }else if(detail.kind==="schedule"){
     const item=detail.schedule,thread=scheduleThread(item),project=scheduleProject(item);$("detail-title").textContent=item.name||item.id;content.append(metadataList([[ui("狀態"),scheduleStatus(item.status)],[ui("類型"),item.kind||ui("未知")],[ui("下次執行"),item.next_run_at?when(item.next_run_at):ui("尚未提供")],[ui("最近執行"),item.last_run_at?when(item.last_run_at):ui("尚未執行")],[ui("執行位置"),labels.environment[item.execution_environment]||item.execution_environment||ui("未知")],["Model",item.model||ui("尚未提供")],[ui("Reasoning 等級"),item.reasoning_effort||ui("尚未提供")],[ui("最近執行狀態"),labels.status[item.last_run_status?.toLowerCase()]||item.last_run_status||ui("尚未執行")]]));if(thread)content.append(node("h4",ui("關聯對話")),threadLink(thread));else if(item.target_thread_id||item.last_thread_id)content.append(metadataList([["Thread ID",item.target_thread_id||item.last_thread_id]]));if(project)content.append(node("h4",ui("專案")),button(project.name||project.id,()=>openDetail({kind:"project",project}),"link"));content.append(structuredPayload(ui("排程設定"),{id:item.id,rrule:item.rrule||null,created_at:item.created_at,updated_at:item.updated_at}));
@@ -1575,40 +1588,57 @@ async function openJev(call,thread,remember=true,scroll=0){
   }catch(error){if(detail===selected)$("detail-content").replaceChildren(node("p",error.message||ui("內容讀取失敗"),"empty"));}
   finally{if(detail===selected){syncDetailHeader($("detail-content"),call.timestamp);groupDetailSections($("detail-content"));$("detail-content").scrollTop=scroll;}}
 }
-let eventStream=null,eventStreamReady=false,eventVersion=null;
-function stopEventStream(){eventStream?.close();eventStream=null;eventStreamReady=false;eventVersion=null;}
-function startEventStream(){
-  if(eventStream||document.hidden||typeof EventSource!=="function")return;
-  const stream=new EventSource("/api/events");eventStream=stream;
-  stream.onopen=()=>{if(eventStream===stream){eventStreamReady=true;eventVersion=null;syncRefreshState(data?.activity);}};
-  stream.addEventListener("snapshot",event=>{if(eventStream!==stream)return;let value;try{value=JSON.parse(event.data);}catch{return;}if(!Number.isSafeInteger(value.version)||value.version===eventVersion)return;eventVersion=value.version;if(!busy)refresh();else refreshQueued=true;});
-  stream.onerror=()=>{if(eventStream===stream){eventStreamReady=false;syncRefreshState(data?.activity);}};
+let eventStream=null,eventStreamReady=false,eventVersion=null,queuedSnapshot=null,queuedDebug=null,backgroundSnapshot=false,snapshotFrame=0;
+function renderSnapshot(next){backgroundSnapshot=true;try{render(next);}finally{backgroundSnapshot=false;}}
+const snapshotWaiters=[];
+function settleSnapshot(){for(const resolve of snapshotWaiters.splice(0))resolve();}
+function stopEventStream(){eventStream?.close();eventStream=null;eventStreamReady=false;eventVersion=null;queuedSnapshot=queuedDebug=null;cancelAnimationFrame(snapshotFrame);snapshotFrame=0;}
+function startEventStream(restart=false){
+  if(restart)stopEventStream();
+  if(eventStream||document.hidden)return;
+  if(typeof EventSource!=="function"){queueReconnect(true);settleSnapshot();return;}
+  const stream=new EventSource("/api/events?window="+encodeURIComponent(activeSourceWindow()));eventStream=stream;
+  stream.onopen=()=>{if(eventStream===stream){eventStreamReady=true;eventVersion=null;}};
+  stream.addEventListener("snapshot",event=>{
+    if(eventStream!==stream)return;
+    let value;try{value=JSON.parse(event.data);}catch{queueReconnect();return;}
+    if(!Number.isSafeInteger(value.version)||value.version<0||!value.snapshot?.codex){queueReconnect();return;}
+    if(value.window!==activeSourceWindow()||eventVersion!==null&&value.version<=eventVersion)return;
+    eventVersion=value.version;queuedDebug=null;queuedSnapshot={stream,value};drainSnapshots();
+  });
+  stream.addEventListener("debug",event=>{
+    if(eventStream!==stream||!data)return;
+    let value;try{value=JSON.parse(event.data);}catch{return;}
+    if(!Array.isArray(value.records)||value.records.length>150||typeof value.enabled!=="boolean")return;
+    queuedDebug={stream,value};drainSnapshots();
+  });
+  stream.onerror=()=>{if(eventStream===stream){eventStreamReady=false;queueReconnect(stream.readyState===EventSource.CLOSED);settleSnapshot();}};
 }
-document.addEventListener("visibilitychange",()=>{if(document.hidden)stopEventStream();else{startEventStream();refresh();}});
-addEventListener("pagehide",stopEventStream);
+function drainSnapshots(){
+  if(busy||(!queuedSnapshot&&!queuedDebug)||snapshotFrame)return;
+  snapshotFrame=requestAnimationFrame(async()=>{
+    snapshotFrame=0;if(busy||(!queuedSnapshot&&!queuedDebug))return;
+    const selected=queuedSnapshot,diagnostic=queuedDebug;queuedSnapshot=queuedDebug=null;
+    if(selected){if(diagnostic?.stream===selected.stream&&selected.value.snapshot.monitor)selected.value.snapshot.monitor.debug=diagnostic.value;await acceptSnapshot(selected);}
+    else if(diagnostic?.stream===eventStream&&data?.monitor){data.monitor.debug=diagnostic.value;if(!$("view-monitor").hidden){backgroundSnapshot=true;try{renderMonitorDebug();attachTables(true);}finally{backgroundSnapshot=false;}}}
+    if(queuedSnapshot||queuedDebug)drainSnapshots();
+  });
+}
+document.addEventListener("visibilitychange",()=>{if(document.hidden){stopEventStream();settleSnapshot();}else refresh();});
+addEventListener("pagehide",()=>{stopEventStream();settleSnapshot();});
 addEventListener("online",()=>{if(connectionLost)refresh();});
 function syncSessionTracking(){}
-function syncIdleSettings(){if(document.activeElement!==$("activity-retention-days"))$("activity-retention-days").value=data?.settings?.activity_retention_days??90;const minutes=data?.settings?.idle_minutes??5;$("idle-pause").checked=minutes>0;$("idle-minutes").disabled=!minutes;$("apply-idle").disabled=!minutes;if(document.activeElement!==$("idle-minutes"))$("idle-minutes").value=minutes||5;}
-function syncRefreshState(activity){idlePaused=activity?.paused===true;$("resume-refresh").hidden=!idlePaused;$("refresh-note").textContent=idlePaused?ui("Codex 閒置, 更新已暫停"):(eventStreamReady?ui("即時更新")+" · ":"")+ui("每 ")+(data?.settings?.interval??refreshSeconds)+ui(" 秒整理");bindHelp($("refresh-note"),ui(idlePaused?"偵測到新的對話或活動後會自動恢復, 也可手動立即更新":"依設定的頻率更新監測資料"));}
-function schedule(seconds){refreshSeconds=seconds;startEventStream();const delay=idlePaused?Math.min(30,Math.max(10,seconds)):seconds;if(refreshTimer&&scheduledSeconds===delay)return;scheduledSeconds=delay;if(refreshTimer)clearInterval(refreshTimer);refreshTimer=setInterval(()=>{if(!document.hidden&&(!eventStreamReady||idlePaused))automaticRefresh();},delay*1000);syncRefreshState(data?.activity);}
-function cancelReconnect(){if(reconnectTimer!==null)clearTimeout(reconnectTimer);reconnectTimer=null;}
-function connectionRecovered(){connectionLost=false;reconnectFailures=0;cancelReconnect();}
-function queueReconnect(){
-  connectionLost=true;if(reconnectTimer!==null)return;
-  const delay=Math.min(30,2**Math.min(reconnectFailures++,5));
-  $("live").textContent=ui("連線中斷, 自動重試中");renderConnectionStatus(true);
-  reconnectTimer=setTimeout(()=>{reconnectTimer=null;if(document.hidden){queueReconnect();return;}refresh();},delay*1000);
-}
-async function automaticRefresh(){
-  if(connectionLost){if(reconnectTimer===null)return refresh();return;}
-  if(!idlePaused)return refresh();
-  if(activityBusy||busy)return;activityBusy=true;
-  try{const response=await request("/api/activity",{cache:"no-store"});if(!response.ok)throw new Error();const activity=response.data;connectionRecovered();if(data)data.activity=activity;syncRefreshState(activity);schedule(refreshSeconds);$("live").textContent=ui("已連線");renderConnectionStatus();if(!activity.paused||loadedRevision&&!loadedRevision.startsWith(activity.code_revision+"-"))await refresh();}
-  catch{queueReconnect();}finally{activityBusy=false;}
+function syncRetentionSettings(){if(document.activeElement!==$("activity-retention-days"))$("activity-retention-days").value=data?.settings?.activity_retention_days??90;}
+function connectionRecovered(){connectionLost=false;}
+function queueReconnect(closed=false){connectionLost=true;$("live").textContent=ui(closed?"連線中斷, 請重新整理頁面":"連線中斷, 自動重試中");setSnapshotState("error");renderConnectionStatus(true);}
+function refresh(){
+  if(document.hidden)return Promise.resolve();
+  setSnapshotState(data?.updated_at?"refreshing":"loading");
+  return new Promise(resolve=>{snapshotWaiters.push(resolve);startEventStream(true);});
 }
 async function request(url,options){const control=new AbortController(),timer=setTimeout(()=>control.abort(),15000),signal=options?.signal,abort=()=>control.abort();if(signal?.aborted)abort();else signal?.addEventListener("abort",abort,{once:true});try{const response=await fetch(url,{...options,signal:control.signal}),body=await response.text();return {ok:response.ok,status:response.status,data:response.headers.get("Content-Type")?.includes("application/json")?JSON.parse(body):body};}finally{clearTimeout(timer);signal?.removeEventListener("abort",abort);}}
 function compatibleSettings(saved,current,categories){
-  const next={};for(const [key,min,max]of [["interval",1,3600],["idle_minutes",0,1440],["activity_retention_days",0,3650],["max_files",1,5000]])if(Number.isInteger(saved[key])&&saved[key]>=min&&saved[key]<=max)next[key]=saved[key];if(typeof saved.track_all==="boolean")next.track_all=saved.track_all;
+  const next={};for(const [key,min,max]of [["activity_retention_days",0,3650],["max_files",1,5000]])if(Number.isInteger(saved[key])&&saved[key]>=min&&saved[key]<=max)next[key]=saved[key];if(typeof saved.track_all==="boolean")next.track_all=saved.track_all;if(typeof saved.debug_mode==="boolean")next.debug_mode=saved.debug_mode;
   const observations=Object.fromEntries(Object.entries(saved.observations||{}).filter(([key,value])=>Object.hasOwn(current.observations,key)&&typeof value==="boolean"));if(Object.keys(observations).length)next.observations=observations;
   for(const key of ["mcp_sources","mcp_categories","tool_descriptions","mcp_descriptions","mcp_tags"]){const entries=Object.entries(saved[key]||{}).filter(([name,value])=>["tool_descriptions","mcp_descriptions"].includes(key)?/^[a-zA-Z0-9_.:-]{1,160}$/.test(name)&&typeof value==="string"&&value.length<=400:/^[a-zA-Z0-9_.-]{1,80}$/.test(name)&&(key==="mcp_sources"?typeof value==="boolean":key==="mcp_tags"?Array.isArray(value)&&value.length<=4&&value.every(text=>typeof text==="string"&&text.trim().length<=40&&text.trim()):typeof value==="string"&&Object.hasOwn(categories,value))).slice(0,64);if(entries.length)next[key]=Object.fromEntries(entries);}
   return next;
@@ -1628,62 +1658,38 @@ function reportFrontendError(error,phase){
 }
 window.addEventListener("error",event=>{if(event.error)reportFrontendError(event.error,"script");});
 window.addEventListener("unhandledrejection",event=>reportFrontendError(event.reason,"promise"));
-async function refresh(){
-  if(busy){refreshQueued=true;return;}cancelReconnect();busy=true;const current=version;setSnapshotState(data?.updated_at?"refreshing":"loading");
+async function acceptSnapshot({stream,value}){
+  busy=true;const current=version;
   try{
-    const url="/api/snapshot?window="+encodeURIComponent(activeSourceWindow());
-    let response=await request(url,{cache:"no-store"});if(!response.ok||!response.data||typeof response.data!=="object"||!response.data.codex)throw new Error();connectionRecovered();let next=response.data;
+    let next=value.snapshot;
     const frontendRevision=next.frontend_revision||next.revision?.split("-").at(-1),backendRevision=next.backend_revision||next.activity?.code_revision;
     if(loadedBackendRevision&&backendRevision&&loadedBackendRevision!==backendRevision)preferencesApplied=false;
     loadedBackendRevision=backendRevision||loadedBackendRevision;
     if(loadedFrontendRevision&&frontendRevision&&loadedFrontendRevision!==frontendRevision&&!document.querySelector("dialog[open]")){
-      if(pendingRevision!==frontendRevision){pendingRevision=frontendRevision;$("live").textContent=ui("程式已更新, 準備重新載入");return;}
-      const ready=await request("/",{cache:"no-store"});if(!ready.ok)throw new Error();
+      pendingRevision=frontendRevision;const ready=await request("/",{cache:"no-store"});if(!ready.ok)throw new Error();
       saveView();location.reload();return;
     }
     loadedFrontendRevision??=frontendRevision;
     if(!loadedRevision||!document.querySelector("dialog[open]"))loadedRevision=next.revision||loadedRevision;
     if(!preferencesApplied){
-      if(preferences.settings){const saved=Object.fromEntries(Object.entries(compatibleSettings(preferences.settings,next.settings,next.mcp?.categories||{})).filter(([key,value])=>JSON.stringify(value)!==JSON.stringify(next.settings[key])));if(Object.keys(saved).length){try{await post("/api/settings",saved);}catch(error){if(![400,409].includes(error.status))throw error;preferences.settings=null;}response=await request(url,{cache:"no-store"});if(!response.ok)throw new Error();next=response.data;}}
       preferencesApplied=true;
+      if(preferences.settings){const saved=Object.fromEntries(Object.entries(compatibleSettings(preferences.settings,next.settings,next.mcp?.categories||{})).filter(([key,value])=>JSON.stringify(value)!==JSON.stringify(next.settings[key])));if(Object.keys(saved).length){try{await post("/api/settings",saved);return;}catch(error){if(![400,409].includes(error.status))throw error;preferences.settings=null;}}}
     }
-    if(current===version){try{render(next);}catch(error){reportFrontendError(error,"render");$("live").textContent=ui("畫面更新失敗");setSnapshotState("error",ui("畫面更新失敗"));renderConnectionStatus();}}
-  }
-  catch{setSnapshotState("error");queueReconnect();}finally{busy=false;if(refreshQueued){refreshQueued=false;refresh();}}
+    if(current===version&&eventStream===stream&&value.window===activeSourceWindow()){
+      logData=value.logs;connectionRecovered();
+      try{renderSnapshot(next);}catch(error){reportFrontendError(error,"render");$("live").textContent=ui("畫面更新失敗");setSnapshotState("error",ui("畫面更新失敗"));renderConnectionStatus();}
+      settleSnapshot();
+    }
+  }catch{queueReconnect();settleSnapshot();}finally{busy=false;}
 }
 async function post(url,value){let response;try{response=await request(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(value)});}catch{throw new Error(ui("設定格式無效或連線中斷"));}if(!response.ok){const error=new Error(ui(response.data?.error||"設定更新失敗"));error.status=response.status;throw error;}return response.data;}
 async function changeSettings(value){
   if(settingsBusy)throw new Error(ui("設定更新中"));
   settingsBusy=true;version++;feedback("settings-message",ui("正在套用設定"),"pending");
-  try{const next=await post("/api/settings",value);data.settings=next;schedule(next.interval);$("refresh-interval").value=next.interval;syncSessionTracking();saveView();feedback("settings-message",value.interval!=null?ui("更新頻率已套用: ")+next.interval+ui(" 秒"):value.max_files!=null?ui("追蹤數量已套用: ")+next.max_files:ui("設定已套用"));}
+  try{const next=await post("/api/settings",value);data.settings=next;syncSessionTracking();saveView();feedback("settings-message",value.max_files!=null?ui("追蹤數量已套用: ")+next.max_files:ui("設定已套用"));}
   catch(error){feedback("settings-message",error.message,"error");throw error;}
   finally{settingsBusy=false;await refresh();}
 }
-async function applyFrequency(){
-  if(settingsBusy)return;
-  const input=$("refresh-interval");roundNumber(input);const seconds=Number(input.value);if(!input.checkValidity()||!Number.isInteger(seconds)){feedback("settings-message",ui("更新頻率請輸入 1 - 3600 秒的整數"),"error");input.value=refreshSeconds;return;}
-  input.disabled=true;try{await changeSettings({interval:seconds});}catch{input.value=refreshSeconds;}finally{input.disabled=false;}
-}
-$("refresh-interval").addEventListener("change",applyFrequency);
-$("refresh-interval").addEventListener("keydown",event=>{if(event.key==="Enter"){event.preventDefault();applyFrequency();}});
-$("apply-frequency").addEventListener("click",applyFrequency);
-async function applyIdle(){
-  if(settingsBusy||!data)return;const input=$("idle-minutes");roundNumber(input);if($("idle-pause").checked&&(!input.checkValidity()||!Number.isInteger(Number(input.value)))){feedback("settings-message",ui("閒置時間請輸入 1 - 1440 分鐘的整數"),"error");syncIdleSettings();return;}
-  try{await changeSettings({idle_minutes:$("idle-pause").checked?Number(input.value):0});}catch{syncIdleSettings();}
-}
-$("idle-pause").addEventListener("change",applyIdle);
-$("idle-minutes").addEventListener("change",applyIdle);
-$("idle-minutes").addEventListener("keydown",event=>{if(event.key==="Enter"){event.preventDefault();applyIdle();}});
-$("apply-idle").addEventListener("click",applyIdle);
-async function applyActivityRetention(){
-  if(settingsBusy||!data)return;const input=$("activity-retention-days");roundNumber(input);
-  if(!input.checkValidity()||!Number.isInteger(Number(input.value))){feedback("settings-message",ui("保存天數請輸入 0 - 3650 的整數"),"error");syncIdleSettings();return;}
-  try{await changeSettings({activity_retention_days:Number(input.value)});}catch{syncIdleSettings();}
-}
-$("apply-activity-retention").addEventListener("click",applyActivityRetention);
-$("activity-retention-days").addEventListener("change",applyActivityRetention);
-$("activity-retention-days").addEventListener("keydown",event=>{if(event.key==="Enter"){event.preventDefault();applyActivityRetention();}});
-$("resume-refresh").addEventListener("click",async()=>{const control=$("resume-refresh");control.disabled=true;try{await post("/api/refresh",{});await refresh();}catch{feedback("action-message",ui("資料更新失敗, 請稍後再試"),"error");}finally{control.disabled=false;}});
 function renderObservationSettings(){
   const monitoring=$("observation-data"),mcp=$("observation-mcp"),recording=$("observation-recording");monitoring.replaceChildren();mcp.replaceChildren();recording.replaceChildren();
   const purposes={model_api:"讀取既有模型 API 診斷 metadata, 不修改來源紀錄設定",codex:"讀取對話狀態與 Token 紀錄",metadata:"補充對話名稱, 專案與執行設定",usage:"讀取帳戶額度與 Credits 快照",codex_account:"透過已登入的 Codex CLI 查詢官方帳戶額度與 Token 統計, 至少快取 60 秒",tool_events:"辨識工具呼叫與回傳時間",web:"整理網路操作與參考頁面",files:"辨識檔案讀寫操作",git:"辨識 Git 操作",worktrees:"唯讀檢查已載入專案與 Codex 管理目錄的 Git 工作樹",skills:"保存技能讀取紀錄",checks:"辨識 test, build 與 lint 操作",sqlite:"辨識 SQL 操作與 SQLite 診斷",errors:"整理錯誤明細與最近 24 小時紀錄",logs:"讀取來源 Log 與執行紀錄",mcp:"辨識 MCP 操作與結果",jev:"讀取 Jev 用量與耗時",jev_calls:"讀取指定 Jev 呼叫的送出與回傳內容"};
@@ -1716,7 +1722,7 @@ function renderObservationSettings(){
 function openSettings(){
   $("language-select").value=locale;
   $("display-options").value=display.options.join(", ");fillDisplayOptions($("default-ranking"),display.ranking);fillDisplayOptions($("default-table"),display.table);$("default-lines").value=display.lines??displayDefaults.lines;for(const [id,key]of [["default-main-summary","mainSummary"],["default-sub-summary","subSummary"]])$(id).value=display[key]??displayDefaults[key];
-  if(!data)return;applyAppearance();$("refresh-interval").value=data.settings.interval;syncSessionTracking();syncIdleSettings();
+  if(!data)return;applyAppearance();syncSessionTracking();syncRetentionSettings();
   renderObservationSettings();
   docTools=[...new Set([...docTools,...Object.keys(data.codex.tools||{}),...Object.keys(data.codex.nested_tools||{}),...Object.keys(data.settings.tool_descriptions||{})])].sort();renderToolDocs();
   $("settings-message").textContent="";if(!$("settings-dialog").open)openDialog($("settings-dialog"));
@@ -1752,7 +1758,11 @@ function tableSort(key){
   if(column<0)column=view.headers.findIndex(label=>sortableColumn(label)&&measured(label));if(column<0){column=view.headers.findIndex(sortableColumn);descending=false;}return {column,descending};
 }
 function sortColumn(key,sort){const view=tableViews.get(key);return sort.header&&view?.headers.includes(sort.header)?view.headers.indexOf(sort.header):sort.column;}
-function sortRecords(key,items,columns,time){const sort=tableSort(key),index=sortColumn(key,sort),get=index<0?time:columns[index]||time;return [...items].sort((a,b)=>compareValues(get(a),get(b),sort.descending));}
+function tableInteracting(view){return view&&(view.hovered||view.interactionRoot?.contains(document.activeElement));}
+function deferTable(view){view.pendingUpdate=true;view.table.dataset.pendingUpdate="true";if(view.disclosureSummary)view.disclosureSummary.title=ui("互動期間保留列表, 離開後套用最新資料");}
+function resumeTable(view){if(!view.pendingUpdate||tableInteracting(view)||!view.table.isConnected)return;renderSnapshot(data);}
+const tableRecords=new Map();
+function sortRecords(key,items,columns,time){const view=tableViews.get(key);if(backgroundSnapshot&&tableInteracting(view)&&tableRecords.has(key)){deferTable(view);return tableRecords.get(key);}const sort=tableSort(key),index=sortColumn(key,sort),get=index<0?time:columns[index]||time,rows=[...items].sort((a,b)=>compareValues(get(a),get(b),sort.descending));tableRecords.set(key,rows);return rows;}
 function sortRows(key,view,rows=view.rows){const sort=tableSort(key),column=sortColumn(key,sort),index=column<0?view.headers.findIndex(label=>/時間|日期/.test(label)&&!label.includes("耗時")):column;const get=row=>index<0?row.querySelector("[data-sort-time]")?.dataset.sortTime:rowCells(row)[index]?.dataset.sortValue??rowValue(row,index);return [...rows].sort((a,b)=>compareValues(get(a),get(b),sort.descending));}
 function changeTableSort(key,sort){if(sort.column>=0)sort.header=tableViews.get(key)?.headers[sort.column];const size=key==="codex-rows"?$("page-size").value:tableStates[key]?.size||display.table;tableStates[key]={...tableStates[key],size:size==="all"?"all":Number(size),page:1,sort};if(key==="codex-rows"){page=1;lazyLimit=50;renderCodex();}else if(key==="mcp-rows"){mcpPage=1;renderMcp();}else if(key==="docs-rows"){docsPage=1;renderToolDocs();}else paginateTable(key);persistTables();attachTables();if($("table-dialog").open)renderTableSort(key);}
 function renderTableSort(key){const view=tableViews.get(key),sort=tableSort(key);$("table-sort-column").replaceChildren(...[[-1,ui("自動排序 (預設)")],...view.headers.map((label,index)=>[index,ui(label)]).filter(([,label])=>sortableColumn(label))].map(([value,label])=>{const option=node("option",label);option.value=value;return option;}));$("table-sort-column").value=String(sortColumn(key,sort));$("table-sort-direction").value=sort.descending?"desc":"asc";}
@@ -1846,6 +1856,8 @@ function targetTableRows(body){return tableRowStores.get(body)?.get()||[...body.
 function updateTableChildren(body,rows,pageDirection=0){if(!WorkbenchUI.createStore||!WorkbenchUI.reconcileChildren){body.replaceChildren(...rows);return;}let store=tableRowStores.get(body);const previous=store?.get();if(previous?.length===rows.length&&previous.every((row,index)=>row===rows[index]))return;if(!store){store=WorkbenchUI.createStore([]);store.subscribe(items=>WorkbenchUI.reconcileChildren(body,items,{motion:body.children.length>0&&childMotion(body),pageDirection:tablePageDirections.get(body)||0}),{immediate:false});tableRowStores.set(body,store);}tablePageDirections.set(body,pageDirection);store.set(rows);}
 function replaceRows(id,...rows){
   const body=$(id),view=tableViews.get(id),previous=view?.rows||[...body.children];
+  if(backgroundSnapshot&&tableInteracting(view)){deferTable(view);return;}
+  if(view){view.pendingUpdate=false;delete view.table.dataset.pendingUpdate;if(view.disclosureSummary)view.disclosureSummary.title="";}
   const signature=row=>JSON.stringify(rowCells(row).map(cell=>[cell.textContent,cell.className,cell.title,cell.dataset.sortValue,cell.dataset.heatValue,[...cell.querySelectorAll("button,a")].map(el=>[el.textContent,el.title,el.getAttribute("href")])]));
   const retained=new Map();for(const row of previous){const key=signature(row);if(!retained.has(key))retained.set(key,[]);retained.get(key).push(row);}
   rows=rows.map(row=>{const old=retained.get(signature(row))?.shift();if(!old)return row;old._rowAction=row._rowAction;const controls=rowCells(row).flatMap(cell=>[...cell.querySelectorAll("button")]);for(const [index,control]of rowCells(old).flatMap(cell=>[...cell.querySelectorAll("button")]).entries())control._action=controls[index]?._action;return old;});
@@ -1876,6 +1888,8 @@ function attachTables(skipOpenDialogs=false){
       if(!specialTables.has(key)){const footer=node("div",null,"pagination table-pagination"),summary=node("span"),controls=node("div"),prev=button("←",()=>moveTablePage(key,-1)),next=button("→",()=>moveTablePage(key,1)),label=node("label",ui("第 ")),input=node("input"),total=node("span");prev.setAttribute("aria-label",ui("上一頁"));next.setAttribute("aria-label",ui("下一頁"));input.type="number";configureIntegerInput(input);input.min=1;input.className="table-page-input";input.setAttribute("aria-label",view.title+ui(" 頁碼"));pageInput(input,()=>{const previousPage=tableStates[key]?.page||1;tableStates[key]={...tableStates[key],size:tableStates[key]?.size||display.table,page:Number(input.value)};paginateTable(key,previousPage);persistTables();});label.append(input,node("span",ui(" 頁 ")));const first=button("⇤",()=>moveTablePage(key,-Number.MAX_SAFE_INTEGER)),last=button("⇥",()=>moveTablePage(key,Number.MAX_SAFE_INTEGER));first.setAttribute("aria-label",ui("第一頁"));last.setAttribute("aria-label",ui("最後一頁"));for(const [control,icon]of [[first,"first"],[prev,"previous"],[next,"next"],[last,"last"]])setPageIcon(control,icon);controls.append(first,prev,label,total,next,last);footer.append(summary,controls);wrap.after(footer);Object.assign(view,{footer,summary,firstPage:first,lastPage:last,prev,next,input,total,label});}
     }
     collapseTable(view,key);
+    if(!view.interactionRoot){view.interactionRoot=view.table.closest(".table-disclosure")||view.table;view.interactionRoot.addEventListener("pointerenter",()=>view.hovered=true);view.interactionRoot.addEventListener("pointerleave",()=>{view.hovered=false;resumeTable(view);});view.interactionRoot.addEventListener("focusout",()=>queueMicrotask(()=>resumeTable(view)));}
+    if(backgroundSnapshot&&tableInteracting(view))continue;
     if(!specialTables.has(key)){if(view.sourceChanged||targetTableRows(body)[0]!==view.first){view.rows=targetTableRows(body);view.sourceChanged=false;}renderTableFilters(key);paginateTable(key);}
     applyTableColumns(key);
     const sort=tableSort(key),column=sortColumn(key,sort),active=column<0?view.headers.findIndex(label=>/時間|日期/.test(label)&&!label.includes("耗時")):column;
@@ -2202,7 +2216,7 @@ function readConfiguration(value){
   const p=value.preferences,a=p.appearance,s=p.settings;
   if(p.sourceWindows!=null&&(!object(p.sourceWindows)||!activityWindows.includes(p.sourceWindows.global)||!bounded(p.sourceWindows.tabs||{},64,(item,key)=>/^[a-z][a-z:-]{0,79}$/.test(key)&&activityWindows.includes(item))))throw new Error(ui("來源紀錄範圍設定格式無效"));
   if(p.locale!=null&&!["zh-TW","en","ja"].includes(p.locale))throw new Error(ui("設定檔格式或版本不支援"));
-  if(!object(a)||!["auto","light","dark"].includes(a.mode)||!["workbench","steam","slate","neutral"].includes(a.theme)||!["green","blue","orange","custom"].includes(a.accent)||!Number.isInteger(a.font)||a.font<12||a.font>18||a.reduceMotion!=null&&typeof a.reduceMotion!=="boolean"||a.accent==="custom"&&!a.accentColor||!validDisplay(p.display)||!object(s)||!Number.isInteger(s.interval)||s.interval<1||s.interval>3600||!Number.isInteger(s.max_files)||s.max_files<1||s.max_files>5000||typeof s.track_all!=="boolean"||s.idle_minutes!=null&&(!Number.isInteger(s.idle_minutes)||s.idle_minutes<0||s.idle_minutes>1440)||s.activity_retention_days!=null&&(!Number.isInteger(s.activity_retention_days)||s.activity_retention_days<0||s.activity_retention_days>3650))throw new Error(ui("外觀, 更新頻率或顯示數量不在可用範圍"));
+  if(!object(a)||!["auto","light","dark"].includes(a.mode)||!["workbench","steam","slate","neutral"].includes(a.theme)||!["green","blue","orange","custom"].includes(a.accent)||!Number.isInteger(a.font)||a.font<12||a.font>18||a.reduceMotion!=null&&typeof a.reduceMotion!=="boolean"||a.accent==="custom"&&!a.accentColor||!validDisplay(p.display)||!object(s)||s.debug_mode!=null&&typeof s.debug_mode!=="boolean"||s.interval!=null&&(!Number.isInteger(s.interval)||s.interval<1||s.interval>3600)||!Number.isInteger(s.max_files)||s.max_files<1||s.max_files>5000||typeof s.track_all!=="boolean"||s.idle_minutes!=null&&(!Number.isInteger(s.idle_minutes)||s.idle_minutes<0||s.idle_minutes>1440)||s.activity_retention_days!=null&&(!Number.isInteger(s.activity_retention_days)||s.activity_retention_days<0||s.activity_retention_days>3650))throw new Error(ui("外觀或顯示數量不在可用範圍"));
   try{WorkbenchUI.validateSettings({version:1,appearance:{...a.accentColor!=null?{accent:a.accentColor}:{},...a.fontFamily!=null?{fontFamily:a.fontFamily}:{}}});}catch{throw new Error(ui("自訂強調色或字型格式無效"));}
   if(!bounded(s.observations,64,item=>typeof item==="boolean")||!bounded(s.mcp_sources||{},64,item=>typeof item==="boolean")||!bounded(s.mcp_categories||{},64,item=>typeof item==="string"&&item.length<=80)||!bounded(s.tool_descriptions||{},64,item=>typeof item==="string"&&item.length<=400)||!bounded(s.mcp_descriptions||{},64,item=>typeof item==="string"&&item.length<=400)||!bounded(s.mcp_tags||{},64,item=>Array.isArray(item)&&item.length<=4&&item.every(text=>typeof text==="string"&&text.trim()&&text.length<=40))||!bounded(p.copy||{},500,item=>typeof item==="string"&&item.length<=400)||!bounded(p.inputs||{},100,item=>typeof item==="string"&&item.length<=2000))throw new Error(ui("檢查設定或介面文字格式無效"));
   if(!bounded(p.charts||{},256,item=>object(item)&&["all","recent","custom"].includes(item.range)&&Number.isInteger(item.length)&&item.length>=1&&item.length<=365&&[60000,3600000,86400000].includes(item.unit)&&[60000,300000,900000,3600000,21600000,86400000].includes(item.interval)&&Number.isInteger(item.top)&&item.top>=0&&item.top<=200&&Number.isFinite(item.maximum)&&item.maximum>=0&&item.maximum<=1e9&&(item.lines==null||[3,5,10].includes(item.lines))&&(item.statistics==null||[0,1].includes(item.statistics))&&(item.total==null||typeof item.total==="boolean")&&["bar","line","area","pie","donut","column","stacked"].includes(item.shape)&&typeof item.start==="string"&&typeof item.end==="string"&&Number.isFinite(new Date(item.start).getTime())&&Number.isFinite(new Date(item.end).getTime())&&(item.range!=="custom"||new Date(item.start)<new Date(item.end)))||!bounded(p.tables||{},500,item=>object(item)&&(item.size==="all"||Number.isInteger(item.size)&&item.size>=1&&item.size<=200)&&Number.isInteger(item.page)&&item.page>=1&&(item.heatmap==null||typeof item.heatmap==="boolean")&&(item.heatmapCustom==null||typeof item.heatmapCustom==="boolean")&&(item.open==null||typeof item.open==="boolean")&&(!item.hidden||Array.isArray(item.hidden)&&item.hidden.length<=100&&item.hidden.every(label=>typeof label==="string"&&label.length<=400))&&(!item.columns||Array.isArray(item.columns)&&item.columns.length<=100&&item.columns.every(label=>typeof label==="string"&&label.length<=400))&&(!item.filters||bounded(item.filters,100,value=>typeof value==="string"&&value.length<=2000))&&(!item.sort||object(item.sort)&&Number.isInteger(item.sort.column)&&item.sort.column>=-1&&item.sort.column<=100&&typeof item.sort.descending==="boolean")))throw new Error(ui("圖表或表格設定格式無效"));
@@ -2381,7 +2395,7 @@ chartControls("conversation-model-chart");chartControls("conversation-environmen
 pageInput($("mcp-page-number"),()=>{const previousPage=mcpPage;mcpPage=Number($("mcp-page-number").value);renderMcp(previousPage);});
 pageInput($("docs-page-number"),()=>{const previousPage=docsPage;docsPage=Number($("docs-page-number").value);renderToolDocs(previousPage);});
 addTabSettings();
-applyAppearance();applyActionIcons();setSnapshotState("loading");loadLocales().then(()=>{applyLanguage();schedule(10);refresh();});
+applyAppearance();applyActionIcons();setSnapshotState("loading");loadLocales().then(()=>{applyLanguage();refresh();});
 addEventListener("pageshow",event=>{if(event.persisted){arrangeOverview();arrangeContentPanels();}});
 let chartResizeTimer;addEventListener("resize",()=>{clearTimeout(chartResizeTimer);chartResizeTimer=setTimeout(()=>{document.querySelectorAll(".purpose-editor textarea").forEach(fitPurposeEditor);if(data)renderCharts();},150);});
 

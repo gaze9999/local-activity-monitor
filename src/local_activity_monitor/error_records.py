@@ -439,7 +439,7 @@ class DiagnosticCollector:
                         if len(self.logs) == self.EVENT_LIMIT:
                             self.log_trimmed += 1
                         self.logs.append(event)
-                self.backfill_pending["core"] = self.sql_history is not None
+                self.backfill_pending["core"] = self.sql_history is not None or self.sql_cursor is not None and self.sql_cursor < high
                 self.health["core"] = "ok"
         except (OSError, sqlite3.Error) as error:
             self.health["core"] = "unavailable"

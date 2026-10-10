@@ -14,6 +14,8 @@ import sqlite3
 import json
 import os
 import re
+import select
+import socket
 import sys
 from pathlib import Path
 from socketserver import TCPServer
@@ -29,7 +31,7 @@ from .activity_windows import cutoff, contains
 from .payload_detail import mask_payloads, payload_masking
 from .project_instructions import instructions, observed_file_metadata
 from .codex_connection import connection_status
-from .idle_activity import IdleActivity
+from .source_watch import SourceWatch, source_path
 from .mcp_source_files import documents as source_documents, read_document, write_document
 from .mcp_records import CATEGORIES, EVENT_LIMIT as MCP_EVENT_LIMIT, TOOL_LIMIT as MCP_TOOL_LIMIT, SOURCE, category, discover_sources, summarize
 from .monitor_state import MonitorState
@@ -121,17 +123,15 @@ class Dashboard:
         self.jev = JevCollector(home)
         self.codex = CodexCollector(home/"sessions", max_files) if codex else None
         self.account = CodexAccountSource(home)
-        self.interval = interval
-        self.idle_minutes = 5
-        self.activity = IdleActivity(home)
         source = Path(__file__).parent
         self.code_revision = hashlib.sha256(b"".join(path.read_bytes() for path in sorted(source.glob("*.py")))).hexdigest()[:12]+"-"+uuid.uuid4().hex[:8]
         self.observations = {"usage": True, "codex_account": False, "codex": codex, "jev": True, "metadata": True, "git": True, "worktrees": True, "jev_calls": True, "skills": True, "checks": True, "tool_events": True, "mcp": True, "web": True, "files": True, "errors": True, "logs": True, "sqlite": True, "model_api": True}
-        self.default_settings = {"interval": 10, "idle_minutes": 5, "activity_retention_days": ActivityHistory.DEFAULT_DAYS, "max_files": 20, "track_all": False, "observations": dict(self.observations), "mcp_sources": {}, "mcp_categories": {}, "tool_descriptions": {}, "mcp_descriptions": {}, "mcp_tags": {}}
+        self.default_settings = {"debug_mode": False, "activity_retention_days": ActivityHistory.DEFAULT_DAYS, "max_files": 20, "track_all": False, "observations": dict(self.observations), "mcp_sources": {}, "mcp_categories": {}, "tool_descriptions": {}, "mcp_descriptions": {}, "mcp_tags": {}}
         self.mcp_sources, self.mcp_categories, self.tool_descriptions, self.mcp_descriptions, self.mcp_tags = {}, {}, {}, {}, {}
         self.mcp_document_cache = {}
         self.started_at = now()
         self.monitor = MonitorState(home/"monitoring/local-activity-monitor.jsonl", defer_device=True)
+        self.monitor.debug.revision = self.code_revision
         self.worktrees = WorktreeCollector(home)
         self.diagnostics = DiagnosticCollector(home)
         self.error_history = ErrorHistory(home/"monitoring/error-history.json")
@@ -144,8 +144,11 @@ class Dashboard:
         self.update_condition = threading.Condition()
         self.update_version = 0
         self.event_clients = threading.BoundedSemaphore(8)
+        self.source_changed = threading.Event()
+        self.retry_sources = threading.Event()
+        self.source_watches = {}
         self.cache = {}
-        self.activity_cache = self.activity.snapshot(self.idle_minutes, self.interval)
+        self.activity_cache = {"paused": False, "health": "ok", "last_activity_at": None, "update_mode": "source_events"}
         self.asset_signature, self.asset_revision = None, None
         self.stagger = False
         self.phase_times = {}
@@ -205,6 +208,48 @@ class Dashboard:
         with self.update_condition:
             self.update_version += 1
             self.update_condition.notify_all()
+
+    def watch_sources(self):
+        targets = [(self.home, source_path)]
+        if self.observations['codex'] and any(self.observations[key] for key in ('logs', 'errors', 'sqlite', 'model_api')):
+            targets.extend((root, lambda relative: True) for root in self.diagnostics.roots if not root.is_relative_to(self.home))
+        enabled, database, _ = monitor_config(self.home)
+        if self.observations['jev'] and enabled and database is not None:
+            targets.append((database.parent, lambda relative, name=database.name: str(relative) in (name, name+'-wal')))
+        wanted = {}
+        for root, accepts in targets:
+            previous = wanted.get(root)
+            wanted[root] = (lambda relative, first=previous, second=accepts: first(relative) or second(relative)) if previous else accepts
+        watches = dict(self.source_watches)
+        retry = self.retry_sources.is_set()
+        self.retry_sources.clear()
+        if retry:
+            for root in tuple(watches):
+                if watches[root].health == 'unavailable':
+                    watches.pop(root).close()
+        for root in watches.keys()-wanted.keys():
+            watches.pop(root).close()
+        for root, accepts in wanted.items():
+            directory = root
+            while not directory.exists() and directory != directory.parent:
+                directory = directory.parent
+            prefix = root.relative_to(directory)
+            def selected(relative, prefix=prefix, accepts=accepts):
+                path = Path(str(relative).replace('\\', '/'))
+                return path.is_relative_to(prefix) and accepts(path.relative_to(prefix)) or path in prefix.parents
+            if root in watches:
+                watches[root].accepts = selected
+            else:
+                watch = SourceWatch(directory, self.source_changed.set, selected).start()
+                watch.ready.wait(5)
+                watches[root] = watch
+        self.source_watches = watches
+
+    def close_sources(self):
+        self.source_changed.set()
+        for watch in self.source_watches.values():
+            watch.close()
+        self.source_watches = {}
 
     def phase(self, name):
         if self.phase_started is not None:
@@ -270,6 +315,7 @@ class Dashboard:
                     projection["usage"] = {"source": "codex_app_server", "updated_at": account["updated_at"], "limit_id": bucket["limit_id"], "plan_type": bucket.get("plan_type") or account.get("plan_type") or local.get("plan_type"), "credits": bucket.get("credits") if bucket.get("credits") is not None else account.get("credits"), "limits": [bucket[key] for key in ("primary", "secondary") if bucket.get(key) is not None]}
             codex_windows = {window: dict(projection) for window, projection in codex_windows.items()}
             codex = codex_windows["all"]
+            history_dates = [(boundary.isoformat() if boundary else None) for window in codex_windows for boundary in [cutoff(window)]]
             enabled, database, since = monitor_config(self.home)
             if not self.phase("diagnostics"):
                 return
@@ -294,6 +340,7 @@ class Dashboard:
                     projection["mcp_events"] = list(retained.values())
             if self.observations["codex"] and self.observations["sqlite"]:
                 history_sql = self.activity_history.snapshot("sql")
+                sql_aggregates = dict(zip(codex_windows, self.activity_history.store.aggregate_many('sql', history_dates)))
                 for window, projection in codex_windows.items():
                     sql = projection.setdefault("sqlite", {"events": [], "total": 0, "operations": {}})
                     retained = [event for event in history_sql if contains(event, cutoff(window))]+sql.pop("_retained_events", sql["events"])+[event for event in self.diagnostics.sql_events if contains(event, cutoff(window))]
@@ -306,8 +353,7 @@ class Dashboard:
                     identity_fields = ("source", "thread_id", "call_id", "index", "file", "record_id", "record_offset", "record_hash", "timestamp", "statement")
                     events = [event | {"id": hashlib.sha256(json.dumps([event.get(key) for key in identity_fields]).encode()).hexdigest()} for event in events]
                     sql.update(events=events, total=len(retained), operations=dict(Counter(event["operation"] for event in retained)))
-                    boundary = cutoff(window)
-                    sql['aggregate'] = self.activity_history.store.aggregate('sql', since=boundary.isoformat() if boundary else None) | {'scope':'retained_database', 'window':window}
+                    sql['aggregate'] = sql_aggregates[window] | {'scope':'retained_database', 'window':window}
             for projection in codex_windows.values():
                 projection.get("sqlite", {}).pop("_retained_events", None)
             diagnostics = self.diagnostics.snapshot() if self.observations["codex"] and self.observations["errors"] else {"events": [], "health": {"desktop": "disabled", "core": "disabled"}}
@@ -334,6 +380,7 @@ class Dashboard:
             settings = self.settings()
             revision = self.web_revision()
             scoped_mcp = {}
+            mcp_aggregates = dict(zip(codex_windows, self.activity_history.store.aggregate_many('mcp', history_dates, excluded_sources=[key for key,enabled in self.mcp_sources.items() if enabled is False]))) if self.observations['codex'] and self.observations['mcp'] else {}
             for window, projection in codex_windows.items():
                 report = summarize(sources, projection.pop("mcp_events", []), self.mcp_sources, self.mcp_categories)
                 complete = {source["server"]: source for source in mcp["servers"]}
@@ -344,8 +391,7 @@ class Dashboard:
                 report["configuration"] = mcp["configuration"]
                 report["recording_status"] = mcp["recording_status"]
                 if self.observations['codex'] and self.observations['mcp']:
-                    boundary = cutoff(window)
-                    report['history_aggregate'] = self.activity_history.store.aggregate('mcp', since=boundary.isoformat() if boundary else None, excluded_sources=[key for key,enabled in self.mcp_sources.items() if enabled is False]) | {'scope':'retained_database', 'window':window}
+                    report['history_aggregate'] = mcp_aggregates[window] | {'scope':'retained_database', 'window':window}
                 scoped_mcp[window] = report
             connection = connection_status(codex.get("threads", []), codex.get("error_events", [])+diagnostic_events, self.observations["codex"])
             if not self.phase("jev"):
@@ -406,10 +452,10 @@ class Dashboard:
             return {"enabled": current["enabled"], "enabled_at": current["enabled_at"]}
 
     def settings(self):
-        return {"interval": self.interval, "idle_minutes": self.idle_minutes, "activity_retention_days": self.activity_history.retention_days, "max_files": self.max_files, "track_all": self.codex.track_all if self.codex else False, "observations": dict(self.observations), "mcp_sources": dict(self.mcp_sources), "mcp_categories": dict(self.mcp_categories), "tool_descriptions": dict(self.tool_descriptions), "mcp_descriptions": dict(self.mcp_descriptions), "mcp_tags": {key: list(tags) for key, tags in self.mcp_tags.items()}}
+        return {"debug_mode": self.monitor.debug.enabled, "activity_retention_days": self.activity_history.retention_days, "max_files": self.max_files, "track_all": self.codex.track_all if self.codex else False, "observations": dict(self.observations), "mcp_sources": dict(self.mcp_sources), "mcp_categories": dict(self.mcp_categories), "tool_descriptions": dict(self.tool_descriptions), "mcp_descriptions": dict(self.mcp_descriptions), "mcp_tags": {key: list(tags) for key, tags in self.mcp_tags.items()}}
 
     def set_settings(self, value):
-        allowed = {"interval", "idle_minutes", "activity_retention_days", "max_files", "track_all", "observations", "mcp_sources", "mcp_categories", "tool_descriptions", "mcp_descriptions", "mcp_tags", "replace_customizations", "recording"}
+        allowed = {"debug_mode", "interval", "idle_minutes", "activity_retention_days", "max_files", "track_all", "observations", "mcp_sources", "mcp_categories", "tool_descriptions", "mcp_descriptions", "mcp_tags", "replace_customizations", "recording"}
         if not isinstance(value, dict) or not value or set(value)-allowed:
             raise ValueError()
         observations = value.get("observations", {})
@@ -421,7 +467,7 @@ class Dashboard:
             raise ValueError()
         if "activity_retention_days" in value and (type(value["activity_retention_days"]) is not int or not 0 <= value["activity_retention_days"] <= 3650):
             raise ValueError()
-        if any(key in value and type(value[key]) is not bool for key in ("replace_customizations", "recording")):
+        if any(key in value and type(value[key]) is not bool for key in ("debug_mode", "replace_customizations", "recording")):
             raise ValueError()
         for key in ("mcp_sources", "mcp_categories"):
             items = value.get(key, {})
@@ -451,18 +497,15 @@ class Dashboard:
                 changed = configure(self.jev.home, value["recording"]) if value["recording"] or monitor_config(self.jev.home)[1] is not None else "unchanged"
                 if changed != "unchanged":
                     self.monitor.event("recording_enabled" if value["recording"] else "recording_disabled")
-            interval = value.get("interval", self.interval)
+            if "debug_mode" in value:
+                self.monitor.debug.set_enabled(value["debug_mode"])
             track_all = value.get("track_all", self.codex.track_all if self.codex else False)
             if observations.get("codex") and not self.codex:
                 self.codex = CodexCollector(self.home/"sessions", self.max_files)
                 self.codex.history_sink = self.retain_calls
-            self.interval = interval
-            self.idle_minutes = value.get("idle_minutes", self.idle_minutes)
             if "activity_retention_days" in value:
                 self.activity_history.retention_days = value["activity_retention_days"]
                 self.activity_history.update([], [], [])
-            self.activity.wake()
-            self.cache_activity()
             self.max_files = value.get("max_files", self.max_files)
             restart_diagnostics = any(observations.get(key) and not self.observations[key] for key in ("codex", "errors", "logs", "sqlite", "model_api"))
             self.observations.update(observations)
@@ -503,6 +546,8 @@ class Dashboard:
                     self.codex.next_scan = 0
             self.monitor.event("settings_applied")
             self.refresh()
+            self.retry_sources.set()
+            self.source_changed.set()
             return self.settings()
 
     def sql_detail(self, identity, mask=True, full=False):
@@ -577,8 +622,6 @@ class Dashboard:
                 raise ValueError()
             result = write_document(value, document, text, expected)
             self.mcp_document_cache.clear()
-            self.activity.wake()
-            self.cache_activity()
             self.refresh()
             return result
 
@@ -654,40 +697,56 @@ class Dashboard:
     def activity_status(self):
         # Readers use the last complete activity check instead of waiting for scans.
         with self.lock:
-            return dict(self.activity_cache) | {"code_revision": self.code_revision}
-
-    def cache_activity(self):
-        with self.lock:
-            value = self.activity.snapshot(self.idle_minutes, self.interval)
-            changed = self.activity_cache.get('paused') != value.get('paused')
-            self.activity_cache = value
-        if changed:
-            self.notify_update()
+            return dict(self.activity_cache) | {"code_revision": self.code_revision, "update_mode": "source_events",
+                    "watch_health": 'unavailable' if any(watch.health == 'unavailable' for watch in tuple(self.source_watches.values())) else 'ok' if self.source_watches else 'starting'}
 
     def resume_refresh(self):
         with self.refresh_lock:
-            self.activity.wake()
-            self.cache_activity()
             self.refresh()
+            self.retry_sources.set()
+            self.source_changed.set()
             return self.activity_status()
 
     def poll_once(self):
         with self.refresh_lock:
-            self.activity.check(self.codex if self.observations["codex"] else None, self.idle_minutes, self.observations["metadata"])
-            self.cache_activity()
-            if self.activity.paused:
-                return False
+            with self.lock:
+                self.activity_cache["last_activity_at"] = now()
             self.refresh(stagger=True)
             return True
 
     def poll(self):
-        while not self.stop.is_set():
-            try:
-                self.poll_once()
-            except Exception:
-                # Collector errors cannot expose record content or exception paths
-                pass
-            self.stop.wait(self.activity_status()["check_interval"])
+        self.source_changed.set()
+        try:
+            while not self.stop.is_set():
+                with self.refresh_lock:
+                    self.watch_sources()
+                self.source_changed.wait()
+                self.source_changed.clear()
+                if self.stop.is_set():
+                    break
+                try:
+                    before = self.backfill_progress()
+                    if self.codex:
+                        self.codex.next_scan = 0
+                    self.diagnostics.next_scan = 0
+                    self.poll_once()
+                    after = self.backfill_progress()
+                    pending = (self.codex and any(state.get('history_cursor') or state.get('error_cursor')
+                                                 or state.get('partial_history') or state.get('offset') is None
+                                                 for state in self.codex.files.values())) or any(self.diagnostics.backfill_pending.values()) or any(state.get('unread_bytes') for state in self.diagnostics.files.values())
+                    if before != after and pending:
+                        self.source_changed.set()
+                except Exception:
+                    # A new source event or an explicit refresh retries failed collection.
+                    pass
+        finally:
+            self.close_sources()
+
+    def backfill_progress(self):
+        sessions = tuple((str(path), state.get('offset'), state.get('history_cursor'), state.get('error_cursor'))
+                         for path, state in self.codex.files.items()) if self.codex else ()
+        logs = tuple((str(path), state.get('offset'), state.get('history_cursor')) for path, state in self.diagnostics.files.items())
+        return sessions, logs, self.diagnostics.sql_cursor, repr(self.diagnostics.sql_history)
 
     def snapshot(self, window):
         with self.lock:
@@ -696,6 +755,7 @@ class Dashboard:
         result["default_settings"] = copy.deepcopy(self.default_settings)
         result["activity"] = self.activity_status()
         result["monitor"] = self.monitor.snapshot()
+        result["monitor"]["debug"] = self.monitor.debug.snapshot()
         monitor_boundary = cutoff(window)
         result["monitor"]["history"] = [sample for sample in result["monitor"]["history"] if contains({"timestamp": sample.get("time")}, monitor_boundary)]
         result["monitor"]["events"] = [event for event in result["monitor"]["events"] if contains(event, monitor_boundary)]
@@ -910,10 +970,28 @@ def handler(dashboard, port):
 
         def get_local(self, url):
             if url.path == "/api/events":
-                if url.query or not dashboard.event_clients.acquire(blocking=False):
-                    self.reply(400 if url.query else 503, b"Event stream unavailable")
+                query = parse_qs(url.query, keep_blank_values=True)
+                window = query.get('window', ['24h'])[0]
+                invalid = len(url.query)>128 or set(query)-{'window'} or len(query.get('window', ['24h']))!=1 or window not in WINDOWS
+                if invalid or not dashboard.event_clients.acquire(blocking=False):
+                    self.reply(400 if invalid else 503, b"Event stream unavailable")
                     return
+                wake_reader = wake_writer = peer = None
                 try:
+                    dashboard.monitor.debug.connection(True)
+                    disconnected = threading.Event()
+                    wake_reader, wake_writer = socket.socketpair()
+                    def watch_disconnect():
+                        try:
+                            select.select([self.connection, wake_reader], [], [])
+                        except (OSError, ValueError):
+                            pass
+                        finally:
+                            disconnected.set()
+                            with dashboard.update_condition:
+                                dashboard.update_condition.notify_all()
+                    peer = threading.Thread(target=watch_disconnect, name='sse-peer', daemon=True)
+                    peer.start()
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream; charset=utf-8")
                     self.send_header("Cache-Control", "no-store")
@@ -921,22 +999,54 @@ def handler(dashboard, port):
                     self.send_header("X-Content-Type-Options", "nosniff")
                     self.end_headers()
                     self.close_connection = True
-                    self.wfile.write(b"retry: 3000\n\n")
-                    self.wfile.flush()
                     previous = -1
-                    while not dashboard.stop.is_set():
+                    while not dashboard.stop.is_set() and not disconnected.is_set():
                         with dashboard.update_condition:
-                            dashboard.update_condition.wait_for(lambda: dashboard.stop.is_set() or dashboard.update_version != previous, timeout=15)
+                            dashboard.update_condition.wait_for(lambda: dashboard.stop.is_set() or disconnected.is_set() or dashboard.update_version != previous, timeout=15)
                             current = dashboard.update_version
-                        if dashboard.stop.is_set():
+                        if dashboard.stop.is_set() or disconnected.is_set():
                             break
-                        event = f"id: {current}\nevent: snapshot\ndata: {{\"version\":{current}}}\n\n" if current != previous else ": heartbeat\n\n"
-                        self.wfile.write(event.encode("ascii"))
+                        began, cpu = time.perf_counter(), time.process_time()
+                        if current != previous:
+                            value = {'version': current, 'window': window, 'snapshot': dashboard.snapshot(window), 'logs': dashboard.logs(window)}
+                            body = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+                            event = f'id: {current}\nevent: snapshot\ndata: {body}\n\n'
+                        else:
+                            event = ': heartbeat\n\n'
+                        encoded = event.encode("utf-8")
+                        snapshot_size = len(body.encode("utf-8")) if current != previous else 0
+                        serialized, writing = (time.perf_counter()-began)*1000, time.perf_counter()
+                        self.wfile.write(encoded)
                         self.wfile.flush()
+                        written = (time.perf_counter()-writing)*1000
+                        if current != previous:
+                            with dashboard.monitor.lock:
+                                dashboard.monitor.snapshot_bytes = snapshot_size
+                                dashboard.monitor.transfer_bytes = len(encoded)
+                        dashboard.monitor.debug.record("stream_frame" if current != previous else "heartbeat", {
+                            "cpu_ms": round((time.process_time()-cpu)*1000, 2), "serialization_ms": round(serialized, 2),
+                            "write_ms": round(written, 2), "snapshot_bytes": snapshot_size,
+                            "transfer_bytes": len(encoded), "active_streams": dashboard.monitor.debug.active_streams})
+                        if dashboard.monitor.debug.enabled:
+                            diagnostic = json.dumps(dashboard.monitor.debug.snapshot(), separators=(",", ":"))
+                            self.wfile.write(f"event: debug\ndata: {diagnostic}\n\n".encode("utf-8"))
+                            self.wfile.flush()
                         previous = current
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
+                    dashboard.monitor.debug.record("stream_error")
                     self.close_connection = True
                 finally:
+                    dashboard.monitor.debug.connection(False)
+                    if wake_writer:
+                        try:
+                            wake_writer.send(b'x')
+                        except OSError:
+                            pass
+                    if peer:
+                        peer.join(1)
+                    for wake in (wake_reader, wake_writer):
+                        if wake:
+                            wake.close()
                     dashboard.event_clients.release()
                 return
             if url.path in ('/api/codex/context','/api/codex/agent-message'):
@@ -1241,6 +1351,7 @@ def serve(argv=None, watch_stdin=False):
         pass
     finally:
         dashboard.stop.set()
+        dashboard.source_changed.set()
         dashboard.notify_update()
         dashboard.monitor.event("stopped")
         server.server_close()

@@ -246,10 +246,13 @@ class ActivityDetailsTests(unittest.TestCase):
         second=self.root/"rollout-00000000-0000-0000-0000-000000000002.jsonl"
         second.write_text(json.dumps({"type":"session_meta","payload":{"id":"00000000-0000-0000-0000-000000000002"}})+"\n")
         dashboard.refresh();self.assertEqual(dashboard.snapshot("24h")["codex"]["files"],2)
+        settings=dashboard.settings()
         for value in ({"interval":0},{"interval":True},{"interval":2.5},{"observations":{"git":1}},{"observations":{"unknown":True}}):
             with self.assertRaises(ValueError):dashboard.set_settings(value)
-        self.assertEqual(dashboard.interval,10)
+        self.assertEqual(dashboard.settings(),settings)
         dashboard.set_settings({"track_all":True,"interval":5,"observations":{"git":False}})
+        self.assertNotIn("interval",dashboard.settings())
+        self.assertEqual(dashboard.activity_status()["update_mode"],"source_events")
         self.assertEqual(dashboard.snapshot("24h")["codex"]["files"],2)
         self.assertFalse(dashboard.codex.features["git"])
         dashboard.set_settings({"observations":{"codex":False}})

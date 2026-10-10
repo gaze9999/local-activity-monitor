@@ -264,9 +264,12 @@ class HistoryStore:
 
     def aggregate(self, section, since=None, excluded_sources=()):
         """Aggregate retained metadata in SQLite without loading event payloads."""
+        return self.aggregate_many(section, [since], excluded_sources)[0]
+
+    def aggregate_many(self, section, boundaries, excluded_sources=()):
+        """Read several time ranges in one bounded, consistent transaction."""
         from datetime import datetime, timezone
-        import math
-        if section not in self.sections:
+        if section not in self.sections or not isinstance(boundaries, (list, tuple)) or not 1 <= len(boundaries) <= 16:
             raise ValueError("Invalid history query")
         if not isinstance(excluded_sources, (list, tuple)) or len(excluded_sources)>64 or any(not isinstance(value, str) or not 1<=len(value)<=80 for value in excluded_sources):
             raise ValueError("Invalid excluded sources")
@@ -274,7 +277,11 @@ class HistoryStore:
         if excluded_sources:
             where += " AND (json_extract(payload, '$.server') IS NULL OR json_extract(payload, '$.server') NOT IN ("+','.join('?' for _ in excluded_sources)+"))"
             args.extend(excluded_sources)
-        if since is not None:
+        queries = []
+        for since in boundaries:
+            if since is None:
+                queries.append((where, args))
+                continue
             try:
                 stamp = datetime.fromisoformat(since.replace('Z', '+00:00'))
                 if not stamp.tzinfo:
@@ -282,40 +289,49 @@ class HistoryStore:
                 boundary = stamp.astimezone(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
             except (ValueError, TypeError, AttributeError) as error:
                 raise ValueError("Invalid history date") from error
-            where += " AND event_time>=?"
-            args.append(boundary)
-        result = {'total':0, 'dated_total':0, 'undated_total':0, 'operations':{}, 'statements':{}, 'servers':{}, 'series':[], 'bucket_seconds':60, 'classification_truncated':False}
+            queries.append((where+" AND event_time>=?", [*args, boundary]))
         if not self.path.exists():
+            return [self._aggregate(None, *query) for query in queries]
+        with closing(self.connect()) as db, db:
+            db.execute('BEGIN')
+            return [self._aggregate(db, *query) for query in queries]
+
+    @staticmethod
+    def _aggregate(db, where, args):
+        from datetime import datetime, timezone
+        import math
+        result = {'total':0, 'dated_total':0, 'undated_total':0, 'operations':{}, 'statements':{}, 'servers':{}, 'series':[], 'bucket_seconds':60, 'classification_truncated':False}
+        if db is None:
             return result
         epoch = "CAST(strftime('%s',event_time) AS INTEGER)"
         nested = "CASE WHEN json_extract(payload,'$.nested')=1 THEN 1 ELSE 0 END"
-        with closing(self.connect()) as db, db:
-            db.execute('BEGIN')
-            total, dated, earliest, latest = db.execute('SELECT count(*), count('+epoch+'), min('+epoch+'), max('+epoch+') FROM history_items WHERE '+where, args).fetchone()
-            result.update(total=total, dated_total=dated, undated_total=total-dated)
-            for field in ('operation', 'statement'):
-                column = "json_extract(payload,'$."+field+"')"
-                rows = db.execute('SELECT '+column+', count(*) FROM history_items WHERE '+where+' AND '+column+' IS NOT NULL GROUP BY '+column+' ORDER BY count(*) DESC, '+column+' LIMIT 201', args).fetchall()
-                result[field+'s'] = {name:count for name,count in rows[:200]}
-                result['classification_truncated'] |= len(rows)>200
-            column = "json_extract(payload,'$.server')"
-            rows = db.execute('SELECT '+column+', count(*), sum('+nested+') FROM history_items WHERE '+where+' AND '+column+' IS NOT NULL GROUP BY '+column+' ORDER BY count(*) DESC, '+column+' LIMIT 201', args).fetchall()
-            result['servers'] = {name:{'total':count, 'direct':count-inferred, 'nested':inferred} for name,count,inferred in rows[:200]}
+        total, dated, earliest, latest = db.execute('SELECT count(*), count('+epoch+'), min('+epoch+'), max('+epoch+') FROM history_items WHERE '+where, args).fetchone()
+        result.update(total=total, dated_total=dated, undated_total=total-dated)
+        if not total:
+            return result
+        for field in ('operation', 'statement'):
+            column = "json_extract(payload,'$."+field+"')"
+            rows = db.execute('SELECT '+column+', count(*) FROM history_items WHERE '+where+' AND '+column+' IS NOT NULL GROUP BY '+column+' ORDER BY count(*) DESC, '+column+' LIMIT 201', args).fetchall()
+            result[field+'s'] = {name:count for name,count in rows[:200]}
             result['classification_truncated'] |= len(rows)>200
-            if dated:
-                minutes = latest//60-earliest//60+1
-                bucket = max(1, math.ceil(minutes/1439))*60
-                result['bucket_seconds'] = bucket
-                rows = db.execute('SELECT ('+epoch+'/?) * ?, count(*), sum('+nested+') FROM history_items WHERE '+where+' AND '+epoch+' IS NOT NULL GROUP BY 1 ORDER BY 1 LIMIT 1440', (bucket,bucket,*args)).fetchall()
-                result['series'] = [{'time':datetime.fromtimestamp(stamp,timezone.utc).isoformat(timespec='seconds').replace('+00:00','Z'), 'calls':count, 'direct':count-inferred, 'nested':inferred, 'operations':{}, 'servers':{}} for stamp,count,inferred in rows]
-                slots = {stamp:item for (stamp,_,_),item in zip(rows,result['series'])}
-                result['classification_series_truncated'] = False
-                for field in ('operation', 'server'):
-                    column = "json_extract(payload,'$."+field+"')"
-                    grouped = db.execute('SELECT ('+epoch+'/?) * ?, '+column+', count(*), sum('+nested+') FROM history_items WHERE '+where+' AND '+epoch+' IS NOT NULL AND '+column+' IS NOT NULL GROUP BY 1, 2 ORDER BY 1, 2 LIMIT 14401', (bucket,bucket,*args)).fetchall()
-                    result['classification_series_truncated'] |= len(grouped)>14400
-                    for stamp,name,count,inferred in grouped[:14400]:
-                        slots[stamp][field+'s'][name] = {'total':count,'direct':count-inferred,'nested':inferred} if field=='server' else count
+        column = "json_extract(payload,'$.server')"
+        rows = db.execute('SELECT '+column+', count(*), sum('+nested+') FROM history_items WHERE '+where+' AND '+column+' IS NOT NULL GROUP BY '+column+' ORDER BY count(*) DESC, '+column+' LIMIT 201', args).fetchall()
+        result['servers'] = {name:{'total':count, 'direct':count-inferred, 'nested':inferred} for name,count,inferred in rows[:200]}
+        result['classification_truncated'] |= len(rows)>200
+        if dated:
+            minutes = latest//60-earliest//60+1
+            bucket = max(1, math.ceil(minutes/1439))*60
+            result['bucket_seconds'] = bucket
+            rows = db.execute('SELECT ('+epoch+'/?) * ?, count(*), sum('+nested+') FROM history_items WHERE '+where+' AND '+epoch+' IS NOT NULL GROUP BY 1 ORDER BY 1 LIMIT 1440', (bucket,bucket,*args)).fetchall()
+            result['series'] = [{'time':datetime.fromtimestamp(stamp,timezone.utc).isoformat(timespec='seconds').replace('+00:00','Z'), 'calls':count, 'direct':count-inferred, 'nested':inferred, 'operations':{}, 'servers':{}} for stamp,count,inferred in rows]
+            slots = {stamp:item for (stamp,_,_),item in zip(rows,result['series'])}
+            result['classification_series_truncated'] = False
+            for field in ('operation', 'server'):
+                column = "json_extract(payload,'$."+field+"')"
+                grouped = db.execute('SELECT ('+epoch+'/?) * ?, '+column+', count(*), sum('+nested+') FROM history_items WHERE '+where+' AND '+epoch+' IS NOT NULL AND '+column+' IS NOT NULL GROUP BY 1, 2 ORDER BY 1, 2 LIMIT 14401', (bucket,bucket,*args)).fetchall()
+                result['classification_series_truncated'] |= len(grouped)>14400
+                for stamp,name,count,inferred in grouped[:14400]:
+                    slots[stamp][field+'s'][name] = {'total':count,'direct':count-inferred,'nested':inferred} if field=='server' else count
         return result
 
     def prune(self, days, batch=500):

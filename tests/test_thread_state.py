@@ -9,6 +9,29 @@ from local_activity_monitor.thread_state import ThreadState
 
 
 class ThreadStateTests(unittest.TestCase):
+    def test_unchanged_state_skips_writes_but_changed_offset_saves_and_retries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = ThreadState(Path(directory)/'thread-state.json')
+            stamp = datetime.now(timezone.utc).isoformat()
+            key = 'rollout-example.jsonl'
+            state = {'thread_id':'00000000-0000-4000-8000-000000000001', 'source_file':key,
+                'status':'running', 'offset':100, 'task_time':stamp, 'task_start':stamp, 'calls':{}}
+            cache.update([state])
+            checked = cache.write_checked_at
+            with patch.object(cache.store, 'save', side_effect=AssertionError('Unchanged state should not save')):
+                cache.update([state])
+            self.assertEqual(cache.write_checked_at, checked)
+            changed = state|{'offset':200}
+            with patch.object(cache.store, 'save', side_effect=PermissionError):
+                cache.update([changed])
+            self.assertEqual(cache.write_health, 'unavailable')
+            self.assertEqual(cache.store.read_document(cache.BYTE_LIMIT)['entries'][key]['offset'], 100)
+            cache.update([changed])
+            self.assertEqual(cache.write_health, 'ok')
+            self.assertEqual(cache.store.read_document(cache.BYTE_LIMIT)['entries'][key]['offset'], 200)
+            with patch.object(cache.store, 'save', side_effect=AssertionError('Successful retry should allow skipping')):
+                cache.update([changed])
+
     def test_check_times_follow_load_and_failed_save_attempts(self):
         with tempfile.TemporaryDirectory() as directory, patch('local_activity_monitor.thread_state.datetime', wraps=datetime) as clock:
             clock.now.return_value = datetime(2026, 10, 9, 1, tzinfo=timezone.utc)
