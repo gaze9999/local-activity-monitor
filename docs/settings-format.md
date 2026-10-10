@@ -22,7 +22,8 @@
 | charts | 時間範圍, 長度 / 單位, 間隔, 項目數, 線數, 上限, statistics 與 shape |
 | chartDefaultsVersion | 舊版圖表預設遷移標記, 接受值 1 以相容既有設定檔 |
 | tables | size, page, sort, filters, hidden, columns, heatmap, heatmapCustom, open |
-| summaries | 各摘要區的 count, order, hidden 與 titles |
+| summaries | 各摘要區的 count, order, hidden, titles, sources 與 custom |
+| cardLayouts | 各卡片區的 custom, groups, assignments, order 與 hidden |
 | contentMasking | 訊息、工具執行回覆、SQL、錯誤與 Context 的按需明細遮蔽, 預設 true |
 | sqlMasking | 舊 SQL 遮蔽設定相容欄位, 與 contentMasking 同步 |
 | tableSchema | 欄位相容版本, 目前為 10 |
@@ -40,7 +41,7 @@
 - 設定檔最多 2 MiB, HTTP 設定 body 最多 256 KiB
 - font 12 - 18 px, max_files 1 - 5000. JSON 需提供有效整數, 頁面輸入四捨五入
 - 舊設定的 interval 1 - 3600 秒及 idle_minutes 0 - 1440 通過格式驗證後忽略, 新匯出省略這兩個欄位. 收集由來源變更觸發, 不設定輪詢或閒置秒數
-- debug_mode 為 boolean, 預設 false. 在監測程式 Tab 切換, 設定匯出 / 匯入與還原預設均保存此欄位. 開啟時追加有界效能記錄, 關閉停止追加, 既有記錄保留
+- debug_mode 為 boolean, 預設 false. 在主設定切換, 設定匯出 / 匯入與還原預設均保存此欄位. 開啟才顯示診斷面板並追加有界效能記錄, 關閉停止追加, 既有記錄保留
 - activity_retention_days 0 - 3650, 預設 90, 0 不自動刪除歷史. 保存 SQL、網路、MCP、技能與錯誤的已整理紀錄, 設定與摘要一起保存, 重啟後沿用. 縮短天數分批清理過期紀錄, 快取、查詢、API 與畫面仍保留各自的讀取限制, 不以快取筆數限制 SQLite 歷史保存
 - max_files / track_all 保留舊版匯入與 API 相容格式, 不再限制 session 選取, 設定畫面不提供這兩項. 所有來源分批差異讀取, 每輪讀取量仍有上限
 - display.options 1 - 200, 最多 8 個不重複整數. ranking / table 必須是其中一項或 `all`
@@ -72,7 +73,23 @@ localStorage 依 origin 隔離. 後端觀察設定保存於目前程序, 網頁�
 
 cardVisibility 最多 500 項, 保留已有的明確顯示選擇. 省略時套用各分頁預設, 摘要項目使用 summaries 的配置, 總覽使用 overview 的配置. tableSchema 7 新增對話快取命中率欄位, 舊版排序 index 依原欄位移位
 
-多線圖的 display.lines 與 charts.lines 接受 3 / 5 / 10, 預設 3. display.mainSummary 接受 1 - 8, 預設 4, subSummary 接受 0 - 8, 預設 0. summaries 最多 100 個區域, count 在主頁接受 1 - 8, 子頁接受 0 - 8, order / hidden 各最多 32 個不重複指標序號, titles 每區最多 32 個名稱, 各 80 字元. 省略 count 時沿用全域數量, 新指標接到既有順序尾端
+多線圖的 display.lines 與 charts.lines 接受 3 / 5 / 10, 預設 3. display.mainSummary 接受 1 - 8, 預設 4, subSummary 接受 0 - 8, 預設 0. summaries 最多 100 個區域, count 在主頁接受 1 - 8, 子頁接受 0 - 8. 省略 count 時沿用全域數量, 新指標接到既有順序尾端
+
+## 自訂摘要與卡片布局
+
+- summaries.order / hidden 各最多 48 個不重複識別碼, 接受內建指標序號 0 - 31 或 `custom-<UUID>` 字串. titles 每區最多 48 個名稱, 各 80 字元, sources 每區最多 48 個來源覆寫, 接受空字串或已註冊的指標來源
+- summaries.custom 每區最多 16 項, cardLayouts.custom 每區最多 32 項, 皆為 `{id,title,source}`. ID 必須是唯一的 `custom-<UUID>`, title 最多 80 字元, source 必須存在於目前 `metricSources`
+- cardLayouts 最多 100 個區域. groups 每區最多 32 項 `{id,title}`, ID 唯一, 名稱不可空白且最多 80 字元. assignments 最多 500 項, 值為空字串或此區已存在的群組 ID
+- cardLayouts.order / hidden 各最多 500 個不重複卡片 ID. 區域 / 卡片 / 群組 key 接受英文字母、數字、`_`、`.`、`:`、`-`, 長度 1 - 100, 沿現有驗證拒絕無效資料
+- 搜尋、排序、群組及更新保留穩定 ID, 匯入不以新 UUID 取代已有 ID. 原始設定 version 仍是 1, 不要求舊檔提供新增欄位
+
+## 診斷與分享副本
+
+一般 `kind:"settings"` 匯出完整偏好供還原, 自訂名稱、ID、搜尋及設定不被去識別化. 「匯出診斷設定」另產生 `kind:"diagnostic-settings"` / version 1, 只保存白名單的數值、boolean、內建外觀 / 來源選項及配置數量
+
+診斷副本移除路徑、自訂名稱 / ID、搜尋、字型名稱、文字覆寫及工具名稱. 表格 / 圖表 / 卡片區域改用陣列, 不把來源物件的數值 key 當成可公開索引. 支援 CompressionStream 時輸出 `.json.gz`, 否則使用 `.json`, 本機完整偏好不變. 這份副本不供匯入還原, 分享與傳送由使用者另行操作
+
+欄位白名單與驗證維護於 `frontend/app.js` 的 diagnosticConfiguration 與設定匯入流程. 隱私 / gzip 往返及自訂卡片驗收見[驗證紀錄](validation.md), 任務查找見 [AI 入口](../AI.md)
 
 overview.order / hidden 各最多 500 個卡片 ID. 總覽副本以 overview-copy- 前綴保存獨立圖表設定, 統計卡使用 -statistics 後綴. 匯出保存卡片配置與摘要偏好, 活動資料仍依來源按需取得
 

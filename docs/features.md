@@ -11,7 +11,7 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 | 模型 API 呼叫監測 | 讀取 Codex diagnostics 中的 HTTP、WebSocket、連線及重試事件, 依事件類型分開統計 |
 | 顯示更新保護 | hover 時局部更新已識別數值並保留列順序, 焦點與文字選取保留內容, 明確暫停控制保留資料畫面, 恢復時套用最新資料 |
 | 本機即時更新 | 來源變更觸發收集, 一個畫面共用一條 SSE 直接接收快照與 Log |
-| 效能 Debug | 監測程式 Tab 切換, 查看最近數值指標與階段明細, 記錄檔最多 32 MiB |
+| 效能 Debug | 主設定開關, 開啟才顯示診斷面板, 查看數值指標、階段明細與記錄檔位置, 最多 32 MiB |
 | 對話與代理關聯 | 對話、子代理程式及 Context 分頁, 提供代理訊息明細, 顯示父子角色與 Thread ID, Context 列可點選 |
 | Token 速率 | 對話表格提供平均 Token / 秒, 使用最新累計 Token 除以已記錄工作時間 |
 | MCP 活動 | 依設定與紀錄產生來源卡、呼叫趨勢及明細, 分開顯示直接呼叫、程式碼辨識位置與來源紀錄 |
@@ -22,6 +22,9 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 | 其他電腦活動 | 讀取 Codex 本機保存的遠端對話與 My dots 活動摘要, 列出電腦、近期活動與對話數 |
 | 系統資訊 | 裝置、使用量與 GPU, 依實體顯示卡及介面識別去重 |
 | 外觀設定 | 系統字型選單、字級、語言、主題、卡片順序、欄位順序及篩選偏好 |
+| 摘要與卡片設定 | 摘要可選來源、自訂名稱 / 卡片, 卡片庫與活動摘要可自訂數值卡 / 群組, 拖曳或鍵盤排序保留 ID |
+| 診斷設定副本 | 去識別化的白名單副本, 可選 gzip 並提供 JSON 備用方式, 本機偏好完整保留 |
+| CPU 耗時圖表 | 顯示資料整理的 CPU 時間趨勢, 與經過時間 / 程序使用率分開, 零值與缺值分開 |
 | 動態內容 | 接近可視區域後載入內容, 長程式碼依可視範圍預先上色, 保留完整文字與捲動位置 |
 | 共用互動 | 載入狀態、展開與收合、按鈕間距、標籤、下拉選單樣式及減少動態效果設定 |
 | 螢幕配置 | 橫向、直向與手機可視寬度, 直向兩欄卡片、摘要與子頁籤分區、寬表格區域捲動及明細高度限制 |
@@ -47,10 +50,11 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 
 | 項目 | 現況 | 所屬工作 |
 | --- | --- | --- |
-| TOML、XML、CSV / TSV 結構預覽 | 原文可讀取, WBUI 尚未內建資料解析 | WBUI 定義格式、讀取上限與錯誤處理, LAM 依來源格式採用 |
+| TOML、XML、CSV / TSV 結構預覽 | LAM 保持 WBUI 0.9.0, 相鄰 WBUI 0.10.0 候選已實作安全 XML、CSV / TSV 與 TOML 子集, 尚未採用 | 取得可固定的候選修訂並另獲准更新 pin 後, 依格式上限驗收串接 |
 | SQL AST、完整 YAML 與 Markdown | 已有 SQL 排版、YAML 子集及 Markdown 預覽 | WBUI 依使用情境補齊 dialect、節點、source map 與格式規格 |
 | 更多程式碼 parser | WBUI 的 `registerParser` 用於資料結構解析, 程式碼已有通用 tokenizer 與可視範圍上色 | WBUI 另定程式碼上色介面、逐行狀態、grammar 授權、語意 token 與 Worker 取消, LAM 保留來源格式及完整原文 |
 | 共用元件與互動 | 虛擬表格、組合搜尋、條件篩選、sortable list、列拖曳、跨容器拖放、圖表縮放及面板編輯列為候選 | WBUI 維護[元件盤點](https://github.com/gaze9999/workbench-ui/blob/v0.9.0/docs/component-coverage.md)與[互動待辦](https://github.com/gaze9999/workbench-ui/blob/v0.9.0/docs/interaction-roadmap.md), LAM 按資料用途選用 |
+| 數值精算 / 公式 / 3D | 共用庫規劃候選, 尚未有可呼叫的數學或 3D 引擎 | WBUI 定義資料 / 精度 / 解析 / renderer, 使用端提供業務公式、變數、資產與授權, 不新增必裝相依套件 |
 | 遠端 LAM 存取、配對及登入 | 已有[遠端存取設計](remote-access.md), 尚未實作 | 待確認部署、HTTPS、權限及配對規格, 目前服務維持 loopback |
 
 ## 待驗收
@@ -91,6 +95,8 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 
 ## 實作與驗證入口
 
+完整任務分流見 [AI 入口](../AI.md), 共用 API 必須核對 `workbench-ui.json` 的實際版本. 目前本機候選與 1.0.0 待辦依 WBUI 自己的 AI 入口與索引查找, 上方 0.9.0 連結是固定版本的歷史文件
+
 | 檔案 | 用途 |
 | --- | --- |
 | `frontend/app.js` | 資料投影、預載呈現、來源共用計數、列明細、表格預設、空資料、首尾頁與圖表載入後重排 |
@@ -104,3 +110,5 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 | `tests/history-flow.cjs`, `test_activity_details.py`, `test_event_stream.py` | 歷史首尾頁、literal 驗證辨識、HTTP 回應與串流邊界 |
 | Workbench UI `src/workbench-ui.js`, `workbench-ui.css`, `workbench-ui.d.mts` | 共用 Tree SVG 圖示、表格空資料與首尾頁, 含型別與樣式 |
 | Workbench UI `docs/usage.md`, `component-coverage.md`, `tests/tree-flow.cjs`, `table-boundary-flow.cjs` | 共用操作規格、元件候選、樹狀鍵盤及表格邊界驗證 |
+
+SQL / SQLite、網路、MCP、錯誤紀錄與技能各自提供歷史分頁入口, 查詢量上限每頁 200 筆. Context 明細依記錄位置保留既有區段與捲動錨點, 重新讀取只替換新增或修改的畫面內容, 來源仍採原有有界按需讀取. 父子代理關聯取自實際 Thread ID, 用途標籤獨立成欄並標示 Goal / Plan 紀錄

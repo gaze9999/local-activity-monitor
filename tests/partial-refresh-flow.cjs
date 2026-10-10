@@ -19,9 +19,10 @@ async page=>{
   await page.mouse.move(1,1);await page.locator('[data-tab="codex"]').focus();await page.waitForFunction(()=>!tableViews.get('codex-rows').pendingUpdate);
   check(await page.evaluate(()=>page===2&&targetTableRows(document.getElementById('codex-rows')).every(row=>row.dataset.recordKey!==partialKeys[1])),'resume reapplies latest membership and preserves requested page');
   await page.evaluate(()=>{window.dispatchEvent(new Event('blur'));setSnapshotState('refreshing');});
-  check(await page.evaluate(()=>document.documentElement.dataset.wbMotion==='false'&&!document.querySelector('#codex-rows .wb-refresh-text')&&snapshotDisplayState==='refreshing'),'blur retains state without decoration');
+  const blurred=await page.evaluate(()=>({active:document.documentElement.dataset.displayActive,motion:document.documentElement.dataset.wbMotion,state:snapshotDisplayState,paused:[...document.querySelectorAll('#codex-rows .wb-refresh-text')].every(el=>getComputedStyle(el).animationPlayState==='paused'),opacity:getComputedStyle(document.getElementById('view-codex')).opacity}));
+  check(blurred.active==='false'&&blurred.motion==='true'&&blurred.state==='refreshing'&&blurred.paused&&blurred.opacity==='1','blur pauses decoration and retains content without changing preference: '+JSON.stringify(blurred));
   await page.evaluate(()=>{window.dispatchEvent(new Event('focus'));setSnapshotState('ready');});
-  check(await page.evaluate(()=>document.documentElement.dataset.wbMotion==='true'&&appearance.reduceMotion===false),'focus restores effective motion without changing preference');
+  check(await page.evaluate(()=>document.documentElement.dataset.displayActive==='true'&&document.documentElement.dataset.wbMotion==='true'&&appearance.reduceMotion===false),'focus restores effective motion without changing preference');
   await page.emulateMedia({reducedMotion:'reduce'});await page.evaluate(()=>setSnapshotState('refreshing'));check(await page.locator('#codex-rows .wb-refresh-text').count()===0,'system reduced motion retains plain text');await page.evaluate(()=>setSnapshotState('ready'));await page.emulateMedia({reducedMotion:'no-preference'});
   return {hovered,numericUpdates:true,membershipAndPageRetained:true,focusProtection:true,resumeLatest:true,backgroundMotion:true,systemReducedMotion:true};
 }

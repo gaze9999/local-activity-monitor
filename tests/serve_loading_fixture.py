@@ -119,7 +119,7 @@ def main():
             value = original_snapshot(window)
             if value['codex'].get('usage'):
                 value['codex']['usage']['credits'] = {'balance': 0, 'has_credits': False, 'unlimited': False}
-            value['monitor'] = {'debug': value['monitor'].get('debug', {}), 'version': __version__, 'uptime_seconds': 7200, 'health': 'ok', 'requests': 24, 'errors': 0, 'collection': {'phase': 'idle'}, 'device_ready': True, 'gpus':[{'name':'Demo single GPU','dedicated_memory_bytes':8*1024**3,'shared_memory_bytes':16*1024**3,'driver_version':'demo'}], 'fonts':['Segoe UI','Microsoft JhengHei'], 'history': [], 'events': []}
+            value['monitor'] = {'log_path': value['monitor'].get('log_path'), 'debug': value['monitor'].get('debug', {}), 'version': __version__, 'uptime_seconds': 7200, 'health': 'ok', 'requests': 24, 'errors': 0, 'collection': {'phase': 'idle'}, 'device_ready': True, 'gpus':[{'name':'Demo single GPU','dedicated_memory_bytes':8*1024**3,'shared_memory_bytes':16*1024**3,'driver_version':'demo'}], 'fonts':['Segoe UI','Microsoft JhengHei'], 'history': [], 'events': []}
             return value
         dashboard.snapshot = demo_snapshot
         server = ThreadingHTTPServer(('127.0.0.1', 0), handler(dashboard, 0))
