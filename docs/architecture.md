@@ -80,7 +80,7 @@ Jev payload 仍只在指定呼叫點開時讀取, 遮蔽 credentials 並保留�
 ## 範圍與效能
 
 - 初次每個 session 讀取頭行與最多 1 MiB 尾端, 後續差異讀取. 缺少 lifecycle 時優先反向回查工作事件, 再回補最近 24 小時錯誤. 全部 session 共用每輪 8 MiB
-- 檔案清單每 15 秒盤點全部 session, 不再依近期數量篩選. 差異讀取以輪替游標與每輪位元組 / 檔案檢查預算避免單一大檔占滿額度, 未讀完的來源持續回補
+- 來源變更通知後盤點全部 session, 不再依近期數量篩選. 差異讀取以輪替游標與每輪位元組 / 檔案檢查預算避免單一大檔占滿額度, 未讀完的來源持續回補
 - 每個檔案保留最多 8192 個工具 Call ID, 全部檔案合計最多 50000, 超過移除最舊資料. 去除同 ID 的重複呼叫
 - 未完成行每檔最多 1 MiB, 合計 8 MiB, 超過時丟棄該片段至下個換行. 額外 session error 每檔 50 筆, 全部最多 1000
 - 工具趨勢保留最近 10080 個分鐘 bucket, 工具 / 時間排行最多 20000 個 bucket
@@ -88,7 +88,9 @@ Jev payload 仍只在指定呼叫點開時讀取, 遮蔽 credentials 並保留�
 - Catalog 最多 2000 個對話 metadata, Jev 趨勢最多 168 個小時 bucket
 - 對話全部顯示每批建立 50 列 DOM, 全部新表格預設每頁 10 筆, 排行 5 項, 顯示選項預設 5 / 10 / 20, 可自訂最多 8 個 1 - 200 選項. 圖表最多 240 格
 
-SQLite 的 threads 分區持續保存已確認 lifecycle checkpoint 與 Skills 選定 metadata, 不依筆數或容量刪除歷史. 記憶體工作集合仍最多 1000 個 lifecycle checkpoint、500 筆 Skills 及合計 512 KiB. 保存狀態時間, 開始時間, Thread ID, 檔名與讀取 offset. Skills 保存 Thread / Call ID, Skill 與時間. lifecycle / Skills 改變時保存, offset 最多每 30 秒更新. 交易保存失敗時保留記憶體觀察
+SQLite 的 threads 分區持續保存已確認 lifecycle checkpoint 與 Skills 選定 metadata, 不依筆數或容量刪除歷史. 記憶體工作集合仍最多 1000 個 lifecycle checkpoint、500 筆 Skills 及合計 512 KiB. 保存狀態時間, 開始時間, Thread ID, 檔名與讀取 offset. Skills 保存 Thread / Call ID, Skill 與時間. 選定 metadata 變更時保存, 相同且已成功保存的輸入以 SHA-256 摘要略過, 失敗後保留記憶體觀察並於後續更新重試
+
+錯誤歷史同樣略過已成功保存的相同輸入, 記憶體摘要持續套用 24 小時範圍. SQL 與 MCP 的四個時間範圍各共用一次唯讀交易, 空結果省去分類與趨勢查詢, 保留統計上限與來源篩選
 
 重啟後若初始尾端涵蓋 checkpoint 至最新位置, 可沿用確認狀態. 未涵蓋的離線區間繼續反向回補, 顯示快取來源與確認時間. 新事件優先覆蓋舊狀態. Skill count 依已保留的 500 筆 metadata 計算, 以 Thread / Call ID / Skill 去重
 
@@ -96,7 +98,7 @@ SQLite 的 threads 分區持續保存已確認 lifecycle checkpoint 與 Skills �
 
 AGENTS.md 的最後修改時間取自實際開啟的檔案, 技能文件沿用既有 metadata 時間. 一般檔案時間只在開啟明細時 stat 已觀察路徑, 拒絕 UNC, symlink 與 credential 檔案, 不加入 snapshot 或 checkpoint
 
-右上 LAM 狀態依 snapshot 請求成敗顯示. Codex 狀態從既有對話用量回報及連線診斷 metadata 投影, 最近 5 分鐘顯示最近有回應或連線錯誤, 缺少近期資料時顯示待確認, 停用 Codex 觀察時顯示觀察停用. tooltip 提供依據及觀測時間, 不呼叫遠端探測 API
+右上 LAM 狀態依 SSE 連線、來源監聽與資料整理狀態顯示. Codex 狀態從既有對話用量回報及連線診斷 metadata 投影, 最近 5 分鐘顯示最近有回應或連線錯誤, 缺少近期資料時顯示待確認, 停用 Codex 觀察時顯示觀察停用. tooltip 提供依據及觀測時間, 不呼叫遠端探測 API
 
 ## HTTP 與設定
 
@@ -121,14 +123,14 @@ CLI 啟動時檢查最高的 0.x 正式版本 tag, WBUI 1.0.0 起以既有 GitHu
 | `POST /api/mcp/file` | 白名單資料檔的格式檢查, hash 比對與原子儲存 |
 | `GET /api/logs` | 目前保留的來源事件 metadata 與來源健康狀態 |
 | `GET /api/instance` | 程式識別與 CODEX_HOME hash, 啟動時重用同一個 monitor |
-| `POST /api/settings` | interval, observations, mcp_sources, mcp_categories, tool_descriptions, mcp_descriptions, mcp_tags, recording, replace_customizations. 舊 max_files / track_all 設定仍接受相容格式, 不再限制來源數量 |
+| `POST /api/settings` | debug_mode, observations, mcp_sources, mcp_categories, tool_descriptions, mcp_descriptions, mcp_tags, recording, replace_customizations. 舊 max_files / track_all 設定仍接受相容格式, 不再限制來源數量 |
 | `POST /api/jev/recording` | 經驗證的本機 Jev enabled 開關 |
 
 設定先完整驗證再變更. map 各最多 64 個自訂項目, 工具說明最多 400 字元. `/api/settings` body 上限 256 KiB. 觀察設定只存在目前後端程序, 網頁使用 localStorage 保存並在重新連線後套用. 外觀, 圖表, 表格排序 / 分頁, Tab 順序與介面文案屬於前端. 介面文字由 HTML 純文字與 ui() 標籤集中登錄, 略過數字, 單獨單位與帶有拼接空白的片段. data-copy="ignore" 可排除整個元件. 圖表動態控制項保留原始標籤供即時套用, 不修改原始紀錄值或 ID. 新 UI 元件沿用 ui() 與通用表格控制, 新 Tab 會自動接到目前排序尾端
 
 Snapshot 額外提供 `default_settings` 與讀取器的來源資訊. `sources` 根據當次 collector 結果組合實際位置, health, 選取欄位與上限, 各讀取器保留實際讀取數量與回補狀態. 上限與執行讀取共用 constants, 不額外重掃來源或載入 payload. 頁面依主 / 子 Tab 的資料相依篩選來源, 詳細內容只在展開區塊時建立 DOM. MCP 回傳只投影最多 40 個符合用量, credits, 次數或耗時語意的數值, 排除 credentials 與任意帳戶欄位. Token 用量採 thread 最新累計, 額度保留來源視窗, 剩餘百分比與時間, 不推估帳單金額
 
-Snapshot 的 monitor 欄位提供處理器名稱, 實體與可用記憶體容量, GPU 型號 / 專用容量 / 共享上限 / 驅動版本及 runtime, uptime, refresh / process CPU 耗時, 當次 session bytes, 資料保留量, HTTP 回應大小與錯誤計數. GPU 在首次硬體收集階段查詢, 最多 16 張. Windows 使用 System32 的 DXGI 唯讀 API, 區分專用容量與共享上限, 32 位元程序不提供容量, 不採用只有 uint32 的 WMI AdapterRAM. Linux 使用已安裝的 nvidia-smi 或 DRM sysfs, 型號按需由已安裝的 lspci 補充, 外部查詢合計預算 3 秒, 不安裝工具. macOS 使用 system_profiler 的顯示卡資料, Apple M 系列標示統一記憶體, 不將共享容量當成專用容量. 每個外部指令最多 2 秒, 接受輸出最多 128 KiB. 權限, 工具, schema 或驅動欄位不足時保留未知, 不使用 kernel 或 macOS 版本冒充 GPU 驅動版本. 記憶體容量最多每 5 秒查詢一次, macOS 可用容量目前保持未知. 360 個效能樣本及 200 個狀態事件使用 bounded deque, 重新啟動後清空. 整理失敗保留前次 cache, poll 繼續重試, 紀錄只保存例外類型
+Snapshot 的 monitor 欄位提供處理器名稱, 實體與可用記憶體容量, GPU 型號 / 專用容量 / 共享上限 / 驅動版本及 runtime, uptime, refresh / process CPU 耗時, 當次 session bytes, 資料保留量, HTTP 回應大小與錯誤計數. GPU 在首次硬體收集階段查詢, 最多 16 張. Windows 使用 System32 的 DXGI 唯讀 API, 區分專用容量與共享上限, 32 位元程序不提供容量, 不採用只有 uint32 的 WMI AdapterRAM. Linux 使用已安裝的 nvidia-smi 或 DRM sysfs, 型號按需由已安裝的 lspci 補充, 外部查詢合計預算 3 秒, 不安裝工具. macOS 使用 system_profiler 的顯示卡資料, Apple M 系列標示統一記憶體, 不將共享容量當成專用容量. 每個外部指令最多 2 秒, 接受輸出最多 128 KiB. 權限, 工具, schema 或驅動欄位不足時保留未知, 不使用 kernel 或 macOS 版本冒充 GPU 驅動版本. 記憶體容量最多每 5 秒查詢一次, macOS 可用容量目前保持未知. 360 個效能樣本及 200 個狀態事件使用 bounded deque, 重新啟動後清空. 整理失敗保留前次 cache, 下次來源變更或手動更新時重試, 紀錄只保存例外類型
 
 錯誤觀察使用平台 log 目錄及 CODEX_HOME 的 logs_*.sqlite, 驗證 schema 後唯讀選取 metadata. Desktop 最多 8 個近期 log, 每份初始 256 KiB 尾端, 差異與歷史回補每輪各最多 1 MiB, 未完成行最多 64 KiB. Core 每輪最多最近 2000 列 ID, 歷史回補每輪最多 2000 列. 有 0.08 秒 SQLite 讀取預算, 投影診斷 / SQL metadata, body 只暫讀前 8192 字元供分類, 不保留. 診斷事件與輸出的錯誤清單各最多 1000 筆, source 缺少 / schema 不符顯示健康狀態. 詳細錯誤判定見 [錯誤觀察](error-observation.md)
 
@@ -185,8 +187,16 @@ HTTP 服務提供等待狀態後, 單一收集 worker 依序讀取 session、統
 
 `GET /api/history` 依 namespace 與 section 查詢歷史, 每頁 1 - 200 筆, 可使用回傳的 next_cursor 依時間與穩定識別碼接續查詢, 最後一頁回傳 null. offset 上限 1000000, 可指定 since, 資料庫計算 total, 受來源檢查開關及現有 Host / Origin 限制. 這個 API 的保存範圍與畫面最近 24 小時等查詢範圍分開
 
-本機 `GET /api/events` 已提供 SSE 版本通知, 收集批次完成後通知前端查詢快照, 串流失敗時使用定時 HTTP 查詢. 前端保留分頁、捲動與 modal, 背景頁面關閉串流, 回到前景重新訂閱. 遠端候選入口與登入規格見 [遠端存取](remote-access.md), 服務維持 loopback
+`source_watch.py` 以 Windows ReadDirectoryChangesW、Linux inotify 或 macOS kqueue 監聽已選來源, 只處理檔名與檔案 metadata. 排除 auth.json、LAM 的 SQLite、checkpoint 與自身記錄檔, Jev 資料庫沿已啟用的來源設定監聽. 通知合併到單一收集 worker, 收集期間到達的通知留待下一輪, 尚未完成的回補按讀取預算繼續處理. 原生監聽失敗時顯示狀態並提供手動更新
+
+`GET /api/events?window=...` 直接推送 `{version, window, snapshot, logs}`, 每個畫面一條連線, 快照與 Log 沿原有欄位投影、時間範圍及容量限制. 前端不定時查詢 snapshot、activity 或 logs, 保留分頁、捲動與 modal, 背景頁面關閉串流, 回到前景重新訂閱. HTTP 快照入口保留給相容使用端, 內容明細與設定操作仍依既有權限按需呼叫. 遠端候選入口與登入規格見 [遠端存取](remote-access.md), 服務維持 loopback
 
 `session_cursors` 保存每個來源最新的 metadata-only 讀取狀態, 供重啟恢復. `session_calls` 另存有界呼叫工作集合, 個別變動以 Call ID 更新, 不把整批呼叫重寫至 cursor JSON. 退休呼叫先保存白名單活動歷史, 再移除恢復用工作集合. 這兩表與 threads 的最新 lifecycle checkpoint 是來源恢復狀態, 不是活動歷史, 不依 90 天活動期限刪除. SQL / 網路 / MCP / Skills / 錯誤活動歷史預設保存 90 天, 設定 0 時不自動刪除
 
 資料庫端 `aggregate()` 計算保存範圍的總數、SQL 分類、MCP 直接呼叫與程式碼辨識數量及時間序列, 不載入完整 payload 至 Python. 分類最多回傳 200 項並標示截斷, 時間序列最多 1440 格, 跨較長期間時以分鐘整數倍合併, 未提供時間的紀錄只列入總數
+
+## 效能診斷
+
+`performance_debug.py` 提供預設關閉的數值記錄與檔案輪替, `MonitorState` 記錄收集指標, SSE handler 記錄連線與傳輸指標. 原生記憶體 API 與型別共用, 避免每次取樣建立型別快取. 磁碟寫入失敗保留收集流程並回報診斷健康狀態, 路徑為所選 home 下的固定檔案, 拒絕連結與不支援格式
+
+快照的 `monitor.debug` 與獨立 `debug` SSE 事件提供有界診斷 metadata, 顯示於監測程式 Tab. 診斷事件不提高來源快照版本、不觸發收集, 與快照共用畫面影格排程並保留最新資料, 只有診斷事件時更新當頁的診斷區. 所有一般 SSE 快照仍涵蓋所選時間範圍的其他分頁摘要

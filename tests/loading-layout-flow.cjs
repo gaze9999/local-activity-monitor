@@ -1,22 +1,35 @@
 async page => {
   const origin=new URL(page.url()).origin,errors=[],onError=error=>errors.push(error.message);page.on('pageerror',onError);
+  const initial=await page.evaluate(()=>({snapshot:data,logs:logData}));
+  if(!initial.snapshot.codex.threads.every(thread=>thread.model?.startsWith('demo-model-')))throw Error('This flow requires an isolated synthetic fixture');
+  // Finite route fixtures end after one frame; only suppress that artificial EOF.
+  await page.addInitScript(()=>{
+    if(sessionStorage.getItem('lam-finite-sse-fixture')!=='true')return;
+    window.fixtureNativeEventSource=EventSource;
+    window.EventSource=class extends fixtureNativeEventSource{
+      constructor(...args){super(...args);super.addEventListener('snapshot',()=>this.fixtureDataReceived=true);}
+      set onerror(handler){super.onerror=event=>{if(!this.fixtureDataReceived||this.readyState===EventSource.CLOSED)handler?.call(this,event);};}
+      get onerror(){return super.onerror;}
+    };
+  });
   let phase='failed',requests=0;
-  await page.route(origin+'/api/snapshot?*',async route=>{
-    requests++;const response=await route.fetch(),snapshot=await response.json();
-    if(!snapshot.codex.threads.every(thread=>thread.model?.startsWith('demo-model-')))throw Error('This flow requires an isolated synthetic fixture');
+  await page.route(origin+'/api/events?*',async route=>{
+    requests++;const snapshot=structuredClone(initial.snapshot);
     if(phase==='failed'){await new Promise(resolve=>setTimeout(resolve,1000));await route.fulfill({status:503,contentType:'application/json',body:'{}'});return;}
     if(phase==='missing')snapshot.codex.usage={limits:[],credits:{},plan_type:null};
     else snapshot.codex.usage.credits={balance:0,has_credits:false,unlimited:false};
     if(phase==='delayed')await new Promise(resolve=>setTimeout(resolve,1000));
-    await route.fulfill({response,json:snapshot});
+    const value={version:requests,window:new URL(route.request().url()).searchParams.get('window'),snapshot,logs:initial.logs};
+    await route.fulfill({contentType:'text/event-stream; charset=utf-8',body:'id: '+requests+'\nevent: snapshot\ndata: '+JSON.stringify(value)+'\n\n'});
   });
   const check=(value,message)=>{if(!value)throw Error(message);};
   try{
-    await page.evaluate(()=>localStorage.setItem('local-activity-monitor.preferences.v1',JSON.stringify({themeVersion:1,appearance:{mode:'dark',theme:'steam',accent:'blue',font:14}})));
+    await page.evaluate(()=>{sessionStorage.setItem('lam-finite-sse-fixture','true');localStorage.setItem('local-activity-monitor.preferences.v1',JSON.stringify({themeVersion:1,appearance:{mode:'dark',theme:'steam',accent:'blue',font:14}}));});
     await page.setViewportSize({width:1600,height:1000});await page.goto(origin);
     await page.locator('section.panel').filter({has:page.locator('#overview-account-card')}).getByText('載入中',{exact:true}).waitFor();await page.locator('section.panel').filter({has:page.locator('#overview-account-card')}).getByText('連線中斷',{exact:true}).waitFor();
     phase='ready';await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));await page.locator('#overview-account-card').getByText('pro',{exact:true}).waitFor();
     const account=await page.locator('#overview-account-card').innerText();check(account.includes('0')&&account.includes('否'),'zero/false account values');check(await page.getByRole('tab',{name:'用量與額度',exact:true}).getAttribute('aria-selected')==='false','cold overview must not require usage page');
+    await page.evaluate(()=>document.fonts.ready);await page.waitForFunction(()=>document.getAnimations().every(animation=>animation.effect.getTiming().iterations===Infinity||animation.playState!=='running'));
     const height=await page.locator('#overview-account-card').evaluate(node=>node.closest('.panel').getBoundingClientRect().height);phase='delayed';await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));await page.waitForFunction(()=>document.querySelector('#overview-account-card')?.closest('.wb-data-host')?.dataset.wbRefreshing==='true');
     const updating=await page.locator('#overview-account-card').evaluate(node=>{const panel=node.closest('.panel'),host=node.closest('.wb-data-host'),state=host.querySelector('.wb-state'),rootStyle=getComputedStyle(host,'::after');return {height:panel.getBoundingClientRect().height,text:!!host.querySelector('.wb-refresh-text'),emptyBackdrop:rootStyle.content==='none',spinner:getComputedStyle(state,'::before').display,heading:panel.querySelector('h3').textContent};});check(Math.abs(height-updating.height)<1&&updating.text&&updating.emptyBackdrop&&updating.spinner==='none','retained state / size '+JSON.stringify({height,updating}));
     await page.waitForFunction(()=>document.querySelector('#overview-account-card')?.closest('.wb-data-host')?.dataset.wbRefreshing==='false');
@@ -35,5 +48,5 @@ async page => {
     }
     check(layouts.every(value=>value.grids>0&&value.cards>0&&!value.overlaps&&!value.overflow&&value.footerFull&&value.footerBottom&&value.borders),'monitor layout / footer '+JSON.stringify(layouts));check(await page.evaluate(()=>document.documentElement.dataset.theme)==='workbench','default theme name');check(!errors.length,'browser errors: '+errors.join(','));
     return {passed:true,account,requests,updating,layouts,errors};
-  }finally{await page.unrouteAll({behavior:'wait'});page.off('pageerror',onError);}
+  }finally{await page.unrouteAll({behavior:'wait'});await page.evaluate(()=>{sessionStorage.removeItem('lam-finite-sse-fixture');if(window.fixtureNativeEventSource)EventSource=fixtureNativeEventSource;stopEventStream();});page.off('pageerror',onError);}
 }

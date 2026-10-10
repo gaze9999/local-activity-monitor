@@ -1,5 +1,6 @@
 """Retain confirmed lifecycle checkpoints across collector restarts."""
 from datetime import datetime, timezone
+import hashlib
 import json
 import sqlite3
 import re
@@ -17,6 +18,7 @@ class ThreadState:
         self.path, self.entries = self.store.path, {}
         self.skills = []
         self.saved, self.next_save = None, 0
+        self.last_incoming = None
         self.load_health, self.write_health = "missing", None
         self.load_checked_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         self.write_checked_at = None
@@ -104,11 +106,17 @@ class ThreadState:
             if clean:
                 lifecycle_changed |= self.entries.get(key, {}).get('task_time') != clean['task_time']
                 self.entries[key] = clean
+        incoming = json.dumps({'version':1, 'entries':self.entries, 'skills':list(skills.values())}, separators=(',', ':')).encode()
+        digest = hashlib.sha256(incoming).digest()
+        storage_error = None
         try:
-            self.write_checked_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-            self.store.save(json.dumps({'version':1, 'entries':self.entries, 'skills':list(skills.values())}, separators=(',', ':')).encode())
-        except (OSError, sqlite3.Error):
+            if digest != self.last_incoming or self.write_health != 'ok':
+                self.write_checked_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                self.store.save(incoming)
+                self.last_incoming, self.write_health = digest, 'ok'
+        except (OSError, sqlite3.Error) as error:
             self.write_health = 'unavailable'
+            storage_error = error
         recent = sorted(skills.values(), key=lambda entry:entry['timestamp'], reverse=True)[:self.SKILL_LIMIT]
         lifecycle_changed |= recent != self.skills
         self.skills = recent
@@ -120,11 +128,12 @@ class ThreadState:
         while len(raw) > self.BYTE_LIMIT and self.entries:
             self.entries.pop(next(reversed(self.entries)))
             raw = json.dumps({'version':1, 'entries':self.entries, 'skills':self.skills}, separators=(',', ':')).encode()
-        if raw == self.saved:
+        if storage_error is not None or raw == self.saved:
             return
         try:
-            self.write_checked_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-            self.store.save(raw)
+            if raw != incoming:
+                self.write_checked_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                self.store.save(raw)
             self.saved = raw
             self.write_health = "ok"
         except (OSError, sqlite3.Error):

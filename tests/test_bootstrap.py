@@ -350,17 +350,16 @@ exit (Start-Monitor {quote(self.root)} @('--codex-home', 'folder with spaces') (
                 self.assertEqual(json.loads(output), arguments)
                 self.assertIn(f"退出碼 {code}", result.stdout)
 
-    def test_powershell_entry_points_preserve_mode_and_unicode_arguments(self):
-        for entry, mode in (("launch-cli.ps1", "--console"),):
+    def test_shared_powershell_launcher_preserves_mode_and_unicode_arguments(self):
+        for entry, mode in (("launch-logged.ps1", "--console"),):
             with self.subTest(entry=entry):
                 checkout = self.root / entry.replace(".ps1", " 資料夾 🐍 with spaces")
                 (checkout / "tools").mkdir(parents=True)
-                shutil.copyfile(ROOT / entry, checkout / entry)
                 for file in ("launch-logged.ps1", "launch-log.ps1"):
                     shutil.copyfile(ROOT / "tools" / file, checkout / "tools" / file)
                 (checkout / "tools/launch-windows.ps1").write_text("[IO.File]::WriteAllText($env:MOCK_LAUNCH_LOG, (ConvertTo-Json -InputObject @($args) -Compress), [Text.Encoding]::UTF8)\nexit 0\n")
                 arguments = ["--fixture", "資料夾 🐍 with spaces"]
-                result = subprocess.run([POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(checkout / entry), *arguments], capture_output=True, text=True, env=self.env, timeout=15)
+                result = subprocess.run([POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(checkout / "tools" / entry), mode, *arguments], capture_output=True, text=True, env=self.env, timeout=15)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(self.launch_log.read_text(encoding="utf-8-sig")), [mode, *arguments])
 

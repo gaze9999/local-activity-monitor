@@ -72,7 +72,6 @@ def main():
     subprocess.run([sys.executable, str(root/"tools/smoke_release.py"), str(executable)], check=True)
     if system == "windows":
         (bundle/"launch-cli.cmd").write_text('@echo off\n"%~dp0launch-cli.exe" %*\nexit /b %ERRORLEVEL%\n', encoding="utf-8")
-        (bundle/"launch-cli.ps1").write_text("& (Join-Path $PSScriptRoot 'launch-cli.exe') @args\nexit $LASTEXITCODE\n", encoding="utf-8")
     elif system == "macos":
         launcher = bundle/"launch-cli.command"
         launcher.write_text('#!/bin/sh\nROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1\nexec "$ROOT_DIR/launch-cli" "$@"\n', encoding="utf-8")

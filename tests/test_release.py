@@ -63,7 +63,7 @@ class ReleaseAssemblyTests(unittest.TestCase):
                     with zipfile.ZipFile(cli_archive) as package:
                         cli_names = package.namelist()
                     self.assertIn("local-activity-monitor/launch-cli.cmd", cli_names)
-                    self.assertIn("local-activity-monitor/launch-cli.ps1", cli_names)
+                    self.assertNotIn("local-activity-monitor/launch-cli.ps1", cli_names)
                     self.assertIn("local-activity-monitor/launch-cli.exe", cli_names)
                 elif platform == "darwin":
                     cli_archive = next((root / ".local/package-tests").rglob("*-cli.tar.gz"))

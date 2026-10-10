@@ -14,6 +14,26 @@ def event(hours=0, **fields):
 
 
 class ErrorHistoryTests(unittest.TestCase):
+    def test_unchanged_large_input_skips_writes_and_retry_recovers(self):
+        with tempfile.TemporaryDirectory() as folder:
+            history = ErrorHistory(Path(folder)/'history.json')
+            history.LIMIT = 3
+            events = [event(index=index) for index in range(8)]
+            history.update(events)
+            self.assertEqual(history.store.page('events')['total'], 8)
+            with patch.object(history.store, 'save', side_effect=AssertionError('Unchanged input should not save')):
+                history.update(events)
+            changed = events+[event(index=99)]
+            with patch.object(history.store, 'save', side_effect=PermissionError):
+                history.update(changed)
+            self.assertEqual(history.health, 'unavailable')
+            history.update(changed)
+            self.assertEqual(history.health, 'ok')
+            self.assertIsNone(history.error_type)
+            self.assertEqual(history.store.page('events')['total'], 9)
+            with patch.object(history.store, 'save', side_effect=AssertionError('Successful retry should allow skipping')):
+                history.update(changed)
+
     def test_reload_prune_deduplicate_and_project_private_fields(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder)/"history.json"

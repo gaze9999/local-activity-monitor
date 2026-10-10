@@ -27,7 +27,7 @@
 | sqlMasking | 舊 SQL 遮蔽設定相容欄位, 與 contentMasking 同步 |
 | tableSchema | 欄位相容版本, 目前為 10 |
 | copy | 預設完整標籤 / tooltip → 自訂文字 |
-| settings | interval, idle_minutes, activity_retention_days, max_files, track_all, observations, mcp_sources, mcp_categories, tool_descriptions, mcp_descriptions, mcp_tags |
+| settings | debug_mode, activity_retention_days, max_files, track_all, observations, mcp_sources, mcp_categories, tool_descriptions, mcp_descriptions, mcp_tags |
 
 來源紀錄開關由 MCP 管理, 不寫入可攜設定. 舊版外層的 boolean `recording` 可讀取但不套用. 拖曳開關每次載入預設關閉, 不放入可攜設定
 
@@ -38,8 +38,9 @@
 - 內容遮蔽只控制支援 `mask=0|1` 的訊息與執行明細, 不改變文件選取及編輯規則, 也不解除隱藏推理、analysis 或加密內容的排除
 
 - 設定檔最多 2 MiB, HTTP 設定 body 最多 256 KiB
-- font 12 - 18 px, interval 1 - 3600 秒, max_files 1 - 5000. JSON 需提供有效整數, 頁面輸入四捨五入
-- idle_minutes 0 - 1440, 預設 5, 0 停用閒置暫停. 舊設定省略此欄位時沿用預設
+- font 12 - 18 px, max_files 1 - 5000. JSON 需提供有效整數, 頁面輸入四捨五入
+- 舊設定的 interval 1 - 3600 秒及 idle_minutes 0 - 1440 通過格式驗證後忽略, 新匯出省略這兩個欄位. 收集由來源變更觸發, 不設定輪詢或閒置秒數
+- debug_mode 為 boolean, 預設 false. 在監測程式 Tab 切換, 設定匯出 / 匯入與還原預設均保存此欄位. 開啟時追加有界效能記錄, 關閉停止追加, 既有記錄保留
 - activity_retention_days 0 - 3650, 預設 90, 0 不自動刪除歷史. 保存 SQL、網路、MCP、技能與錯誤的已整理紀錄, 設定與摘要一起保存, 重啟後沿用. 縮短天數分批清理過期紀錄, 快取、查詢、API 與畫面仍保留各自的讀取限制, 不以快取筆數限制 SQLite 歷史保存
 - max_files / track_all 保留舊版匯入與 API 相容格式, 不再限制 session 選取, 設定畫面不提供這兩項. 所有來源分批差異讀取, 每輪讀取量仍有上限
 - display.options 1 - 200, 最多 8 個不重複整數. ranking / table 必須是其中一項或 `all`
@@ -57,7 +58,7 @@
 
 匯入先驗證並顯示套用範圍, 確認後呼叫後端, 保存 localStorage 並重新載入. 取消或無效內容保留既有設定. 匯入以 `replace_customizations` 替換自訂來源分類, 觀察開關, 標籤與說明. 一般編輯採差異更新. 前後端只接受可寫欄位, 不接受任意檔案位置或 command
 
-全部設定還原預設以後端 `default_settings` 為基準: 10 秒更新, 閒置五分鐘暫停, 歷史保存 90 天, 所有 session 分批差異讀取, 各來源的程式預設開關, 空自訂 map, 前端預設顯示 / 排序 / 外觀 / 語言. 需先確認, 已有活動紀錄依套用後的保存策略處理
+全部設定還原預設以後端 `default_settings` 為基準: 來源變更時收集, 歷史保存 90 天, 所有 session 分批差異讀取, 各來源的程式預設開關, 空自訂 map, 前端預設顯示 / 排序 / 外觀 / 語言. 需先確認, 已有活動紀錄依套用後的保存策略處理
 
 前端新預設為排行榜 5 項, 表格每頁 10 筆, 介面字級 14 px, 所有數量選擇在各卡片 / 表格齒輪內. 已保存的有效自訂值保留, 省略欄位時使用預設
 
@@ -74,3 +75,5 @@ cardVisibility 最多 500 項, 保留已有的明確顯示選擇. 省略時套�
 多線圖的 display.lines 與 charts.lines 接受 3 / 5 / 10, 預設 3. display.mainSummary 接受 1 - 8, 預設 4, subSummary 接受 0 - 8, 預設 0. summaries 最多 100 個區域, count 在主頁接受 1 - 8, 子頁接受 0 - 8, order / hidden 各最多 32 個不重複指標序號, titles 每區最多 32 個名稱, 各 80 字元. 省略 count 時沿用全域數量, 新指標接到既有順序尾端
 
 overview.order / hidden 各最多 500 個卡片 ID. 總覽副本以 overview-copy- 前綴保存獨立圖表設定, 統計卡使用 -statistics 後綴. 匯出保存卡片配置與摘要偏好, 活動資料仍依來源按需取得
+
+來源變更通知決定收集與推送時機. 舊設定檔的 `interval` 欄位可讀取, API 驗證其原有範圍後略過, 新匯出不保存此欄位. 圖表的 `interval` 仍表示資料聚合區間

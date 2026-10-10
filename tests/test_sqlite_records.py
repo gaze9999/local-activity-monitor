@@ -11,9 +11,28 @@ from unittest.mock import MagicMock
 from local_activity_monitor.sqlite_records import diagnostic_content, sql_content, sqlite_operations, sql_operations, sql_diagnostic
 from local_activity_monitor.collectors import CodexCollector
 from local_activity_monitor.server import Dashboard, handler
+from local_activity_monitor.error_records import DiagnosticCollector
 
 
 class SQLiteRecordTests(unittest.TestCase):
+    def test_forward_sql_log_backfill_keeps_pending_until_latest_row(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home=Path(folder)
+            path=home/'logs_1.sqlite'
+            stamp=datetime.now(timezone.utc).timestamp()
+            with closing(sqlite3.connect(path)) as db,db:
+                db.execute('CREATE TABLE logs(id INTEGER PRIMARY KEY, ts REAL, level TEXT, target TEXT, feedback_log_body TEXT)')
+                db.execute("INSERT INTO logs VALUES(1,?,'INFO','sqlx::query','sql=\"SELECT 1\" elapsed=1ms')",(stamp,))
+            collector=DiagnosticCollector(home)
+            collector.refresh_core()
+            with closing(sqlite3.connect(path)) as db,db:
+                db.executemany("INSERT INTO logs VALUES(?,?,'INFO','sqlx::query','sql=\"SELECT 1\" elapsed=1ms')",[(index,stamp) for index in range(2,4502)])
+            for expected,pending in ((2001,True),(4001,True),(4501,False)):
+                collector.refresh_core()
+                self.assertEqual(collector.sql_cursor,expected)
+                self.assertEqual(collector.backfill_pending['core'],pending)
+            self.assertEqual(collector.sql_events[-1]['record_id'],4501)
+
     def test_recorded_escape_warning_does_not_escape_metadata_parser(self):
         code = 'pattern = "' + chr(92) + '["\nimport sqlite3\nc=sqlite3.connect(":memory:")\nc.execute("SELECT 1")'
         with warnings.catch_warnings(record=True) as emitted:

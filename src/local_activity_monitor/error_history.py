@@ -1,5 +1,6 @@
 """A small 24-hour cache of error metadata, never original log messages."""
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import sqlite3
 import threading
@@ -27,6 +28,7 @@ class ErrorHistory:
         self.lock = threading.Lock()
         self.events = []
         self.saved = None
+        self.last_incoming = None
         self.health, self.error_type = "waiting", None
         try:
             raw = self.store.load(self.BYTE_LIMIT)
@@ -76,8 +78,11 @@ class ErrorHistory:
     def update(self, events):
         with self.lock:
             storage_error = None
+            incoming = json.dumps({'version': 1, 'events': self.project(events, False)}, ensure_ascii=True, separators=(',', ':')).encode()
+            digest = hashlib.sha256(incoming).digest()
             try:
-                self.store.save(json.dumps({'version': 1, 'events': self.project(events, False)}, ensure_ascii=True, separators=(',', ':')).encode())
+                if digest != self.last_incoming or self.health != 'ok':
+                    self.store.save(incoming)
             except (OSError, sqlite3.Error) as error:
                 self.health, self.error_type = 'unavailable', type(error).__name__
                 storage_error = error
@@ -86,11 +91,13 @@ class ErrorHistory:
             while len(raw) > self.BYTE_LIMIT and self.events:
                 self.events.pop()
                 raw = json.dumps({"version": 1, "events": self.events}, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-            if storage_error is not None or raw == self.saved:
+            if storage_error is not None:
                 return
             try:
-                self.store.save(raw)
+                if raw != self.saved and raw != incoming:
+                    self.store.save(raw)
                 self.saved = raw
+                self.last_incoming = digest
                 self.health, self.error_type = "ok", None
             except (OSError, sqlite3.Error) as error:
                 self.health, self.error_type = "unavailable", type(error).__name__

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from . import __version__
 from .device_info import memory_info, processor_name, CpuUsage, system_fonts
 from .gpu_info import gpu_info
+from .performance_debug import PerformanceDebug
 import os
 import platform
 import json
@@ -50,6 +51,7 @@ class MonitorState:
         self.events = deque(maxlen=self.EVENT_LIMIT)
         self.logs = deque(maxlen=self.LOG_LIMIT)
         self.journal = journal
+        self.debug = PerformanceDebug(journal.with_name("performance-debug.jsonl") if journal else None)
         self.log_enabled = True
         self.log_health = "memory" if journal is None else "waiting"
         self.log_error_type = None
@@ -188,6 +190,7 @@ class MonitorState:
             self.health, self.error_type = "error", category
 
     def refreshed(self, metrics):
+        self.debug.record("collection", metrics)
         with self.lock:
             if self.health == "error":
                 self.append_event({"timestamp": stamp(), "kind": "recovered", "error_type": None})

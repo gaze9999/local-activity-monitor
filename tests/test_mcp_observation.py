@@ -64,7 +64,8 @@ class McpObservationTests(unittest.TestCase):
         self.assertEqual(dashboard.settings()['mcp_tags']['future_service'],['Search','Docs'])
         for value in (True,'tag',[''],['x'*41],['a']*5,['line\nbreak']):
             with self.assertRaises(ValueError):dashboard.set_settings({'interval':1,'mcp_tags':{'future_service':value}})
-        self.assertEqual(dashboard.interval,10)
+        self.assertEqual(dashboard.settings()['mcp_tags']['future_service'],['Search','Docs'])
+        self.assertNotIn('interval',dashboard.settings())
         dashboard.set_settings({'mcp_tags':{'future_service':[]}})
         self.assertNotIn('future_service',dashboard.settings()['mcp_tags'])
         self.assertEqual(category('unfamiliar','browser_screenshot'),'runtime')
