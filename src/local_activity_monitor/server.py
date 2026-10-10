@@ -31,7 +31,7 @@ from .activity_windows import cutoff, contains
 from .payload_detail import mask_payloads, payload_masking
 from .project_instructions import instructions, observed_file_metadata
 from .codex_connection import connection_status
-from .source_watch import SourceWatch, source_path
+from .source_watch import SourceWatch, source_path, git_metadata_path, managed_worktree_path
 from .mcp_source_files import documents as source_documents, read_document, write_document
 from .mcp_records import CATEGORIES, EVENT_LIMIT as MCP_EVENT_LIMIT, TOOL_LIMIT as MCP_TOOL_LIMIT, SOURCE, category, discover_sources, summarize
 from .monitor_state import MonitorState
@@ -211,6 +211,16 @@ class Dashboard:
 
     def watch_sources(self):
         targets = [(self.home, source_path)]
+        if self.observations['worktrees']:
+            def invalidate(accepts):
+                def selected(relative):
+                    accepted = accepts(relative)
+                    if accepted:
+                        self.worktrees.next_read = 0
+                    return accepted
+                return selected
+            targets.append((self.worktrees.managed_root, invalidate(managed_worktree_path)))
+            targets.extend((root, invalidate(git_metadata_path)) for root in self.worktrees.notification_roots())
         if self.observations['codex'] and any(self.observations[key] for key in ('logs', 'errors', 'sqlite', 'model_api')):
             targets.extend((root, lambda relative: True) for root in self.diagnostics.roots if not root.is_relative_to(self.home))
         enabled, database, _ = monitor_config(self.home)

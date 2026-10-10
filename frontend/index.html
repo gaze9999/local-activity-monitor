@@ -17,6 +17,8 @@
       <div class="header-status"><div class="header-info-primary"><div class="connection-group"><div id="lam-connection" class="live" tabindex="0" title="此頁面與 LAM 本機監測服務的連線"><span id="live-dot"></span><strong>LAM</strong><span id="live">連線中</span></div><div id="codex-connection" class="live" tabindex="0"><span id="codex-live-dot"></span><strong>Codex</strong><span id="codex-live">待確認</span></div></div></div><div id="header-quota" class="header-quota" tabindex="0" aria-label="額度剩餘比例"></div><div class="header-info-secondary"><div class="refresh-status"><time id="updated">尚未更新</time></div><span id="source-retention"></span><span id="source-backfill" role="status"></span><span id="program-uptime">已執行 --</span></div><time id="program-started" hidden>啟動 --</time></div>
       <div class="header-actions"><div class="layout-edit-control" title="開啟後可以拖曳 Tab, 圖表, 活動摘要與表格欄位"><span>拖曳排序</span><input id="layout-drag-toggle" aria-label="拖曳排序" type="checkbox" class="switch" role="switch"></div>
 
+      <button id="snapshot-pause" class="icon-button" type="button" aria-label="暫停顯示更新" aria-pressed="false" title="暫停顯示更新">暫停</button>
+      <span id="snapshot-paused" class="muted" role="status" hidden>顯示已暫停</span>
       <button id="dark-toggle" class="icon-button" type="button" aria-label="切換深色模式" title="切換深色模式">◐</button>
       <button id="observation-settings" class="icon-button" type="button" aria-label="設定" title="設定">⚙</button></div>
     </div>

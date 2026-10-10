@@ -19,8 +19,35 @@ def source_path(relative):
         return True
     if parts[0] == 'monitoring':
         return len(parts) == 1 or parts[1] == 'jev-monitor.json'
+    if parts[0] == 'plugins':
+        if len(parts) == 1:
+            return True
+        if parts[1] != 'cache':
+            return False
+        if len(parts) <= 5:
+            return True
+        tail = parts[5:]
+        return tail in [('plugin.json',), ('.mcp.json',), ('.codex-plugin',), ('.codex-plugin', 'plugin.json')] or tail[0] == 'skills' and (len(tail) <= 2 or len(tail) == 3 and tail[2] == 'SKILL.md')
     return len(parts) == 1 and (parts[0] in ('config.toml', '.codex-global-state.json', 'session_index.jsonl')
                               or re.fullmatch(r'(?:state|logs)_\d+\.sqlite(?:-wal|-shm)?', parts[0]) is not None)
+
+
+def git_metadata_path(relative):
+    parts = Path(str(relative).replace('\\', '/')).parts
+    if not parts:
+        return True
+    if '..' in parts or parts[-1].endswith('.lock'):
+        return False
+    if parts[0] == 'refs':
+        return True
+    if parts[0] == 'worktrees':
+        return len(parts) <= 2 or len(parts) == 3 and parts[2] in ('HEAD', 'gitdir', 'commondir', 'locked')
+    return len(parts) == 1 and parts[0] in ('HEAD', 'packed-refs', 'gitdir', 'commondir', 'locked')
+
+
+def managed_worktree_path(relative):
+    parts = Path(str(relative).replace('\\', '/')).parts
+    return '..' not in parts and (len(parts) <= 2 or len(parts) == 3 and parts[-1] == '.git')
 
 
 class SourceWatch:

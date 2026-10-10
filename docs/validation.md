@@ -91,6 +91,11 @@ python tests/serve_loading_fixture.py
 | `event-stream-flow.cjs` | SSE 快照與 Log、重複及晚到資料、後端重啟與重連、連線關閉 |
 | `debug-flow.cjs` | Debug 開關、監測程式 Tab 與明細、心跳不觸發來源收集、停止記錄及三語排版 |
 | `stream-burst-flow.cjs` | 接受 page 與 CDP session, 1200 筆快照與獨立 / 混合 Debug 事件合併渲染、最新資料與回收後 heap / DOM 保留量 |
+| `idle-interaction-flow.cjs` | 明確暫停與最新快照合併、hover / 焦點 / 選取 / touch / 失焦保護、診斷回應、無效網址、來源更新後恢復、狀態到期、背景切換及檔案資訊檢查頻率 |
+| `idle-cadence-flow.cjs` | 隔離瀏覽器時鐘核對 60 秒的計時回呼、手動暫停後停止計時、裝置取樣時間與四種寬度 / 三語系排版, 計時次數不代表實機 CPU 改善幅度 |
+| `partial-refresh-flow.cjs` | hover 更新數值並保留列身分、順序、篩選結果及分頁, 焦點保留內容, 新增 / 移除延後套用, 失焦與系統減少動畫 |
+| `mcp-refresh-flow.cjs` | MCP 摘要更新保留卡片、欄位與標題、柔和光條、連續更新逐影格的可見性與高度、單一明細入口及三種寬度 / 三語系布局 |
+| `stable-refresh-flow.cjs` | 總覽捷徑、額度、已展開來源、裝置欄位的焦點與文字選取、官方帳戶欄位、MCP 來源卡與表格、互動期間的欄位變動、文件列表及圖表保留 / 更新 |
 | `table-stream-interaction-flow.cjs` | SSE 更新期間保留滑鼠與鍵盤目標, 離開後套用最新排序, 對話及 SQL 表格 |
 | `followup-layout-flow.cjs` | 空圖表恢復、精簡欄位、Context 順序、摘要、列明細、空資料提示及首尾頁 |
 | `startup-preload-flow.cjs` | 首輪活動整理前的對話目錄與完整結果切換, 使用隔離回應 |

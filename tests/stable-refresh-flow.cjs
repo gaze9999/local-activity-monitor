@@ -1,0 +1,47 @@
+async page=>{
+  const check=(value,message)=>{if(!value)throw Error(message);};
+  check(await page.evaluate(()=>data.codex.threads.every(thread=>thread.model?.startsWith('demo-model-'))),'isolated synthetic source required');
+  await page.evaluate(()=>{
+    locale='zh-TW';applyLanguage();switchTab('overview');const snapshot=structuredClone(data);
+    snapshot.monitor.cpu_usage_percent=25;snapshot.monitor.processor='Synthetic CPU';snapshot.monitor.physical_memory_bytes=8*1024**3;snapshot.monitor.available_memory_bytes=4*1024**3;
+    snapshot.settings.observations.codex_account=true;snapshot.codex.account={health:'ok',updated_at:snapshot.updated_at,account_usage:{summary:{lifetimeTokens:100}},limits:{fixture:{limit_name:'Synthetic quota',primary:{window_minutes:300,remaining_percent:50}}}};
+    snapshot.mcp.telemetry.fixture_telemetry={health:'ok',updated_at:snapshot.updated_at,summary:{calls:2},recent:[{time:snapshot.updated_at,calls:2}],series:[{time:snapshot.updated_at,calls:2}]};renderSnapshot(snapshot);
+    window.stableRefs={};window.captureStable=(key,selector)=>{const value=document.querySelector(selector);if(!value)throw Error('Missing '+selector);stableRefs[key]={value,selector};return value;};
+    window.sendStableUpdate=change=>{const snapshot=structuredClone(data);change(snapshot);eventStream.dispatchEvent(new MessageEvent('snapshot',{data:JSON.stringify({version:(eventVersion??0)+1,window:activeSourceWindow(),snapshot,logs:logData})}));};
+    captureStable('highlight','#overview-highlights button');captureStable('quota','#header-quota .header-quota-window');captureStable('quotaValue','#header-quota strong');
+    const footer=document.querySelector('#view-overview>.source-reference');footer.open=true;populateSourceReference(footer);const source=footer.querySelector('.source-read-grid>details');source.open=true;captureStable('source','#view-overview .source-read-grid>details');captureStable('sourceField','#view-overview .source-read-grid>details dd');
+  });
+  await page.evaluate(()=>sendStableUpdate(snapshot=>{snapshot.monitor.requests++;snapshot.codex.usage.limits[0].remaining_percent=49;}));
+  await page.waitForFunction(()=>!queuedSnapshot&&!snapshotFrame);
+  check(await page.evaluate(()=>Object.values(stableRefs).every(({value,selector})=>value===document.querySelector(selector))&&stableRefs.source.value.open),'overview shortcuts, quota and expanded sources retain nodes');
+  await page.evaluate(()=>{switchTab('monitor');captureStable('hardware','#monitor-hardware dd');captureStable('help','#monitor-hardware .metadata-help');captureStable('meter','#monitor-device-usage progress');captureStable('deviceList','#monitor-device-usage dl');stableRefs.help.value.focus();const range=document.createRange();range.selectNodeContents(stableRefs.hardware.value);getSelection().removeAllRanges();getSelection().addRange(range);});
+  const selection=await page.evaluate(()=>getSelection().toString());
+  await page.evaluate(()=>sendStableUpdate(snapshot=>{snapshot.monitor.cpu_usage_percent=31;snapshot.monitor.requests++;}));
+  await page.waitForFunction(()=>!queuedSnapshot&&!snapshotFrame);
+  const device=await page.evaluate(()=>({same:Object.values(stableRefs).every(({value,selector})=>value===document.querySelector(selector)),focused:document.activeElement===stableRefs.help.value,selected:getSelection().toString(),cpu:stableRefs.meter.value.value,pending:stableRefs.deviceList.value.classList.contains('wb-data-pending')}));
+  check(device.same&&device.focused&&device.selected===selection&&device.cpu===31&&!device.pending,'device metadata focus, selection and changed CPU: '+JSON.stringify(device));
+  await page.evaluate(()=>{getSelection().removeAllRanges();document.activeElement.blur();switchTab('usage');captureStable('account','#account-usage-panel dd');captureStable('officialQuota','#account-usage-panel .official-quota-buckets dl');});
+  await page.evaluate(()=>sendStableUpdate(snapshot=>{snapshot.codex.account.account_usage.summary.lifetimeTokens=101;snapshot.codex.account.limits.fixture.primary.remaining_percent=48;}));
+  await page.waitForFunction(()=>!queuedSnapshot&&!snapshotFrame);
+  check(await page.evaluate(()=>stableRefs.account.value===document.querySelector(stableRefs.account.selector)&&stableRefs.account.value.textContent==='101'&&stableRefs.officialQuota.value===document.querySelector(stableRefs.officialQuota.selector)),'official account and quota retain fields with current values');
+  await page.evaluate(()=>{switchTab('mcp');selectMcpSource('all');captureStable('mcpSource','#mcp-source-cards .mcp-source-card');captureStable('mcpLink','#mcp-source-cards .source-name');captureStable('telemetry','#mcp-telemetry table');captureStable('telemetryBody','#mcp-telemetry tbody');});
+  const tableSelector='#mcp-telemetry table';await page.locator(tableSelector).first().scrollIntoViewIfNeeded();await page.locator(tableSelector+' tbody td').first().hover();
+  const before=await page.locator(tableSelector+' tbody').first().innerText();
+  await page.evaluate(()=>sendStableUpdate(snapshot=>{snapshot.mcp.telemetry.fixture_telemetry.recent[0].calls=3;}));await page.waitForFunction(()=>!queuedSnapshot&&!snapshotFrame);
+  check(await page.evaluate(()=>stableRefs.telemetry.value===document.querySelector(stableRefs.telemetry.selector)&&stableRefs.telemetryBody.value===document.querySelector(stableRefs.telemetryBody.selector)&&stableRefs.mcpSource.value===document.querySelector(stableRefs.mcpSource.selector)&&stableRefs.mcpLink.value===document.querySelector(stableRefs.mcpLink.selector)),'MCP tables and source cards retain nodes');
+  check(await page.locator(tableSelector+' tbody').first().innerText()!==before&&await page.locator(tableSelector+' tbody').first().innerText().then(text=>text.includes('3')),'MCP telemetry hover updates numeric cells');
+  await page.mouse.move(1,1);await page.waitForFunction(()=>document.querySelector('#mcp-telemetry tbody')?.textContent.includes('3'));
+  await page.locator(tableSelector+' tbody td').first().hover();await page.evaluate(()=>sendStableUpdate(snapshot=>{snapshot.mcp.telemetry.fixture_telemetry.recent[0].extra=4;}));await page.waitForFunction(()=>!queuedSnapshot&&!snapshotFrame);
+  check(await page.evaluate(()=>stableRefs.telemetry.value.isConnected&&!document.querySelector('#mcp-telemetry thead').textContent.includes('extra')),'schema change waits during table interaction');await page.mouse.move(1,1);await page.waitForFunction(()=>document.querySelector('#mcp-telemetry thead')?.textContent.includes('extra'));
+  await page.evaluate(()=>{selectMcpSource('demo_docs');selectMcpSection('files');});await page.waitForFunction(()=>document.querySelector('#mcp-files .detail-row button'));
+  await page.evaluate(()=>captureStable('fileLink','#mcp-files .detail-row button'));
+  await page.evaluate(()=>sendStableUpdate(snapshot=>snapshot.monitor.requests++));await page.waitForFunction(()=>!queuedSnapshot&&!snapshotFrame);
+  check(await page.evaluate(()=>stableRefs.fileLink.value===document.querySelector(stableRefs.fileLink.selector)),'unchanged MCP file list retains actions');
+  await page.evaluate(()=>{switchTab('overview');overviewHidden.delete('overview-source-column');applyOverview();renderSnapshot(data);});await page.locator('#overview-source-column').scrollIntoViewIfNeeded();await page.waitForFunction(()=>document.querySelector('#overview-source-column svg')&&!chartJobs.has('overview-source-column'));
+  await page.evaluate(()=>captureStable('chart','#overview-source-column svg'));
+  await page.evaluate(()=>sendStableUpdate(snapshot=>snapshot.monitor.requests++));await page.waitForFunction(()=>!queuedSnapshot&&!snapshotFrame&&!chartJobs.has('overview-source-column'));
+  check(await page.evaluate(()=>stableRefs.chart.value===document.querySelector(stableRefs.chart.selector)),'unchanged chart retains rendered SVG');
+  await page.evaluate(()=>sendStableUpdate(snapshot=>{snapshot.mcp.events.push({...snapshot.mcp.events[0],call_id:'synthetic-extra-call'});}));await page.waitForFunction(()=>!queuedSnapshot&&!snapshotFrame&&!chartJobs.has('overview-source-column'));
+  check(await page.evaluate(()=>stableRefs.chart.value!==document.querySelector(stableRefs.chart.selector)),'changed chart data updates rendering');
+  return {overview:true,expandedSources:true,device,account:true,mcpHover:true,schemaChange:true,files:true,chartRetained:true,chartChanged:true};
+}

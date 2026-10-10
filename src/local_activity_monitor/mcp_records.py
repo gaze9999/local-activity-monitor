@@ -224,7 +224,11 @@ def reference_url(value):
         return None
     try:
         parsed = urlsplit(value)
-        host = parsed.hostname or ""
+        # Accessing port validates its syntax and range; urlsplit alone does not.
+        parsed.port
+        host = (parsed.hostname or "").rstrip(".")
+        if not re.fullmatch(r"[A-Za-z0-9.-]+", host.encode("idna").decode("ascii")) or "\\" in parsed.netloc:
+            return None
         if parsed.scheme not in ("http", "https") or parsed.username or parsed.password or "." not in host or host.endswith((".local", ".internal")):
             return None
         try:
@@ -234,7 +238,7 @@ def reference_url(value):
             pass
         # Reference links retain the page path, without query strings or fragments.
         return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
-    except ValueError:
+    except (ValueError, UnicodeError):
         return None
 
 
