@@ -8,11 +8,44 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from local_activity_monitor.source_watch import SourceWatch, source_path
+from local_activity_monitor.source_watch import SourceWatch, source_path, git_metadata_path, managed_worktree_path
 from local_activity_monitor.server import Dashboard
 
 
 class SourceWatchTests(unittest.TestCase):
+    def test_plugin_and_git_metadata_selection(self):
+        for name in ('plugins/cache/provider/plugin/1/.codex-plugin/plugin.json',
+                     'plugins/cache/provider/plugin/1/.mcp.json',
+                     'plugins/cache/provider/plugin/1/skills/example/SKILL.md'):
+            self.assertTrue(source_path(name), name)
+        for name in ('plugins/cache/provider/plugin/1/scripts/server.js',
+                     'plugins/cache/provider/plugin/1/skills/example/private.txt', 'plugins/config.json'):
+            self.assertFalse(source_path(name), name)
+        for name in ('HEAD', 'refs/heads/main', 'packed-refs', 'worktrees/example/HEAD', 'worktrees/example/locked'):
+            self.assertTrue(git_metadata_path(name), name)
+        for name in ('objects/ab/object', 'index', 'logs/HEAD', 'refs/heads/main.lock', '../outside'):
+            self.assertFalse(git_metadata_path(name), name)
+        self.assertTrue(managed_worktree_path('abcd/checkout/.git'))
+        self.assertFalse(managed_worktree_path('abcd/checkout/src/private.py'))
+
+    def test_native_plugin_manifest_change_without_workspace_source_updates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plugin = root/'plugins/cache/provider/plugin/1'
+            (plugin/'.codex-plugin').mkdir(parents=True)
+            (plugin/'scripts').mkdir()
+            changed = threading.Event()
+            watch = SourceWatch(root, changed.set, source_path).start()
+            try:
+                self.assertTrue(watch.ready.wait(3))
+                self.assertEqual(watch.health, 'ok')
+                (plugin/'scripts/server.js').write_text('// inert fixture')
+                self.assertFalse(changed.wait(.2))
+                (plugin/'.codex-plugin/plugin.json').write_text('{"name":"fixture"}')
+                self.assertTrue(changed.wait(3))
+            finally:
+                watch.close()
+
     def test_source_selection_excludes_secrets_and_owned_writes(self):
         for name in ('sessions/2026/new.jsonl', 'sqlite/codex-dev.db-wal', 'state_5.sqlite-wal',
                      'monitoring/jev-monitor.json', 'desktop-logs/trace.log', 'config.toml'):
@@ -105,6 +138,7 @@ class SourceWatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
             app=Dashboard(root/'home')
+            app.observations['worktrees']=False
             app.home.mkdir(exist_ok=True)
             database=root/'jev.sqlite3'
             failed=Mock(health='unavailable')

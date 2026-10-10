@@ -227,6 +227,16 @@ class McpObservationTests(unittest.TestCase):
         self.assertNotIn('SECRET',json.dumps(events));self.assertNotIn('PRIVATE',json.dumps(events))
         self.assertEqual(response_metadata('web', {'content':None})['references'],[])
 
+    def test_invalid_reference_ports_hosts_and_cached_url_boundaries(self):
+        from local_activity_monitor.mcp_records import reference_url
+        for url in ('https://example.org:bad/page', 'https://example.org:65536/page',
+                    'https://example.org:-1/page', 'https://bad host.org/page',
+                    'https://example.local./page', 'https://example.org\\private/page',
+                    'https://user:password@example.org/page', 'https://[broken/page'):
+            self.assertIsNone(reference_url(url), url)
+        self.assertEqual(reference_url('https://example.org:443/page?q=private#part'), 'https://example.org:443/page')
+        self.assertEqual(reference_url('https://例子.測試/page'), 'https://例子.測試/page')
+
     def test_patch_paths_and_task_duration_pairing(self):
         self.write('event_msg', {'type':'task_started'})
         self.write('response_item', {'type':'custom_tool_call','name':'exec','call_id':'patch','input':'await tools.apply_patch("*** Begin Patch\\n*** Update File: src/a.py\\n@@\\n+SECRET\\n*** End Patch");'})

@@ -150,6 +150,43 @@ class WorktreeCollector:
             item["thread_count"] = len(item["thread_ids"])
         return self.snapshot()
 
+    def notification_roots(self):
+        """Watch only known, local Git metadata, without reading workspace content."""
+        roots = set()
+        paths = [key for key, _ in self.signature or ()]+[item['_path'] for item in self.items.values()]
+        def metadata_path(base, value):
+            candidate = Path(value)
+            return local_path(candidate if candidate.is_absolute() else Path(os.path.abspath(base/candidate)))
+        def marker(path):
+            if local_path(path) is None or not path.is_file():
+                return None
+            with path.open('rb') as stream:
+                value = stream.read(4097)
+            return value.decode('utf-8').strip() if len(value) <= 4096 else None
+        for value in dict.fromkeys(paths):
+            path = local_path(value)
+            if path is None:
+                continue
+            try:
+                git = local_path(path/'.git')
+                if git is not None and git.is_file():
+                    value = marker(git)
+                    git = metadata_path(path, value[8:]) if value and value.startswith('gitdir: ') else None
+                if git is not None and git.is_dir():
+                    roots.add(git)
+                    common = marker(git/'commondir')
+                    if common:
+                        target = metadata_path(git, common)
+                        if target is not None and target.is_dir():
+                            roots.add(target)
+                elif (path/'HEAD').is_file() and (path/'objects').is_dir():
+                    roots.add(path)
+            except (OSError, UnicodeError, ValueError):
+                continue
+            if len(roots) >= self.ROOT_LIMIT:
+                break
+        return sorted(roots, key=str)[:self.ROOT_LIMIT]
+
     def read(self, roots):
         checked = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         managed_health, managed_dirs, failures, limited = "missing", 0, 0, False

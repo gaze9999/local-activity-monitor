@@ -12,7 +12,7 @@ function createPageMetrics(){
 }
 const pageMetrics=createPageMetrics(),pageMetricObservers=[];
 let firstHiddenAt=document.visibilityState==="hidden"?0:Infinity;
-function updatePageMetrics(){for(const el of document.querySelectorAll("[data-page-metric]")){const key=el.dataset.pageMetric,value=pageMetrics.snapshot()[key];el.textContent=value==null?ui("尚無樣本或瀏覽器不支援"):key==="cls"?fmt(Math.round(value*10000)/10000):key==="longTasks"?fmt(value):measure(value,"ms");}}
+function updatePageMetrics(){for(const el of document.querySelectorAll("[data-page-metric]")){const key=el.dataset.pageMetric,value=pageMetrics.snapshot()[key];updateText(el,value==null?ui("尚無樣本或瀏覽器不支援"):key==="cls"?fmt(Math.round(value*10000)/10000):key==="longTasks"?fmt(value):measure(value,"ms"));}}
 if(typeof PerformanceObserver==="function")for(const type of ["navigation","paint","largest-contentful-paint","layout-shift","longtask","event"]){
   if(!(PerformanceObserver.supportedEntryTypes||[]).includes(type))continue;
   try{const observer=new PerformanceObserver(list=>{pageMetrics.consume(type,list.getEntries(),firstHiddenAt);updatePageMetrics();});observer.observe(type==="event"?{type,buffered:true,durationThreshold:16}:{type,buffered:true});pageMetrics.support(type);pageMetricObservers.push([type,observer]);}catch{}
@@ -68,7 +68,7 @@ function discoverCopy(){
 }
 function applyCopy(){for(const target of copyTargets)if(target.text)target.text.textContent=target.before+ui(target.base)+target.after;else target.el.setAttribute(target.attribute,ui(target.base));}
 async function loadLocales(){try{const response=await request("/locales.json",{cache:"no-store"});if(!response.ok||!response.data?.en||!response.data?.ja)throw new Error();translations=response.data;translatedValues=new Set(Object.values(translations).flatMap(Object.values));}catch{locale="zh-TW";$("action-message").textContent="語言檔無法讀取, 使用繁體中文";}}
-function applyLanguage(){tagIdentities=new Map(Object.entries(translations[locale]||{}).map(([key,value])=>[value,defaultCopy[key]||key]));for(const [key,value]of Object.entries(preferences.copy||{}))tagIdentities.set(value,defaultCopy[key]||key);preferences.locale=locale;document.documentElement.lang=locale;numberFormat=new Intl.NumberFormat(locale);applyCopy();applyAppearance();applyActionIcons();document.querySelector(".settings-layout>.modal-tabs")?.setAttribute("aria-label",ui("設定分類"));$("language-select").value=locale;for(const input of document.querySelectorAll(".pagination input"))input.setAttribute("aria-label",ui(" 頁碼").trim());for(const tab of document.querySelectorAll(".modal-tabs button[data-copy-base]"))tab.textContent=ui(tab.dataset.copyBase);if(data)render(data);syncSourceWindow();windowOptions($("source-window-global"));$("source-window-global").value=sourceWindows.global;setupTabDescriptions();for(const el of document.querySelectorAll("[data-help-key]"))el.dataset.help=ui(el.dataset.helpKey);syncHelp();}
+function applyLanguage(){tagIdentities=new Map(Object.entries(translations[locale]||{}).map(([key,value])=>[value,defaultCopy[key]||key]));for(const [key,value]of Object.entries(preferences.copy||{}))tagIdentities.set(value,defaultCopy[key]||key);preferences.locale=locale;document.documentElement.lang=locale;numberFormat=new Intl.NumberFormat(locale);applyCopy();applyAppearance();applyActionIcons();syncDisplayPause();document.querySelector(".settings-layout>.modal-tabs")?.setAttribute("aria-label",ui("設定分類"));$("language-select").value=locale;for(const input of document.querySelectorAll(".pagination input"))input.setAttribute("aria-label",ui(" 頁碼").trim());for(const tab of document.querySelectorAll(".modal-tabs button[data-copy-base]"))tab.textContent=ui(tab.dataset.copyBase);if(data)render(data);syncSourceWindow();windowOptions($("source-window-global"));$("source-window-global").value=sourceWindows.global;setupTabDescriptions();for(const el of document.querySelectorAll("[data-help-key]"))el.dataset.help=ui(el.dataset.helpKey);syncHelp();}
 const $ = id => document.getElementById(id);
 let numberFormat=new Intl.NumberFormat(locale);
 const fmt = value => value == null ? "--" : numberFormat.format(value);
@@ -99,7 +99,7 @@ function syncSourceWindow(){
 }
 function applySourceWindow(){version++;syncSourceWindow();logData=null;saveView();refresh();if(data&&!$("view-logs").hidden)loadLogs();}
 function setupSourceWindowSettings(){
-  const select=node("select",null,"source-range-select");select.id="source-window-global";windowOptions(select);select.value=sourceWindows.global;select.setAttribute("aria-label",ui("來源紀錄範圍"));bindHelp(select,ui("列表與操作統計使用的全域時間範圍"));$("dark-toggle").before(select);select.addEventListener("change",()=>{sourceWindows.global=select.value;applySourceWindow();});syncSourceWindow();
+  const select=node("select",null,"source-range-select");select.id="source-window-global";windowOptions(select);select.value=sourceWindows.global;select.setAttribute("aria-label",ui("來源紀錄範圍"));bindHelp(select,ui("列表與操作統計使用的全域時間範圍"));$("snapshot-pause").before(select);select.addEventListener("change",()=>{sourceWindows.global=select.value;applySourceWindow();});syncSourceWindow();
 }
 const viewInputs=["thread-search","filter-type","filter-environment","filter-project","filter-trigger","filter-status","filter-reasoning","filter-model","page-size","filter-git","window","filter-mcp-category","filter-mcp-server","filter-mcp-result","file-search","filter-file-operation","filter-file-method","filter-file-project","filter-file-tool"];
 const defaultInputValues=Object.fromEntries(viewInputs.map(id=>[id,$(id).value]));
@@ -108,7 +108,7 @@ let pendingFileProject=preferences.inputs?.["filter-file-project"],pendingFileTo
 let loadedRevision=null,loadedFrontendRevision=null,loadedBackendRevision=null,pendingRevision=null,preferencesApplied=false,pendingProject=preferences.inputs?.["filter-project"],pendingGit=preferences.inputs?.["filter-git"],pendingReasoning=preferences.inputs?.["filter-reasoning"],pendingModel=preferences.inputs?.["filter-model"];
 let threadIndex=new Map();
 let logData=null,logBusy=false,logQueued=false;
-let data = null, page = 1, pageCount = 1;
+let data = null, page = 1, pageCount = 1, displayPaused=false;
 let connectionLost=false;
 const fileSnapshots=new Map(),fileSnapshotRequests=new Set(),fileSnapshotAttempts=new Map();let fileSummaryBusy=false;
 let busy = false, settingsBusy = false, version = 0, detail = null;
@@ -166,7 +166,7 @@ function pageInput(input,change){
 }
 function syncPageInput(input,value,max){input.max=max;if(document.activeElement!==input)input.value=value;}
 const cardLayouts=new Map();
-function childMotion(root){return !appearance.reduceMotion&&!!WorkbenchUI.cancelChildMotion&&root.isConnected&&root.getClientRects().length>0&&getComputedStyle(root).display!=="none";}
+function childMotion(root){return !appearance.reduceMotion&&displayWindowFocused&&!document.hidden&&!!WorkbenchUI.cancelChildMotion&&root.isConnected&&root.getClientRects().length>0&&getComputedStyle(root).display!=="none";}
 function updateCardLayout(root,items){
   const layout=cardLayouts.get(root);
   if(layout)layout.update(items);
@@ -273,10 +273,12 @@ function drawNextChart(){
   if(chartReady.size)chartTimer=setTimeout(drawNextChart,16);
 }
 function chartTarget(id){if(panelNeeded(id))return $(id).closest(".chart-data-region")||$(id);if(panelNeeded(id+"-statistics")){const panel=$(id+"-statistics");panel.classList.remove("empty-statistics");return panel;}return null;}
-function deferChart(id,draw){
+function deferChart(id,draw,projection){
   if(chartDrawing)return false;
   let target=chartTarget(id);if(!target)return true;
-  chartJobs.set(id,draw);
+  const root=$(id),signature=projection===undefined?null:JSON.stringify([locale,display,chartViews.get(id)?.settings,root.clientWidth,getComputedStyle(root).fontSize,projection]);
+  if(signature!==null&&root.chartSignature===signature)return true;
+  chartJobs.set(id,()=>{draw();if(signature!==null)root.chartSignature=signature;});
   for(const panel of [$(id)?.closest(".panel"),$(id+"-statistics")])if(panel){const entry=panelDataState(panel);setPanelDataState(panel,entry.loaded?"refreshing":"loading");}
   target=chartTarget(id);
   if(typeof IntersectionObserver!=="function"){chartReady.add(id);if(chartTimer==null)chartTimer=setTimeout(drawNextChart,16);return true;}
@@ -290,7 +292,7 @@ function scheduleVisibleCharts(){
 }
 addEventListener("scroll",scheduleVisibleCharts,{passive:true});
 function bars(id,counts,names,onClick,unit=ui("次"),segments){
-  const view=chartViews.get(id);if(view)view.renderData={kind:"bars",args:[counts,names,onClick,unit,segments]};if(deferChart(id,()=>bars(id,counts,names,onClick,unit,segments)))return;if(typeof counts==="function")counts=counts(id);
+  const view=chartViews.get(id);if(view)view.renderData={kind:"bars",args:[counts,names,onClick,unit,segments]};if(!chartDrawing&&!chartTarget(id))return;const values=typeof counts==="function"?counts(id):counts;if(deferChart(id,()=>bars(id,counts,names,onClick,unit,segments),[values,names,unit,segments,!!onClick]))return;counts=values;
   const s=chartViews.get(id)?.settings||{},entries=(id==="tool-duration-distribution"?Object.entries(counts):sorted(counts)).slice(0,rankingSize(s.top??display.ranking)),peak=Math.max(...entries.map(item=>item[1]),1),max=s.maximum||peak;
   if(["column","stacked"].includes(s.shape)){columnChart(id,entries,names,onClick,unit,s,segments);return;}
   if(["donut","pie"].includes(s.shape)){shareChart(id,counts,entries,names,onClick,unit,s.shape);return;}
@@ -344,7 +346,8 @@ function shareChart(id,counts,visible,names,onClick,unit,shape){
 }
 function timeline(id,noteId,series,unit=ui("次"),average=false,lanes=[{key:"calls"}]){
   const recipe=chartViews.get(id);if(recipe&&!recipe.projecting)recipe.renderData={kind:"timeline",args:[series,unit,average,lanes]};
-  if(deferChart(id,()=>timeline(id,noteId,series,unit,average,lanes)))return;
+  if(!chartDrawing&&!chartTarget(id))return;
+  if(deferChart(id,()=>timeline(id,noteId,series,unit,average,lanes),[ranged(id,series||[]),unit,average,lanes,Math.floor(Date.now()/60000)]))return;
   const svg=$(id),view=chartViews.get(id),note=$(noteId);note.dataset.chartFor=id;view?.statisticsRoot?.replaceChildren();view?.statisticsPanel?.classList.add("empty-statistics");svg.replaceChildren();svg.onpointermove=svg.onpointerleave=svg.onkeydown=svg.onfocus=svg.onblur=null;
   const empty=()=>{svg.classList.add("chart-is-empty");svg.removeAttribute("tabindex");$(noteId).classList.add("chart-empty");$(noteId).textContent=ui("此範圍尚無活動紀錄");};
   svg.classList.remove("chart-is-empty");$(noteId).classList.remove("chart-empty");if(!series?.length){empty();return;}
@@ -382,7 +385,8 @@ function timeline(id,noteId,series,unit=ui("次"),average=false,lanes=[{key:"cal
   if(view?.statisticsPanel)view.statisticsPanel.classList.toggle("empty-statistics",!view.statisticsRoot.childElementCount);
 }
 function categoryTimeline(id,noteId,events,key,names=null,weight=null){
-  const view=chartViews.get(id);if(view)view.renderData={kind:"category",args:[events,key,names,weight]};if(deferChart(id,()=>categoryTimeline(id,noteId,events,key,names,weight)))return;
+  if(!chartDrawing&&!chartTarget(id))return;
+  const view=chartViews.get(id);if(view)view.renderData={kind:"category",args:[events,key,names,weight]};if(deferChart(id,()=>categoryTimeline(id,noteId,events,key,names,weight),[ranged(id,events),key,names,weight,Math.floor(Date.now()/60000)]))return;
   const selected=ranged(id,events),totals=new Map();for(const event of selected){const category=event[key]||ui("未知"),count=weight?event[weight]:1;if(Number.isFinite(count)&&count>=0)totals.set(category,(totals.get(category)||0)+count);}
   const settings=chartViews.get(id)?.settings||{},categories=[...totals].sort(([a,x],[b,y])=>y-x||sortCollator.compare(a,b)).slice(0,settings.lines??display.lines??displayDefaults.lines),lanes=categories.map(([category],index)=>({key:"series"+index,label:names?.[category]||category,title:category})),indexes=new Map(categories.map(([category],index)=>[category,index]));
   if(settings.total)lanes.push({key:"total",label:ui("合計"),total:true});
@@ -390,7 +394,8 @@ function categoryTimeline(id,noteId,events,key,names=null,weight=null){
 }
 function hourly(events){return events.filter(event=>event.timestamp).map(event=>({time:event.timestamp,calls:1}));}
 function activeThreadsTimeline(id,noteId,events){
-  const view=chartViews.get(id);if(view)view.renderData={kind:"threads",args:[events]};if(deferChart(id,()=>activeThreadsTimeline(id,noteId,events)))return;
+  if(!chartDrawing&&!chartTarget(id))return;
+  const view=chartViews.get(id);if(view)view.renderData={kind:"threads",args:[events]};if(deferChart(id,()=>activeThreadsTimeline(id,noteId,events),[ranged(id,events),Math.floor(Date.now()/60000)]))return;
   const {start,end}=bounds(id,events),s=chartViews.get(id)?.settings||{};let interval=Math.max(60000,s.interval||3600000);while((end-start)/interval>240)interval*=2;
   const first=Math.floor(start/interval)*interval,slots=Math.max(1,Math.ceil((end-first)/interval)),groups=new Map();
   for(const event of ranged(id,events)){if(!event.thread_id)continue;const time=new Date(event.timestamp||event.time).getTime(),slot=Math.min(slots-1,Math.floor((time-first)/interval));if(!Number.isFinite(time)||slot<0)continue;if(!groups.has(slot))groups.set(slot,new Set());groups.get(slot).add(event.thread_id);}
@@ -451,7 +456,7 @@ function pathNames(paths){
 }
 function rankTitle(id,key,label){return /^(?:file|folder)-(?:count|read|write|size|read-count|write-count)-rank$/.test(cardLibrary.get(id)?.baseId||id)?key:label;}
 function renderRankingCard(id,kind,field=null,folder=false,operation=null){
-  const recipe=chartViews.get(id);if(recipe)recipe.renderData={kind:"rank",args:[kind,field,folder,operation]};if(deferChart(id,()=>renderRankingCard(id,kind,field,folder,operation)))return;
+  const recipe=chartViews.get(id);if(recipe)recipe.renderData={kind:"rank",args:[kind,field,folder,operation]};if(!chartDrawing&&!chartTarget(id))return;const projection=kind==="url"||kind==="site"?ranged(id,(data.mcp?.events||[]).filter(event=>event.server==="web")):ranged(id,filteredFiles());if(deferChart(id,()=>renderRankingCard(id,kind,field,folder,operation),[kind,field,folder,operation,projection,kind==="size"?fileSnapshots.get(activeSourceWindow()):null]))return;
   const groups=new Map();if(kind==="size"){const files=filteredFiles(),snapshot=fileSnapshots.get(activeSourceWindow()),locations=new Set(files.map(fileLocation)),sizes=new Map((snapshot?.files||[]).filter(file=>locations.has(fileLocation(file))&&Number.isFinite(file.bytes)).map(file=>[fileLocation(file),file]));bars(id,Object.fromEntries([...sizes].map(([path,file])=>[path,file.bytes])),pathNames([...sizes.keys()]),path=>openDetail({kind:"file",event:sizes.get(path),fileMetadata:sizes.get(path)}),"bytes");
   }else if(kind==="url"||kind==="site"){for(const item of references(ranged(id,(data.mcp?.events||[]).filter(event=>event.server==="web")))){const key=kind==="url"?item.url:new URL(item.url).hostname;if(!groups.has(key))groups.set(key,[]);groups.get(key).push(item);}bars(id,Object.fromEntries([...groups].map(([key,items])=>[key,items.length])),null,key=>openDetail({kind:"web-reference",key,items:groups.get(key)}));
   }else{for(const item of ranged(id,filteredFiles())){if(operation==="read"&&item.operation!=="read"||operation==="change"&&item.operation==="read"||field&&!Number.isFinite(item[field]))continue;const path=fileLocation(item),key=folder?path.replace(/[\\/][^\\/]*$/,""):path;if(!groups.has(key))groups.set(key,[]);groups.get(key).push(item);}bars(id,Object.fromEntries([...groups].map(([key,items])=>[key,field?items.reduce((total,item)=>total+item[field],0):items.length])),pathNames([...groups.keys()]),path=>openDetail({kind:"file-group",path,items:groups.get(path)}),field?"bytes":ui("次"));if(field&&!groups.size)$(id).querySelector(".empty").textContent=ui(field==="read_bytes"?"來源未提供讀取量":"來源未提供寫入量");}
@@ -538,7 +543,7 @@ function applyAppearance(){
   for(const key of ["--accent","--accent-soft","--accent-border"])root.style.removeProperty(key);
   if(appearance.accent==="custom"){const rgb=appearance.accentColor.slice(1).match(/../g).map(value=>parseInt(value,16)).join(",");root.style.setProperty("--accent",appearance.accentColor);root.style.setProperty("--accent-soft","rgba("+rgb+",.15)");root.style.setProperty("--accent-border","rgba("+rgb+",.6)");}
   $("accent-custom-row").hidden=appearance.accent!=="custom";$("accent-color").value=appearance.accentColor;$("accent-hex").value=appearance.accentColor;selectOptions("font-family",[["",ui("系統預設")],...(data?.monitor?.fonts||[]).map(value=>[value,value]),...appearance.fontFamily&&!data?.monitor?.fonts?.includes(appearance.fontFamily)?[[appearance.fontFamily,appearance.fontFamily]]:[]]);$("font-family").value=appearance.fontFamily;
-  appearance.reduceMotion=appearance.reduceMotion===true;WorkbenchUI.setMotion?.(root,!appearance.reduceMotion);$("reduce-motion").checked=appearance.reduceMotion;
+  appearance.reduceMotion=appearance.reduceMotion===true;syncDisplayMotion();$("reduce-motion").checked=appearance.reduceMotion;
   $("dark-toggle").removeAttribute("aria-pressed");WorkbenchUI.setButtonIcon($("dark-toggle"),(typeof WorkbenchUI.createStore==="function"?(mode==="dark"?"sun":"moon"):"theme"),mode==="dark"?ui("切換淺色模式"):ui("切換深色模式"));$("dark-toggle").title=mode==="dark"?ui("切換淺色模式"):ui("切換深色模式");$("dark-toggle").setAttribute("aria-label",$("dark-toggle").title);
   for(const el of document.querySelectorAll("#mode-options [data-mode]"))el.setAttribute("aria-pressed",String(el.dataset.mode===appearance.mode));
   $("theme-select").value=appearance.theme;$("accent-select").value=appearance.accent;$("font-size").value=appearance.font;if(data)for(const view of tableViews.values())adaptTable(view);syncHelp();
@@ -597,7 +602,7 @@ function updateProjects(){
   const select=$("filter-project"),selected=select.value,projects=new Map();
   for(const t of data.codex.threads||[])if(t.project_id)projects.set(t.project_id,t.project_name||t.project_id);
   const base=[["all",ui("全部專案")],["project",ui("專案內")],["none",ui("無專案")],["unknown",ui("未知")]];
-  select.replaceChildren(...base.concat([...projects].map(([id,name])=>["id:"+id,name])).map(([value,label])=>{const option=node("option",label);option.value=value;return option;}));
+  selectOptions("filter-project",base.concat([...projects].map(([id,name])=>["id:"+id,name])));
   if([...select.options].some(option=>option.value===selected))select.value=selected;
   if(pendingProject){if([...select.options].some(option=>option.value===pendingProject))select.value=pendingProject;pendingProject=null;}
 }
@@ -611,7 +616,7 @@ function worktreeHealth(value){return ui(({ok:"正常",waiting:"等待檢查",di
 function worktreeStatus(item){const states=[];if(item.locked)states.push(ui("已鎖定"));if(item.prunable)states.push(ui("可清理"));if(!item.available)states.push(ui("目錄不存在"));if(item.detached)states.push("Detached HEAD");return states.join(" · ")||ui("正常");}
 function renderWorktrees(){
   const source=data.codex.worktrees||{},items=source.items||[],projects=projectRows(),root=$("worktree-state");
-  root.replaceChildren(metadataList([[ui("檢查狀態"),worktreeHealth(source.health)],[ui("Codex 管理目錄"),source.managed_root||"--"],[ui("管理目錄狀態"),worktreeHealth(source.managed_health)],[ui(source.count_complete===false?"已取得工作樹":"工作樹總數"),fmt(source.total??source.observed_total),ui(source.count_complete===false?"本輪成功取得的工作樹數量, 部分來源尚未完成":"最近成功取得的 Git 工作樹數量")],[ui("最近檢查時間"),when(source.checked_at).replaceAll("\n"," ")]]));
+  setMetadata(root,[[ui("檢查狀態"),worktreeHealth(source.health)],[ui("Codex 管理目錄"),source.managed_root||"--"],[ui("管理目錄狀態"),worktreeHealth(source.managed_health)],[ui(source.count_complete===false?"已取得工作樹":"工作樹總數"),fmt(source.total??source.observed_total),ui(source.count_complete===false?"本輪成功取得的工作樹數量, 部分來源尚未完成":"最近成功取得的 Git 工作樹數量")],[ui("最近檢查時間"),when(source.checked_at).replaceAll("\n"," ")]]);
   replaceRows("worktree-rows",...items.map(item=>{const row=node("tr");cell(row,item.name);cell(row,(item.project_ids||[]).map(id=>projects.find(project=>project.id===id)?.name||id).join(" · ")||"--");cell(row,item.branch||(item.detached?"Detached HEAD":"--"),"mono");cell(row,item.commit?.slice(0,12)||"--","mono").title=item.commit||"";cell(row).append(tag(worktreeStatus(item),"",!item.available?"error":item.locked||item.prunable?"warning":item.detached?"neutral":"success"));cell(row).append(tag(ui(item.managed?"Codex 管理":"Git 登錄")));valueCell(row,item.thread_count);cell(row,when(item.checked_at));return clickableRow(row,()=>openDetail({kind:"worktree",worktree:item}));}));
   $("worktree-empty").textContent=items.length?source.limited?ui("已達工作樹讀取上限, 目前顯示已取得的資料"):"":source.health==="ok"?ui("目前載入範圍沒有 Git 工作樹"):worktreeHealth(source.health);
 }
@@ -648,6 +653,7 @@ function renderCodex(previousPage){if(Number.isInteger(previousPage))tablePageMo
   cards("codex-cards",[[ui("符合篩選的對話"),fmt(threads.length),threads.length!==(c.threads?.length||0)?ui("全部 ")+fmt(c.threads?.length||0)+ui(" 個"):""],[ui("執行中"),fmt(threads.filter(t=>t.status==="running").length),ui("已完成 ")+fmt(threads.filter(t=>t.status==="completed").length)+ui(" 個")],[ui("工具呼叫"),fmt(Object.values(tools).reduce((sum,count)=>sum+count,0)),ui("工具種類 ")+fmt(Object.keys(tools).length)],[ui("累計讀取量"),fmt(Math.round((c.bytes_read||0)/1024))+" KiB",ui("損壞紀錄 ")+fmt(c.malformed_lines||0)+ui(" 行")]]);
   replaceRows("codex-rows",...visible.map(t=>{
     const row=node("tr"),identity=cell(row,null,"thread-cell");
+    row.dataset.recordKey=t.thread_id;
     identity.append(node("span",title(t),"thread-name"));
     cell(row,t.thread_id,"mono thread-id");cell(row,t.project_name||t.project_id||(t.project_scope==="none"?ui("無專案"):"--"));
     for(const value of [labels.type[t.activity_type],labels.environment[t.environment],labels.trigger[t.trigger]])cell(row).append(tag(value||"--"));
@@ -665,8 +671,8 @@ function renderCodex(previousPage){if(Number.isInteger(previousPage))tablePageMo
   for(const id of ["page-first","page-prev"])$(id).disabled=page===1;
   for(const id of ["page-next","page-last"])$(id).disabled=page===pageCount;
 }
-function selectOptions(id,items){const el=$(id),previous=el.value||preferences.inputs?.[id];el.replaceChildren(...items.map(([value,text])=>{const option=node("option",text);option.value=value;return option;}));if([...el.options].some(o=>o.value===previous))el.value=previous;}
-function references(events){return events.flatMap(event=>[...new Set([...(event.metadata?.references||[]),...(event.result?.references||[])])].map(url=>({...event,url,reference_source:event.result?.references?.includes(url)?ui("工具回傳"):ui("開啟頁面")})));}
+function selectOptions(id,items){const el=$(id),previous=el.value||preferences.inputs?.[id],options=new Map([...el.options].map(option=>[option.value,option]));WorkbenchUI.reconcileChildren(el,items.map(([value,text])=>{let option=options.get(String(value));if(!option){option=node("option");option.value=value;}updateText(option,text);return option;}),{motion:false});if([...el.options].some(o=>o.value===previous))el.value=previous;}
+function references(events){return events.flatMap(event=>[...new Set([...(event.metadata?.references||[]),...(event.result?.references||[])])].filter(url=>{if(typeof url!=="string")return false;try{const parsed=new URL(url);return ["http:","https:"].includes(parsed.protocol)&&!parsed.username&&!parsed.password;}catch{return false;}}).map(url=>({...event,url,reference_source:event.result?.references?.includes(url)?ui("工具回傳"):ui("開啟頁面")})));}
 function referenceLink(url){const link=node("a",url,"reference-link");try{const parsed=new URL(url);if(!["https:","http:"].includes(parsed.protocol)||parsed.username||parsed.password)return node("span","--");link.href=parsed.href;}catch{return node("span","--");}link.target="_blank";link.rel="noopener noreferrer";return link;}
 let toolPreviewFrame;
 function limitToolPreview(){
@@ -677,7 +683,7 @@ function renderTools(){
   const c=data.codex,threads=c.threads||[],tools=c.tools||{},nested=c.nested_tools||{},m=data.mcp||{servers:[],events:[],categories:{}};
   const servers=m.servers.filter(s=>s.enabled),direct=servers.reduce((n,s)=>n+s.calls,0),errors=servers.reduce((n,s)=>n+s.errors,0),known=servers.reduce((n,s)=>n+s.known_status,0);
   $("tools-scope").textContent=fmt(Object.keys(tools).length)+ui(" 種工具 · ")+fmt(data.initial_sections?null:c.observed_tool_calls??0)+ui(" 次呼叫");
-  $("nested-tools").replaceChildren(...sorted(nested).map(([tool,count])=>toolButton(tool,()=>openDetail({kind:"nested-tool",tool}),count)));
+  const toolRoot=$("nested-tools"),oldTools=new Map([...toolRoot.children].map(item=>[item.dataset.tool,item]));WorkbenchUI.reconcileChildren(toolRoot,sorted(nested).map(([tool,count])=>{let item=oldTools.get(tool);if(!item){item=toolButton(tool,()=>openDetail({kind:"nested-tool",tool}),count);item.dataset.tool=tool;}else updateText(item.querySelector("b"),fmt(count));return item;}),{motion:false});
   if(!Object.keys(nested).length)$("nested-tools").append(node("p",ui("尚無工具紀錄"),"empty"));
   limitToolPreview();
   const statistics=c.tool_statistics||[...Object.entries(c.tools||{}).map(([tool,calls])=>({tool,calls,nested:false})),...Object.entries(c.nested_tools||{}).map(([tool,calls])=>({tool,calls,nested:true}))];
@@ -700,10 +706,10 @@ function dragSubTabs(nav,key,identity){
   const config={root:nav,horizontal:true,order:()=>[...nav.children].map(tab=>tab.dataset.tabOrder),label:id=>[...nav.children].find(tab=>tab.dataset.tabOrder===id)?.textContent||id,move:(id,target,after)=>{const order=config.order().filter(key=>key!==id),index=order.indexOf(target);if(index<0||id===target)return;order.splice(index+(after?1:0),0,id);for(const key of order)nav.append([...nav.children].find(tab=>tab.dataset.tabOrder===key));preferences.subOrders={...preferences.subOrders,[key]:order};saveView();}};
   for(const tab of nav.children){tab.classList.add("tab-order-row");tab.dataset.tabOrder=identity(tab);if(tab.dataset.dragWired)return;tab.dataset.dragWired="true";dragTab(tab,tab.dataset.tabOrder,config);tab.addEventListener("keydown",event=>{if(event.altKey||!["ArrowLeft","ArrowRight","Home","End"].includes(event.key))return;event.preventDefault();event.stopImmediatePropagation();const tabs=[...nav.children].filter(tab=>!tab.hidden),index=tabs.indexOf(tab),next=event.key==="Home"?0:event.key==="End"?tabs.length-1:(index+(event.key==="ArrowRight"?1:tabs.length-1))%tabs.length;tabs[next].click();tabs[next].focus();},true);}
 }
-function arrangeHighlights(){const root=$("overview-highlights"),cards=[...root.children];if(!defaultElementOrders.has(root))defaultElementOrders.set(root,cards);const saved=Array.isArray(preferences.highlightOrder)?preferences.highlightOrder:[],order=[...new Set(saved.filter(id=>cards.some(card=>card.dataset.tabOrder===id)).concat(cards.map(card=>card.dataset.tabOrder)))];for(const id of order)root.append(cards.find(card=>card.dataset.tabOrder===id));const config={root,grid:true,order:()=>[...root.children].map(card=>card.dataset.tabOrder),label:id=>[...root.children].find(card=>card.dataset.tabOrder===id)?.querySelector("h3").textContent||id,move:(id,target,after)=>{const order=config.order().filter(key=>key!==id),index=order.indexOf(target);if(index<0||id===target)return;order.splice(index+(after?1:0),0,id);for(const key of order)root.append([...root.children].find(card=>card.dataset.tabOrder===key));preferences.highlightOrder=order;saveView();}};for(const card of root.children)dragTab(card,card.dataset.tabOrder,config);}
+function arrangeHighlights(){const root=$("overview-highlights"),cards=[...root.children];if(!defaultElementOrders.has(root))defaultElementOrders.set(root,cards);const saved=Array.isArray(preferences.highlightOrder)?preferences.highlightOrder:[],order=[...new Set(saved.filter(id=>cards.some(card=>card.dataset.tabOrder===id)).concat(cards.map(card=>card.dataset.tabOrder)))];WorkbenchUI.reconcileChildren(root,order.map(id=>cards.find(card=>card.dataset.tabOrder===id)),{motion:false});const config={root,grid:true,order:()=>[...root.children].map(card=>card.dataset.tabOrder),label:id=>[...root.children].find(card=>card.dataset.tabOrder===id)?.querySelector("h3").textContent||id,move:(id,target,after)=>{const order=config.order().filter(key=>key!==id),index=order.indexOf(target);if(index<0||id===target)return;order.splice(index+(after?1:0),0,id);WorkbenchUI.reconcileChildren(root,order.map(key=>[...root.children].find(card=>card.dataset.tabOrder===key)),{motion:false});preferences.highlightOrder=order;saveView();}};for(const card of root.children)dragTab(card,card.dataset.tabOrder,config);}
 
 
-function dragCardGroup(root,key,identity){const cards=[...root.children].filter(card=>card.matches(".panel,.source-card"));if(cards.length<2)return;if(!defaultElementOrders.has(root))defaultElementOrders.set(root,cards);const saved=Array.isArray(preferences.cardOrders?.[key])?preferences.cardOrders[key]:[],order=[...new Set(saved.filter(id=>cards.some(card=>identity(card)===id)).concat(cards.map(identity)))];for(const id of order)root.append(cards.find(card=>identity(card)===id));const config={root,grid:true,order:()=>[...root.children].filter(card=>!card.hidden&&!card.classList.contains("layout-hidden")).map(identity),label:id=>cards.find(card=>identity(card)===id)?.querySelector("h3,.source-name,.table-disclosure>summary")?.textContent||id,move:(id,target,after)=>{const order=[...root.children].map(identity).filter(key=>key!==id),index=order.indexOf(target);if(index<0||id===target)return;order.splice(index+(after?1:0),0,id);for(const key of order)root.append(cards.find(card=>identity(card)===key));preferences.cardOrders={...preferences.cardOrders,[key]:order};saveView();}};for(const card of cards){card.classList.add("tab-order-row");card.dataset.tabOrder=identity(card);const handle=card.tagName==="BUTTON"?card:card.querySelector("h3,.table-disclosure>summary");if(!handle||handle.dataset.cardDragWired)continue;handle.dataset.cardDragWired="true";if(handle.tagName!=="BUTTON"){handle.tabIndex=0;handle.classList.add("direct-drag");}dragTab(handle,identity(card),config);}}
+function dragCardGroup(root,key,identity){const cards=[...root.children].filter(card=>card.matches(".panel,.source-card"));if(cards.length<2)return;if(!defaultElementOrders.has(root))defaultElementOrders.set(root,cards);const saved=Array.isArray(preferences.cardOrders?.[key])?preferences.cardOrders[key]:[],order=[...new Set(saved.filter(id=>cards.some(card=>identity(card)===id)).concat(cards.map(identity)))];WorkbenchUI.reconcileChildren(root,[...order.map(id=>cards.find(card=>identity(card)===id)),...[...root.children].filter(card=>!cards.includes(card))],{motion:false});const config={root,grid:true,order:()=>[...root.children].filter(card=>!card.hidden&&!card.classList.contains("layout-hidden")).map(identity),label:id=>cards.find(card=>identity(card)===id)?.querySelector("h3,.source-name,.table-disclosure>summary")?.textContent||id,move:(id,target,after)=>{const order=[...root.children].map(identity).filter(key=>key!==id),index=order.indexOf(target);if(index<0||id===target)return;order.splice(index+(after?1:0),0,id);WorkbenchUI.reconcileChildren(root,order.map(key=>cards.find(card=>identity(card)===key)),{motion:false});preferences.cardOrders={...preferences.cardOrders,[key]:order};saveView();}};for(const card of cards){card.classList.add("tab-order-row");card.dataset.tabOrder=identity(card);const handle=card.tagName==="BUTTON"?card:card.querySelector("h3,.table-disclosure>summary");if(!handle||handle.dataset.cardDragWired)continue;handle.dataset.cardDragWired="true";if(handle.tagName!=="BUTTON"){handle.tabIndex=0;handle.classList.add("direct-drag");}dragTab(handle,identity(card),config);}}
 function arrangeContentCards(){
   const isChart=card=>card.matches("section.panel")&&!card.matches(".table-panel,.source-reference,.source-disclosure,.mcp-source-picker,#mcp-purpose-panel,#mcp-files-content")&&!card.querySelector("table")&&!card.closest(".overview-panels")&&!card.parentElement.closest(".panel");
   for(const [index,root]of [...document.querySelectorAll("main .panels:not(.overview-panels)")].entries())root.dataset.cardGroup||="panels-"+index;
@@ -732,14 +738,14 @@ const mcpFields=editableLabels({written:"已寫入",truncated:"內容截斷",con
 function metricLabel(key){const credits={credits:"Credits",credits_balance:"Credits 餘額",credits_used:"已使用 credits",credits_remaining:"剩餘 credits",credits_limit:"Credits 上限",credits_total:"Credits 總量",credits_has_credits:"Credits 可用",credits_unlimited:"Credits 無上限"};const base=key.startsWith("usage_")?key.slice(6):key;const common={plan_type:"方案",has_credits:"Credits 可用",unlimited:"無上限",calls:"操作次數",timestamp:"時間",time:"時間",operation:"操作",source:"來源",model:"Model",status:"結果",latency_ms:"耗時 (ms)",average_latency_ms:"平均耗時 (ms)",http_status:"HTTP status",request_bytes:"送出大小 (bytes)",response_bytes:"回傳大小 (bytes)",known_response_bytes:"已知回傳大小 (bytes)",request_body_bytes:"送出大小 (bytes)",since:"最早紀錄",attempts:"HTTP 嘗試",input_known_calls:"輸入 Token 有值",output_known_calls:"輸出 Token 有值",input_unknown_calls:"輸入 Token 缺值",output_unknown_calls:"輸出 Token 缺值",response_unknown_attempts:"回傳大小缺值",statuses:"結果分布"};return mcpFields[key]||mcpFields[base]||ui(credits[base]||common[base]||key.replaceAll("_"," "));}
 function metricUnit(key){return /(?:^|_)credits(?:_|$)/.test(key)?"credits":/(?:^|_)tokens(?:_|$)/.test(key)?"tokens":key.endsWith("_ms")?"ms":key.endsWith("_bytes")?"bytes":key.endsWith("_percent")?"%":key.endsWith("_ratio")?ui("比例"):key.endsWith("_seconds")?"s":key.endsWith("_chars")?ui("字元"):key.endsWith("_pages")?ui("頁"):key.endsWith("_files")?ui("檔案"):/(?:_attempts|_retries|_hits|_misses)$/.test(key)?ui("次"):/(?:_items|_errors|_passed|_failed|_skipped)$/.test(key)?ui("項"):/(?:_count|_nodes)$/.test(key)?ui("個"):"--";}
 function mcpBrief(event){return Object.entries(event.result||{}).filter(([key,value])=>key!=="status"&&["boolean","number"].includes(typeof value)).slice(0,8).map(([key,value])=>metricLabel(key)+": "+(typeof value==="boolean"?ui(value?"是":"否"):fmt(value))).join(" · ")||"--";}
-function mcpMetrics(events,key){
+function mcpMetrics(events,key,container=node("div",null,"mcp-metric-groups")){
   const values=new Map();for(const event of events)for(const [name,value]of Object.entries(event.result||{}))if(typeof value==="boolean"||typeof value==="number"&&Number.isFinite(value)){const id=event.server+":"+name,time=event.completed_at||event.timestamp;if(!values.has(id))values.set(id,{server:event.server,key:name,latest:value,timestamp:time,values:[]});const metric=values.get(id);if(typeof value==="number")metric.values.push(value);if((time||"")>(metric.timestamp||"")){metric.latest=value;metric.timestamp=time;}}
-  if(!values.size)return null;const container=node("div",null,"mcp-metric-groups"),groups=new Map();for(const metric of [...values.values()].slice(0,160)){const group=/(?:credits?|balance|cost|price|billing)/.test(metric.key)?"Credits 與費用":/(?:tokens?|usage|quota|limit)/.test(metric.key)?"用量":/_(?:ms|seconds)$/.test(metric.key)?"耗時":/(?:saved|saving|compress|reduction)/.test(metric.key)?"節省與壓縮":/(?:browser|page|node|locator|request)/.test(metric.key)?"瀏覽器與頁面":/(?:checks|tests|passed|failed|skipped)/.test(metric.key)?"驗證結果":"執行結果";if(!groups.has(group))groups.set(group,[]);groups.get(group).push(metric);}
+  if(!values.size)return null;const groups=new Map(),sections=[];for(const metric of [...values.values()].slice(0,160)){const group=/(?:credits?|balance|cost|price|billing)/.test(metric.key)?"Credits 與費用":/(?:tokens?|usage|quota|limit)/.test(metric.key)?"用量":/_(?:ms|seconds)$/.test(metric.key)?"耗時":/(?:saved|saving|compress|reduction)/.test(metric.key)?"節省與壓縮":/(?:browser|page|node|locator|request)/.test(metric.key)?"瀏覽器與頁面":/(?:checks|tests|passed|failed|skipped)/.test(metric.key)?"驗證結果":"執行結果";if(!groups.has(group))groups.set(group,[]);groups.get(group).push(metric);}
   for(const [name,metrics]of groups){
-    const section=node("section"),timing=name==="耗時",columns=[ui("來源"),ui("指標"),ui("最新值"),ui("單位"),ui("最近更新時間")];
+    let section=[...container.children].find(item=>item.dataset.metricGroup===name);if(!section){section=node("section");section.dataset.metricGroup=name;section.append(node("h4"),node("div",null,"metric-table-content"));}const timing=name==="耗時",columns=[ui("來源"),ui("指標"),ui("最新值"),ui("單位"),ui("最近更新時間")];updateProjectionHeading(section,ui(name));
     if(timing)columns.push(ui("樣本數"),ui("平均值"),"P99");
-    section.append(node("h4",ui(name)),table(columns,metrics.map(metric=>{const row=node("tr");cell(row,metric.server,"mono");cell(row,metricLabel(metric.key));cell(row,typeof metric.latest==="boolean"?ui(metric.latest?"是":"否"):fmt(metric.latest));cell(row,typeof metric.latest==="boolean"?"--":metricUnit(metric.key));cell(row,when(metric.timestamp));if(timing){const stats=statistics(metric.values);valueCell(row,stats?.size);valueCell(row,stats?.mean);valueCell(row,stats?.p99);}return row;}),ui(name),key+":"+name));container.append(section);
-  }return container;
+    projectionTable(section.querySelector(".metric-table-content"),columns,metrics.map(metric=>{const row=node("tr");row.dataset.recordKey=metric.server+":"+metric.key;cell(row,metric.server,"mono");cell(row,metricLabel(metric.key));if(typeof metric.latest==="boolean")cell(row,ui(metric.latest?"是":"否"));else valueCell(row,metric.latest);cell(row,typeof metric.latest==="boolean"?"--":metricUnit(metric.key));cell(row,when(metric.timestamp));if(timing){const stats=statistics(metric.values);valueCell(row,stats?.size);valueCell(row,stats?.mean);valueCell(row,stats?.p99);}return row;}),ui(name),key+":"+name);sections.push(section);
+  }WorkbenchUI.reconcileChildren(container,sections,{motion:false});return container;
 }
 function appendThreadMcp(content,thread){
   const events=(data.mcp?.events||[]).filter(event=>event.thread_id===thread.thread_id),servers=[...new Set(events.map(event=>event.server).concat(thread.jev_calls?.length?["jev"]:[]))].sort();
@@ -759,16 +765,30 @@ function appendThreadMcp(content,thread){
 function telemetryFields(record){return Object.entries(record||{}).filter(([,value])=>value==null||["number","boolean","string"].includes(typeof value));}
 function telemetryValue(value){return value==null?"--":typeof value==="boolean"?ui(value?"是":"否"):typeof value==="number"?fmt(value):/^\d{4}-\d\d-\d\dT/.test(value)?when(value):labels.status[value]||value;}
 function metricPriority(key){return /(?:credits?|balance|remaining|quota|cost)/.test(key)?100:/(?:tokens?|saved|saving|reduction|compress)/.test(key)?80:/(?:errors?|failed|latency|_ms$)/.test(key)?70:/(?:calls|operations|attempts|retries)/.test(key)?60:50;}
+function mcpSummaryPanel(server,key,updated,groups){
+  let panel=[...$("mcp-observations").children].find(item=>item.dataset.cardKey===key);
+  if(!panel){panel=node("section",null,"panel mcp-summary-card "+(key.startsWith("telemetry:")?"source-telemetry":"source-observation"));panel.dataset.cardKey=key;const head=node("div",null,"panel-head device-usage-head"),heading=node("h3");heading.append(button("",()=>openDetail({kind:"mcp-source",server}),"link"));head.append(heading,sourceUpdated(updated));panel.append(head,node("div",null,"mcp-summary-body"));}
+  const caption=server+" · "+ui("活動摘要"),title=panel.querySelector("h3 button"),time=panel.querySelector(".card-updated");if(title.textContent!==caption)title.textContent=caption;
+  const stamp=updated?ui("更新時間")+": "+when(updated):"";if(time.textContent!==stamp)time.textContent=stamp;time.hidden=!updated;if(updated&&Number.isFinite(Date.parse(updated)))time.dateTime=updated;else time.removeAttribute("datetime");
+  const body=panel.querySelector(".mcp-summary-body");
+  for(const [index,[label,rows]]of groups.entries()){
+    let group=body.children[index];if(!group){group=node("div",null,"mcp-summary-group");group.append(node("h4"),metadataList(rows));body.append(group);}
+    const heading=group.querySelector("h4");heading.hidden=!label;updateText(heading,label);metadataList(rows,group.querySelector(".metadata-grid"));
+  }
+  while(body.children.length>groups.length)body.lastElementChild.remove();return panel;
+}
 function telemetryPanel(server,report,section="all"){
+  if(section==="records")return telemetryRecordsPanel(server,report);
   const panel=node("section",null,"panel source-telemetry");panel.dataset.cardKey="telemetry:"+server;
   const heading=node("h3"),caption=server+" · "+ui(section==="summary"?"活動摘要":"來源紀錄");heading.append(section==="summary"?button(caption,()=>openDetail({kind:"mcp-source",server}),"link"):document.createTextNode(caption));const head=node("div",null,"panel-head device-usage-head");head.append(heading,sourceUpdated(report.updated_at||report.observed_at));panel.append(head);
   if(section!=="records"){
-    panel.append(metadataList([[ui("狀態"),logHealthLabels[report.health]||report.health],[ui("開始紀錄"),when(report.enabled_at)]]));
+    const status=[[ui("狀態"),logHealthLabels[report.health]||report.health],[ui("開始紀錄"),when(report.enabled_at)]];
     const metrics=telemetryFields(report.summary).filter(([,value])=>value!=null).map(([key,value])=>[key,telemetryValue(value)]);
     for(const [key,value]of Object.entries(report.summary||{}))if(value&&typeof value==="object"&&!Array.isArray(value))for(const [name,count]of telemetryFields(value))metrics.push([key+" · "+name,telemetryValue(count)]);
     const selected=section==="summary"?[...metrics].sort((a,b)=>metricPriority(b[0])-metricPriority(a[0])).slice(0,8):metrics;
+    if(section==="summary")return mcpSummaryPanel(server,"telemetry:"+server,report.updated_at||report.observed_at,[["",status],...selected.length?[[ui("用量摘要"),selected.map(([key,value])=>[metricLabel(key),value])]]:[]]);
+    panel.append(metadataList(status));
     if(selected.length)panel.append(node("h4",ui("用量摘要")),metadataList(selected.map(([key,value])=>[metricLabel(key),value])));
-    if(section==="summary")panel.append(button(ui("查看明細"),()=>openDetail({kind:"mcp-source",server}),"detail-open"));
   }
   if(section!=="summary"){
     const recent=report.recent||[];if(recent.length){const fields=[...new Set(recent.flatMap(record=>telemetryFields(record).map(([key])=>key)))];panel.append(node("h4",ui("操作紀錄")),table(fields.map(metricLabel),recent.map(record=>{const row=node("tr");for(const key of fields)cell(row,telemetryValue(record[key]));return clickableRow(row,()=>openDetail({kind:"source-record",server,record}));}),ui("來源紀錄"),"source:"+server+":recent"));}
@@ -778,14 +798,19 @@ function telemetryPanel(server,report,section="all"){
 function connectionBadge(source){const connection=source.connection||{},names={response:"已連線",pending:"等待回應",error:"連線錯誤",paused:"檢查停用"};if(!names[connection.state])return document.createDocumentFragment();const badge=tag(ui(names[connection.state]),"connection-status connection-"+connection.state);bindHelp(badge,ui("依本機呼叫, 回傳與診斷紀錄判斷")+(connection.observed_at?" · "+when(connection.observed_at):""));return badge;}
 function mcpObservationPanel(source,events){
   if(!events.length&&!source.calls&&!source.recognized&&!Object.keys(source.latest_metrics||{}).length)return null;
-  const panel=node("section",null,"panel source-observation");panel.dataset.cardKey="mcp:"+source.server;
-  const heading=node("h3");heading.append(button(source.server+" · "+ui("活動摘要"),()=>openDetail({kind:"mcp-source",server:source.server}),"link"));const head=node("div",null,"panel-head device-usage-head");head.append(heading,sourceUpdated(source.last_at));panel.append(head);
-  const direct=events.filter(event=>!event.nested),replies=direct.filter(event=>event.completed_at),recent=[...events].sort((a,b)=>(b.completed_at||b.timestamp||"").localeCompare(a.completed_at||a.timestamp||"")),summary=[[ui("工具呼叫"),fmt(source.calls)],[ui("exec 辨識"),fmt(source.recognized)],[ui("工具已回傳"),fmt(source.returned)]];
-  panel.append(metadataList(summary));
+  const recent=[...events].sort((a,b)=>(b.completed_at||b.timestamp||"").localeCompare(a.completed_at||a.timestamp||"")),summary=[[ui("工具呼叫"),fmt(source.calls)],[ui("exec 辨識"),fmt(source.recognized)],[ui("工具已回傳"),fmt(source.returned)]];
   const values=new Map(Object.entries(source.latest_metrics||{}).map(([key,item])=>[key,item.value]));for(const event of recent)for(const [key,value]of Object.entries(event.result||{}))if(!values.has(key)&&(typeof value==="boolean"||typeof value==="number"&&Number.isFinite(value)))values.set(key,value);
   const selected=[...values].sort((a,b)=>metricPriority(b[0])-metricPriority(a[0])).slice(0,8);
-  if(selected.length)panel.append(node("h4",ui("主要指標")),metadataList(selected.map(([key,value])=>[metricLabel(key),telemetryValue(value)])));
-  panel.append(button(ui("查看明細"),()=>openDetail({kind:"mcp-source",server:source.server}),"detail-open"));return panel;
+  return mcpSummaryPanel(source.server,"mcp:"+source.server,source.last_at,[["",summary],...selected.length?[[ui("主要指標"),selected.map(([key,value])=>[metricLabel(key),telemetryValue(value)])]]:[]]);
+}
+function telemetryRecordsPanel(server,report){
+  let panel=[...$("mcp-telemetry").children].find(item=>item.dataset.cardKey==="telemetry:"+server);
+  if(!panel){panel=node("section",null,"panel source-telemetry");panel.dataset.cardKey="telemetry:"+server;const head=node("div",null,"panel-head device-usage-head");head.append(node("h3",server+" · "+ui("來源紀錄")),sourceUpdated(report.updated_at||report.observed_at));panel.append(head,node("div",null,"source-record-groups"));}
+  updateSourceTime(panel.querySelector(".card-updated"),report.updated_at||report.observed_at);const root=panel.querySelector(".source-record-groups"),groups=[];
+  for(const [type,label]of [["recent","操作紀錄"],["series","活動紀錄"]]){
+    const records=report[type]||[];if(!records.length)continue;let group=[...root.children].find(item=>item.dataset.recordType===type);if(!group){group=node("section");group.dataset.recordType=type;group.append(node("h4"),node("div",null,"source-record-table"));}updateProjectionHeading(group,ui(label));
+    const fields=[...new Set(records.flatMap(record=>telemetryFields(record).map(([key])=>key)))];projectionTable(group.querySelector(".source-record-table"),fields.map(metricLabel),records.map(record=>{const row=node("tr");const identity=record.id||record.record_id||record.call_id||record.timestamp||record.time;if(identity!=null)row.dataset.recordKey=String(identity);for(const key of fields)if(typeof record[key]==="number")valueCell(row,record[key]);else cell(row,telemetryValue(record[key]));return type==="recent"?clickableRow(row,()=>openDetail({kind:"source-record",server,record})):row;}),ui(label),"source:"+server+":"+type);groups.push(group);
+  }WorkbenchUI.reconcileChildren(root,groups,{motion:false});return panel;
 }
 function mcpTags(source,events){
   if(Array.isArray(source.tags)&&source.tags.length)return source.tags.map(label=>tag(label,"category"));
@@ -796,10 +821,11 @@ function mcpTags(source,events){
 }
 function selectMcpSection(value){mcpSection=value;renderMcp();attachTables();}
 function mcpSourceCard(source,events){
-  const card=node("article",null,"mcp-source-card"),head=node("div",null,"mcp-source-card-head"),name=button(source.server,()=>openDetail({kind:"mcp-source",server:source.server}),"link source-name mono"),tags=node("div",null,"tag-line");card.dataset.sourceKey=source.server;head.append(name,sourceUpdated(source.last_at));tags.append(...mcpTags(source,events),connectionBadge(source),tag(source.enabled?source.origin==="configured"?ui("已設定"):ui("有紀錄"):ui("已關閉")));card.append(head);
-  if(source.description)card.append(node("p",source.description,"source-description"));
-  card.append(tags,metadataList([[ui("工具呼叫"),fmt(source.calls),ui("直接呼叫此 MCP 的工具紀錄數")],[ui("程式碼辨識"),fmt(source.recognized),ui("exec 程式碼中辨識到的 MCP 呼叫位置數")],[ui("工具已回傳"),fmt(source.returned),ui("已有對應回覆的工具紀錄數")],...source.known_status?[[ui("錯誤"),fmt(source.errors),ui("來源回報失敗或逾時的操作數")]]:[]]));
-  const actions=node("div",null,"mcp-observation-actions");actions.append(button(ui("查看活動"),()=>navigateToMcpSource(source.server)),button(ui("查看明細"),()=>openDetail({kind:"mcp-source",server:source.server})));card.append(actions);return card;
+  let card=[...$("mcp-source-cards").children].find(item=>item.dataset.sourceKey===source.server);
+  if(!card){card=node("article",null,"mcp-source-card");card.dataset.sourceKey=source.server;const head=node("div",null,"mcp-source-card-head"),actions=node("div",null,"mcp-observation-actions");head.append(button(source.server,()=>openDetail({kind:"mcp-source",server:source.server}),"link source-name mono"),sourceUpdated(source.last_at));actions.append(button(ui("查看活動"),()=>navigateToMcpSource(source.server)));card.append(head,node("p",null,"source-description"),node("div",null,"tag-line"),metadataList([]),actions);}
+  updateSourceTime(card.querySelector(".card-updated"),source.last_at);const description=card.querySelector(".source-description");updateText(description,source.description);description.hidden=!source.description;updateText(card.querySelector(".mcp-observation-actions button"),ui("查看活動"));
+  const tags=card.querySelector(".tag-line"),badges=[...mcpTags(source,events),connectionBadge(source),tag(source.enabled?source.origin==="configured"?ui("已設定"):ui("有紀錄"):ui("已關閉"))];renderProjection(tags,badges.map(badge=>badge.outerHTML),()=>tags.replaceChildren(...badges));
+  metadataList([[ui("工具呼叫"),fmt(source.calls),ui("直接呼叫此 MCP 的工具紀錄數")],[ui("程式碼辨識"),fmt(source.recognized),ui("exec 程式碼中辨識到的 MCP 呼叫位置數")],[ui("工具已回傳"),fmt(source.returned),ui("已有對應回覆的工具紀錄數")],...source.known_status?[[ui("錯誤"),fmt(source.errors),ui("來源回報失敗或逾時的操作數")]]:[]],card.querySelector(".metadata-grid"));return card;
 }
 function renderMcp(previousPage){if(Number.isInteger(previousPage))tablePageMoves.set("mcp-rows",previousPage);
   const source=data.mcp||{servers:[],events:[],categories:{}},m={...source,servers:source.servers.filter(s=>s.server!=="web"),events:source.events.filter(e=>e.server!=="web")};
@@ -809,18 +835,19 @@ function renderMcp(previousPage){if(Number.isInteger(previousPage))tablePageMove
   $("mcp-panel").hidden=!m.servers.length;$("mcp-chart-panel").hidden=!m.servers.length;$("mcp-chart-panel").dataset.fullWidth="false";
   selectOptions("filter-mcp-category",[["all",ui("全部分類")],...[...new Set(m.servers.map(s=>s.category).concat(m.events.map(e=>e.category)))].map(key=>[key,ui(m.categories[key])||key])]);
   selectOptions("filter-mcp-server",[["all",ui("全部來源")],...m.servers.map(s=>[s.server,s.server])]);
-  $("mcp-source-cards").replaceChildren(...m.servers.map(source=>mcpSourceCard(source,m.events)));
-  const selectedSource=m.servers.find(source=>source.server===mcpSource);$("mcp-purpose-panel").hidden=mcpSource==="all"||!selectedSource;$("mcp-purpose").textContent=selectedSource?.description||ui("來源尚未提供說明");$("mcp-purpose").hidden=false;$("mcp-purpose-panel").querySelector("h3").hidden=false;$("mcp-purpose-origin").replaceChildren(...selectedSource?[connectionBadge(selectedSource),...selectedSource.description_source?[node("span",ui("說明來源")+": "+(selectedSource.description_source==="config"?ui("Codex 設定"):selectedSource.description_source))]:[]]:[]);
+  WorkbenchUI.reconcileChildren($("mcp-source-cards"),m.servers.map(source=>mcpSourceCard(source,m.events)),{motion:false});
+  const selectedSource=m.servers.find(source=>source.server===mcpSource);$("mcp-purpose-panel").hidden=mcpSource==="all"||!selectedSource;updateText($("mcp-purpose"),selectedSource?.description||ui("來源尚未提供說明"));$("mcp-purpose").hidden=false;$("mcp-purpose-panel").querySelector("h3").hidden=false;renderProjection($("mcp-purpose-origin"),[selectedSource?.connection,selectedSource?.description_source],()=>$("mcp-purpose-origin").replaceChildren(...selectedSource?[connectionBadge(selectedSource),...selectedSource.description_source?[node("span",ui("說明來源")+": "+(selectedSource.description_source==="config"?ui("Codex 設定"):selectedSource.description_source))]:[]]:[]));
 
   $("mcp-section-tabs").hidden=mcpSource==="all";const filesActive=mcpSource!=="all"&&mcpSection==="files";$("mcp-activity-content").hidden=filesActive;$("mcp-files-content").hidden=!filesActive;
   for(const [id,active]of [["mcp-activity-tab",!filesActive],["mcp-files-tab",filesActive]]){$(id).setAttribute("aria-selected",String(active));$(id).tabIndex=active?0:-1;}
-  if(filesActive){let selected=mcpFileLists.get(mcpSource);if(!selected){selected={server:mcpSource};mcpFileLists.set(mcpSource,selected);}$("mcp-files").replaceChildren();appendMcpFiles($("mcp-files"),selected);if(!selected.mcpFiles&&!selected.mcpFilesError&&!selected.mcpFilesLoading)loadMcpFiles(selected);}
+  if(filesActive){let selected=mcpFileLists.get(mcpSource);if(!selected){selected={server:mcpSource};mcpFileLists.set(mcpSource,selected);}renderProjection($("mcp-files"),[selected.server,selected.mcpFiles,selected.mcpFilesError],()=>{$("mcp-files").replaceChildren();appendMcpFiles($("mcp-files"),selected);});if(!selected.mcpFiles&&!selected.mcpFilesError&&!selected.mcpFilesLoading)loadMcpFiles(selected);}
 
   if(mcpSource!=="all")$("filter-mcp-server").value=mcpSource;
-  $("source-record-range").hidden=!Object.keys(data.mcp?.telemetry||{}).some(server=>mcpSource==="all"||server===mcpSource);$("mcp-telemetry").replaceChildren(...Object.entries(data.mcp?.telemetry||{}).filter(([server,report])=>(mcpSource==="all"||server===mcpSource)&&(report.recent?.length||report.series?.length)).map(([server,report])=>telemetryPanel(server,report,"records")));
-  const metrics=mcpSource==="all"?null:mcpMetrics(selectedEvents,"mcp-metric-rows");$("mcp-metrics-panel").hidden=!metrics;$("mcp-metrics").replaceChildren(...metrics?[metrics]:[]);
+  $("source-record-range").hidden=!Object.keys(data.mcp?.telemetry||{}).some(server=>mcpSource==="all"||server===mcpSource);WorkbenchUI.reconcileChildren($("mcp-telemetry"),Object.entries(data.mcp?.telemetry||{}).filter(([server,report])=>(mcpSource==="all"||server===mcpSource)&&(report.recent?.length||report.series?.length)).map(([server,report])=>telemetryPanel(server,report,"records")),{motion:false});
+  const metrics=mcpSource==="all"?null:mcpMetrics(selectedEvents,"mcp-metric-rows",$("mcp-metrics").querySelector(".mcp-metric-groups")||undefined);$("mcp-metrics-panel").hidden=!metrics;if(metrics&&metrics.parentElement!==$("mcp-metrics"))$("mcp-metrics").replaceChildren(metrics);
   $("mcp-ranking-panel").hidden=mcpSource!=="all"||!m.servers.length;$("mcp-retained-panel").hidden=mcpSource!=="all";
-  $("mcp-observations").replaceChildren(...Object.entries(data.mcp?.telemetry||{}).filter(([server])=>mcpSource==="all"||server===mcpSource).map(([server,report])=>telemetryPanel(server,report,"summary")),...(mcpSource==="all"?m.servers:[]).filter(source=>!data.mcp?.telemetry?.[source.server]).map(source=>mcpObservationPanel(source,m.events.filter(event=>event.server===source.server))).filter(Boolean));
+  const observations=[...Object.entries(data.mcp?.telemetry||{}).filter(([server])=>mcpSource==="all"||server===mcpSource).map(([server,report])=>telemetryPanel(server,report,"summary")),...(mcpSource==="all"?m.servers:[]).filter(source=>!data.mcp?.telemetry?.[source.server]).map(source=>mcpObservationPanel(source,m.events.filter(event=>event.server===source.server))).filter(Boolean)];
+  WorkbenchUI.reconcileChildren($("mcp-observations"),observations,{motion:false});
   const filtered=m.events.filter(e=>(mcpSource==="all"||e.server===mcpSource)&&($("filter-mcp-category").value==="all"||e.category===$("filter-mcp-category").value)&&($("filter-mcp-server").value==="all"||e.server===$("filter-mcp-server").value)&&($("filter-mcp-result").value==="all"||$("filter-mcp-result").value==="error"&&["error","failed","timeout","cancelled","canceled","missing_dependencies"].includes(e.result?.status)||$("filter-mcp-result").value==="known"&&e.result?.status||$("filter-mcp-result").value==="unknown"&&!e.result?.status));
   $("mcp-rows").dataset.recordCount=filtered.length;
   const rows=sortRecords("mcp-rows",filtered,[e=>e.timestamp,e=>e.thread_name||e.thread_id,eventProject,e=>e.server,e=>data.mcp.categories[e.category]||e.category,e=>e.tool,e=>actionLabels[e.action],e=>e.nested?ui("exec 辨識"):ui("工具呼叫"),e=>e.result?.status,e=>e.duration_ms,mcpBrief],e=>e.timestamp),size=tableSize("mcp-rows"),pages=Math.max(1,Math.ceil(rows.length/size));mcpPage=Math.max(1,Math.min(mcpPage,pages));
@@ -846,7 +873,7 @@ function filteredFiles(){const query=$("file-search").value.trim().toLowerCase()
 function fileRows(events,includeThread=true){return events.map(e=>{const row=node("tr");cell(row,when(e.timestamp));if(includeThread){eventThreadCell(row,e);projectCell(row,e);}cell(row).append(tag(fileLabels[e.operation]||e.operation));cell(row,fileLocation(e),"mono path-cell");const tool=cell(row,null,"operation-cell");tool.append(toolButton(e.tool||"apply_patch",()=>openDetail({kind:e.nested?"nested-tool":"tool",tool:e.tool||"apply_patch",ids:[e.thread_id]})));cell(row).append(tag(e.nested?ui("exec 辨識"):ui("工具呼叫")));cell(row,when(e.completed_at));valueCell(row,e.duration_ms);return clickableRow(row,()=>openDetail({kind:"file",event:e}));});}
 function renderFiles(){
   const selected=activeSourceWindow(),checked=fileSnapshotAttempts.get(selected)||0;
-  if($("tab-files").getAttribute("aria-selected")==="true"&&data.codex?.activity_scope?.window===selected&&Date.now()-checked>=60000&&!fileSummaryBusy)loadFileSizes();
+  if(!document.hidden&&!$("view-files").closest("[hidden]")&&data.codex?.activity_scope?.window===selected&&Date.now()-checked>=(pageIdle()?300000:60000)&&!fileSummaryBusy)loadFileSizes();
   const records=data.codex.file_activity||{events:[],total:0},projects=new Map();for(const event of records.events){const key=fileProjectKey(event);if(!["none","unknown"].includes(key))projects.set(key,eventProject(event)||key);}
   selectOptions("filter-file-project",[["all",ui("全部專案")],["none",ui("無專案")],["unknown",ui("未知")],...[...projects].sort((a,b)=>a[1].localeCompare(b[1]))]);selectOptions("filter-file-tool",[["all",ui("全部工具")],...[...new Set(records.events.map(event=>event.tool).filter(Boolean))].sort().map(tool=>[tool,tool])]);
   for(const [id,value]of [["filter-file-project",pendingFileProject],["filter-file-tool",pendingFileTool]])if(value&&[...$(id).options].some(option=>option.value===value))$(id).value=value;pendingFileProject=pendingFileTool=null;
@@ -862,7 +889,7 @@ function renderFiles(){
 }
 function renderGit(){
   const git=data.codex.git||{events:[],operations:{},total:0},select=$("filter-git"),selected=select.value;
-  select.replaceChildren(...[["all",ui("全部操作")],...sorted(git.operations).map(([key,count])=>[key,key+" ("+fmt(count)+")"])].map(([value,label])=>{const el=node("option",label);el.value=value;return el;}));
+  selectOptions("filter-git",[["all",ui("全部操作")],...sorted(git.operations).map(([key,count])=>[key,key+" ("+fmt(count)+")"])]);
   if([...select.options].some(option=>option.value===selected))select.value=selected;
   if(pendingGit){if([...select.options].some(option=>option.value===pendingGit))select.value=pendingGit;pendingGit=null;}
   const events=git.events.filter(event=>select.value==="all"||event.operation===select.value);
@@ -882,8 +909,22 @@ function renderWorkflow(){
 }
 
 let uptimeSample=null;
-function renderUptime(){if(!uptimeSample||document.hidden)return;const elapsed=Math.max(0,Math.floor(uptimeSample.seconds+(performance.now()-uptimeSample.received)/1000)),days=Math.floor(elapsed/86400),clock=[Math.floor(elapsed/3600)%24,Math.floor(elapsed/60)%60,elapsed%60].map(value=>String(value).padStart(2,"0")).join(":");$("program-uptime").textContent=ui("已執行 ")+(days?fmt(days)+ui(" 天")+" ":"")+clock;}
-setInterval(renderUptime,1000);
+function renderUptime(){if(!uptimeSample||document.hidden||displayPaused)return;const elapsed=Math.max(0,Math.floor(uptimeSample.seconds+(performance.now()-uptimeSample.received)/1000)),days=Math.floor(elapsed/86400),clock=[Math.floor(elapsed/3600)%24,Math.floor(elapsed/60)%60,elapsed%60].map(value=>String(value).padStart(2,"0")).join(":");$("program-uptime").textContent=ui("已執行 ")+(days?fmt(days)+ui(" 天")+" ":"")+clock;}
+let chromeTimer=0,lastInteraction=performance.now(),connectionDeadline=null;
+function pageIdle(){return !document.hasFocus()||performance.now()-lastInteraction>=60000;}
+function scheduleChrome(){
+  clearTimeout(chromeTimer);chromeTimer=0;if(document.hidden)return;
+  if(displayPaused&&connectionDeadline==null)return;
+  const delay=pageIdle()||displayPaused?15000:1000,deadline=connectionDeadline==null?delay:Math.max(1,connectionDeadline-Date.now()+1);
+  chromeTimer=setTimeout(()=>{renderUptime();if(connectionDeadline!=null&&Date.now()>connectionDeadline)renderConnectionStatus();scheduleChrome();},Math.min(delay,deadline));
+}
+function noteInteraction(){const idle=pageIdle();lastInteraction=performance.now();if(idle)scheduleChrome();}
+for(const event of ["pointermove","pointerdown","keydown","wheel"])document.addEventListener(event,noteInteraction,{passive:true});
+let displayWindowFocused=document.hasFocus();
+function syncDisplayMotion(){WorkbenchUI.setMotion?.(document.documentElement,!appearance.reduceMotion&&displayWindowFocused&&!document.hidden);}
+addEventListener("blur",()=>{displayWindowFocused=false;syncDisplayMotion();scheduleChrome();});
+addEventListener("focus",()=>{displayWindowFocused=true;syncDisplayMotion();lastInteraction=performance.now();renderUptime();renderConnectionStatus();scheduleChrome();});
+scheduleChrome();
 
 function panelNeeded(id){const root=$(id);return !!root&&!root.closest("[hidden],.layout-hidden");}
 function renderVisibleContent(){
@@ -978,7 +1019,7 @@ function renderSQLite(){
   cards("sqlite-cards",[[ui("SQL 操作"),fmt(events.length),ui("最近保留的操作紀錄")],[ui("資料庫"),fmt(new Set(events.map(sqlLocation).filter(Boolean)).size),ui("可確認的檔案與記憶體資料庫")],[ui("SQL 診斷紀錄"),fmt(events.filter(e=>e.recognition==="diagnostic_log").length),ui("來源實際提供的 SQL metadata")],[ui("工具失敗"),fmt(new Set(events.filter(e=>e.result==="failed").map(e=>e.thread_id+":"+e.call_id)).size),ui("整次工具呼叫的回傳狀態")]]);
   replaceRows("sqlite-rows",...events.map(event=>{const row=node("tr");cell(row,when(event.timestamp));cell(row,event.statement,"mono");cell(row,sqlLabels[event.operation]||event.operation);cell(row,event.engine);cell(row,sqlLocation(event)||"--","path-cell mono");cell(row).append(tag(sqlResults[event.result]||event.result));if(event.thread_id)eventThreadCell(row,event);else cell(row,"--");projectCell(row,event);cell(row,sqlMethod(event));cell(row,event.tool||"--","mono");valueCell(row,event.container_duration_ms);cell(row,event.call_id||"--","mono");cell(row,event.source?logSource(event.source):ui("對話紀錄"));valueCell(row,event.duration_ms);valueCell(row,event.rows_affected);valueCell(row,event.rows_returned);return clickableRow(row,()=>openDetail({kind:"sqlite",event}));}));
   $("sqlite-empty").textContent=events.length?"":ui("目前時間範圍沒有 SQL 紀錄");
-  const measured=events.filter(event=>Number.isFinite(event.duration_ms));$("sqlite-measured").replaceChildren(node("h4",ui("SQL 耗時統計")),measured.length?statisticLabels(statistics(measured.map(event=>event.duration_ms)),"ms",ui("僅統計來源有提供耗時的 SQL 紀錄")):node("p","--","muted"));
+  const measured=events.filter(event=>Number.isFinite(event.duration_ms));renderProjection($("sqlite-measured"),statistics(measured.map(event=>event.duration_ms)),()=>$("sqlite-measured").replaceChildren(node("h4",ui("SQL 耗時統計")),measured.length?statisticLabels(statistics(measured.map(event=>event.duration_ms)),"ms",ui("僅統計來源有提供耗時的 SQL 紀錄")):node("p","--","muted")));
 }
 const sourceScopes=editableLabels({loaded_project_roots_and_codex_managed_worktrees:"唯讀檢查已載入專案與 Codex 管理目錄的 Git 工作樹",retained_activity_metadata:"SQL, 網路與 MCP 活動摘要保存至 SQLite, 預設 90 天, 設定 0 時不自動刪除. 筆數與容量上限只限制記憶體工作集合",
   recent_tail_and_incremental_metadata:"依讀取預算分批讀取各 session, 後續差異讀取新增紀錄. 工作起訖與錯誤依預算回補, 表格使用有界工作集合, 活動歷史另存 SQLite",
@@ -995,22 +1036,19 @@ function sourceMetrics(values){return Object.entries(values||{}).filter(([,value
 function sourceFeature(tab){const id=tab.id.slice(5),key=activePage(id);return id==="codex"?(conversationSource==="dots"?"dots":"codex"):id==="errors"?diagnosticSource:id==="projects"?(projectSource==="project-list"?"codex":projectSource):key==="tool-activity"?"tools":key;}
 const sourceWindowLabels=editableLabels({"1h":"最近 1 小時","24h":"最近 24 小時","7d":"最近 7 天",all:"全部本機紀錄"});
 const sourceReaderNames=editableLabels({"Checkpoint load":"Checkpoint 載入","Checkpoint save":"Checkpoint 保存"});
-function sourceReader(reader){
-  const group=node("section",null,"source-reader"),head=node("h4",sourceReaderNames[reader.name]||reader.name||logSource(reader.source)||reader.source);
-  if(reader.health)head.append(document.createTextNode(" "),tag(logHealthLabels[reader.health]||reader.health));
-  group.append(head,metadataList(sourceMetrics(reader)));
-  if(reader.fields?.length){const fields=node("div",null,"source-fields");fields.append(...reader.fields.map(field=>tag(field)));group.append(fields);}
-  for(const query of reader.queries||[])group.append(sourceReader(query));
+function sourceReader(reader,group=node("section",null,"source-reader")){
+  if(!group.childElementCount)group.append(node("h4"),metadataList([]),node("div",null,"source-fields"),node("div",null,"source-reader-children"));
+  const head=group.querySelector(":scope>h4"),name=sourceReaderNames[reader.name]||reader.name||logSource(reader.source)||reader.source;renderProjection(head,[name,reader.health],()=>{head.replaceChildren(document.createTextNode(name));if(reader.health)head.append(document.createTextNode(" "),tag(logHealthLabels[reader.health]||reader.health));});
+  metadataList(sourceMetrics(reader),group.querySelector(":scope>.metadata-grid"));const fields=group.querySelector(":scope>.source-fields");fields.hidden=!reader.fields?.length;renderProjection(fields,reader.fields,()=>fields.replaceChildren(...(reader.fields||[]).map(field=>tag(field))));
+  const queries=group.querySelector(".source-reader-children");WorkbenchUI.reconcileChildren(queries,(reader.queries||[]).map((query,index)=>sourceReader(query,queries.children[index])),{motion:false});
   return group;
 }
-function sourceDetails(key,source,opened){
-  const item=node("details"),summary=node("summary",source.name);item.dataset.source=key;item.open=opened.has(key);
-  if(source.health)summary.append(tag(logHealthLabels[source.health]||source.health));item.append(summary,node("p",sourceScopes[source.scope]||source.scope||"--","source-description"));
-  const modes=editableLabels({read_only:"唯讀",bounded_metadata_cache:"循環保存"});item.append(metadataList([[ui("讀取方式"),modes[source.mode]||source.mode],...(source.display_window?[[ui("顯示時間範圍"),sourceWindowLabels[source.display_window]||source.display_window]]:[]),...(source.window?[[ui("來源保留範圍"),sourceWindowLabels[source.window]||source.window]]:[]),...sourceMetrics(source.limits)]));
-  if(source.locations?.length){item.append(node("h4",ui("來源位置")));for(const location of source.locations)item.append(node("p",location,"mono source-location"));}
-  if(source.observations?.length){const fields=node("div",null,"source-fields");fields.append(...source.observations.map(field=>tag(observationLabels[field]||metricLabel(field))));item.append(node("h4",ui("檢查項目")),fields);}
-  if(source.fields?.length){const fields=node("div",null,"source-fields");fields.append(...source.fields.map(field=>tag(field)));item.append(node("h4",ui("選取欄位")),fields);}
-  for(const reader of source.readers||[])item.append(sourceReader(reader));
+function sourceDetails(key,source,item=node("details")){
+  if(!item.childElementCount){item.dataset.source=key;item.append(node("summary"),node("p",null,"source-description"),metadataList([]));for(const name of ["locations","observations","fields"]){const group=node("div",null,"source-"+name);group.append(node("h4"),node("div",null,"source-field-content"));item.append(group);}item.append(node("div",null,"source-reader-list"));}
+  const summary=item.querySelector(":scope>summary");renderProjection(summary,[source.name,source.health],()=>{summary.replaceChildren(document.createTextNode(source.name));if(source.health)summary.append(tag(logHealthLabels[source.health]||source.health));});updateText(item.querySelector(".source-description"),sourceScopes[source.scope]||source.scope||"--");
+  const modes=editableLabels({read_only:"唯讀",bounded_metadata_cache:"循環保存"});metadataList([[ui("讀取方式"),modes[source.mode]||source.mode],...(source.display_window?[[ui("顯示時間範圍"),sourceWindowLabels[source.display_window]||source.display_window]]:[]),...(source.window?[[ui("來源保留範圍"),sourceWindowLabels[source.window]||source.window]]:[]),...sourceMetrics(source.limits)],item.querySelector(":scope>.metadata-grid"));
+  for(const [name,label]of [["locations","來源位置"],["observations","檢查項目"],["fields","選取欄位"]]){const group=item.querySelector(":scope>.source-"+name),values=source[name]||[];group.hidden=!values.length;updateProjectionHeading(group,ui(label));const fields=group.querySelector(".source-field-content");renderProjection(fields,values,()=>fields.replaceChildren(...values.map(value=>name==="locations"?node("p",value,"mono source-location"):tag(name==="observations"?observationLabels[value]||metricLabel(value):value))));}
+  const readers=item.querySelector(".source-reader-list");WorkbenchUI.reconcileChildren(readers,(source.readers||[]).map((reader,index)=>sourceReader(reader,readers.children[index])),{motion:false});
   return item;
 }
 function renderSources(){
@@ -1018,14 +1056,13 @@ function renderSources(){
   for(const tab of document.querySelectorAll('main>section[role="tabpanel"]')){
     const id=tab.id.slice(5),feature=sourceFeature(tab),sources=Object.entries(data.sources||{}).filter(([key,source])=>(id==="overview"||source.features?.includes(feature))&&(id!=="mcp"||mcpSource==="all"||!key.startsWith("telemetry:")||key==="telemetry:"+mcpSource));let footer=tab.querySelector(":scope>.source-reference");
     if(!footer){footer=node("details",null,"panel source-reference");footer.dataset.sourceTab=id;footer.open=preferences.sectionCollapsed?.["source:"+id]===false;tab.append(footer);footer.addEventListener("toggle",event=>{if(event.target!==footer)return;preferences.sectionCollapsed={...preferences.sectionCollapsed,["source:"+id]:!footer.open};if(footer.open)populateSourceReference(footer);saveView();});}
-    footer.dataset.fullWidth="true";tab.append(footer);for(const extra of tab.querySelectorAll(":scope>.source-reference"))if(extra!==footer)extra.remove();footer.sourceItems=sources;let summary=footer.querySelector(":scope>summary");if(!summary){summary=node("summary");footer.prepend(summary);}const meta=node("span",null,"source-summary-meta"),updated=node("time",when(data.updated_at));if(data.updated_at)updated.dateTime=data.updated_at;meta.append(node("span",ui("最近更新時間")+": "),updated,node("span",fmt(sources.length)+ui(" 個來源"),"source-count"));summary.replaceChildren(node("span",ui("資料來源與讀取範圍")),meta);
+    footer.dataset.fullWidth="true";for(const extra of tab.querySelectorAll(":scope>.source-reference"))if(extra!==footer)extra.remove();footer.sourceItems=sources;let summary=footer.querySelector(":scope>summary");if(!summary){summary=node("summary");const meta=node("span",null,"source-summary-meta");meta.append(node("span"),node("time"),node("span",null,"source-count"));summary.append(node("span"),meta);footer.prepend(summary);}updateText(summary.firstElementChild,ui("資料來源與讀取範圍"));const meta=summary.querySelector(".source-summary-meta"),updated=meta.querySelector("time");updateText(meta.firstElementChild,ui("最近更新時間")+": ");updateText(updated,when(data.updated_at));if(data.updated_at)updated.dateTime=data.updated_at;else updated.removeAttribute("datetime");updateText(meta.querySelector(".source-count"),fmt(sources.length)+ui(" 個來源"));
     if(footer.open&&!tab.hidden)populateSourceReference(footer);
   }
 }
 function populateSourceReference(footer){
-  const old=footer.querySelector(":scope>.source-reference-content"),opened=new Set([...(old?.querySelectorAll("details[open]")||[])].map(item=>item.dataset.source)),content=node("div",null,"source-reference-content"),grid=node("div",null,"source-read-grid");
-  content.append(node("p",ui("下方列出此頁讀取器的實際設定與載入結果. 列表與操作統計依來源紀錄範圍篩選, 圖表與表格條件可再縮小範圍. 未知時間紀錄只在全部範圍顯示"),"source-description"));
-  grid.append(...footer.sourceItems.map(([key,source])=>sourceDetails(key,source,opened)));content.append(grid);if(old)old.replaceWith(content);else footer.append(content);
+  let content=footer.querySelector(":scope>.source-reference-content");if(!content){content=node("div",null,"source-reference-content");content.append(node("p",null,"source-description"),node("div",null,"source-read-grid"));footer.append(content);}updateText(content.querySelector(":scope>.source-description"),ui("下方列出此頁讀取器的實際設定與載入結果. 列表與操作統計依來源紀錄範圍篩選, 圖表與表格條件可再縮小範圍. 未知時間紀錄只在全部範圍顯示"));
+  const grid=content.querySelector(".source-read-grid"),previous=new Map([...grid.children].map(item=>[item.dataset.source,item]));WorkbenchUI.reconcileChildren(grid,footer.sourceItems.map(([key,source])=>sourceDetails(key,source,previous.get(key))),{motion:false});
 }
 
 const modelApiKinds={request:"模型呼叫",connection:"連線事件",retry:"重試事件"},modelApiStatuses={unknown:"未知",sent:"已送出",returned:"已回傳",failed:"失敗",retrying:"重試中",connecting:"連線中",connected:"已連線"};
@@ -1068,7 +1105,7 @@ function debugKind(kind){return ui(({enabled:"已啟用",disabled:"已停用",co
 function renderMonitorDebug(){
   const value=data.monitor?.debug||{},records=value.records||[],latest=records[0],control=$("debug-mode");
   if(!settingsBusy)control.checked=!!data.settings?.debug_mode;
-  $("monitor-debug-data").replaceChildren(metadataList([[ui("記錄狀態"),ui(value.health==="unavailable"?"寫入失敗":value.enabled?"記錄中":"已停用"),value.error_type||""],[ui("SSE 連線數"),fmt(value.active_streams)],[ui("記錄檔容量"),fmt(value.bytes)+" B / "+(Number.isFinite(value.byte_limit)?measure(value.byte_limit,"bytes"):"--")],[ui("最近記錄"),when(latest?.timestamp)],[ui("程序記憶體"),Number.isFinite(latest?.rss_bytes)?measure(latest.rss_bytes,"bytes"):"--"],[ui("程序累計 CPU (ms)"),fmt(latest?.process_cpu_ms)]]));
+  setMetadata($("monitor-debug-data"),[[ui("記錄狀態"),ui(value.health==="unavailable"?"寫入失敗":value.enabled?"記錄中":"已停用"),value.error_type||""],[ui("SSE 連線數"),fmt(value.active_streams)],[ui("記錄檔容量"),fmt(value.bytes)+" B / "+(Number.isFinite(value.byte_limit)?measure(value.byte_limit,"bytes"):"--")],[ui("最近記錄"),when(latest?.timestamp)],[ui("程序記憶體"),Number.isFinite(latest?.rss_bytes)?measure(latest.rss_bytes,"bytes"):"--"],[ui("程序累計 CPU (ms)"),fmt(latest?.process_cpu_ms)]]);
   replaceRows("debug-rows",...records.map(record=>{const row=node("tr");cell(row,when(record.timestamp));cell(row,debugKind(record.kind));valueCell(row,record.refresh_ms??(record.serialization_ms!=null?record.serialization_ms+(record.write_ms||0):null));for(const key of ["cpu_ms","process_cpu_ms","rss_bytes","read_bytes","transfer_bytes"])valueCell(row,record[key]);return clickableRow(row,()=>openDetail({kind:"performance",record}));}));
   $("debug-empty").textContent=records.length?ui("點開紀錄可查看階段耗時與緩衝區資訊"):ui("開啟 Debug 模式後開始記錄");
 }
@@ -1076,25 +1113,24 @@ $("debug-mode").addEventListener("change",async event=>{const control=event.targ
 function renderMonitor(){
   renderMonitorDebug();
   const m=data.monitor||{},c=data.codex,enabled=Object.values(data.settings?.observations||{}).filter(Boolean).length;
-  const activeHelp=document.activeElement.closest("#monitor-environment .metadata-help"),helpRoot=activeHelp?.closest("[id]")?.id,helpIndex=activeHelp?[...activeHelp.parentElement.querySelectorAll(".metadata-help")].indexOf(activeHelp):-1,helpDismissed=activeHelp?.classList.contains("help-dismissed");
   cards("monitor-cards",[[ui("整理狀態"),ui(m.health==="error"?"整理失敗":m.health==="ok"?"正常":"啟動中"),ui("累計錯誤 ")+fmt(m.errors||0)+ui(" 次")],[ui("執行時間"),fmt(Math.floor((m.uptime_seconds||0)/60))+ui(" 分鐘"),ui("已整理 ")+fmt(m.refreshes||0)+ui(" 次")],[ui("本輪整理耗時"),fmt(m.refresh_ms)+" ms",ui("CPU 時間 ")+fmt(m.cpu_ms)+" ms"],[ui("保留工具紀錄"),fmt(m.retained_calls||0),ui("上限 ")+fmt(m.call_limit)+ui(" 筆")]]);
   const cliVersions=[...new Set((data.codex.threads||[]).map(thread=>thread.execution?.cli_version).filter(Boolean))];
   const browser=browserEnvironment();
-  $("monitor-runtime").replaceChildren(metadataList([[ui("LAM 版本"),m.version||ui("未知")],[ui("Python 版本"),m.python||ui("未知")],[ui("Python 實作"),m.python_implementation],[ui("Codex CLI (紀錄)"),cliVersionList(cliVersions),ui("已載入對話紀錄中使用過的 Codex CLI 版本")],[ui("瀏覽器"),browser.browser,ui("目前頁面的瀏覽器或 WebView 回報的名稱與版本")],[ui("瀏覽器語言"),browser.language],[ui("時區"),browser.timeZone],...pagePerformanceRows()]));updatePageMetrics();
-  $("monitor-system").replaceChildren(metadataList([[ui("系統"),m.platform||ui("未知")],[ui("系統版本"),m.system_release],[ui("系統組建"),m.system_version],[ui("執行架構"),m.process_bits?fmt(m.process_bits)+ui(" 位元"):null]]));
-  $("monitor-hardware").replaceChildren(metadataList([[ui("處理器"),m.processor],[ui("處理器架構"),m.architecture||ui("未知")],[ui("可用邏輯核心"),fmt(m.logical_cpus)],[ui("實體記憶體"),memorySize(m.physical_memory_bytes),ui("作業系統可使用的實體記憶體總量, 以 GiB 顯示")]]));
+  setMetadata($("monitor-runtime"),[[ui("LAM 版本"),m.version||ui("未知")],[ui("Python 版本"),m.python||ui("未知")],[ui("Python 實作"),m.python_implementation],[ui("Codex CLI (紀錄)"),cliVersionList(cliVersions),ui("已載入對話紀錄中使用過的 Codex CLI 版本")],[ui("瀏覽器"),browser.browser,ui("目前頁面的瀏覽器或 WebView 回報的名稱與版本")],[ui("瀏覽器語言"),browser.language],[ui("時區"),browser.timeZone],...pagePerformanceRows()]);updatePageMetrics();
+  setMetadata($("monitor-system"),[[ui("系統"),m.platform||ui("未知")],[ui("系統版本"),m.system_release],[ui("系統組建"),m.system_version],[ui("執行架構"),m.process_bits?fmt(m.process_bits)+ui(" 位元"):null]]);
+  setMetadata($("monitor-hardware"),[[ui("處理器"),m.processor],[ui("處理器架構"),m.architecture||ui("未知")],[ui("可用邏輯核心"),fmt(m.logical_cpus)],[ui("實體記憶體"),memorySize(m.physical_memory_bytes),ui("作業系統可使用的實體記憶體總量, 以 GiB 顯示")]]);
   const total=m.physical_memory_bytes,available=m.available_memory_bytes,used=Number.isFinite(total)&&Number.isFinite(available)&&total>0&&available>=0&&available<=total?total-available:null,percent=used==null?null:Math.round(used/total*1000)/10;
-  $("monitor-device-usage").replaceChildren(metadataList([[ui("CPU 使用率"),usageMeter(m.cpu_usage_percent,ui("CPU")),ui(m.cpu_scope==="processor_group"?"目前 Windows 處理器群組的 CPU 使用率":"最近兩次取樣之間的整體 CPU 使用率")],[ui("已使用記憶體"),usageMeter(percent,memorySize(used)+" / "+memorySize(total)),ui("可用記憶體")+": "+memorySize(available)]]));const updated=$("monitor-device-updated");updated.hidden=true;updated.textContent=ui("更新時間")+": "+when(m.device_checked_at);if(m.device_checked_at)updated.dateTime=m.device_checked_at;else updated.removeAttribute("datetime");
+  setMetadata($("monitor-device-usage"),[[ui("CPU 使用率"),usageMeter(m.cpu_usage_percent,ui("CPU")),ui(m.cpu_scope==="processor_group"?"目前 Windows 處理器群組的 CPU 使用率":"最近兩次取樣之間的整體 CPU 使用率")],[ui("已使用記憶體"),usageMeter(percent,memorySize(used)+" / "+memorySize(total)),ui("可用記憶體")+": "+memorySize(available)]]);const updated=$("monitor-device-updated");updated.hidden=!m.device_checked_at;updated.textContent=ui("裝置取樣時間")+": "+when(m.device_checked_at);bindHelp(updated,ui("裝置使用量隨來源更新取樣, 閒置時保留最近一次取樣"));if(m.device_checked_at)updated.dateTime=m.device_checked_at;else updated.removeAttribute("datetime");
   const gpus=m.gpus?.length?m.gpus:[{}],environment=$("monitor-environment");
   for(const panel of environment.querySelectorAll(".monitor-gpu-panel"))if(Number(panel.dataset.gpuIndex)>=gpus.length)panel.remove();
   for(const [index,gpu]of gpus.entries()){
     let panel=$("monitor-gpu-panel-"+index);
     if(!panel){panel=node("section",null,"panel monitor-gpu-panel");panel.id="monitor-gpu-panel-"+index;panel.dataset.cardKey="monitor-gpu-"+index;panel.dataset.gpuIndex=index;const body=node("div");body.id="monitor-gpu-data-"+index;panel.append(node("h3"),body);environment.insertBefore(panel,$("monitor-service").closest(".panel"));}
-    panel.querySelector("h3").textContent=ui("GPU")+(gpus.length>1?" "+fmt(index+1):"");
-    $("monitor-gpu-data-"+index).replaceChildren(metadataList([[ui("GPU 型號"),gpu.name||"--",ui("依平台與驅動提供的本機資料顯示, 無法取得時顯示 --")],[ui("GPU 專用記憶體"),Number.isFinite(gpu.dedicated_memory_bytes)&&gpu.dedicated_memory_bytes<1024**3?fmt(Math.round(gpu.dedicated_memory_bytes/1024**2))+" MiB":memorySize(gpu.dedicated_memory_bytes),ui("GPU 專用視訊記憶體容量")],[ui("GPU 共享記憶體上限"),memorySize(gpu.shared_memory_bytes),ui("GPU 可使用的系統共享記憶體容量上限")],[ui("GPU 驅動版本"),gpu.driver_version||"--",ui("啟動時取得的驅動版本, 部分平台不提供獨立版本, 更新驅動後需重新啟動 LAM")],...(gpu.memory_type==="unified"?[[ui("GPU 記憶體架構"),ui("統一記憶體"),ui("CPU 與 GPU 共用實體記憶體")]]:[])]));
+    updateText(panel.querySelector("h3"),ui("GPU")+(gpus.length>1?" "+fmt(index+1):""));
+    setMetadata($("monitor-gpu-data-"+index),[[ui("GPU 型號"),gpu.name||"--",ui("依平台與驅動提供的本機資料顯示, 無法取得時顯示 --")],[ui("GPU 專用記憶體"),Number.isFinite(gpu.dedicated_memory_bytes)&&gpu.dedicated_memory_bytes<1024**3?fmt(Math.round(gpu.dedicated_memory_bytes/1024**2))+" MiB":memorySize(gpu.dedicated_memory_bytes),ui("GPU 專用視訊記憶體容量")],[ui("GPU 共享記憶體上限"),memorySize(gpu.shared_memory_bytes),ui("GPU 可使用的系統共享記憶體容量上限")],[ui("GPU 驅動版本"),gpu.driver_version||"--",ui("啟動時取得的驅動版本, 部分平台不提供獨立版本, 更新驅動後需重新啟動 LAM")],...(gpu.memory_type==="unified"?[[ui("GPU 記憶體架構"),ui("統一記憶體"),ui("CPU 與 GPU 共用實體記憶體")]]:[])]);
   }
-  $("monitor-service").replaceChildren(metadataList([["PID",m.pid||ui("未知")],[ui("啟用的檢查項目"),fmt(enabled)],[ui("HTTP 請求"),fmt(m.requests||0)],[ui("HTTP 錯誤回應"),fmt(m.http_errors||0)],[ui("上次整理錯誤"),m.last_error_at?when(m.last_error_at):ui("無")],[ui("目前錯誤類型"),m.error_type||ui("無")]]));
-  $("monitor-storage").replaceChildren(metadataList([
+  setMetadata($("monitor-service"),[["PID",m.pid||ui("未知")],[ui("啟用的檢查項目"),fmt(enabled)],[ui("HTTP 請求"),fmt(m.requests||0)],[ui("HTTP 錯誤回應"),fmt(m.http_errors||0)],[ui("上次整理錯誤"),m.last_error_at?when(m.last_error_at):ui("無")],[ui("目前錯誤類型"),m.error_type||ui("無")]]);
+  setMetadata($("monitor-storage"),[
     [ui("目前整理階段"),collectionPhase(m.collection?.phase)],
     [ui("最長階段 CPU 時間"),measure(m.max_phase_cpu_ms,"ms")],
     [ui("工作狀態待回補 (bytes)"),fmt(c.read_state?.history_pending_bytes)],
@@ -1111,16 +1147,16 @@ function renderMonitor(){
     [ui("上次資料大小 (bytes)"),fmt(m.snapshot_bytes),ui("最近一次資料回應的 JSON 大小, 尚未壓縮")],
     [ui("上次傳輸大小 (bytes)"),fmt(m.transfer_bytes),ui("最近一次資料回應或 SSE 快照事件的內容大小, 不包含 HTTP header 與 Debug 事件")],
     [ui("Jev 資料庫大小 (bytes)"),fmt(m.jev_database_bytes),ui("Jev 的 SQLite 主資料庫檔案大小, 不含 WAL / SHM 暫存檔")]
-  ]));
-  if(helpIndex>=0){const term=$(helpRoot)?.querySelectorAll(".metadata-help")[helpIndex];if(term){term.classList.toggle("help-dismissed",!!helpDismissed);term.focus({preventScroll:true});}}
+  ]);
   $("monitor-retention").textContent=ui("效能樣本與狀態事件保存在記憶體, 超過上限會移除舊資料, 重新啟動後重新累積");
   const names=monitorEventLabels;
   replaceRows("monitor-event-rows",...(m.events||[]).map(event=>{const row=node("tr");cell(row,when(event.timestamp));cell(row,names[event.kind]||event.kind);cell(row,event.error_type||"--","mono");return row;}));
 }
 function renderConnectionStatus(stale=connectionLost){
-  const value=data?.codex?.connection||{},names={response:"已連線",error:"連線錯誤",paused:"檢查停用",idle:"閒置",unknown:"待確認"},status=$("codex-live"),state=stale?"unknown":data?.settings?.observations?.codex===false?"paused":Date.now()-Date.parse(value.observed_at)>(value.recent_seconds||300)*1000?"unknown":value.state||"unknown";
-  const source=data?.codex||{},fallback=source.health==="missing"?"未找到來源":source.health==="unavailable"||source.health==="partly_unavailable"?"來源讀取異常":source.health==="ok"?(source.files>0||source.threads?.length?"來源可讀取":"等待活動"):"待確認";status.textContent=ui(stale?"資料未更新":state==="unknown"?fallback:names[state]||fallback);$("codex-connection").dataset.state=state;$("lam-connection").dataset.state=stale||data?.activity?.watch_health==="unavailable"||data?.monitor?.health==="error"?"error":"response";
-  const evidence={model_usage:"模型用量回報",connection_error:"連線錯誤紀錄"},parts=[ui("最近 5 分鐘有模型用量更新時顯示已連線"),ui("最後回應")+": "+when(value.last_response_at),ui("最近檢查時間")+": "+when(value.observed_at)];if(value.evidence)parts.push(ui("依據")+": "+ui(evidence[value.evidence]||value.evidence));bindHelp($("codex-connection"),parts.join(". "));
+  const current=displayPaused&&pausedSnapshot?.value.snapshot||data,value=current?.codex?.connection||{},names={response:"已連線",error:"連線錯誤",paused:"檢查停用",idle:"閒置",unknown:"待確認"},status=$("codex-live"),state=stale?"unknown":current?.settings?.observations?.codex===false?"paused":Date.now()-Date.parse(value.observed_at)>(value.recent_seconds||300)*1000?"unknown":value.state||"unknown";
+  const source=current?.codex||{},fallback=source.health==="missing"?"未找到來源":source.health==="unavailable"||source.health==="partly_unavailable"?"來源讀取異常":source.health==="ok"?(source.files>0||source.threads?.length?"來源可讀取":"等待活動"):"待確認";status.textContent=ui(stale?"資料未更新":state==="unknown"?fallback:names[state]||fallback);$("codex-connection").dataset.state=state;$("lam-connection").dataset.state=stale||current?.activity?.watch_health==="unavailable"||current?.monitor?.health==="error"?"error":"response";
+  connectionDeadline=!stale&&["response","error"].includes(state)&&Number.isFinite(Date.parse(value.observed_at))?Date.parse(value.observed_at)+(value.recent_seconds||300)*1000:null;scheduleChrome();
+  const evidence={model_usage:"模型用量回報",connection_error:"連線錯誤紀錄"},parts=[ui("最近 5 分鐘有模型用量更新時顯示已連線"),ui("最後回應")+": "+when(value.last_response_at),ui("狀態依據時間")+": "+when(value.observed_at)];if(value.evidence)parts.push(ui("依據")+": "+ui(evidence[value.evidence]||value.evidence));bindHelp($("codex-connection"),parts.join(". "));
 }
 const highlightDescriptions={tools:"查看已載入紀錄中的工具呼叫次數與工具種類",git:"查看目前來源範圍內的 Git 操作與所屬對話",skills:"查看技能文件讀取次數與關聯對話",checks:"查看 test, build, lint 與型別檢查操作",files:"查看目前來源範圍內的檔案讀寫與修改紀錄",web:"查看網路工具操作與參考網址",errors:"查看來源範圍內的錯誤與警告紀錄",logs:"查看來源 Log 的執行紀錄與讀取狀態",sqlite:"查看已辨識的 SQL 操作與診斷紀錄"};
 function renderHighlights(){
@@ -1132,19 +1168,37 @@ function renderHighlights(){
 
   for(const source of data.mcp?.servers||[]){if(!source.enabled||source.server==="web")continue;const latest=m.events.filter(event=>event.server===source.server).sort((a,b)=>(b.completed_at||b.timestamp||"").localeCompare(a.completed_at||a.timestamp||""))[0],report=data.mcp.telemetry?.[source.server],info=report?telemetryFields(report.summary).slice(0,3).map(([key,value])=>metricLabel(key)+": "+telemetryValue(value)).join(" · "):latest?mcpBrief(latest):source.description||ui(data.mcp.categories[source.category]||"MCP 工具");items.push([source.server,"mcp",fmt(source.calls)+ui(" 次呼叫 · ")+fmt(source.recognized)+ui(" 處 exec 辨識"),info,source.server]);}
   const highlightOrder=["usage","files","sqlite","git","checks","skills","tools","web","mcp","errors","logs"],usage=c.usage,known=(c.threads||[]).map(thread=>thread.tokens?.total_tokens).filter(Number.isFinite);items.unshift([ui("用量與額度"),"usage",known.length?fmt(known.reduce((sum,value)=>sum+value,0))+" tokens":"--",usage?.plan_type||"--"]);items.sort((a,b)=>highlightOrder.indexOf(a[1])-highlightOrder.indexOf(b[1]));
-  $("overview-highlights").replaceChildren(...items.map(([name,tab,value,info,category])=>{const el=button(null,()=>{if(category&&tab==="mcp"){openDetail({kind:"mcp-source",server:category});return;}if(tab==="jev"){openDetail({kind:"mcp-source",server:"jev"});return;}navigateToTab(tab);},"highlight-card tab-order-row");el.dataset.tabOrder=category?"mcp:"+category:tab;el.classList.add("wb-action-card");el.append(node("h3",name),node("div",value,"highlight-value"),node("p",info,"muted"));bindHelp(el,[ui(highlightDescriptions[tab]||"查看來源的活動統計與操作明細"),value,info].filter(Boolean).join(". "));return el;}));arrangeHighlights();
+  const root=$("overview-highlights"),previous=new Map([...root.children].map(item=>[item.dataset.tabOrder,item]));WorkbenchUI.reconcileChildren(root,items.map(([name,tab,value,info,category])=>{const key=category?"mcp:"+category:tab;let el=previous.get(key);if(!el){el=button(null,()=>{if(category&&tab==="mcp"){openDetail({kind:"mcp-source",server:category});return;}if(tab==="jev"){openDetail({kind:"mcp-source",server:"jev"});return;}navigateToTab(tab);},"highlight-card tab-order-row wb-action-card");el.dataset.tabOrder=key;el.append(node("h3"),node("div",null,"highlight-value"),node("p",null,"muted"));}updateText(el.querySelector("h3"),name);updateText(el.querySelector(".highlight-value"),value);updateText(el.querySelector("p"),info);bindHelp(el,[ui(highlightDescriptions[tab]||"查看來源的活動統計與操作明細"),value,info].filter(Boolean).join(". "));return el;}),{motion:false});arrangeHighlights();
 }
-function metadataList(items){
-  const list=node("dl",null,"metadata-grid");
+function updateText(target,value){const text=String(value??""),anchor=target.querySelector(":scope>.wb-status-anchor");if(anchor){const labels=[...target.childNodes].filter(child=>child!==anchor);if(labels.map(child=>child.textContent).join("")!==text){for(const child of labels)child.remove();target.prepend(document.createTextNode(text));}}else if(target.textContent!==text)target.textContent=text;}
+function updateProjectionHeading(section,label){const heading=section.querySelector("h4");if(heading){updateText(heading,label);return;}const summary=section.querySelector(".table-disclosure>summary"),text=summary?.firstChild;if(text?.nodeType===Node.TEXT_NODE&&text.textContent!==label)text.textContent=label;}
+function updateSourceTime(time,value){updateText(time,value?ui("更新時間")+": "+when(value):"");time.hidden=!value;if(value&&Number.isFinite(Date.parse(value)))time.dateTime=value;else time.removeAttribute("datetime");}
+function metadataList(items,list=node("dl",null,"metadata-grid")){
+  const previous=new Map(),children=[];for(const term of list.querySelectorAll(":scope>dt")){const label=term.textContent;if(!previous.has(label))previous.set(label,[]);previous.get(label).push([term,term.nextElementSibling]);}
   for(const [label,value,description]of items){
     const help=description||fieldDescription(label);
-    const term=node("dt",label);
-    if(help){term.classList.add("metadata-help");term.tabIndex=0;term.setAttribute("aria-label",label);term.replaceChildren(node("span",label,"help-label"));bindHelp(term,help);for(const event of ["mouseleave","blur"])term.addEventListener(event,()=>term.classList.remove("help-dismissed"));}
-    const entry=node("dd",value instanceof Node?null:value==null||value===""?"--":value);if(value instanceof Node)entry.append(value);list.append(term,entry);
+    const retained=previous.get(String(label))?.shift(),term=retained?.[0]||node("dt",label),entry=retained?.[1]||node("dd");
+    if(help){if(!term.classList.contains("metadata-help")){term.classList.add("metadata-help");term.tabIndex=0;term.setAttribute("aria-label",label);term.replaceChildren(node("span",label,"help-label"));}bindHelp(term,help);}else{term.classList.remove("metadata-help");term.removeAttribute("tabindex");term.removeAttribute("aria-label");bindHelp(term,"");}
+    if(value instanceof Node){
+      const signature=value.outerHTML||value.textContent,meter=entry.querySelector(":scope>.memory-meter");
+      if(meter&&value.matches?.(".memory-meter")){updateText(meter.querySelector("span"),value.querySelector("span").textContent);meter.dataset.level=value.dataset.level;const bar=meter.querySelector("progress"),next=value.querySelector("progress");bar.value=next.value;for(const name of ["aria-label","aria-valuetext"])bar.setAttribute(name,next.getAttribute(name));}
+      else if(entry.metadataSignature!==signature)entry.replaceChildren(value);
+      entry.metadataSignature=signature;
+    }else{updateText(entry,value==null||value===""?"--":value);delete entry.metadataSignature;}
+    children.push(term,entry);
   }
+  children.push(...list.querySelectorAll(":scope>.wb-data-state"));WorkbenchUI.reconcileChildren(list,children,{motion:false});
   return list;
 }
+function setMetadata(target,items){if(typeof target==="string")target=$(target);delete target.projectionSignature;const list=target.querySelector(":scope>.metadata-grid");if(list)metadataList(items,list);else target.replaceChildren(metadataList(items),...target.querySelectorAll(":scope>.wb-data-state"));}
+function renderProjection(target,value,draw){const signature=JSON.stringify([locale,value]);if(target.projectionSignature===signature)return;draw();target.projectionSignature=signature;}
 function table(headers,rows,title,key){const wrap=node("div",null,"table-wrap"),el=node("table"),head=node("thead"),tr=node("tr"),body=node("tbody");el.dataset.tableKey=key||"detail:"+detail.kind+":"+headers.join("|");if(key)body.id=key;if(title)el.dataset.tableTitle=title;for(const label of headers)tr.append(node("th",label));head.append(tr);body.append(...rows);el.append(head,body);wrap.append(el);return wrap;}
+function projectionTable(container,headers,rows,title,key){
+  const current=container.querySelector("table"),signature=JSON.stringify(headers),view=tableViews.get(key);
+  if(current?.dataset.projectionHeaders===signature){replaceRows(key,...rows);return;}
+  if(backgroundSnapshot&&current&&tableInteracting(view)){view.pendingUpdate=true;return;}
+  const wrap=table(headers,rows,title,key);wrap.querySelector("table").dataset.projectionHeaders=signature;container.replaceChildren(wrap);
+}
 
 function toolEventRows(events){return events.slice(0,100).map(event=>{const row=node("tr");cell(row,when(event.timestamp));const outer=cell(row,null,"tool-column");outer.append(toolButton(event.tool,()=>openDetail({kind:"tool",tool:event.tool})));const inner=cell(row,null,"nested-tool-column"),list=node("div",null,"tools");for(const [tool,count]of sorted(event.nested_tools))list.append(toolButton(tool,()=>openDetail({kind:"nested-tool",tool}),count));inner.append(list.childElementCount?list:node("span","--"));cell(row,when(event.completed_at));valueCell(row,event.duration_ms);return clickableRow(row,()=>openDetail({kind:"tool-call",event}),ui("查看執行內容"));});}
 const toolPurposes={exec:"執行 JavaScript, 可在一次操作中呼叫其他工具並整理回傳結果",exec_command:"執行終端機命令, 例如讀取檔案, Git 操作或測試",write_stdin:"向已啟動的命令送入資料, 或取得後續執行結果",apply_patch:"依 patch 新增, 修改或刪除檔案",web__run:"搜尋網路, 開啟參考頁面, 或取得天氣與其他網路資料",view_image:"檢視本機圖片",js:"在持續存在的 JavaScript runtime 中執行操作",js_reset:"重設 JavaScript runtime 與其中的變數",document_status:"檢查文件處理套件與 OCR 是否就緒",extract_document:"取得文件文字與位置資訊, 必要時執行 OCR, 可預覽或寫出 Markdown",inspect_markdown:"讀取 Markdown 的標題, 指定段落與 SHA-256",locate_markdown_extracts:"尋找與原始文件相符的 Markdown 抽出檔",update_markdown:"檢查目前 hash 後, 預覽或寫入 Markdown 更新",workspace_status:"查看環境檢查工具的版本與可讀取範圍",compare_environment:"比對兩個目錄的檔案與 SHA-256, 找出環境差異",validation_evidence:"整理既有驗證紀錄與結果",jev_rank:"依問題將候選內容排序, 決定優先閱讀順序",jev_evaluate:"依明確的評分項目評估指定內容",jev_status:"檢查 Jev 設定, 可選擇測試 API 連線",pull_requests_checks:"讀取 PR / MR 的 CI 檢查結果",create_worktree:"建立供目前工作使用的 Git worktree",archive_worktree:"保存 worktree 的工作快照並封存",restore_worktree:"還原已封存的 worktree",fork_thread:"從既有對話建立保留脈絡的分支",handoff_thread:"移轉工作與 Git 狀態",automation_update:"建立或調整排程工作",read_thread:"讀取指定工作的狀態與摘要",list_threads:"列出目前工作與對話",open_in_codex:"在 Codex 面板開啟檔案, 頁面或其他成果"};
@@ -1588,11 +1642,13 @@ async function openJev(call,thread,remember=true,scroll=0){
   }catch(error){if(detail===selected)$("detail-content").replaceChildren(node("p",error.message||ui("內容讀取失敗"),"empty"));}
   finally{if(detail===selected){syncDetailHeader($("detail-content"),call.timestamp);groupDetailSections($("detail-content"));$("detail-content").scrollTop=scroll;}}
 }
-let eventStream=null,eventStreamReady=false,eventVersion=null,queuedSnapshot=null,queuedDebug=null,backgroundSnapshot=false,snapshotFrame=0;
+let eventStream=null,eventStreamReady=false,eventVersion=null,queuedSnapshot=null,queuedDebug=null,backgroundSnapshot=false,snapshotFrame=0,pausedSnapshot=null;
+function syncDisplayPause(){const control=$("snapshot-pause");control.hidden=!WorkbenchUI.bindUpdateGuard;if(control.hidden)return;const label=ui(displayPaused?"恢復顯示更新":"暫停顯示更新");WorkbenchUI.setButtonIcon(control,displayPaused?"play":"pause",label);control.title=label;control.setAttribute("aria-label",ui("暫停顯示更新"));control.setAttribute("aria-pressed",String(displayPaused));$("snapshot-paused").hidden=!displayPaused;$("snapshot-paused").textContent=ui("顯示已暫停");bindHelp(control,ui("只暫停顯示, 來源仍持續收集. 恢復時直接套用最新資料"));}
+$("snapshot-pause").addEventListener("click",()=>{displayPaused=!displayPaused;syncDisplayPause();renderUptime();scheduleChrome();if(!displayPaused&&pausedSnapshot){queuedSnapshot=pausedSnapshot;pausedSnapshot=null;drainSnapshots();}});
 function renderSnapshot(next){backgroundSnapshot=true;try{render(next);}finally{backgroundSnapshot=false;}}
 const snapshotWaiters=[];
 function settleSnapshot(){for(const resolve of snapshotWaiters.splice(0))resolve();}
-function stopEventStream(){eventStream?.close();eventStream=null;eventStreamReady=false;eventVersion=null;queuedSnapshot=queuedDebug=null;cancelAnimationFrame(snapshotFrame);snapshotFrame=0;}
+function stopEventStream(){eventStream?.close();eventStream=null;eventStreamReady=false;eventVersion=null;queuedSnapshot=queuedDebug=pausedSnapshot=null;cancelAnimationFrame(snapshotFrame);snapshotFrame=0;}
 function startEventStream(restart=false){
   if(restart)stopEventStream();
   if(eventStream||document.hidden)return;
@@ -1616,16 +1672,17 @@ function startEventStream(restart=false){
 }
 function drainSnapshots(){
   if(busy||(!queuedSnapshot&&!queuedDebug)||snapshotFrame)return;
+  if(queuedSnapshot&&data?.updated_at&&!displayPaused&&snapshotDisplayState!=="refreshing")setSnapshotState("refreshing");
   snapshotFrame=requestAnimationFrame(async()=>{
     snapshotFrame=0;if(busy||(!queuedSnapshot&&!queuedDebug))return;
     const selected=queuedSnapshot,diagnostic=queuedDebug;queuedSnapshot=queuedDebug=null;
     if(selected){if(diagnostic?.stream===selected.stream&&selected.value.snapshot.monitor)selected.value.snapshot.monitor.debug=diagnostic.value;await acceptSnapshot(selected);}
-    else if(diagnostic?.stream===eventStream&&data?.monitor){data.monitor.debug=diagnostic.value;if(!$("view-monitor").hidden){backgroundSnapshot=true;try{renderMonitorDebug();attachTables(true);}finally{backgroundSnapshot=false;}}}
+    else if(!displayPaused&&diagnostic?.stream===eventStream&&data?.monitor){data.monitor.debug=diagnostic.value;if(!$("view-monitor").hidden){backgroundSnapshot=true;try{renderMonitorDebug();attachTables(true);}finally{backgroundSnapshot=false;}}}
     if(queuedSnapshot||queuedDebug)drainSnapshots();
   });
 }
-document.addEventListener("visibilitychange",()=>{if(document.hidden){stopEventStream();settleSnapshot();}else refresh();});
-addEventListener("pagehide",()=>{stopEventStream();settleSnapshot();});
+document.addEventListener("visibilitychange",()=>{displayWindowFocused=document.hasFocus();syncDisplayMotion();if(document.hidden){clearTimeout(chromeTimer);chromeTimer=0;stopEventStream();settleSnapshot();}else{renderUptime();renderConnectionStatus();scheduleChrome();refresh();}});
+addEventListener("pagehide",()=>{clearTimeout(chromeTimer);chromeTimer=0;stopEventStream();settleSnapshot();});
 addEventListener("online",()=>{if(connectionLost)refresh();});
 function syncSessionTracking(){}
 function syncRetentionSettings(){if(document.activeElement!==$("activity-retention-days"))$("activity-retention-days").value=data?.settings?.activity_retention_days??90;}
@@ -1633,7 +1690,8 @@ function connectionRecovered(){connectionLost=false;}
 function queueReconnect(closed=false){connectionLost=true;$("live").textContent=ui(closed?"連線中斷, 請重新整理頁面":"連線中斷, 自動重試中");setSnapshotState("error");renderConnectionStatus(true);}
 function refresh(){
   if(document.hidden)return Promise.resolve();
-  setSnapshotState(data?.updated_at?"refreshing":"loading");
+  if(displayPaused&&data?.codex?.activity_scope?.window!==activeSourceWindow()){displayPaused=false;pausedSnapshot=null;syncDisplayPause();renderUptime();scheduleChrome();}
+  if(!displayPaused)setSnapshotState(data?.updated_at?"refreshing":"loading");
   return new Promise(resolve=>{snapshotWaiters.push(resolve);startEventStream(true);});
 }
 async function request(url,options){const control=new AbortController(),timer=setTimeout(()=>control.abort(),15000),signal=options?.signal,abort=()=>control.abort();if(signal?.aborted)abort();else signal?.addEventListener("abort",abort,{once:true});try{const response=await fetch(url,{...options,signal:control.signal}),body=await response.text();return {ok:response.ok,status:response.status,data:response.headers.get("Content-Type")?.includes("application/json")?JSON.parse(body):body};}finally{clearTimeout(timer);signal?.removeEventListener("abort",abort);}}
@@ -1648,7 +1706,7 @@ function reportFrontendError(error,phase){
   const errorType=/^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(error?.name)?error.name:"Error",frames=[];
   for(const line of String(error?.stack||"").split("\n").slice(1,9)){
     const match=line.match(/(?:at\s+([^\s(]+)\s+\()?((?:https?:\/\/)[^\s)]+):(\d+):(\d+)\)?$/);if(!match)continue;
-    try{const url=new URL(match[2]),file=url.pathname==="/"?"index.html":url.pathname.slice(1),symbol=/^[A-Za-z0-9_.$<>]{1,80}$/.test(match[1])?match[1]:"anonymous";if(url.origin!==location.origin||url.search||url.hash||!["index.html","app.js","workbench-ui.js"].includes(file))continue;frames.push({file,function:symbol,line:Number(match[3]),column:Number(match[4])});}catch{}
+    try{const url=new URL(match[2]),file=url.pathname==="/"?"index.html":url.pathname.slice(1),symbol=typeof match[1]==="string"&&/^[A-Za-z0-9_.$<>]{1,80}$/.test(match[1])?match[1]:"anonymous";if(url.origin!==location.origin||url.search||url.hash||!["index.html","app.js","workbench-ui.js"].includes(file))continue;frames.push({file,function:symbol,line:Number(match[3]),column:Number(match[4])});}catch{}
   }
   const value={phase,error_type:errorType,frames,frontend_revision:loadedFrontendRevision||null},key=JSON.stringify(value),current=performance.now();
   if(current-(frontendDiagnostics.get(key)??-Infinity)<60000)return;
@@ -1659,6 +1717,7 @@ function reportFrontendError(error,phase){
 window.addEventListener("error",event=>{if(event.error)reportFrontendError(event.error,"script");});
 window.addEventListener("unhandledrejection",event=>reportFrontendError(event.reason,"promise"));
 async function acceptSnapshot({stream,value}){
+  if(displayPaused&&data?.updated_at){pausedSnapshot={stream,value};connectionRecovered();renderConnectionStatus();setSnapshotState("ready");settleSnapshot();return;}
   busy=true;const current=version;
   try{
     let next=value.snapshot;
@@ -1758,11 +1817,12 @@ function tableSort(key){
   if(column<0)column=view.headers.findIndex(label=>sortableColumn(label)&&measured(label));if(column<0){column=view.headers.findIndex(sortableColumn);descending=false;}return {column,descending};
 }
 function sortColumn(key,sort){const view=tableViews.get(key);return sort.header&&view?.headers.includes(sort.header)?view.headers.indexOf(sort.header):sort.column;}
-function tableInteracting(view){return view&&(view.hovered||view.interactionRoot?.contains(document.activeElement));}
-function deferTable(view){view.pendingUpdate=true;view.table.dataset.pendingUpdate="true";if(view.disclosureSummary)view.disclosureSummary.title=ui("互動期間保留列表, 離開後套用最新資料");}
+function tableInteracting(view){return view?.updateGuard?view.updateGuard.held:view&&(view.hovered||view.interactionRoot?.contains(document.activeElement));}
+function deferTable(view){view.pendingUpdate=true;view.table.dataset.pendingUpdate="true";if(view.disclosureSummary)view.disclosureSummary.title=ui("操作期間保留列順序, 離開後套用最新列表");}
 function resumeTable(view){if(!view.pendingUpdate||tableInteracting(view)||!view.table.isConnected)return;renderSnapshot(data);}
 const tableRecords=new Map();
-function sortRecords(key,items,columns,time){const view=tableViews.get(key);if(backgroundSnapshot&&tableInteracting(view)&&tableRecords.has(key)){deferTable(view);return tableRecords.get(key);}const sort=tableSort(key),index=sortColumn(key,sort),get=index<0?time:columns[index]||time,rows=[...items].sort((a,b)=>compareValues(get(a),get(b),sort.descending));tableRecords.set(key,rows);return rows;}
+function uniqueRecords(items,key){const result=new Map();for(const item of items){const id=key(item);if(id)result.set(id,result.has(id)?null:item);}return result;}
+function sortRecords(key,items,columns,time){const view=tableViews.get(key);if(backgroundSnapshot&&tableInteracting(view)&&tableRecords.has(key)){deferTable(view);const previous=tableRecords.get(key);if(view.updateGuard?.contentHeld!==false)return previous;const identity=item=>item.call_id||item.thread_id||item.id,current=uniqueRecords(items,identity),old=uniqueRecords(previous,identity);const rows=previous.map(item=>old.get(identity(item))&&current.get(identity(item))||item);tableRecords.set(key,rows);return rows;}const sort=tableSort(key),index=sortColumn(key,sort),get=index<0?time:columns[index]||time,rows=[...items].sort((a,b)=>compareValues(get(a),get(b),sort.descending));tableRecords.set(key,rows);return rows;}
 function sortRows(key,view,rows=view.rows){const sort=tableSort(key),column=sortColumn(key,sort),index=column<0?view.headers.findIndex(label=>/時間|日期/.test(label)&&!label.includes("耗時")):column;const get=row=>index<0?row.querySelector("[data-sort-time]")?.dataset.sortTime:rowCells(row)[index]?.dataset.sortValue??rowValue(row,index);return [...rows].sort((a,b)=>compareValues(get(a),get(b),sort.descending));}
 function changeTableSort(key,sort){if(sort.column>=0)sort.header=tableViews.get(key)?.headers[sort.column];const size=key==="codex-rows"?$("page-size").value:tableStates[key]?.size||display.table;tableStates[key]={...tableStates[key],size:size==="all"?"all":Number(size),page:1,sort};if(key==="codex-rows"){page=1;lazyLimit=50;renderCodex();}else if(key==="mcp-rows"){mcpPage=1;renderMcp();}else if(key==="docs-rows"){docsPage=1;renderToolDocs();}else paginateTable(key);persistTables();attachTables();if($("table-dialog").open)renderTableSort(key);}
 function renderTableSort(key){const view=tableViews.get(key),sort=tableSort(key);$("table-sort-column").replaceChildren(...[[-1,ui("自動排序 (預設)")],...view.headers.map((label,index)=>[index,ui(label)]).filter(([,label])=>sortableColumn(label))].map(([value,label])=>{const option=node("option",label);option.value=value;return option;}));$("table-sort-column").value=String(sortColumn(key,sort));$("table-sort-direction").value=sort.descending?"desc":"asc";}
@@ -1852,11 +1912,25 @@ function renderTableColumns(key){
 }
 function tableSize(key,fallback=display.table){const size=tableStates[key]?.size??fallback;return size==="all"?Number.MAX_SAFE_INTEGER:size;}
 const tableRowStores=new WeakMap(),tablePageDirections=new WeakMap(),tablePageMoves=new Map();
+function updateHoveredRows(view,rows){
+  const identity=row=>row.dataset.recordKey||rowCells(row)[view.headers.indexOf("Call ID")]?.textContent.trim().replace(/^--$/,"");
+  const current=uniqueRecords(rows,identity),previous=uniqueRecords(view.rows,identity);
+  for(const row of targetTableRows(view.body)){
+    const key=identity(row),next=previous.get(key)&&current.get(key);if(!next)continue;
+    const cells=rowCells(row),values=rowCells(next);
+    for(const [index,cell]of cells.entries()){
+      const value=values[index];if(!value||cell.querySelector("button,a,input,select")||value.querySelector("button,a,input,select")||cell.dataset.heatValue==null&&value.dataset.heatValue==null)continue;
+      updateText(cell,value.textContent);for(const field of ["heatValue","sortValue"])if(value.dataset[field]==null)delete cell.dataset[field];else cell.dataset[field]=value.dataset[field];cell.title=value.title;
+    }
+    row._rowAction=next._rowAction;
+  }
+  applyTableHeatmap(view.body.id||view.table.dataset.tableKey);
+}
 function targetTableRows(body){return tableRowStores.get(body)?.get()||[...body.children];}
 function updateTableChildren(body,rows,pageDirection=0){if(!WorkbenchUI.createStore||!WorkbenchUI.reconcileChildren){body.replaceChildren(...rows);return;}let store=tableRowStores.get(body);const previous=store?.get();if(previous?.length===rows.length&&previous.every((row,index)=>row===rows[index]))return;if(!store){store=WorkbenchUI.createStore([]);store.subscribe(items=>WorkbenchUI.reconcileChildren(body,items,{motion:body.children.length>0&&childMotion(body),pageDirection:tablePageDirections.get(body)||0}),{immediate:false});tableRowStores.set(body,store);}tablePageDirections.set(body,pageDirection);store.set(rows);}
 function replaceRows(id,...rows){
   const body=$(id),view=tableViews.get(id),previous=view?.rows||[...body.children];
-  if(backgroundSnapshot&&tableInteracting(view)){deferTable(view);return;}
+  if(backgroundSnapshot&&tableInteracting(view)){if(view.updateGuard?.contentHeld===false)updateHoveredRows(view,rows);deferTable(view);return;}
   if(view){view.pendingUpdate=false;delete view.table.dataset.pendingUpdate;if(view.disclosureSummary)view.disclosureSummary.title="";}
   const signature=row=>JSON.stringify(rowCells(row).map(cell=>[cell.textContent,cell.className,cell.title,cell.dataset.sortValue,cell.dataset.heatValue,[...cell.querySelectorAll("button,a")].map(el=>[el.textContent,el.title,el.getAttribute("href")])]));
   const retained=new Map();for(const row of previous){const key=signature(row);if(!retained.has(key))retained.set(key,[]);retained.get(key).push(row);}
@@ -1883,12 +1957,13 @@ function attachTables(skipOpenDialogs=false){
     const body=el.querySelector("tbody"),key=el.dataset.tableKey||body?.id;if(!body||!key)continue;
     let view=tableViews.get(key);
     if(!view||view.table!==el){
+      view?.updateGuard?.destroy();view?.disclosure?.destroy();
       const wrap=el.closest(".table-wrap"),previous=wrap.previousElementSibling,caption=el.dataset.tableTitle||(/^H[1-4]$/.test(previous?.tagName)?previous.textContent:previous?.querySelector("h3,h4")?.textContent||wrap.closest(".panel,dialog")?.querySelector("h3,h4")?.textContent||ui("表格")),toolbar=node("div",null,"table-toolbar"),gear=button("⚙",()=>openTableSettings(key),"chart-setting-button");gear.setAttribute("aria-label",caption.trim()+ui(" 表格設定"));gear.title=ui("表格設定");toolbar.append(gear);if(historySections[key])toolbar.append(button(ui("歷史紀錄"),()=>openHistory(...historySections[key])));wrap.before(toolbar);
       const headerCells=[...el.querySelectorAll("th")];view={table:el,body,rows:[],first:null,title:caption.trim(),headerCells,headers:headerCells.map(th=>th.dataset.copyBase||th.textContent)};tableViews.set(key,view);
       if(!specialTables.has(key)){const footer=node("div",null,"pagination table-pagination"),summary=node("span"),controls=node("div"),prev=button("←",()=>moveTablePage(key,-1)),next=button("→",()=>moveTablePage(key,1)),label=node("label",ui("第 ")),input=node("input"),total=node("span");prev.setAttribute("aria-label",ui("上一頁"));next.setAttribute("aria-label",ui("下一頁"));input.type="number";configureIntegerInput(input);input.min=1;input.className="table-page-input";input.setAttribute("aria-label",view.title+ui(" 頁碼"));pageInput(input,()=>{const previousPage=tableStates[key]?.page||1;tableStates[key]={...tableStates[key],size:tableStates[key]?.size||display.table,page:Number(input.value)};paginateTable(key,previousPage);persistTables();});label.append(input,node("span",ui(" 頁 ")));const first=button("⇤",()=>moveTablePage(key,-Number.MAX_SAFE_INTEGER)),last=button("⇥",()=>moveTablePage(key,Number.MAX_SAFE_INTEGER));first.setAttribute("aria-label",ui("第一頁"));last.setAttribute("aria-label",ui("最後一頁"));for(const [control,icon]of [[first,"first"],[prev,"previous"],[next,"next"],[last,"last"]])setPageIcon(control,icon);controls.append(first,prev,label,total,next,last);footer.append(summary,controls);wrap.after(footer);Object.assign(view,{footer,summary,firstPage:first,lastPage:last,prev,next,input,total,label});}
     }
     collapseTable(view,key);
-    if(!view.interactionRoot){view.interactionRoot=view.table.closest(".table-disclosure")||view.table;view.interactionRoot.addEventListener("pointerenter",()=>view.hovered=true);view.interactionRoot.addEventListener("pointerleave",()=>{view.hovered=false;resumeTable(view);});view.interactionRoot.addEventListener("focusout",()=>queueMicrotask(()=>resumeTable(view)));}
+    if(!view.interactionRoot){view.interactionRoot=view.table.closest(".table-disclosure")||view.table;if(WorkbenchUI.bindUpdateGuard)view.updateGuard=WorkbenchUI.bindUpdateGuard(view.interactionRoot,{onResume:()=>resumeTable(view)});else{view.interactionRoot.addEventListener("pointerenter",()=>view.hovered=true);view.interactionRoot.addEventListener("pointerleave",()=>{view.hovered=false;resumeTable(view);});view.interactionRoot.addEventListener("focusout",()=>queueMicrotask(()=>resumeTable(view)));}}
     if(backgroundSnapshot&&tableInteracting(view))continue;
     if(!specialTables.has(key)){if(view.sourceChanged||targetTableRows(body)[0]!==view.first){view.rows=targetTableRows(body);view.sourceChanged=false;}renderTableFilters(key);paginateTable(key);}
     applyTableColumns(key);
@@ -2064,14 +2139,13 @@ function usageWindow(minutes){return minutes==null?"--":minutes%1440===0?fmt(min
 function quotaResetTime(value){const time=new Date(value);return Number.isFinite(time.getTime())?time.toLocaleString(locale,{...(time.getFullYear()!==new Date().getFullYear()?{year:"numeric"}:{}),month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit",hour12:false}):ui("尚未提供");}
 function renderHeaderQuota(usage){
   const target=$("header-quota"),limits=[...(usage?.limits||[])].sort((a,b)=>(b.window_minutes??-Infinity)-(a.window_minutes??-Infinity));target.setAttribute("aria-label",ui("額度剩餘比例"));
-  target.replaceChildren(node("span",ui("額度剩餘"),"header-quota-label"));
-  const values=node("div",null,"header-quota-values");for(const item of limits){
-    const block=node("div",null,"header-quota-window"),amount=node("div",null,"header-quota-amount"),known=Number.isFinite(item.remaining_percent)&&item.remaining_percent>=0&&item.remaining_percent<=100,value=node("strong",known?fmt(item.remaining_percent)+"%":ui("尚未取得")),reset=node("time",null,"header-quota-reset");
-    if(item.window_minutes!=null)amount.append(node("span",usageWindow(item.window_minutes)));amount.append(value);
-    const label=node("span",ui("重設 "),"header-quota-reset-label"),date=node("span",item.resets_at?quotaResetTime(item.resets_at):ui("尚未提供"));reset.append(label,date);reset.setAttribute("aria-label",ui("重設時間")+": "+(item.resets_at?when(item.resets_at):ui("尚未提供")));if(item.resets_at)reset.dateTime=item.resets_at;
-    const separator=node("span","·");separator.setAttribute("aria-hidden","true");block.append(reset,separator,amount);bindHelp(block,[fieldDescription("剩餘比例"),usage.updated_at?ui("最近更新")+": "+when(usage.updated_at):"",item.resets_at&&Date.parse(item.resets_at)<=Date.now()?ui("等待來源更新"):""].filter(Boolean).join("\n"));bindHelp(reset,reset.getAttribute("aria-label"));values.append(block);
-  }
-  if(!limits.length)values.append(node("span",ui("尚未取得")));target.append(values);
+  if(!target.querySelector(".header-quota-label"))target.append(node("span",null,"header-quota-label"),node("div",null,"header-quota-values"));updateText(target.querySelector(".header-quota-label"),ui("額度剩餘"));
+  const values=target.querySelector(".header-quota-values"),previous=new Map([...values.children].map(block=>[block.dataset.quotaKey,block])),blocks=limits.map((item,index)=>{
+    const key=String(item.window_minutes)+":"+index;let block=previous.get(key);
+    if(!block){block=node("div",null,"header-quota-window");block.dataset.quotaKey=key;const reset=node("time",null,"header-quota-reset"),separator=node("span","·"),amount=node("div",null,"header-quota-amount");separator.setAttribute("aria-hidden","true");reset.append(node("span",null,"header-quota-reset-label"),node("span"));amount.append(node("span"),node("strong"));block.append(reset,separator,amount);}
+    const amount=block.querySelector(".header-quota-amount"),known=Number.isFinite(item.remaining_percent)&&item.remaining_percent>=0&&item.remaining_percent<=100,reset=block.querySelector("time");amount.querySelector("span").hidden=item.window_minutes==null;updateText(amount.querySelector("span"),usageWindow(item.window_minutes));updateText(amount.querySelector("strong"),known?fmt(item.remaining_percent)+"%":ui("尚未取得"));
+    updateText(reset.firstElementChild,ui("重設 "));updateText(reset.lastElementChild,item.resets_at?quotaResetTime(item.resets_at):ui("尚未提供"));reset.setAttribute("aria-label",ui("重設時間")+": "+(item.resets_at?when(item.resets_at):ui("尚未提供")));if(item.resets_at)reset.dateTime=item.resets_at;else reset.removeAttribute("datetime");bindHelp(block,[fieldDescription("剩餘比例"),usage.updated_at?ui("最近更新")+": "+when(usage.updated_at):"",item.resets_at&&Date.parse(item.resets_at)<=Date.now()?ui("等待來源更新"):""].filter(Boolean).join("\n"));bindHelp(reset,reset.getAttribute("aria-label"));return block;
+  });if(!blocks.length){const empty=values.querySelector(":scope>span")||node("span");updateText(empty,ui("尚未取得"));blocks.push(empty);}WorkbenchUI.reconcileChildren(values,blocks,{motion:false});
 }
 const panelDataStates=new Map();let snapshotDisplayState="loading";
 function panelDataState(panel){
@@ -2083,7 +2157,7 @@ function panelDataState(panel){
     boundary??=owned(".table-wrap,.chart-statistics,.source-cards,.metadata-grid,.wb-card-body");
     if(!boundary){boundary=node("div",null,"panel-data-region");const heading=panel.querySelector(":scope>h3,:scope>h4,:scope>.panel-head,:scope>summary,:scope>.table-disclosure>summary");const container=heading?.parentElement||panel;let child=heading?.nextElementSibling;while(child){const next=child.nextElementSibling;boundary.append(child);child=next;}container.append(boundary);}
     if(!chart){const heading=owned("h3,h4,.panel-head,.table-disclosure>summary,summary");if(heading){statusTarget=node("span",null,"wb-status-anchor");heading.append(statusTarget);}}
-    const view=WorkbenchUI.createDataState(boundary,{kind:chart?"chart":boundary.matches(".table-wrap")?"table":"content",statusTarget,context:WorkbenchUI.createContext({locale,accessibility:true}),onRetry:()=>panel.closest("#view-logs")?loadLogs():refresh()});entry={view,boundary,statusTarget,loaded};panelDataStates.set(panel,entry);
+    const view=WorkbenchUI.createDataState(boundary,{kind:chart?"chart":boundary.matches(".table-wrap")?"table":"content",statusTarget,context:WorkbenchUI.createContext({locale,accessibility:true})});entry={view,boundary,statusTarget,loaded};panelDataStates.set(panel,entry);
   }return entry;
 }
 function setPanelDataState(panel,state,message=""){
@@ -2106,7 +2180,7 @@ function setSnapshotState(state,message=""){
 }
 function settleChartState(id,error){
   const logChart=id.startsWith("log-")||id.startsWith("overview-copy-log-"),state=error?"error":logChart&&!logData?"loading":snapshotDisplayState==="refreshing"||snapshotDisplayState==="error"?snapshotDisplayState:data?.updated_at?"ready":"loading";
-  for(const panel of [$(id)?.closest(".panel"),$(id+"-statistics")])if(panel)setPanelDataState(panel,state,error?ui("圖表無法顯示, 請重試"):"");
+  for(const panel of [$(id)?.closest(".panel"),$(id+"-statistics")])if(panel)setPanelDataState(panel,state,error?ui("圖表無法顯示, 等待來源更新"):"");
 }
 let usageModelCounts={},usageModelSegments={},usageProjection={groups:new Map(),counts:{},segments:{}};
 function projectUsage(threads){
@@ -2116,11 +2190,11 @@ function projectUsage(threads){
   return {groups,counts,segments};
 }
 function renderBilling(){
-  const usage=data.codex.usage,account=telemetryFields({plan_type:usage?.plan_type,credits_balance:usage?.credits?.balance,has_credits:usage?.credits?.has_credits,unlimited:usage?.credits?.unlimited}).filter(([,value])=>value!=null);for(const id of ["overview-billing","overview-account-card"])if(panelNeeded(id))$(id).replaceChildren(account.length?metadataList(account.map(([key,value])=>[metricLabel(key),telemetryValue(value)])):node("p",ui("尚未取得帳戶用量資料"),"empty"));
+  const usage=data.codex.usage,account=telemetryFields({plan_type:usage?.plan_type,credits_balance:usage?.credits?.balance,has_credits:usage?.credits?.has_credits,unlimited:usage?.credits?.unlimited}).filter(([,value])=>value!=null);for(const id of ["overview-billing","overview-account-card"])if(panelNeeded(id)){if(account.length)setMetadata(id,account.map(([key,value])=>[metricLabel(key),telemetryValue(value)]));else renderProjection($(id),[],()=>$(id).replaceChildren(node("p",ui("尚未取得帳戶用量資料"),"empty")));}
 }
 function renderAllowance(id,usage){
   if(deferChart(id,()=>renderAllowance(id,usage)))return;
-  const target=$(id);target.replaceChildren(...(usage?.limits||[]).map(item=>{const panel=node("section",null,"allowance-window"),expired=item.resets_at&&new Date(item.resets_at)<new Date(),progress=node("progress"),status=node("p",null,"snapshot-at allowance-status");panel.append(node("h4",usageWindow(item.window_minutes)),metadataList([[ui("剩餘比例"),item.remaining_percent==null?"--":fmt(item.remaining_percent)+"%"],[ui("已使用"),item.used_percent==null?"--":fmt(item.used_percent)+"%"],[ui("重設時間"),item.resets_at?when(item.resets_at):ui("尚未提供")]]));if(item.remaining_percent!=null){progress.max=100;progress.value=item.remaining_percent;progress.setAttribute("aria-label",ui("剩餘比例")+" "+fmt(item.remaining_percent)+"%");panel.append(progress);}status.append(node("span",ui(expired?"等待來源更新":"最近更新")),node("time",when(usage.updated_at)));bindHelp(status,fieldDescription("資料狀態"));panel.append(status);return panel;}));if(!usage?.limits?.length)target.append(node("p",ui("尚未取得額度資料"),"empty"));
+  const target=$(id),previous=new Map([...target.querySelectorAll(":scope>.allowance-window")].map(panel=>[panel.dataset.quotaKey,panel])),panels=(usage?.limits||[]).map((item,index)=>{const key=String(item.window_minutes)+":"+index;let panel=previous.get(key);if(!panel){panel=node("section",null,"allowance-window");panel.dataset.quotaKey=key;const status=node("p",null,"snapshot-at allowance-status");status.append(node("span"),node("time"));panel.append(node("h4"),metadataList([]),node("progress"),status);}updateText(panel.querySelector("h4"),usageWindow(item.window_minutes));metadataList([[ui("剩餘比例"),item.remaining_percent==null?"--":fmt(item.remaining_percent)+"%"],[ui("已使用"),item.used_percent==null?"--":fmt(item.used_percent)+"%"],[ui("重設時間"),item.resets_at?when(item.resets_at):ui("尚未提供")]],panel.querySelector(".metadata-grid"));const progress=panel.querySelector("progress"),status=panel.querySelector(".allowance-status");progress.hidden=item.remaining_percent==null;progress.max=100;if(item.remaining_percent!=null)progress.value=item.remaining_percent;progress.setAttribute("aria-label",ui("剩餘比例")+" "+fmt(item.remaining_percent)+"%");updateText(status.querySelector("span"),ui(item.resets_at&&Date.parse(item.resets_at)<Date.now()?"等待來源更新":"最近更新"));updateText(status.querySelector("time"),when(usage.updated_at));bindHelp(status,fieldDescription("資料狀態"));return panel;});if(!panels.length){const empty=target.querySelector(":scope>.empty")||node("p",null,"empty");updateText(empty,ui("尚未取得額度資料"));panels.push(empty);}panels.push(...target.querySelectorAll(":scope>.wb-data-state"));WorkbenchUI.reconcileChildren(target,panels,{motion:false});
 }
 function renderUsage(){
   const usage=data.codex.usage,threads=data.codex.threads||[],groups=usageProjection.groups;
@@ -2138,8 +2212,8 @@ function renderAccountUsage(){
   let panel=$("account-usage-panel");if(!panel){panel=node("section",null,"panel");panel.id="account-usage-panel";$("usage-cards").after(panel);}
   const account=data.codex.account,summary=account?.account_usage?.summary;panel.hidden=!data.settings.observations.codex_account;if(panel.hidden)return;
   const names={lifetimeTokens:"帳戶 Token 合計",peakDailyTokens:"最高單日 Token",longestRunningTurnSec:"最長工作時間 (秒)",currentStreakDays:"目前連續使用 (天)",longestStreakDays:"最長連續使用 (天)"},items=Object.entries(names).filter(([key])=>Number.isFinite(summary?.[key])).map(([key,label])=>[ui(label),fmt(summary[key])]);
-  panel.replaceChildren(node("h3",ui("官方帳戶統計")),node("p",ui(account?.health==="ok"?"透過官方 Codex 介面取得, 最近查詢 ":"官方來源暫時未提供完整資料, 最近查詢 ")+when(account?.updated_at),"muted"));if(items.length)panel.append(metadataList(items));else panel.append(node("p",ui("官方帳戶統計尚未取得"),"empty"));
-  const buckets=account?.limits||{},limits=node("div",null,"official-quota-buckets");for(const [key,bucket]of Object.entries(buckets)){const section=node("section",null,"allowance-window");section.append(node("h4",bucket.limit_name||key));for(const window of [bucket.primary,bucket.secondary].filter(Boolean)){section.append(metadataList([[ui("額度視窗"),usageWindow(window.window_minutes)],[ui("剩餘比例"),window.remaining_percent==null?ui("尚未提供"):fmt(window.remaining_percent)+"%"],[ui("重設時間"),window.resets_at?when(window.resets_at):ui("尚未提供")]]));}limits.append(section);}if(limits.childElementCount)panel.append(limits);
+  if(!panel.querySelector(".official-account-content")){const body=node("div",null,"official-account-content");body.append(node("p",null,"muted"),node("div",null,"official-account-summary"),node("div",null,"official-quota-buckets"));panel.append(node("h3"),body);}updateText(panel.querySelector("h3"),ui("官方帳戶統計"));updateText(panel.querySelector(".official-account-content>.muted"),ui(account?.health==="ok"?"透過官方 Codex 介面取得, 最近查詢 ":"官方來源暫時未提供完整資料, 最近查詢 ")+when(account?.updated_at));const summaryRoot=panel.querySelector(".official-account-summary");if(items.length)setMetadata(summaryRoot,items);else renderProjection(summaryRoot,[],()=>summaryRoot.replaceChildren(node("p",ui("官方帳戶統計尚未取得"),"empty")));
+  const buckets=account?.limits||{},limits=panel.querySelector(".official-quota-buckets"),previous=new Map([...limits.children].map(section=>[section.dataset.quotaKey,section])),sections=[];for(const [key,bucket]of Object.entries(buckets)){let section=previous.get(key);if(!section){section=node("section",null,"allowance-window");section.dataset.quotaKey=key;section.append(node("h4"));}updateText(section.querySelector("h4"),bucket.limit_name||key);const lists=[section.querySelector("h4")];for(const [index,window]of [bucket.primary,bucket.secondary].filter(Boolean).entries())lists.push(metadataList([[ui("額度視窗"),usageWindow(window.window_minutes)],[ui("剩餘比例"),window.remaining_percent==null?ui("尚未提供"):fmt(window.remaining_percent)+"%"],[ui("重設時間"),window.resets_at?when(window.resets_at):ui("尚未提供")]],section.querySelectorAll(":scope>.metadata-grid")[index]));WorkbenchUI.reconcileChildren(section,lists,{motion:false});sections.push(section);}limits.hidden=!sections.length;WorkbenchUI.reconcileChildren(limits,sections,{motion:false});
 }
 function renderContexts(){
   const threads=data.codex.threads||[];
@@ -2263,7 +2337,7 @@ if(sameOrder(preferences.overview?.order,legacyOverviewDefault))preferences.over
 if(sameOrder(preferences.overview?.hidden,priorOverviewDefaultHidden)||sameOrder(preferences.overview?.hidden,overviewDefault.filter(id=>!overviewPriority.slice(0,16).includes(id)||/(?:error|cpu|refresh|read|environment|trigger)/.test(id)))||sameOrder(preferences.overview?.hidden,legacyOverviewHidden)||sameOrder(preferences.overview?.hidden,overviewDefault.filter(id=>!["overview-account-card","overview-account-quota","activity-chart"].includes(id))))preferences.overview.hidden=overviewDefaultHidden;
 let overviewOrder=[...new Set((Array.isArray(preferences.overview?.order)?preferences.overview.order:[]).filter(id=>overviewPanels.has(id)).concat(overviewDefault))],overviewHidden=new Set((Array.isArray(preferences.overview?.hidden)?preferences.overview.hidden:overviewDefaultHidden).concat(overviewDefault.filter(id=>id.endsWith("-statistics")&&!preferences.overview?.order?.includes(id))).filter(id=>overviewPanels.has(id)));
 function overviewNeeds(owner){return !$("view-overview")?.hidden&&overviewOrder.some(id=>!overviewHidden.has(id)&&cardLibrary.get(id)?.owner===owner);}
-function applyOverview(){for(const id of overviewOrder){const panel=overviewPanels.get(id);panel.hidden=overviewHidden.has(id);overviewGrid.append(panel);}preferences.overview={order:overviewOrder,hidden:[...overviewHidden]};arrangeOverview();}
+function applyOverview(){const panels=overviewOrder.map(id=>{const panel=overviewPanels.get(id);panel.hidden=overviewHidden.has(id);return panel;});WorkbenchUI.reconcileChildren(overviewGrid,panels,{motion:false});preferences.overview={order:overviewOrder,hidden:[...overviewHidden]};arrangeOverview();}
 function moveOverview(id,target,after=false){if(id===target)return;const next=overviewOrder.filter(key=>key!==id),index=next.indexOf(target);if(index<0)return;next.splice(index+(after?1:0),0,id);overviewOrder=next;applyOverview();saveView();renderOverviewSettings();feedback("tab-settings-message",ui("總覽圖表順序已更新"));}
 
 function cardOwner(element){return element.closest("#conversation-content,#projects-content,#subagents-content,#error-content,[id^='view-']")?.id||"view-overview";}
@@ -2279,7 +2353,7 @@ function setupOverviewCopies(){
   }
 }
 function renderOverviewCopies(){
-  const meter=$("overview-copy-device-usage"),m=data.monitor||{},total=m.physical_memory_bytes,available=m.available_memory_bytes,used=Number.isFinite(total)&&Number.isFinite(available)&&total>0&&available>=0&&available<=total?total-available:null;$("overview-copy-device-usage-updated").hidden=true;$("overview-copy-device-usage-updated").textContent=ui("更新時間")+": "+when(m.device_checked_at);meter.replaceChildren(metadataList([[ui("CPU 使用率"),usageMeter(m.cpu_usage_percent,ui("CPU"))],[ui("已使用記憶體"),usageMeter(used==null?null:Math.round(used/total*1000)/10,memorySize(used)+" / "+memorySize(total)),ui("可用記憶體")+": "+memorySize(available)]]));
+  const meter=$("overview-copy-device-usage"),m=data.monitor||{},total=m.physical_memory_bytes,available=m.available_memory_bytes,used=Number.isFinite(total)&&Number.isFinite(available)&&total>0&&available>=0&&available<=total?total-available:null;$("overview-copy-device-usage-updated").hidden=true;$("overview-copy-device-usage-updated").textContent=ui("更新時間")+": "+when(m.device_checked_at);setMetadata(meter,[[ui("CPU 使用率"),usageMeter(m.cpu_usage_percent,ui("CPU"))],[ui("已使用記憶體"),usageMeter(used==null?null:Math.round(used/total*1000)/10,memorySize(used)+" / "+memorySize(total)),ui("可用記憶體")+": "+memorySize(available)]]);
 
   for(const [id,sourceId]of overviewCopies){if(overviewHidden.has(id)&&(!overviewPanels.has(id+"-statistics")||overviewHidden.has(id+"-statistics")))continue;const source=chartViews.get(sourceId),note=id+"-note";if(source?.historyRecipe){source.historyRecipe.render(id,note,...source.historyRecipe.args);continue;}const recipe=source?.renderData;if(!recipe)continue;const args=recipe.args;
     if(recipe.kind==="rank")renderRankingCard(id,...args);else if(recipe.kind==="bars")bars(id,...args);else if(recipe.kind==="timeline")timeline(id,note,...args);else if(recipe.kind==="category")categoryTimeline(id,note,...args);else if(recipe.kind==="threads")activeThreadsTimeline(id,note,...args);
@@ -2359,7 +2433,7 @@ for(const id of ["accent-hex","font-family"])$(id).addEventListener("change",sav
 $("reduce-motion").addEventListener("change",()=>{appearance.reduceMotion=$("reduce-motion").checked;applyAppearance();saveView();feedback("settings-message",ui("外觀已更新"));});
 systemDark.addEventListener("change",applyAppearance);
 $("detail-close").addEventListener("click",()=>$("detail-dialog").close());
-$("detail-dialog").addEventListener("close",()=>{if($("detail-dialog").open)return;detail?.historyRequest?.abort();detail?.communicationRequest?.abort();cancelToolContent(detail);clearSkillTree();detail=null;detailHistory.length=0;const nav=$("detail-content").previousElementSibling;if(nav?.classList.contains("modal-tabs"))nav.remove();clearPayloadObservers($("detail-content"));for(const body of $("detail-content").querySelectorAll("tbody"))WorkbenchUI.cancelChildMotion?.(body);$("detail-content").replaceChildren();for(const [key,view]of tableViews)if(key.startsWith("detail:")){view.disclosure?.destroy();tableViews.delete(key);}updateDetailBack();});
+$("detail-dialog").addEventListener("close",()=>{if($("detail-dialog").open)return;detail?.historyRequest?.abort();detail?.communicationRequest?.abort();cancelToolContent(detail);clearSkillTree();detail=null;detailHistory.length=0;const nav=$("detail-content").previousElementSibling;if(nav?.classList.contains("modal-tabs"))nav.remove();clearPayloadObservers($("detail-content"));for(const body of $("detail-content").querySelectorAll("tbody"))WorkbenchUI.cancelChildMotion?.(body);$("detail-content").replaceChildren();for(const [key,view]of tableViews)if(key.startsWith("detail:")){view.disclosure?.destroy();view.updateGuard?.destroy();tableViews.delete(key);}updateDetailBack();});
 $("detail-back").addEventListener("click",async()=>{const previous=detailHistory.pop();if(!previous)return;if(previous.view.kind==="jev")await openJev(previous.view.call,previous.view.thread,false,previous.scroll);else{openDetail(previous.view,false);$("detail-content").scrollTop=previous.scroll;}updateDetailBack();});
 for(const dialog of document.querySelectorAll("dialog"))dialog.addEventListener("click",event=>{if(event.target!==dialog)return;const rect=dialog.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)dialog.close();});
 for(const tab of document.querySelectorAll("[data-tab]")){

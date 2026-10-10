@@ -9,6 +9,7 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 | 啟動與程序管理 | CLI 建置前端、保留取得失敗時的有效資產, 啟動視窗關閉時結束其所屬子程序 |
 | 循環記錄檔 | 啟動記錄檔與執行中診斷分別輪替, 記錄啟動、更新、前端錯誤及結束事件 |
 | 模型 API 呼叫監測 | 讀取 Codex diagnostics 中的 HTTP、WebSocket、連線及重試事件, 依事件類型分開統計 |
+| 顯示更新保護 | hover 時局部更新已識別數值並保留列順序, 焦點與文字選取保留內容, 明確暫停控制保留資料畫面, 恢復時套用最新資料 |
 | 本機即時更新 | 來源變更觸發收集, 一個畫面共用一條 SSE 直接接收快照與 Log |
 | 效能 Debug | 監測程式 Tab 切換, 查看最近數值指標與階段明細, 記錄檔最多 32 MiB |
 | 對話與代理關聯 | 對話、子代理程式及 Context 分頁, 提供代理訊息明細, 顯示父子角色與 Thread ID, Context 列可點選 |
@@ -28,7 +29,7 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 | 明細導覽 | 主要明細由列點選開啟, 對話明細包含按需讀取的 Context 分頁, 列內連結提供不同紀錄或個別操作, My dots 活動、產出與電腦可查看已有資訊 |
 | 表格顯示 | 預設顯示主要欄位, 保留欄位設定, 空資料隱藏表頭並顯示提示, 分頁導引置中且提供第一頁與最後一頁 |
 | 樹狀明細 | 專案對話與技能檔案採可收合的階層, 預設收合, SVG 表示資料夾與檔案類型 |
-| 檔案大小檢查 | 進入檔案頁自動檢查, 顯示期間每分鐘更新, 可手動重新檢查, 每次最多 100 個已觀察檔案 |
+| 檔案大小檢查 | 進入檔案頁自動檢查, 顯示期間隨來源更新檢查, 間隔至少一分鐘, 閒置或失焦時至少五分鐘, 可手動重新檢查, 每次最多 100 個已觀察檔案 |
 
 ## 待實作
 
@@ -49,7 +50,7 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 | TOML、XML、CSV / TSV 結構預覽 | 原文可讀取, WBUI 尚未內建資料解析 | WBUI 定義格式、讀取上限與錯誤處理, LAM 依來源格式採用 |
 | SQL AST、完整 YAML 與 Markdown | 已有 SQL 排版、YAML 子集及 Markdown 預覽 | WBUI 依使用情境補齊 dialect、節點、source map 與格式規格 |
 | 更多程式碼 parser | WBUI 的 `registerParser` 用於資料結構解析, 程式碼已有通用 tokenizer 與可視範圍上色 | WBUI 另定程式碼上色介面、逐行狀態、grammar 授權、語意 token 與 Worker 取消, LAM 保留來源格式及完整原文 |
-| 共用元件與互動 | 虛擬表格、組合搜尋、條件篩選、sortable list、列拖曳、跨容器拖放、圖表縮放及面板編輯列為候選 | WBUI 維護[元件盤點](https://github.com/gaze9999/workbench-ui/blob/ce243e1d30cbb2c801d99c77b770afe416e0e2c3/docs/component-coverage.md)與[互動待辦](https://github.com/gaze9999/workbench-ui/blob/ce243e1d30cbb2c801d99c77b770afe416e0e2c3/docs/interaction-roadmap.md), LAM 按資料用途選用 |
+| 共用元件與互動 | 虛擬表格、組合搜尋、條件篩選、sortable list、列拖曳、跨容器拖放、圖表縮放及面板編輯列為候選 | WBUI 維護[元件盤點](https://github.com/gaze9999/workbench-ui/blob/v0.9.0/docs/component-coverage.md)與[互動待辦](https://github.com/gaze9999/workbench-ui/blob/v0.9.0/docs/interaction-roadmap.md), LAM 按資料用途選用 |
 | 遠端 LAM 存取、配對及登入 | 已有[遠端存取設計](remote-access.md), 尚未實作 | 待確認部署、HTTPS、權限及配對規格, 目前服務維持 loopback |
 
 ## 待驗收
@@ -69,7 +70,7 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 | 資料 | 傳遞方式 | 範圍 |
 | --- | --- | --- |
 | 整理結果、回補進度、來源讀取結果 | 快照的狀態欄位 | 完整批次與來源健康狀態 |
-| CPU、記憶體、GPU 使用量 | 快照的監控欄位 | 來源收集與手動更新時的樣本 |
+| CPU / 記憶體使用量與 GPU 型號 / 容量 | 快照的監控欄位 | 來源更新或重新連線時的 CPU / 記憶體樣本, GPU 資訊在啟動時取得 |
 | 對話、工具、Token、活動統計與 Log | SSE 完整投影 | 目前時間範圍, 沿既有資料上限 |
 | Debug 效能記錄 | 快照與獨立 debug SSE 事件 | 最近 150 筆, 診斷事件不觸發來源收集 |
 | Context、工具回覆、文件與檔案內文 | 保持按需查詢 | 閱讀權限、遮蔽、容量與分批讀取, 不放入廣播事件 |
@@ -78,7 +79,7 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 
 空資料、列動作、分頁邊界、樹狀圖示與載入狀態的行為參考 [PrimeNG Table](https://primeng.dev/table)、[HeroUI Table](https://beta.heroui.com/docs/components/table) 與 [Nuxt UI Table](https://github.com/nuxt/ui/blob/v4/src/runtime/components/Table.vue)、[Tree](https://github.com/nuxt/ui/blob/v4/src/runtime/components/Tree.vue), 採用項目依 LAM 的資料與操作用途決定
 
-後續優先評估大型表格的可視範圍呈現、階層導覽、組合搜尋與欄位條件篩選, 其餘候選沿 [WBUI 元件盤點](https://github.com/gaze9999/workbench-ui/blob/ce243e1d30cbb2c801d99c77b770afe416e0e2c3/docs/component-coverage.md) 管理
+後續優先評估大型表格的可視範圍呈現、階層導覽、組合搜尋與欄位條件篩選, 其餘候選沿 [WBUI 元件盤點](https://github.com/gaze9999/workbench-ui/blob/v0.9.0/docs/component-coverage.md) 管理
 
 程式碼上色可參考 VS Code 的 [TextMate 語法上色](https://code.visualstudio.com/api/language-extensions/syntax-highlight-guide) 與 [語意上色](https://code.visualstudio.com/api/language-extensions/semantic-highlight-guide). TextMate 依 grammar 分詞, 語意 token 由能分析專案的 provider 提供, 兩者與 TOML、CSV 等結構解析分開評估
 

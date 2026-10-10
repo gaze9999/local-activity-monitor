@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -18,6 +19,27 @@ THREAD = "00000000-0000-0000-0000-000000000001"
 
 
 class WorktreeTests(unittest.TestCase):
+    def test_git_metadata_notifications_invalidate_recent_cache(self):
+        self.collector.refresh(self.projects, [], {})
+        roots = self.collector.notification_roots()
+        self.assertIn(self.repo/'.git', roots)
+        linked_metadata = Path(self.git(self.linked, 'rev-parse', '--absolute-git-dir').decode().strip())
+        self.assertIn(linked_metadata, roots)
+        app = Dashboard(self.home, codex=False)
+        app.worktrees = self.collector
+        app.observations['worktrees'] = True
+        app.watch_sources()
+        try:
+            self.collector.next_read = time.monotonic()+30
+            app.source_changed.clear()
+            self.git(self.repo, 'switch', '-q', '-c', 'fixture-notified')
+            self.assertTrue(app.source_changed.wait(3))
+            self.assertEqual(self.collector.next_read, 0)
+            value = self.collector.refresh(self.projects, [], {})
+            self.assertTrue(any(item['branch'] == 'fixture-notified' for item in value['items']))
+        finally:
+            app.close_sources()
+
     def setUp(self):
         if shutil.which("git") is None:
             self.skipTest("Git is unavailable")

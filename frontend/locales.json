@@ -2198,7 +2198,7 @@
     "來源資料變更時收集, 完成後即時推送至畫面": "Collects source changes and pushes completed data to this page",
     "外觀或顯示數量不在可用範圍": "Appearance or display count is out of range",
     "連線中斷, 可手動重連": "Disconnected; reconnect manually",
-    "互動期間保留列表, 離開後套用最新資料": "Keep the current list during interaction; apply the latest data when you leave",
+    "操作期間保留列順序, 離開後套用最新列表": "Keep row order during interaction; apply the latest list when you leave",
     "來源監聽失敗, 請重新啟動服務": "Source monitoring failed; restart the service",
     "連線中斷, 請重新整理頁面": "Disconnected; reload the page",
     "目前時間範圍沒有 SQL 紀錄": "No SQL records in the current time range",
@@ -2231,7 +2231,15 @@
     "寫入耗時 (ms)": "Write time (ms)",
     "執行時間 (ms)": "Uptime (ms)",
     "工作階段": "Session",
-    "階段": "Phase"
+    "階段": "Phase",
+    "暫停顯示更新": "Pause display updates",
+    "恢復顯示更新": "Resume display updates",
+    "顯示已暫停": "Display paused",
+    "只暫停顯示, 來源仍持續收集. 恢復時直接套用最新資料": "Only the display is paused; source collection continues. Resume shows the latest data",
+    "裝置取樣時間": "Device sample time",
+    "裝置使用量隨來源更新取樣, 閒置時保留最近一次取樣": "Device usage is sampled on source updates; idle periods retain the latest sample",
+    "狀態依據時間": "Status evidence time",
+    "圖表無法顯示, 等待來源更新": "Could not display the chart; waiting for a source update"
   },
   "ja": {
     "概要": "概要",
@@ -4432,7 +4440,7 @@
     "來源資料變更時收集, 完成後即時推送至畫面": "ソースの変更を収集し, 完了したデータを画面に配信します",
     "外觀或顯示數量不在可用範圍": "外観または表示件数が範囲外です",
     "連線中斷, 可手動重連": "接続が切断されました, 手動で再接続できます",
-    "互動期間保留列表, 離開後套用最新資料": "操作中は一覧を維持し、離れたら最新データを反映",
+    "操作期間保留列順序, 離開後套用最新列表": "操作中は行の順序を維持し、離れたら最新の一覧を反映",
     "來源監聽失敗, 請重新啟動服務": "データ監視に失敗しました。サービスを再起動してください",
     "連線中斷, 請重新整理頁面": "接続が切れました。ページを再読み込みしてください",
     "目前時間範圍沒有 SQL 紀錄": "現在の期間に SQL 記録はありません",
@@ -4465,6 +4473,14 @@
     "寫入耗時 (ms)": "書き込み時間 (ms)",
     "執行時間 (ms)": "稼働時間 (ms)",
     "工作階段": "セッション",
-    "階段": "段階"
+    "階段": "段階",
+    "暫停顯示更新": "表示の更新を一時停止",
+    "恢復顯示更新": "表示の更新を再開",
+    "顯示已暫停": "表示の更新を停止中",
+    "只暫停顯示, 來源仍持續收集. 恢復時直接套用最新資料": "表示のみを停止し, データの収集は継続します. 再開時に最新のデータを表示します",
+    "裝置取樣時間": "デバイスの測定時刻",
+    "裝置使用量隨來源更新取樣, 閒置時保留最近一次取樣": "デバイス使用量はデータ更新時に測定し, 待機中は最新の測定値を保持します",
+    "狀態依據時間": "状態の根拠となる時刻",
+    "圖表無法顯示, 等待來源更新": "グラフを表示できません, データの更新を待っています"
   }
 }
