@@ -68,3 +68,28 @@ class ContextDetailTests(unittest.TestCase):
             second.codex.refresh()
             self.assertEqual(second.codex.read_bytes,0)
             self.assertEqual(len(second.codex.snapshot()['threads'][0]['agent_messages']),2)
+
+    def test_context_record_offsets_stay_stable_on_append_and_edit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            sessions = home/'sessions'
+            sessions.mkdir()
+            identity = '00000000-0000-4000-8000-000000000001'
+            stamp = datetime.now(timezone.utc).isoformat()
+            def record(text):
+                return json.dumps({'timestamp':stamp,'type':'response_item','payload':{'type':'message','role':'user','content':[{'type':'input_text','text':text}]}})+'\n'
+            path = sessions/('rollout-'+identity+'.jsonl')
+            prefix = json.dumps({'timestamp':stamp,'type':'session_meta','payload':{'id':identity}})+'\n'
+            path.write_text(prefix+record('Old one')+record('Old two'),encoding='utf-8')
+            dashboard = Dashboard(home,codex=True)
+            dashboard.codex.refresh()
+            first = dashboard.codex.context_detail(identity)['text']
+            with path.open('a',encoding='utf-8') as stream:
+                stream.write(record('New one'))
+            appended = dashboard.codex.context_detail(identity)['text']
+            self.assertEqual([item['record_offset'] for item in first], [item['record_offset'] for item in appended[:2]])
+            self.assertEqual(len(set(item['record_offset'] for item in appended)),3)
+            path.write_text(prefix+record('Old one')+record('New two')+record('New one'),encoding='utf-8')
+            changed = dashboard.codex.context_detail(identity)['text']
+            self.assertEqual(changed[1]['record_offset'],first[1]['record_offset'])
+            self.assertEqual(changed[1]['content'][0]['text'],'New two')

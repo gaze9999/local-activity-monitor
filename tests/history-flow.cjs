@@ -11,6 +11,7 @@ async page=>{
   if(!api.total||api.count!==api.total||api.unique!==api.total||api.invalid!==400)throw Error(JSON.stringify(api));
   await page.evaluate(()=>{display.table=2;openHistory('activity','mcp');});
   await page.waitForFunction(()=>detail.historyPage&&!detail.historyLoading);
+  const locations=await page.evaluate(()=>Object.entries(historySections).map(([key,[namespace,section]])=>{const button=document.querySelector('[data-history-section="'+section+'"]');return {key,section,namespace,local:button?.closest('.panel')===document.getElementById(key)?.closest('.panel')};}));if(locations.length!==5||locations.some(item=>!item.local)||await page.locator('.log-history-library').count())throw Error('History entry placement');
   const first=await page.locator('#detail-content tbody').textContent();
   await page.locator('#detail-content').getByRole('button',{name:'下一頁',exact:true}).click();
   await page.waitForFunction(()=>detail.historyIndex===1&&!detail.historyLoading);
@@ -29,5 +30,7 @@ async page=>{
   await page.evaluate(()=>openHistory('activity','mcp'));await page.waitForFunction(()=>detail.historyError&&!detail.historyLoading);
   await page.unroute('**/api/history?**');await page.locator('#detail-dialog').getByRole('button',{name:'重新整理',exact:true}).click();
   await page.waitForFunction(()=>detail.historyPage&&!detail.historyLoading);await page.locator('#detail-dialog').evaluate(el=>el.close());
-  if(errors.length)throw Error(JSON.stringify(errors));return {api,paging:true,errorRetry:true,errors};
+  for(const item of locations){await page.evaluate(({namespace,section})=>openHistory(namespace,section),item);await page.waitForFunction(section=>detail.section===section&&detail.historyPage&&!detail.historyLoading,item.section);const count=await page.locator('#detail-content tbody tr').count();if(count>2)throw Error('Unbounded history page '+item.section);await page.locator('#detail-dialog').evaluate(el=>el.close());}
+  await page.route('**/api/history?**',route=>route.fulfill({contentType:'application/json',body:JSON.stringify({items:[],total:0,limit:2,next_cursor:null})}));await page.evaluate(()=>openHistory('activity','sql'));await page.waitForFunction(()=>detail.historyPage&&!detail.historyLoading);if(!await page.locator('#detail-content thead').isHidden()||!await page.locator('#detail-content').getByText('沒有資料',{exact:true}).count()||!await page.locator('#detail-content').getByRole('button',{name:'下一頁',exact:true}).isDisabled())throw Error('Empty history state');await page.unroute('**/api/history?**');await page.locator('#detail-dialog').evaluate(el=>el.close());
+  if(errors.length)throw Error(JSON.stringify(errors));return {api,paging:true,errorRetry:true,locations,empty:true,errors};
 }

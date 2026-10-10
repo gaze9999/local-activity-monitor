@@ -1,5 +1,9 @@
 # 程式架構與擴充
 
+任務與驗證分流見 [AI 入口](../AI.md), 實際共用 API 以 `workbench-ui.json` 選定修訂為準. LAM 自有 table adapter 與 WBUI `createTable` 分開, 前者先初始化分頁再掛載當頁, 完整來源 / ID / 排序 / 明細仍由 LAM 管理
+
+摘要與卡片來源沿 `metricSources` 選取, `summaries` / `cardLayouts` 保存名稱、來源、群組及穩定 ID. 自訂群組移動既有節點而非重建 instance, 診斷分享另外投影去識別化副本, 不改本機完整設定, 格式見[設定規格](settings-format.md)
+
 ## 執行環境
 
 Python 3.10+ 標準函式庫, 原生 HTML / JavaScript / CSS, setuptools package assets. 服務綁定 loopback, `Host` / `Origin` / `Sec-Fetch-Site` 驗證保留. 來源資料庫採唯讀連線, LAM 的回補資料庫使用交易寫入

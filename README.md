@@ -19,7 +19,7 @@
 
 介面支援繁體中文、English 與日本語, 提供深淺模式、字型、強調色、圖表形式、篩選、分頁及拖曳排序. 偏好設定可匯出與匯入 JSON, 操作明細按需載入
 
-實作與待補項目見 [功能清單](docs/features.md)
+目前功能與範圍見 [功能清單](docs/features.md)
 
 ## 從原始碼啟動
 
@@ -128,7 +128,7 @@ local-activity-monitor --codex --open
 
 Token 分析使用每個對話的最新累計快照, Cached input 與 Reasoning output 為子項目. 帳戶額度顯示來源回報的剩餘比例與重設時間, 來源缺值顯示 `--`, 已確認零值顯示 `0`
 
-主設定的「官方帳戶查詢」預設關閉. 啟用後透過已登入的 Codex CLI 取得方案、額度與帳戶用量, 查詢結果至少快取 60 秒. My dots 與遠端活動使用 Codex 桌面快取, 遠端排程設定、下次執行時間及即時裝置連線尚未串接
+主設定的「官方帳戶查詢」預設關閉. 啟用後透過已登入的 Codex CLI 取得方案、額度與帳戶用量, 查詢結果至少快取 60 秒. My dots 與遠端活動顯示 Codex 桌面快取的近期活動摘要
 
 一般更新收集選定 metadata, 完整 Git、SQL、工具輸入輸出、Log 與技能文件在開啟明細時受限讀取並遮蔽 credentials. 服務使用 loopback 與 Host / Origin 檢查. 讀取範圍、保存期限與上限見 [資料盤點](docs/data-inventory.md)
 
@@ -185,12 +185,11 @@ node tests/test_usage_projection.mjs
 
 ## 文件
 
+- [AI 入口](AI.md): 依任務查找來源、固定 WBUI 版本、責任與 focused 驗證
+- [功能清單](docs/features.md#已實作): 目前功能與資料範圍
 - [使用說明](docs/usage.md): 圖表、表格、明細與設定
-- [程式架構](docs/architecture.md): 資料流、模組、API 與擴充
-- [設定檔格式](docs/settings-format.md): 欄位、驗證與相容性
-- [資料盤點](docs/data-inventory.md)與[錯誤觀察](docs/error-observation.md): 來源、範圍與資料意義
-- [卡片庫](docs/card-library.md): 可用圖表形式
-- [維護與驗收](docs/maintenance.md)、[測試與建置](docs/validation.md)與[效能與資料上限](docs/performance-report.md): 開發流程及資源管理
+- [設定檔格式](docs/settings-format.md)、[卡片庫](docs/card-library.md): 欄位、驗證、圖表與自訂卡片
+- [文件索引](docs/README.md): 資料範圍、架構、維護及驗證入口
 
 ## 授權
 
@@ -199,5 +198,3 @@ LAM 原始碼與文件採 [MIT License](LICENSE). 內附 Workbench UI 與原生�
 歷史預設保存 90 天, 可在設定調整保存天數, 0 表示不自動刪除. 資料庫保存量與畫面 / 查詢筆數上限分開, 來源依輪替游標分批回補, 右上角顯示活動紀錄保存期限, 回補進行時顯示進度
 
 Release 內的程式與前端產物由建置流程產生, 不包含使用者資料、暫存檔或監測資料庫. 歷史固定保存於 `CODEX_HOME/monitoring`, 更新程式版本不搬移或重設資料. SQLite 格式升級前備份, 不支援的格式保留原檔並回報無法讀取. 備份執行中的 WAL 資料庫應使用 SQLite backup API, 不只複製單一資料庫檔案, 一般啟動不自動 VACUUM
-
-首次啟動引導、其他電腦的完整排程、My dots 即時連線狀態、一般檔案內文與分批續查見[功能清單](docs/features.md). 對外開放 LAM 的候選方案見[遠端存取設計](docs/remote-access.md), 目前服務維持 loopback

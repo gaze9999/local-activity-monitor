@@ -1,5 +1,80 @@
 # 測試與建置
 
+## 0.14.0 歷史分頁、代理關聯與 Context 更新
+
+2026-10-11 00:02, Asia/Taipei, 受測來源為 `b0275e5` 之後的本機 0.14.0 工作目錄, `workbench-ui.json` 維持 `cf13a9417d752001ec388ab74a0f0fddab238066` / WBUI 0.9.0, 下方各節保留先前受測來源
+
+| 來源 | SHA-256 前 16 字元 |
+| --- | --- |
+| `frontend/app.js` | `97a61bee47b153eb` |
+| `frontend/style.css` | `e4e61c328b7edb5d` |
+| `frontend/index.html` | `5281ed100f40ee9c` |
+| `frontend/locales.json` | `4ce46e1098074cae` |
+| `src/local_activity_monitor/collectors.py` | `7897e7fa6727974e` |
+
+| 檢查 | 結果與範圍 |
+| --- | --- |
+| 歷史紀錄 | Edge 155.0.4283.45 的 `history-flow` 通過 SQL / SQLite、網路、MCP、錯誤、技能各自的頁內入口及分頁, 175 筆 MCP 紀錄以 cursor 逐頁讀取皆保留唯一 ID, 首末 / 前後頁、503 恢復、無效 cursor 400 與空資料隱藏表頭通過 |
+| Context 顯示更新 | `context-refresh-flow` 核對修改段落與追加紀錄, 未變動紀錄保留 DOM、捲動區、展開狀態與捲動位置, 讀取失敗保留內容, 恢復及明細重建後的捲動位置通過 |
+| 代理與用途 | 同一流程核對父對話 / 子代理入口及實際 thread ID, Goal / Plan 歷史標籤移至獨立「已觀察用途」欄位, 20 欄表頭與儲存格一致, 1366 / 390 / 320 px 無頁面水平溢位 |
+| 明細回歸 | `context-agent-flow`、`context-layout-flow` 核對來源空 / 尚未記錄、遮蔽與請求取消、父子來源分開及三語系窄畫面 |
+| 表格與更新 | `files-navigation-flow`、`partial-refresh-flow`、`tab-consistency-flow` 通過, 1,000 筆檔案來源只掛載 10 列, ID / Enter / Space / 零值 / 分頁 / 搜尋保留, 本次冷開啟合成樣本 567.4 ms |
+| Python 與建置 | 前端建置 16/16 通過, Context / history store / monitor state / performance debug 合計 38 筆, 37 通過、1 因 Windows 未允許建立 symlink 而略過, Context byte offset 在追加及同長度修改後保留原紀錄身分 |
+
+Context 來源讀取仍使用既有有界、按需端點, 本次增量處理在顯示層, 不新增常駐內容保存或 SSE 變更, 代理關聯入口使用已觀察的 parent_thread_id, 不將子對話訊息冒充父對話訊息, 換頁動畫以目前 pin 的 CSS 相容規則限制捲動範圍, 共用修正另由 WBUI 0.10.0 提供
+
+測試使用自行建立的 `serve_loading_fixture.py`、隔離 SQLite 與合成訊息, 不讀取正式帳戶內容, 正式 8787 服務未重新啟動, 使用端 pin 未更換, 本輪未執行五平台包建置或 Firefox / WebKit
+
+本次調整 `frontend/app.js`、`frontend/index.html`、`frontend/style.css`、`frontend/locales.json`、`src/local_activity_monitor/collectors.py`、`tests/history-flow.cjs`、`tests/test_context_detail.py`, 新增 `tests/context-refresh-flow.cjs`, 同步 `AI.md`、`docs/features.md`、`docs/usage.md`、`docs/maintenance.md` 與本驗證紀錄, 版本來源 `pyproject.toml`、`src/local_activity_monitor/__init__.py` 由已發布的 0.13.0 遞增至 0.14.0
+
+### 本批交付檔案
+
+- 文件、教學與 AI 入口: `AI.md`、`README.md`、`docs/README.md`、`docs/architecture.md`、`docs/card-library.md`、`docs/features.md`、`docs/maintenance.md`、`docs/performance-report.md`、`docs/settings-format.md`、`docs/usage.md`、`docs/validation.md`
+- LAM 畫面、語系與樣式: `frontend/app.js`、`frontend/index.html`、`frontend/locales.json`、`frontend/style.css`
+- 版本、來源清單與索引: `pyproject.toml`
+- LAM 資料與診斷: `src/local_activity_monitor/__init__.py`、`src/local_activity_monitor/collectors.py`、`src/local_activity_monitor/monitor_state.py`、`src/local_activity_monitor/performance_debug.py`
+- 測試與合成驗證: `tests/chart-copy-flow.cjs`、`tests/context-refresh-flow.cjs`、`tests/cpu-theme-flow.cjs`、`tests/debug-flow.cjs`、`tests/diagnostic-settings-flow.cjs`、`tests/files-navigation-flow.cjs`、`tests/history-flow.cjs`、`tests/partial-refresh-flow.cjs`、`tests/serve_loading_fixture.py`、`tests/settings-cards-flow.cjs`、`tests/test_context_detail.py`、`tests/test_monitor_state.py`、`tests/test_performance_debug.py`
+
+## AI 文件入口
+
+[AI.md](../AI.md) 按資料來源、畫面 / 更新、卡片 / 設定、診斷與固定 WBUI 版本提供實作及 focused 測試路徑. README、功能、卡片庫、設定格式與架構同步目前候選, 分清 LAM 已採用的 0.9.0 與相鄰 WBUI 未交付的新能力
+
+本次只更新文件與本機指引, 不改 LAM runtime、資料庫或 SSE. 文件核對參照實際來源 / 型別 / pin、相對連結 / 程式碼區塊及本機 textlint / 人工語意複核, 下節保留先前行為測試的受測來源與證據
+
+2026-10-10 文件整理另加入[文件索引](README.md), README 保留已實作功能與操作入口, 待辦及遠端設計仍留 docs. 14 份公開 Markdown 文件的連結 / 標題 / 程式碼區塊、本機 textlint 與人工複核, 不重跑 LAM 行為測試, 元件教學由 WBUI 的文件與合成流程驗證
+
+本輪新增 `docs/README.md`, 調整 `README.md`、`AI.md` 與 `docs/validation.md`. 既有未提交的其他來源變更保留
+
+## 2026-10-10 工作目錄驗證
+
+受測來源為 `b0275e5` 之後的本機 `0.13.0` 未提交修改, Python 3.12.14、Node.js 22.19.0、Microsoft Edge 155.0.4283.45 headless. LAM 保持 `workbench-ui.json` 指定的 WBUI `cf13a9417d752001ec388ab74a0f0fddab238066` / 0.9.0, 未採用相鄰 WBUI 0.10.0 候選. 本輪未修改 SSE, 未重新啟動正式服務
+
+受測檔案 SHA-256 前 16 字元:
+
+| 檔案 | 來源 hash |
+| --- | --- |
+| `frontend/app.js` | `34fe264eb1a3aa07` |
+| `frontend/style.css` | `685b5a78823c3c1b` |
+| `frontend/index.html` | `25801082f9dcc830` |
+| `frontend/locales.json` | `7d23da216121f392` |
+| `monitor_state.py` | `d8214f61dec39654` |
+| `performance_debug.py` | `4ccac60ef774341a` |
+
+| 檢查 | 結果與範圍 |
+| --- | --- |
+| 檔案頁 | `files-navigation-flow.cjs` 通過隱藏 / 可見頁首次只掛載 10 列、完整 1,000 筆來源、排行、分頁、Enter / Space 對應目前 ID、metadata 零值、搜尋換頁及保留 DOM. 900 px 直向、390 / 320 px 無頁面溢位 |
+| 設定與卡片 | `settings-cards-flow.cjs` 通過來源 / 自訂卡片與群組、排序及取消、穩定 ID、Goal / Plan 實際觀察、回補完成 / 未完成文案、120 px 載入及五種寬度 |
+| 更新 | `stable-refresh-flow.cjs`、`partial-refresh-flow.cjs`、`table-stream-interaction-flow.cjs` 通過 DOM / 焦點 / 頁碼保留、hover 數值局部更新、保留列順序、焦點保護、離開套用最新值、背景暫停動畫、系統減少動畫及來源更新後恢復 |
+| 資料與布局 | `chart-copy-flow.cjs`、`loading-layout-flow.cjs` 通過合成錯誤類型 / Log 等級、空資料文案、帳戶零值 / false、卡片不重疊、頁尾位置及三種寬度 |
+| CPU / 主題 | `cpu-theme-flow.cjs` 通過 CPU 零值與缺值分開、棕色主題 / 共用 tokens 及直向布局 |
+| 診斷設定副本 | `diagnostic-settings-flow.cjs` 通過自訂名稱 / 路徑 / 數值 ID 去識別化、gzip 往返、JSON 備用方式, 本機設定完整保留. 合成樣本 18,121 bytes 壓縮為 662 bytes |
+| Debug | `debug-flow.cjs` 通過主設定開關、路徑、21 筆隔離紀錄、32 MiB 上限、無收集 heartbeat、關閉停止記錄及隱藏面板. 三語系各 1366 / 390 / 320 px 無溢位 |
+| 來源與建置 | 前端建置與 `test_frontend_build.py` 16/16、`test_performance_debug.py` 8/8、`test_monitor_state.py` 18/18 通過, JavaScript runtime / 頁面指標 / 用量投影 focused checks 通過 |
+
+瀏覽器使用 `tests/serve_loading_fixture.py` 的 demo threads 與隔離 SQLite, 不讀取正式帳戶或實際來源內容. 同一瀏覽器流程可將各 `tests/*-flow.cjs` 匯出的函式交給 Playwright Page 執行, fixture 服務及瀏覽器由測試建立者清理. 具體效能樣本見[效能紀錄](performance-report.md)
+
+上述結果涵蓋合成資料及指定操作, 實機來源、Firefox / WebKit、輔助技術、完整 WCAG 與長時間 GC 後記憶體尚未驗證. 不把相鄰 WBUI 候選的檢查當成此固定版本已採用的新能力
+
 ## 原始碼檢查
 
 需要 Python 3.10+ 與已準備的 WBUI 資產. 建置頁面後以 checkout 的 `src` 執行測試

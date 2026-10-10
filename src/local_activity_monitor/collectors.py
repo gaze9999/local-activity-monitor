@@ -1033,17 +1033,21 @@ class CodexCollector:
                     stream.seek(start)
                     raw = stream.read(end-start)
                 lines = raw.split(b'\n')
+                record_offset = start
                 if start:
+                    record_offset += len(lines[0])+1
                     lines = lines[1:]
                 messages = []
                 for line in lines:
+                    offset = record_offset
+                    record_offset += len(line)+1
                     if not line or len(line)>1024*1024:
                         continue
                     try:
                         record = json.loads(line)
                         value = visible_context_record(record)
                         if value is not None:
-                            messages.append({'timestamp':timestamp(record.get('timestamp')),**value})
+                            messages.append({'record_offset':offset,'timestamp':timestamp(record.get('timestamp')),**value})
                     except (ValueError,TypeError,AttributeError,RecursionError):
                         continue
                 return {'text':complete_payload(messages[-32:])['value'],'scope':'preceding_visible_messages' if call_id else 'latest_visible_messages','truncated':start>0 or len(messages)>32,'context_state':'recorded' if messages else 'not_recorded','masked':payload_masking.get()}

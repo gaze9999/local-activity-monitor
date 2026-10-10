@@ -35,6 +35,7 @@ class PerformanceDebugTests(unittest.TestCase):
         self.debug.record('collection', {'cpu_ms': 100})
         self.assertEqual(saved, self.path.read_bytes())
         self.assertNotIn(b'PRIVATE', saved)
+        self.assertEqual(self.debug.snapshot()['path'], str(self.path))
         record = self.debug.snapshot()['records'][1]
         self.assertEqual(record['cpu_ms'], 1.5)
         self.assertNotIn('read_bytes', record)

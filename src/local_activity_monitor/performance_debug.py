@@ -181,4 +181,5 @@ class PerformanceDebug:
             self.load()
             return {"enabled": self.enabled, "health": self.health, "error_type": self.error_type, "active_streams": self.active_streams,
                 "byte_limit": self.FILE_BYTES*self.FILE_COUNT, "bytes": sum(file["bytes"] for file in self.files), "files": list(self.files),
+                "path": str(self.path) if self.path is not None else None,
                 "record_limit": self.RECORD_LIMIT, "records": [dict(record) for record in reversed(self.records)]}

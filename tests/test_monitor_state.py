@@ -15,6 +15,7 @@ class MonitorStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)/'monitor.jsonl'
             state = MonitorState(path, defer_device=True)
+            self.assertEqual(state.snapshot()['log_path'], str(path))
             self.assertTrue(state.frontend_failed(report))
             self.assertFalse(state.frontend_failed(report))
             for index in range(30):
