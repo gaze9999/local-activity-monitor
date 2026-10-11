@@ -71,10 +71,12 @@ def read_schedules(home: Path, source_info=None, metadata=None):
     except (OSError, sqlite3.Error):
         result["health"] = report["health"] = "unavailable" if path.is_file() else "missing"
     result['remote_health'] = 'cache_only'
-    result['remote_activities'] = [{
+    result['remote_activities'] = sorted([{
         'thread_id':identity, 'name':entry.get('thread_name'), 'host_id':entry.get('_host_id'),
-        'kind':entry.get('trigger'), 'last_run_at':entry.get('updated_at'), 'status':entry.get('status')
-    } for identity,entry in (metadata or {}).items() if entry.get('environment') == 'remote' and entry.get('trigger') in ('schedule','automation','heartbeat','dot','orbit')][:SCHEDULE_LIMIT]
+        'environment':entry.get('environment'), 'kind':entry.get('trigger'),
+        'last_run_at':entry.get('updated_at'), 'status':entry.get('status')
+    } for identity,entry in (metadata or {}).items() if entry.get('environment') in ('remote','cloud') and entry.get('trigger') in ('schedule','automation','heartbeat')],
+        key=lambda item:item['last_run_at'] or '', reverse=True)[:SCHEDULE_LIMIT]
     if source_info is not None:
         source_info[str(path)+"#automations"] = report
     return result

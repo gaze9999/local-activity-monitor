@@ -26,7 +26,7 @@ async page=>{
     if(settings.mask!==false||settings.legacyMask!==false||settings.sqlMask!==false||!settings.invalidRejected)throw Error(JSON.stringify(settings));
     await page.evaluate(()=>openDetail({kind:'context',thread:data.codex.threads[0],incoming:true}));
     await page.waitForFunction(()=>detail?.contextLoaded);
-    const context=await page.evaluate(()=>({state:detail.contextContent.context_state,summary:JSON.stringify(detail.contextContent.text).includes('PUBLIC-CONTEXT-SUMMARY'),incomingNote:document.getElementById('detail-dialog').textContent.includes('目前對話的近期 Context'),hasHiddenReasoning:JSON.stringify(detail.contextContent).includes('HIDDEN-REASONING')}));
+    const context=await page.evaluate(()=>({state:detail.contextContent.context_state,summary:JSON.stringify(detail.contextContent.text).includes('PUBLIC-CONTEXT-SUMMARY'),incomingNote:document.getElementById('detail-title').dataset.help.includes('目前對話的近期 Context'),hasHiddenReasoning:JSON.stringify(detail.contextContent).includes('HIDDEN-REASONING')}));
     if(!context.summary||!context.incomingNote||context.hasHiddenReasoning)throw Error(JSON.stringify(context));
     await page.evaluate(()=>{setContentMasking(true);});
     await page.waitForFunction(()=>detail?.contextLoaded&&detail.contextContent.masked===true);

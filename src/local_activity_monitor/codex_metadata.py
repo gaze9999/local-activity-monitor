@@ -338,35 +338,8 @@ def read_metadata(home, identities, dots=None, source_info=None, project_details
                             roots = project.get("rootPaths")
                             if isinstance(roots, list) and not detail.get("folders"):
                                 detail["folders"] = [text(root, 4096) for root in roots[:32] if text(root, 4096)]
-                atom = state.get("electron-persisted-atom-state", {})
-                outputs = atom.get("orbit-outputs-v1") if isinstance(atom, dict) else None
-                if dots is not None:
-                    snapshots = atom.get("orbit-activity-snapshots-v1") if isinstance(atom, dict) else None
-                    dots.update(events=[] if isinstance(outputs, list) else None, activity_items=sum(len(item["data"]) for item in snapshots[:2000] if isinstance(item, dict) and isinstance(item.get("data"), list)) if isinstance(snapshots, list) else None)
-                if isinstance(outputs, list):
-                    seen = set()
-                    for output in outputs[:2000]:
-                        if dots is not None and isinstance(output, dict) and isinstance(output.get("threadId"), str) and re.fullmatch(r"[a-fA-F0-9-]{36}", output["threadId"]):
-                            artifact = output.get("artifact")
-                            if isinstance(artifact, dict):
-                                produced = artifact.get("producedAtMs")
-                                when = date(produced/1000) if type(produced) in (int, float) else None
-                                kind = artifact.get("type")
-                                kind = kind if isinstance(kind, str) and re.fullmatch(r"[a-zA-Z0-9_.:-]{1,80}", kind) else None
-                                identity = (output["threadId"], output.get("turnId") if isinstance(output.get("turnId"), str) else None, when, kind)
-                                if identity not in seen:
-                                    seen.add(identity)
-                                    host = output.get("hostId")
-                                    host = host if isinstance(host,str) and re.fullmatch(r"(?:local|remote-control:[A-Za-z0-9_-]{1,160})",host) else None
-                                    dots["events"].append({"thread_id": output["threadId"], "timestamp": when, "artifact_type": kind, "host_id":host})
-                        if isinstance(output, dict) and isinstance(output.get("threadId"), str) and output["threadId"] in entries:
-                            entries[output["threadId"]]["trigger"] = "dot"
-                    if dots is not None:
-                        dots["_retained_events"] = dots["events"]
-                        dots["events"] = sorted(dots["events"], key=lambda item:item["timestamp"] or "", reverse=True)[:500]
-                if dots is not None:
-                    from .desktop_activity import desktop_activity
-                    desktop_activity(state, entries, dots)
+                from .desktop_activity import project_dots
+                project_dots(state, entries, dots)
                 report(path, "ok", ("project_name", "project_membership", "project_kind", "project_origin", "project_root_metadata", "legacy_project_id_mapping", "dot_thread_id", "artifact_type", "produced_at", "host_id", "remote_thread_summary", "dot_activity"), byte_limit=APP_STATE_LIMIT, project_limit=PROJECT_LIMIT, loaded_projects=legacy_project_rows)
             else:
                 report(path, "unsupported", byte_limit=APP_STATE_LIMIT)

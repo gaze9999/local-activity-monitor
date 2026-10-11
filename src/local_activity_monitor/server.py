@@ -42,6 +42,10 @@ from .error_history import ErrorHistory, error_identity
 from .payload_detail import paged_content
 from .activity_history import ActivityHistory, sql_identity, mcp_identity, merge_event
 from .codex_account import CodexAccountSource
+from .api_queries import ApiQueries
+from .openai_platform import OpenAIPlatformSource, SOURCES as PLATFORM_SOURCES
+from .codex_cloud import CodexCloudSource
+from .public_api import PublicApiSource, SOURCES as PUBLIC_SOURCES
 from .ui_assets import load_ui_assets
 from .frontend_assets import load_frontend_assets
 from .process_lifecycle import cli_lifetime
@@ -123,10 +127,15 @@ class Dashboard:
         self.jev = JevCollector(home)
         self.codex = CodexCollector(home/"sessions", max_files) if codex else None
         self.account = CodexAccountSource(home)
+        self.cloud = CodexCloudSource(home)
+        self.public_api = PublicApiSource()
+        self.platform = OpenAIPlatformSource()
         source = Path(__file__).parent
         self.code_revision = hashlib.sha256(b"".join(path.read_bytes() for path in sorted(source.glob("*.py")))).hexdigest()[:12]+"-"+uuid.uuid4().hex[:8]
-        self.observations = {"usage": True, "codex_account": False, "codex": codex, "jev": True, "metadata": True, "git": True, "worktrees": True, "jev_calls": True, "skills": True, "checks": True, "tool_events": True, "mcp": True, "web": True, "files": True, "errors": True, "logs": True, "sqlite": True, "model_api": True}
-        self.default_settings = {"debug_mode": False, "activity_retention_days": ActivityHistory.DEFAULT_DAYS, "max_files": 20, "track_all": False, "observations": dict(self.observations), "mcp_sources": {}, "mcp_categories": {}, "tool_descriptions": {}, "mcp_descriptions": {}, "mcp_tags": {}}
+        self.observations = {"usage": True, "codex_account": False, "codex_cloud": False, "codex": codex, "jev": True, "metadata": True, "git": True, "worktrees": True, "jev_calls": True, "skills": True, "checks": True, "tool_events": True, "mcp": True, "web": True, "files": True, "errors": True, "logs": True, "sqlite": True, "model_api": True, **{"public_"+key: False for key in PUBLIC_SOURCES}}
+        self.observations.update({"platform_"+key: False for key in PLATFORM_SOURCES})
+        self.api_intervals = {key: ApiQueries.DEFAULT_INTERVAL for key in ("codex_account", "codex_cloud", "public_openai", "public_codex", *("platform_"+key for key in PLATFORM_SOURCES))}
+        self.default_settings = {"debug_mode": False, "activity_retention_days": ActivityHistory.DEFAULT_DAYS, "max_files": 20, "track_all": False, "observations": dict(self.observations), "api_intervals": dict(self.api_intervals), "mcp_sources": {}, "mcp_categories": {}, "tool_descriptions": {}, "mcp_descriptions": {}, "mcp_tags": {}}
         self.mcp_sources, self.mcp_categories, self.tool_descriptions, self.mcp_descriptions, self.mcp_tags = {}, {}, {}, {}, {}
         self.mcp_document_cache = {}
         self.started_at = now()
@@ -154,6 +163,10 @@ class Dashboard:
         self.phase_times = {}
         self.phase_started = None
         self.thread = threading.Thread(target=self.poll, name="metadata-collectors", daemon=True)
+        self.api_queries = ApiQueries({"codex_account": lambda cursor: self.account.snapshot(True),
+                                       "codex_cloud": lambda cursor: self.cloud.query(True, cursor),
+                                       **{"public_"+key: lambda cursor, key=key: self.public_api.query(key, True) for key in PUBLIC_SOURCES},
+                                       **{"platform_"+key: lambda cursor, key=key: self.platform.query(key) for key in PLATFORM_SOURCES}}, self.notify_update)
 
     def preload(self):
         """Read bounded catalog metadata before the first session collection."""
@@ -316,10 +329,10 @@ class Dashboard:
                 return
             # This refresh worker may wait on the optional source, while readers
             # continue receiving the last snapshot without holding self.lock.
-            account = self.account.snapshot(self.observations["codex_account"] and self.observations["usage"])
+            account = self.api_queries.snapshot().get("codex_account", self.account._empty("waiting"))
             for projection in codex_windows.values():
                 projection["account"] = account
-                if account["methods"]["account/rateLimits/read"]["health"] == "ok" and account["limits"]:
+                if account.get("methods", {}).get("account/rateLimits/read", {}).get("health") == "ok" and account.get("limits"):
                     local = projection.get("usage") or {}
                     bucket = account["limits"].get(local.get("limit_id")) or account["limits"].get("codex") or next(iter(account["limits"].values()))
                     projection["usage"] = {"source": "codex_app_server", "updated_at": account["updated_at"], "limit_id": bucket["limit_id"], "plan_type": bucket.get("plan_type") or account.get("plan_type") or local.get("plan_type"), "credits": bucket.get("credits") if bucket.get("credits") is not None else account.get("credits"), "limits": [bucket[key] for key in ("primary", "secondary") if bucket.get(key) is not None]}
@@ -462,13 +475,16 @@ class Dashboard:
             return {"enabled": current["enabled"], "enabled_at": current["enabled_at"]}
 
     def settings(self):
-        return {"debug_mode": self.monitor.debug.enabled, "activity_retention_days": self.activity_history.retention_days, "max_files": self.max_files, "track_all": self.codex.track_all if self.codex else False, "observations": dict(self.observations), "mcp_sources": dict(self.mcp_sources), "mcp_categories": dict(self.mcp_categories), "tool_descriptions": dict(self.tool_descriptions), "mcp_descriptions": dict(self.mcp_descriptions), "mcp_tags": {key: list(tags) for key, tags in self.mcp_tags.items()}}
+        return {"debug_mode": self.monitor.debug.enabled, "activity_retention_days": self.activity_history.retention_days, "max_files": self.max_files, "track_all": self.codex.track_all if self.codex else False, "observations": dict(self.observations), "api_intervals": dict(self.api_intervals), "mcp_sources": dict(self.mcp_sources), "mcp_categories": dict(self.mcp_categories), "tool_descriptions": dict(self.tool_descriptions), "mcp_descriptions": dict(self.mcp_descriptions), "mcp_tags": {key: list(tags) for key, tags in self.mcp_tags.items()}}
 
     def set_settings(self, value):
-        allowed = {"debug_mode", "interval", "idle_minutes", "activity_retention_days", "max_files", "track_all", "observations", "mcp_sources", "mcp_categories", "tool_descriptions", "mcp_descriptions", "mcp_tags", "replace_customizations", "recording"}
+        allowed = {"debug_mode", "interval", "idle_minutes", "activity_retention_days", "max_files", "track_all", "observations", "api_intervals", "mcp_sources", "mcp_categories", "tool_descriptions", "mcp_descriptions", "mcp_tags", "replace_customizations", "recording"}
         if not isinstance(value, dict) or not value or set(value)-allowed:
             raise ValueError()
         observations = value.get("observations", {})
+        intervals = value.get("api_intervals", {})
+        if not isinstance(intervals, dict) or set(intervals)-set(self.api_intervals) or any(type(item) is not int or not ApiQueries.MIN_INTERVAL <= item <= ApiQueries.MAX_INTERVAL for item in intervals.values()):
+            raise ValueError()
         if "interval" in value and (type(value["interval"]) is not int or not 1 <= value["interval"] <= 3600) or "track_all" in value and type(value["track_all"]) is not bool or not isinstance(observations, dict) or set(observations)-set(self.observations) or any(type(item) is not bool for item in observations.values()):
             raise ValueError()
         if "max_files" in value and (type(value["max_files"]) is not int or not 1 <= value["max_files"] <= 5000):
@@ -519,6 +535,8 @@ class Dashboard:
             self.max_files = value.get("max_files", self.max_files)
             restart_diagnostics = any(observations.get(key) and not self.observations[key] for key in ("codex", "errors", "logs", "sqlite", "model_api"))
             self.observations.update(observations)
+            self.api_intervals.update(intervals)
+            self.api_queries.configure({key: self.observations[key] for key in self.api_intervals}, self.api_intervals)
             if restart_diagnostics:
                 self.diagnostics.files.clear()
                 self.diagnostics.next_scan = 0
@@ -763,6 +781,14 @@ class Dashboard:
             cached = self.cache.get(window)
             result = copy.deepcopy(cached) if cached is not None else {"label": "本機觀察統計", "health": "starting", "started_at": self.started_at, "updated_at": None, "settings": self.settings(), "availability": {}, "mcp": {"servers": [], "events": [], "categories": CATEGORIES}, "codex": {"health": "waiting", "threads": [], "tools": {}}, "jev": {"health": "disabled", "enabled": False, "summary": {}, "recent": [], "series": []}}
         result["default_settings"] = copy.deepcopy(self.default_settings)
+        result["settings"] = self.settings()
+        result["api_queries"] = self.api_queries.snapshot()
+        account = result["api_queries"].get("codex_account", self.account._empty("waiting"))
+        result["codex"]["account"] = account
+        if account.get("methods", {}).get("account/rateLimits/read", {}).get("health") == "ok" and account.get("limits"):
+            local = result["codex"].get("usage") or {}
+            bucket = account["limits"].get(local.get("limit_id")) or account["limits"].get("codex") or next(iter(account["limits"].values()))
+            result["codex"]["usage"] = {"source": "codex_app_server", "updated_at": account["updated_at"], "limit_id": bucket["limit_id"], "plan_type": bucket.get("plan_type") or account.get("plan_type") or local.get("plan_type"), "credits": bucket.get("credits") if bucket.get("credits") is not None else account.get("credits"), "limits": [bucket[key] for key in ("primary", "secondary") if bucket.get(key) is not None]}
         result["activity"] = self.activity_status()
         result["monitor"] = self.monitor.snapshot()
         result["monitor"]["debug"] = self.monitor.debug.snapshot()
@@ -1212,6 +1238,44 @@ def handler(dashboard, port):
                     self.reply(503, b'History temporarily unavailable')
                     return
                 self.reply(200, json.dumps(result, ensure_ascii=False).encode('utf-8'), 'application/json; charset=utf-8')
+            elif url.path == "/api/codex/dots" and len(url.query)<=64 and set(parse_qs(url.query, keep_blank_values=True))<={"window"}:
+                from .desktop_activity import read_dots
+                query = parse_qs(url.query, keep_blank_values=True)
+                windows = query.get('window', ['all'])
+                if len(windows)!=1 or windows[0] not in WINDOWS:
+                    self.reply(400, b'Invalid activity window')
+                    return
+                result = read_dots(dashboard.home, windows[0]) if dashboard.observations.get('metadata') else {'health':'disabled'}
+                self.reply(200, json.dumps(result, ensure_ascii=False).encode('utf-8'), 'application/json; charset=utf-8')
+            elif url.path == "/api/codex/cloud":
+                query = parse_qs(url.query, keep_blank_values=True)
+                if len(url.query)>4096 or set(query)-{"cursor"} or any(len(values)!=1 for values in query.values()):
+                    self.reply(400, b"Invalid cloud query")
+                    return
+                try:
+                    result = dashboard.api_queries.query("codex_cloud", query.get("cursor", [None])[0])
+                except ValueError:
+                    self.reply(400, b"Invalid cloud cursor")
+                    return
+                self.reply(200, json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            elif url.path == "/api/public-query":
+                query = parse_qs(url.query, keep_blank_values=True)
+                if len(url.query)>128 or set(query)!={"source"} or len(query["source"])!=1 or query["source"][0] not in PUBLIC_SOURCES:
+                    self.reply(400, b"Invalid public status query")
+                    return
+                source = query["source"][0]
+                result = dashboard.api_queries.query("public_"+source)
+                self.reply(200, json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            elif url.path == "/api/codex/account" and not url.query:
+                result = dashboard.api_queries.query("codex_account")
+                self.reply(200, json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            elif url.path == "/api/openai-platform":
+                query = parse_qs(url.query, keep_blank_values=True)
+                if len(url.query)>128 or set(query)!={"source"} or len(query["source"])!=1 or query["source"][0] not in PLATFORM_SOURCES:
+                    self.reply(400, b"Invalid Platform query")
+                    return
+                result = dashboard.api_queries.query("platform_"+query["source"][0])
+                self.reply(200, json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
             elif url.path == "/api/activity" and not url.query:
                 self.reply(200, json.dumps(dashboard.activity_status()).encode("utf-8"), "application/json; charset=utf-8")
             elif url.path == "/api/snapshot":
@@ -1341,6 +1405,7 @@ def serve(argv=None, watch_stdin=False):
     dashboard.preload()
     server.RequestHandlerClass = handler(dashboard, server.server_port)
     dashboard.thread.start()
+    dashboard.api_queries.thread.start()
     url = f"http://127.0.0.1:{server.server_port}/"
     print(json.dumps({"status": "listening", "url": url, "codex_metadata": args.codex}), flush=True)
     if args.open:
@@ -1361,6 +1426,7 @@ def serve(argv=None, watch_stdin=False):
         pass
     finally:
         dashboard.stop.set()
+        dashboard.api_queries.close()
         dashboard.source_changed.set()
         dashboard.notify_update()
         dashboard.monitor.event("stopped")

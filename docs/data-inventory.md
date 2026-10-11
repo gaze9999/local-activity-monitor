@@ -18,7 +18,7 @@ Debug 模式的數值效能資料由程序與 SSE handler 產生, 不是 Codex �
 
 ## 來源與欄位
 
-My dots 與遠端對話活動選取 Codex 桌面快取中的 host / thread / timestamp. 電腦記錄的 `last_activity_at` 表示近期活動, `connection_status` 目前為 `unknown`. 遠端排程活動提供對話、電腦、觸發類型、狀態與活動時間, 尚無完整定義或下次執行時間. 即時裝置連線及遠端排程的待辦見[功能清單](features.md)
+Dots 與遠端對話活動選取 Codex 桌面快取中的 host / thread / timestamp. 電腦記錄的 `last_activity_at` 表示近期活動, `connection_status` 目前為 `unknown`. 遠端排程活動提供對話、電腦、觸發類型、狀態與活動時間, 尚無完整定義或下次執行時間. 即時裝置連線及遠端排程的待辦見[功能清單](features.md)
 
 一般檔案明細只對已觀察路徑查詢本機 metadata, 不讀取內文. 大小摘要每次選取前 100 個不同的工作目錄 / 路徑, 回傳 `checked_at`、`limit` 與 `total`, 尚無續查游標
 

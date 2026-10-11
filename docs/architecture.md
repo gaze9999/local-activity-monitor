@@ -4,6 +4,10 @@
 
 摘要與卡片來源沿 `metricSources` 選取, `summaries` / `cardLayouts` 保存名稱、來源、群組及穩定 ID. 自訂群組移動既有節點而非重建 instance, 診斷分享另外投影去識別化副本, 不改本機完整設定, 格式見[設定規格](settings-format.md)
 
+表格數值來源使用完整已載入列及相同篩選流程, 以 rows 參照、更新 revision、篩選及語系快取統計. 列更新遞增 revision, 重複讀值沿用快取, 動態指標最多 5,000 項. 最新值優先來源活動 / 事件時間, 不將顯示排序當成資料時間
+
+WBUI 提供圖表色彩 tokens、tree 展開選項及元件生命週期, LAM 依目前 0.9.0 pin 套用主題、預設展開與資料配置. 主頁排序控制持續存在, 明細 / 設定重建或關閉時釋放所屬握把事件與預覽, 主頁與明細各自持有控制器
+
 ## 執行環境
 
 Python 3.10+ 標準函式庫, 原生 HTML / JavaScript / CSS, setuptools package assets. 服務綁定 loopback, `Host` / `Origin` / `Sec-Fetch-Site` 驗證保留. 來源資料庫採唯讀連線, LAM 的回補資料庫使用交易寫入
@@ -29,6 +33,8 @@ Python 3.10+ 標準函式庫, 原生 HTML / JavaScript / CSS, setuptools package
 | `process_lifecycle.py` | CLI 終止訊號與 Windows 子程序生命週期 |
 | `sqlite_records.py` | literal SQLite 操作辨識, 不執行 SQL 或來源程式碼 |
 | `usage_records.py` | 額度視窗與 credits 白名單投影 |
+| `public_api.py` | OpenAI 狀態 / Codex 正式版本的固定公開 API, 按需查詢、快取、格式投影及獨立失敗狀態 |
+| `codex_cloud.py` | Codex CLI 雲端清單的按需唯讀查詢, 有界程序 / 輸出 / cursor 快取與 metadata 投影 |
 | `codex_account.py` | 選配的官方帳戶唯讀查詢, 有期限快取與獨立失敗處理 |
 | `codex_plugins.py` | 選取 Plugins 設定與快取版本 metadata, 不執行外掛 |
 | `frontend/locales.json` | English / 日本語介面與 tooltip |
@@ -46,9 +52,15 @@ Plugins 清單另選取設定與快取 manifest 的名稱, 供應商, 版本, �
 
 官方帳戶來源預設關閉, 啟用時建立自己的 Codex app-server stdio 子程序, 只發送 initialize / initialized 與三個 account 唯讀方法, 結束後釋放程序及串流. 使用既有登入, 不讀取 auth.json, 不將 email, 帳戶 ID 或 credentials 投影至頁面. 成功與失敗均快取至少 60 秒, 整次逾時 10 秒, stdout 上限 1 MiB. rateLimitsByLimitId 優先於 legacy rateLimits, primary / secondary 可為 null, 視窗名稱依 windowDurationMins, 不假設 primary 為短期額度. account/usage/read 的帳戶統計與本機對話累計分開
 
-My dots 與遠端對話活動選取 Codex 桌面快取中的 host / thread / timestamp. 即時裝置連線與遠端排程定義尚未串接, 實作狀態見 [功能清單](features.md)
+Dots 與雲端 / 遠端對話活動選取 Codex 桌面快取中的 host / thread / timestamp. 即時裝置連線與遠端排程定義尚未串接, 實作狀態見 [功能清單](features.md)
 
 已知來源使用分類預設, 新來源使用通用分類. 來源分類與工具說明可以在頁面修改. 呼叫若將 namespace 與 name 分開儲存, 會合併完整識別名稱. 不同 MCP 的同名工具分開統計. 新工具沒有特定 adapter 時仍顯示名稱, 操作, 時間, 資源 ID 及可辨識的結果
+
+公開 API 由 `GET /api/public-query?source=openai|codex` 按需呼叫, 個別 observation 預設 false, 不加入來源收集或計時輪詢. 固定 HTTPS endpoint, 不跟隨 redirect, 每個來源的鎖合併同時查詢, 成功及失敗皆快取 60 秒. 連線逾時 4 秒, OpenAI 本文最多 64 KiB, Codex 版本本文最多 1 MiB. 投影只選狀態或正式 tag 版本與來源時間, 不保留 release 本文 / assets
+
+`GET /api/codex/cloud` 使用所選 CODEX_HOME 的已登入 CLI 執行 `cloud list --json --limit 20`, 只接受有界 cursor, 不經 shell. `codex_cloud` 預設 false, 由使用者查詢, 不加入收集 worker. 每頁最多 20 筆, 輸出上限 1 MiB, 10 秒逾時, 至多快取 10 個來源頁各 60 秒. 只保留標題、ID、狀態、更新時間、環境標籤與嘗試數 metadata, 不保留 summary、URL 或帳戶欄位, 結束及失敗時清理自行建立的子程序
+
+雲端對話查詢與桌面快取分開呈現, 不合併進本機 Token 或操作統計. dots 活動接受既有 durable / chatgpt host 類別並標示雲端, 電腦清單仍只列本機 / 遠端電腦. 排程活動從既有 metadata 同時選取 cloud / remote, 最近執行排序後限制 500 筆, 下次執行時間只取實際排程設定
 
 ## 輸入 / 回傳資料
 
@@ -210,3 +222,18 @@ HTTP 服務提供等待狀態後, 單一收集 worker 依序讀取 session、統
 WBUI 的 `bindUpdateGuard` 管理 hover、焦點、文字選取、失焦與分頁可見性, `contentHeld` 區分需要保留內容的互動, LAM 保留最新資料與更新時機. 只有 hover 時更新唯一身分對應的既有數值, 保留列順序、篩選結果、分頁及操作目標, 新增、移除及欄位結構變動等候恢復. 使用者主動排序、篩選及換頁立即套用. 手動暫停只保留一份最新快照, 不累積推送佇列, 恢復時使用最新資料. 連線與錯誤提示保持有效, 失焦時停用裝飾動畫, 閒置畫面計時降低頻率, 不新增來源輪詢或改變 SSE 心跳
 
 來源通知涵蓋 Plugins 快取的 manifest、MCP metadata 與 Skill 目錄, 不監看任意外掛程式變更. 工作樹通知只選取 Codex 管理目錄與已辨識 Git metadata 的 HEAD、refs、packed-refs、工作樹登錄及鎖定標記, 不讀取工作區檔案本文. 通知會使工作樹快取失效, 下一次收集重新查詢, 不等待原有 30 秒快取期限
+
+## 選用查詢與共用呈現
+
+api_queries.py 管理七個固定唯讀 callback、自動查詢間隔、最近結果與 service worker 清理. 所有來源停用時 worker 不定時喚醒, 設定變動及手動查詢各自同步, 第一頁自動結果進入快照, 來源自己的 60 秒快取及讀取上限保留. openai_platform.py 只接受固定模型 / 用量 / 費用來源, 固定 HTTPS endpoint、5 秒逾時、1 MiB 回應上限與無重新導向, 失敗只回傳狀態, 不投影私人 HTTP 本文或認證內容
+
+Dots 的 GET /api/codex/dots 重新讀取所選 home 的固定桌面快取, 沿用 16 MiB 上限與 project_dots 投影, 拒絕連結 / reparse 檔案、無效 JSON 與過大內容, 排除私人本文與身分. metadata 檢查關閉時不讀取來源. window 只接受既有的 1h / 24h / 7d / all, 手動查詢與主頁的時間範圍一致. 原始來源不修改, 這條按需查詢不建立額外輪詢
+
+LAM 保存顯示偏好與完整表格資料, WBUI 管理狀態元件、通知、分群、數值格式、輸入及虛擬 DOM. 表格統計使用保留的完整篩選來源, 呈現範圍與統計範圍分開. 更換表格、關閉明細及 pagehide 清理擁有的 observer / frame / 輸入, 不在卸載時重新掛載全部虛擬列. 新共用 API 透過能力偵測使用, 正式 pin 尚未更新
+
+
+## 提示與浮動介面
+
+設定及資料明細使用原生 showModal, 背景操作由瀏覽器 inert 保護. 短說明與圖表讀值保留 role=tooltip, 不放按鈕或表單, Escape 優先關閉提示再處理 modal. 提示文字可用滑鼠移入閱讀, 顯示期間保留入口焦點與原本的 aria-describedby, 關閉後復原. 支援原生 Popover API 時用 manual Top Layer 避免裁切, 不支援時保留既有定位
+
+欄位說明、圖表讀值與動態文案由 LAM 的有界提示節點管理, 共用 Tooltip / Popover / Menu / Dialog 的語意與互動規格由 WBUI 維護, 不建立通用 Popup 元件. 現有通知歷史是非模態操作面板, 多版本完整清單使用模態明細, 頁內長清單使用 Disclosure, 依用途選擇, 不由外觀決定模態狀態
