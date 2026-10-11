@@ -1,5 +1,6 @@
 """Build, update and recovery fixtures, without real Git or account data."""
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -171,6 +172,13 @@ class FrontendBuildTests(unittest.TestCase):
             git.assert_called_once()
 
     def test_stable_tags_sort_numerically_and_peel_annotated_tags(self):
+        # Control the installed version independently of the checkout's current pin.
+        source = self.library / "workbench-ui.js"
+        source.write_text('global.WorkbenchUI=Object.freeze({version:"0.9.0"});', encoding="utf-8")
+        manifest_path = self.library / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["sha256"][source.name] = hashlib.sha256(source.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
         rows = ["1"*40 + "\trefs/tags/v0.9.0", "2"*40 + "\trefs/tags/v0.10.0", "3"*40 + "\trefs/tags/v0.10.0^{}", "4"*40 + "\trefs/tags/v1.0.0-rc.1", "5"*40 + "\trefs/heads/main"]
         with patch.object(builder.latest_pin.__globals__["shutil"], "which", side_effect=lambda name: name), patch.dict(builder.latest_pin.__globals__, {"run_command": lambda *args, **kwargs: "\n".join(rows)}):
             self.assertEqual(builder.latest_pin(self.root)["revision"], "3"*40)

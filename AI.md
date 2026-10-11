@@ -27,9 +27,9 @@ Paths under the implementation column are relative to `frontend/`, `src/local_ac
 
 WBUI owns reusable presentation, interaction, state and disposal. LAM owns source IDs, queries, sorting, application pages, detail requests, latest-response decisions and storage. Verify the selected library exports before constructing options; an adjacent working tree or package version does not establish consumer adoption.
 
-LAM's current pin selects WBUI 0.9.0. WBUI 0.10.0's row activation / selection APIs, new parsers and bullet chart have not been adopted. Do not use them through the old assets or change the pin without owner authorization. Source splitting keeps WBUI's published loading entry unchanged.
+LAM's current pin selects WBUI 0.11.0. Resolve supported APIs from that revision and distinguish available exports from the application's adopted callers. Do not change the pin without owner authorization. Source splitting keeps WBUI's published loading entry unchanged.
 
-LAM's existing table adapter initializes pagination before attaching rows, keeps the complete source and stable identities, and mounts only the current page. It is separate from WBUI `createTable`. Table sums / means / latest values use filtered retained rows and a revision-aware cache. Modal panes leave their final table unfolded. Paging and viewport-deferred charts are implemented; continuous virtual scrolling uses capability-gated `bindVirtualScroll` in the development source; the fixed 0.9.0 assets have not adopted it. Numerical precision, formula AST and 3D are also library candidates, not LAM capabilities.
+LAM's existing table adapter initializes pagination before attaching rows, keeps the complete source and stable identities, and mounts only the current page. It is separate from WBUI `createTable`. Eligible sums / means / latest values use filtered retained rows and a revision-aware cache. Modal panes leave their final table unfolded. Paging and viewport-deferred charts are implemented; continuous virtual scrolling uses capability-gated `bindVirtualScroll` from the selected assets when enabled. Numerical precision, formula AST and 3D remain library candidates, not LAM capabilities.
 
 ## Verify and report
 
