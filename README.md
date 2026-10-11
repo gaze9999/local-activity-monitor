@@ -10,7 +10,7 @@
 | --- | --- |
 | 總覽 | 可選擇及排序的圖表、帳戶用量與活動摘要 |
 | 用量與額度 | 模型 Token、帳戶額度剩餘比例、重設時間與 credits |
-| 對話 | 對話列表、子代理程式、Context、排程與 My dots |
+| 對話 | 對話列表、子代理程式、Context、排程與 Dots |
 | 專案 | 專案列表、Git 操作、工作樹與驗證活動 |
 | 工具 | 呼叫與耗時、MCP、技能與 Plugins |
 | 資料操作 | 網路參考、檔案操作與 SQL 紀錄 |
@@ -124,11 +124,11 @@ local-activity-monitor --codex --open
 | MCP 設定與工具紀錄 | 來源名稱、操作、時間、結果及來源提供的數值摘要 |
 | Jev telemetry | 每個完成操作的模型、耗時、HTTP 嘗試、body bytes 與 provider usage |
 | App / Core Log | 診斷等級、類型、時間、識別碼與關聯活動 |
-| 本機設定與快取 | 排程、My dots、Plugins 與工作樹 metadata |
+| 本機設定與快取 | 排程、Dots、外掛程式與工作樹 metadata |
 
 Token 分析使用每個對話的最新累計快照, Cached input 與 Reasoning output 為子項目. 帳戶額度顯示來源回報的剩餘比例與重設時間, 來源缺值顯示 `--`, 已確認零值顯示 `0`
 
-主設定的「官方帳戶查詢」預設關閉. 啟用後透過已登入的 Codex CLI 取得方案、額度與帳戶用量, 查詢結果至少快取 60 秒. My dots 與遠端活動顯示 Codex 桌面快取的近期活動摘要
+API 查詢預設關閉自動更新, 各來源頁的查詢按鈕可手動讀取. 啟用後依設定間隔更新, 官方帳戶來源透過已登入的 Codex CLI 取得方案、額度與帳戶用量, 查詢結果至少快取 60 秒. Dots 手動查詢重新讀取桌面快取, 近期活動與遠端電腦依現有紀錄呈現. OpenAI Platform 來源使用使用者設定的 API Key 環境變數, 詳見[使用說明](docs/usage.md)
 
 一般更新收集選定 metadata, 完整 Git、SQL、工具輸入輸出、Log 與技能文件在開啟明細時受限讀取並遮蔽 credentials. 服務使用 loopback 與 Host / Origin 檢查. 讀取範圍、保存期限與上限見 [資料盤點](docs/data-inventory.md)
 

@@ -1,5 +1,120 @@
 # 測試與建置
 
+## 2026-10-11 15:10 v0.15.0 版本核對
+
+Asia/Taipei, `pyproject.toml` 與 `src/local_activity_monitor/__init__.py` 更新至 0.15.0. 版本更新後重新通過 84/84 Python 建置 / API / 本機 metadata / MCP 測試與 JavaScript Client Hints runtime 檢查, 四個建置前端檔案與來源 bytes 一致
+
+`workbench-ui.json` 與離線 manifest 維持 cf13a9417d752001ec388ab74a0f0fddab238066 / WBUI 0.9.0, manifest hash 核對通過. 前端行為與下節 14:46 的受測來源相同, 本節未重跑全部瀏覽器流程
+
+本次另修改 `pyproject.toml` 與 `src/local_activity_monitor/__init__.py`, 維護套件與執行版本. Cpt 交付範圍為提交、推送與 v0.15.0 Tag, 不包含 GitHub Release、原生套件或正式 8787 重啟. 跨平台套件與真實帳戶權限仍依下節列出的條件驗收
+
+## 2026-10-11 14:46 查詢、顯示與明細驗收
+
+Asia/Taipei, 本機 0.14.0 未提交來源, HEAD 1dbf722, workbench-ui.json 維持 cf13a9417d752001ec388ab74a0f0fddab238066 / 0.9.0. 共用候選以既有 WORKBENCH_UI_PATH 串接本機 WBUI 工作目錄, 另用固定 pin 隔離頁面核對備用方式, 不將候選寫入 pin
+
+| 受測來源 | SHA-256 前 16 字元 |
+| --- | --- |
+| `frontend/app.js` | `bce4ad4f2477f2d2` |
+| `frontend/style.css` | `43aeb30882453d35` |
+| `frontend/index.html` | `14d02fe9c0ddc389` |
+| `frontend/locales.json` | `b734a9eefa13d93c` |
+| `src/local_activity_monitor/server.py` | `1ae280460fb2492c` |
+
+| 檢查 | 實際結果與範圍 |
+| --- | --- |
+| 建置 / API / 本機讀取 | 最新來源 84/84 Python 通過, 包含前端建置 16、七個選用 API、間隔與快取、公開 API / Platform / cloud、桌面 metadata、MCP 文件與觀察. Dots window 過濾與原來源讀取上限通過, 零 / false / 未知保留. Client Hints、UA 備用與省略欄位的 JavaScript runtime 檢查通過 |
+| 提示與明細 | 最新 tooltip-semantics-flow、instructions-layout-flow、detail-tabs-flow 通過. 純文字 / 無 HTML、入口焦點、原 aria-describedby 復原、hover 移入閱讀、manual Top Layer、巢狀 Escape、文件與概要合併、入口 16 px 間距、動態明細清空 / 捲動歸零、default read-only / 明確 Edit / Cancel / Save、草稿與 SHA 防護 |
+| 查詢工具列 | 最新 query-status-flow、api-query-flow、cloud-activity-flow 通過, off 手動按鈕 / on 間隔、七個來源工具列、成功 / 失敗與時間相依、資料保留與恢復、cloud cursor / 空資料 / 分頁、Dots 固定本機快取 / 查詢期間切換範圍忽略過時結果 / 背景重繪保持 pending、MCP 固定本機文件. 390 px 的簡短失敗訊息維持水平, 三語系 x 三種寬度 / 字級 24 無卡片溢位 |
+| 顯示設定 | 最新 appearance-controls-flow、presentation-settings-flow 通過, 主題 / 自訂色 / 最小字級、介面 / 程式碼設定、數值顯示、Tag / badge 群組與外框、九方位 / 鈴鐺 / 歷史、binding 匯入 / 無效資料 / 重載. 1,000 筆模型完整來源保留, 虛擬掛載初始 18 列, 深層捲動、排序與停用後完整還原 |
+| 固定 pin 相容 | WBUI 0.9.0 的隔離頁面通過缺少 API 的設定停用、Intl 數值備用、middle-center 通知、公開查詢工具列與無溢位 / pageerror. 相同 tooltip-semantics-flow / query-status-flow 通過, 不要求使用端提前採用新共用元件 |
+| 其他 focused 回歸 | table-column-flow、card-presentation-flow、settings-sources-flow、diagnostic-settings-flow、theme-api-flow 在最新建置來源通過, 包含活動排序 / 缺值備用、自訂摘要 / 表格總和平均最新值、卡片 / 群組排序、診斷偏好及主題色彩 |
+
+隔離 fixture 啟動時核對四個前端檔案與來源 bytes 一致, 不一致時明確要求重新建置, 沒有改動正式服務的 runtime 載入方式
+
+上述瀏覽器為 Edge 155.0.4283.45, 使用 serve_loading_fixture.py 的隔離 SQLite、合成對話 / MCP 文件 / API 回應與桌面空快取. 本機合成資料不使用真實 credential, fixture 不啟動 MCP server, 實際帳戶 / cloud / Platform API Key 權限尚未驗證. Dots 手動查詢讀桌面快取, 不是遠端即時 API, 有關聯的自訂電腦名稱在目前有界投影未取得
+
+2026-10-11 13:55, Asia/Taipei, 原生直接查詢的公開 OpenAI 服務狀態與 Codex release 都回傳 health=ok, 該次資料為 minor / 0.162.1. 同時正式 8787 的公開查詢路由回傳 HTTP 404, 這是舊後端尚未載入的證據, 不是合成 fixture 的成功證據. 本輪不重啟正式服務、不更新 pin、不提交 / 推送 / 建立 Tag, 所有來源與未提交成果保留
+
+Firefox / WebKit、實體手把 / 觸控、其他 OS、輔助技術、完整 WCAG、GC 後保留量與正式服務驗收仍為交付環境待驗證. 共用虛擬捲動的配對量測見[效能與資料上限](performance-report.md), 不把共用 fixture 效能當成 LAM 所有頁面的改善比例
+
+### 修改與新增檔案
+
+- 修改 `AI.md` - 依任務查找來源與驗證入口
+- 修改 `README.md` - 目前功能 / API / Dots 操作入口
+- 修改 `docs/architecture.md` - 用法 / 架構 / 驗收與規劃文件
+- 修改 `docs/card-library.md` - 用法 / 架構 / 驗收與規劃文件
+- 修改 `docs/data-inventory.md` - 用法 / 架構 / 驗收與規劃文件
+- 修改 `docs/features.md` - 用法 / 架構 / 驗收與規劃文件
+- 修改 `docs/maintenance.md` - 用法 / 架構 / 驗收與規劃文件
+- 修改 `docs/performance-report.md` - 用法 / 架構 / 驗收與規劃文件
+- 修改 `docs/settings-format.md` - 用法 / 架構 / 驗收與規劃文件
+- 修改 `docs/usage.md` - 用法 / 架構 / 驗收與規劃文件
+- 修改 `docs/validation.md` - 用法 / 架構 / 驗收與規劃文件
+- 修改 `frontend/app.js` - 頁面呈現、查詢工具列、設定、提示與明細
+- 修改 `frontend/index.html` - 頁面及設定控制項
+- 修改 `frontend/locales.json` - 三語系文案
+- 修改 `frontend/style.css` - 布局、字級、配色與浮動樣式
+- 修改 `src/local_activity_monitor/codex_metadata.py` - 沿用共用 Dots 投影
+- 修改 `src/local_activity_monitor/codex_schedules.py` - 已觀察排程活動
+- 修改 `src/local_activity_monitor/desktop_activity.py` - Dots / 電腦投影與有界快取讀取
+- 修改 `src/local_activity_monitor/server.py` - 固定查詢路由 / 設定驗證
+- 修改 `tests/context-agent-flow.cjs` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 修改 `tests/detail-tabs-flow.cjs` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 修改 `tests/serve_loading_fixture.py` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 修改 `tests/settings-cards-flow.cjs` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 修改 `tests/test_desktop_activity.py` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 修改 `tests/test_runtime_ui.mjs` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 新增 `src/local_activity_monitor/api_queries.py` - 七個查詢來源、間隔與生命週期
+- 新增 `src/local_activity_monitor/codex_cloud.py` - 雲端對話唯讀查詢
+- 新增 `src/local_activity_monitor/openai_platform.py` - OpenAI Platform 唯讀查詢
+- 新增 `src/local_activity_monitor/public_api.py` - 固定公開狀態 / Codex 版本來源
+- 新增 `tests/api-query-flow.cjs` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 新增 `tests/appearance-controls-flow.cjs` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 新增 `tests/card-presentation-flow.cjs` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 新增 `tests/cloud-activity-flow.cjs` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 新增 `tests/instructions-layout-flow.cjs` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 新增 `tests/presentation-settings-flow.cjs` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 新增 `tests/query-status-flow.cjs` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 新增 `tests/settings-sources-flow.cjs` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 新增 `tests/table-column-flow.cjs` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 新增 `tests/test_api_queries.py` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 新增 `tests/test_codex_cloud.py` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 新增 `tests/test_openai_platform.py` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 新增 `tests/test_public_api.py` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 新增 `tests/theme-api-flow.cjs` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 新增 `tests/tooltip-semantics-flow.cjs` - focused 邏輯 / 型別 / UI 回歸與隔離 fixture
+- 更新本機 `.local/task-context.md`, 保存本批有效目標與當前驗收
+
+## 最近活動時間預設
+
+2026-10-11 11:00, Asia/Taipei, `frontend/app.js` SHA-256 前 16 字元為 `3d1e1ca8183bc1e5`, 本機修改保留未提交, WBUI 固定版本維持 0.9.0
+
+`table-column-flow.cjs` 在 Edge 155 合成資料通過最近活動時間欄位置首及新到舊排序, 同一表格的建立時間與最近活動時間採相反順序, 確認有活動紀錄時使用最近活動, 活動紀錄全為缺值時改用原本建立時間, 沒有活動欄位時保留原本排序與欄位順序, 自訂欄序 / 排序、重載與列 ID 保留
+
+原有拖曳、Escape / 關閉 / 擷取中斷取消、四種寬度與缺值處理同時通過, 固定版本建置、JavaScript 語法、runtime 與新增文件文案檢查通過, 修改 `frontend/app.js`、`tests/table-column-flow.cjs`、`docs/usage.md`、本驗證紀錄及 `.local/task-context.md`, 其他未提交成果保留, 隔離 fixture 已結束
+
+## 欄位排序與指示文件
+
+2026-10-11 02:14, Asia/Taipei, 受測來源為 `1dbf722` 之後的本機未提交修改, WBUI 固定版本仍為 `cf13a9417d752001ec388ab74a0f0fddab238066` / 0.9.0
+
+| 來源 | SHA-256 前 16 字元 |
+| --- | --- |
+| `frontend/app.js` | `017daafcb7f95146` |
+| `frontend/style.css` | `9416bf58ed0452f4` |
+| `frontend/index.html` | `b9859ffe40e1da3c` |
+
+| 檢查 | 結果與範圍 |
+| --- | --- |
+| 欄位排序 | Edge 155.0.4283.45 的 `table-column-flow.cjs` 核對 20 欄清單, 通過設定列拖曳、方向鍵 / Home / End、焦點保留、隱藏欄位與重載保存, 設定排序不需開啟主頁拖曳開關 |
+| 表頭與取消 | 整個拖曳不觸發資料排序, 下一次點擊可正常排序, Alt + End 依可見欄位移動, Escape、關閉設定視窗及滑鼠擷取中斷皆取消順序變更並清除預覽, 排序動畫完成後核對列 ID 保存 |
+| 文件與間距 | `instructions-layout-flow.cjs` 通過全域 AGENTS.md 入口、文件與概要合併、預覽 / 原文、零值、空資料、503 及再次開啟後恢復, 1366 / 900 / 390 / 320 px 的入口與下方卡片保留 16 px 間距, 欄位清單無重疊或頁面水平溢位 |
+| 明細回歸 | `detail-tabs-flow.cjs` 通過其他明細的概要首頁、單一標題列操作、內容快取 / 取消與草稿保留, 三語系共 12 組布局, 瀏覽器沒有 pageerror |
+| 建置與靜態檢查 | 固定 WBUI 前端建置、4 份 JavaScript 語法、`test_runtime_ui.mjs` 與 `test_frontend_build.py` 16/16 通過, Python 測試先遇沙箱 Temp 權限錯誤, 原生隔離暫存環境重驗通過 |
+
+以上流程使用 `serve_loading_fixture.py` 的 demo threads、隔離 SQLite 與合成指示文件, 桌面及直向截圖已人工檢視, 新增文件文案通過本機 textlint 與人工語意複核, 正式 8787 服務未手動重新啟動, 觸控及其他瀏覽器未納入本次驗證
+
+本次修改 `frontend/app.js`、`frontend/style.css`、`frontend/index.html`、`tests/detail-tabs-flow.cjs`、`AI.md`、`docs/usage.md` 與本驗證紀錄, 新增 `tests/table-column-flow.cjs`、`tests/instructions-layout-flow.cjs`, 本機 `.local/task-context.md` 保存目前驗收與未提交狀態
+
 ## 0.14.0 歷史分頁、代理關聯與 Context 更新
 
 2026-10-11 00:02, Asia/Taipei, 受測來源為 `b0275e5` 之後的本機 0.14.0 工作目錄, `workbench-ui.json` 維持 `cf13a9417d752001ec388ab74a0f0fddab238066` / WBUI 0.9.0, 下方各節保留先前受測來源
@@ -174,7 +289,7 @@ python tests/serve_loading_fixture.py
 | `table-stream-interaction-flow.cjs` | SSE 更新期間保留滑鼠與鍵盤目標, 離開後套用最新排序, 對話及 SQL 表格 |
 | `followup-layout-flow.cjs` | 空圖表恢復、精簡欄位、Context 順序、摘要、列明細、空資料提示及首尾頁 |
 | `startup-preload-flow.cjs` | 首輪活動整理前的對話目錄與完整結果切換, 使用隔離回應 |
-| `viewport-detail-flow.cjs` | 截圖比例、不同字級與語系、兩行狀態、摘要與子頁籤分區、My dots 明細 |
+| `viewport-detail-flow.cjs` | 截圖比例、不同字級與語系、兩行狀態、摘要與子頁籤分區、Dots 明細 |
 
 `test_startup_preload.py` 核對 state 目錄查詢的 2,000 筆上限、session 讀取量為 0、未選取 prompt / credential 欄位、停用後不讀取及完整更新時間尚未產生. 瀏覽器模擬回應驗證呈現, 原生 fixture 可加 `--startup-delay 35`, 核對 HTTP 在整理前提供目錄, 整理後提供完整快照
 
@@ -187,7 +302,7 @@ python tests/serve_loading_fixture.py
 | 來源計數 | 頁首可讀取 / 啟用數與來源 Log 共用讀取器清單, 停用列另計, 檢查時間與讀取結果相符 |
 | 驗證與 MCP | 從已觀察操作核對分類、工具回傳、時間及耗時, 空資料時追查來源、篩選範圍與回補進度 |
 | 父子 Context | Context 列開啟目前對話內容, 對話列表列開啟明細後切入 Context 才讀取, 切換分頁保留內容, 代理訊息與父對話入口維持對應, 核對更新、欄位重排與取消要求 |
-| My dots 與排程 | 核對桌面快取中的活動及電腦, 即時連線與完整遠端排程仍列待實作 |
+| Dots 與排程 | 核對桌面快取中的活動及電腦, 即時連線與完整遠端排程仍列待實作 |
 | 裝置資訊 | 依實體顯示卡識別核對數量, 在對應平台驗證字型、取樣時間與使用量 |
 | 效能 | 固定資料、設定及取樣條件, 比較冷啟動、回補、增量與長時間更新, 分開記錄 CPU、耗時、讀取量及快照大小 |
 
@@ -215,3 +330,5 @@ Wheel 與 sdist 輸出至 `dist/`, 原生測試包位於 `.local/package-tests/`
 每個平台先取得 `workbench-ui.json` 的完整 SHA, 準備 `_workbench/` 並建置 `_web/`, 再執行 unittest、原生建置與服務 smoke check. Source job 另產生 wheel、sdist 與含離線資產的原始碼 zip
 
 所有套件通過後產生 `SHA256SUMS.txt`, 檔案保存在 Actions artifacts. 0.x 使用 minor tag, 1.0.0 起可透過 `publish` 附加至草稿 Release. 版本與下載紀錄可從 [Actions](https://github.com/gaze9999/local-activity-monitor/actions/workflows/release.yml)查詢
+
+本批自建隔離 fixture 與測試瀏覽器均已關閉, 正式 8787 未由本輪重新啟動

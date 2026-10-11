@@ -10,14 +10,18 @@ Local Activity Monitor owns local source projections, collection, HTTP endpoints
 | --- | --- | --- |
 | Data provenance, missing values or health | `docs/data-inventory.md`, `docs/architecture.md` | Matching collector / projection in `src/local_activity_monitor/`, source fixture tests, null / zero / false distinctions |
 | Tabs, details, live updates or file-page delay | `docs/usage.md`, `docs/performance-report.md` | `frontend/app.js`, `frontend/style.css`, `files-navigation-flow.cjs`, `partial-refresh-flow.cjs`, `table-stream-interaction-flow.cjs` |
-| Summary sources, custom cards or groups | `docs/card-library.md`, `docs/settings-format.md` | Summary / card layout helpers in `frontend/app.js`, `settings-cards-flow.cjs`, stable IDs and keyboard / pointer cancel |
+| Summary sources, custom cards or groups | `docs/card-library.md`, `docs/settings-format.md` | Summary / card layout helpers in `frontend/app.js`, `settings-cards-flow.cjs`, `settings-sources-flow.cjs`, stable IDs and keyboard / pointer cancel |
+| Table columns or instructions layout | `docs/usage.md` | `dragColumn` / `moveColumn` / `renderTableColumns` and instructions detail in `frontend/app.js`, `table-column-flow.cjs`, `instructions-layout-flow.cjs`, `detail-tabs-flow.cjs` |
 | Settings import or diagnostic sharing | `docs/settings-format.md` | Settings validation / export helpers in `frontend/app.js`, `diagnostic-settings-flow.cjs`, preserve complete local settings |
+| Appearance, palettes, browser / Codex metadata | `docs/usage.md`, `docs/settings-format.md` | `appearance-controls-flow.cjs`, `card-presentation-flow.cjs`, `theme-api-flow.cjs`, pinned color tokens and modal cleanup |
+| Cloud chats, dots or schedules | `docs/usage.md`, `docs/architecture.md` | `codex_cloud.py`, `desktop_activity.py`, `codex_schedules.py`, `test_codex_cloud.py`, `test_desktop_activity.py`, `cloud-activity-flow.cjs`, manual CLI queries vs cached activity |
+| Opt-in account / public / OpenAI Platform queries | `docs/usage.md`, `docs/architecture.md` | `api_queries.py`, `public_api.py`, `openai_platform.py`, `server.py`, query fixture tests and `api-query-flow.cjs`, fixed URLs / disabled default / bounded cache |
 | Debug, CPU or theme | `docs/usage.md`, `docs/features.md` | `performance_debug.py`, `monitor_state.py`, frontend metrics / appearance, `debug-flow.cjs`, `cpu-theme-flow.cjs` |
 | Shared UI or pinned assets | `workbench-ui.json`, `docs/maintenance.md` | `tools/build_frontend.py`, `test_frontend_build.py`, selected revision's WBUI `AI.md` / declarations / API index |
 | History / Context refresh / agent relationships | `docs/usage.md` | History / communication helpers in `frontend/app.js`, `collectors.py` context record offsets, `history-flow.cjs`, `context-refresh-flow.cjs`, `test_context_detail.py` |
 | Feature status, candidates or delivery | `docs/features.md`, `docs/validation.md`, `README.md` | Distinguish implementation, focused fixture evidence, live acceptance and release authorization |
 
-Paths under the implementation column are relative to `frontend/`, `src/local_activity_monitor/` or `tests/` as named. Do not execute observed tool arguments, SQL or source code. Use bounded metadata fixtures, not production source bodies, credentials or real account probes.
+Paths under the implementation column are relative to `frontend/`, `src/local_activity_monitor/` or `tests/` as named. Do not execute observed tool arguments, SQL or source code. Use bounded metadata fixtures, not production source bodies or credential files. Live account metadata queries require explicit task authorization and a supported read-only CLI.
 
 ## Compose with the actual WBUI revision
 
@@ -25,7 +29,7 @@ WBUI owns reusable presentation, interaction, state and disposal. LAM owns sourc
 
 LAM's current pin selects WBUI 0.9.0. WBUI 0.10.0's row activation / selection APIs, new parsers and bullet chart have not been adopted. Do not use them through the old assets or change the pin without owner authorization. Source splitting keeps WBUI's published loading entry unchanged.
 
-LAM's existing table adapter initializes pagination before attaching rows, keeps the complete source and stable identities, and mounts only the current page. It is separate from WBUI `createTable`. Paging and viewport-deferred charts are implemented; continuous virtual scrolling remains WBUI planning work. Numerical precision, formula AST and 3D are also library candidates, not LAM capabilities.
+LAM's existing table adapter initializes pagination before attaching rows, keeps the complete source and stable identities, and mounts only the current page. It is separate from WBUI `createTable`. Table sums / means / latest values use filtered retained rows and a revision-aware cache. Modal panes leave their final table unfolded. Paging and viewport-deferred charts are implemented; continuous virtual scrolling uses capability-gated `bindVirtualScroll` in the development source; the fixed 0.9.0 assets have not adopted it. Numerical precision, formula AST and 3D are also library candidates, not LAM capabilities.
 
 ## Verify and report
 

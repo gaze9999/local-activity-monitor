@@ -13,9 +13,14 @@ import threading
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--startup-delay', type=float, default=0)
+    parser.add_argument('--api-fixture', action='store_true')
     options = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="lam-loading-fixture-") as folder:
         root = Path(__file__).resolve().parents[1]
+        for name in ('app.js', 'style.css', 'index.html', 'locales.json'):
+            generated = root/'src'/'local_activity_monitor'/'_web'/name
+            if not generated.is_file() or generated.read_bytes()!=(root/'frontend'/name).read_bytes():
+                raise RuntimeError('Synthetic fixture requires current assets: run python tools/build_frontend.py')
         base = Path(folder)
         home = base / 'home'
         sessions = home / 'sessions'
@@ -34,9 +39,12 @@ def main():
             source = base / name
             source.mkdir()
             (source / 'server.mjs').write_text('// Inert demo file; never executed.\n', encoding='utf-8')
+            (source / 'README.md').write_text('# Demo source\n', encoding='utf-8')
+            (source / 'settings.json').write_text('{"enabled":false,"count":0}', encoding='utf-8')
             (source / 'package.json').write_text(json.dumps({'name': name, 'description': description}, ensure_ascii=False), encoding='utf-8')
             config.append(f'[mcp_servers.{name}]\ncommand="node"\nargs={json.dumps([str(source / "server.mjs")])}\n')
         (home / 'config.toml').write_text('\n'.join(config), encoding='utf-8')
+        (home / '.codex-global-state.json').write_text('{}', encoding='utf-8')
         titles = ['示範介面整理', '示範工具統計', '示範文件維護', '示範資料讀取', '示範專案導覽', '示範錯誤分類', '示範格式預覽', '示範 MCP 比較', '示範功能檢查', '示範版本資訊', '示範圖表設定', '示範效能觀察']
         threads = []
         for index, title in enumerate(titles):
@@ -102,6 +110,21 @@ def main():
         from local_activity_monitor.server import Dashboard, handler
         from local_activity_monitor import __version__
         dashboard = Dashboard(home.resolve(), codex=True, max_files=20)
+        if options.api_fixture:
+            def api_result(key, cursor):
+                stamp = datetime.now(timezone.utc).isoformat()
+                if key == 'codex_account':
+                    return dashboard.account._empty('ok') | {'updated_at': stamp, 'account_usage': {'summary': {'lifetimeTokens': 0}}}
+                if key == 'codex_cloud':
+                    return {'health':'ok','checked_at':stamp,'items':[],'cursor':None}
+                if key == 'public_openai':
+                    return {'health':'ok','checked_at':stamp,'indicator':'none'}
+                if key == 'public_codex':
+                    return {'health':'ok','checked_at':stamp,'version':'0.160.0'}
+                return {'health':'ok','checked_at':stamp,'items':[],'has_more':False}
+            dashboard.api_queries.sources = {key:lambda cursor,key=key:api_result(key,cursor) for key in dashboard.api_intervals}
+            dashboard.api_queries.thread.start()
+
         dashboard.observations['worktrees'] = False
         dashboard.monitor.load_device = lambda: None
         dashboard.account.snapshot = lambda enabled=False: {'health': 'disabled', 'limits': {}, 'account_usage': None, 'methods': {name: {'health': 'disabled'} for name in ('account/read', 'account/rateLimits/read', 'account/usage/read')}}
@@ -139,6 +162,7 @@ def main():
             pass
         finally:
             dashboard.stop.set()
+            dashboard.api_queries.close()
             dashboard.notify_update()
             server.server_close()
             if worker:
