@@ -50,12 +50,12 @@
 - theme 提供 sand / workbench / neutral, 工作台保留目前配色, 名稱依語言顯示. 舊 steam / slate 設定改用 workbench
 - accent 提供 theme / green / blue / orange / custom, 預設 theme 隨主題與明暗模式調整. accentColor 為六位十六進位色碼, 如 `#66c0f4`, custom 時必填. fontFamily 為本機字型清單, 最多 200 字元, 以逗號分開, 空字串使用預設字型, 字型未安裝時由瀏覽器使用後續或系統字型. 不下載字型, 不接受 URL 或 CSS 宣告
 - codeFontFamily 與 fontFamily 使用相同的本機字型清單驗證, 空字串採系統預設, 兩者獨立保存
-- observations.codex_cloud 為 boolean, 預設 false, 控制 Codex CLI 雲端對話的自動查詢, 關閉時可手動查詢, 與 metadata 開關控制的 Dots / 排程快取分開
-- observations.public_openai / public_codex 為 boolean, 預設 false, 分別控制 OpenAI 狀態與 Codex 最新正式版本的自動查詢, 關閉時可手動查詢
+- observations.codex_cloud 為 boolean, 預設 false, 控制 Codex CLI 雲端對話的自動查詢, 關閉後不自動查詢, 與 metadata 開關控制的 Dots / 排程快取分開
+- observations.public_openai / public_codex 為 boolean, 預設 false, 分別控制 OpenAI 狀態與 Codex 最新正式版本的自動查詢, 關閉後不自動查詢
 - sourceWindows.global 接受 1h / 24h / 7d / all, 統一控制來源範圍. 舊版 tabs 最多 64 項, 匯入保留格式驗證, 顯示使用 global
 - charts 最多 256 項, tables 最多 500 項. 每張表 columns / hidden 最多 100 個欄名, heatmap / heatmapCustom / open 為 boolean. display.heatmap 提供全域預設, heatmapCustom 記錄個別覆寫, 全域 switch 立即套用到沿用設定的表格. 套用全部經確認後清除個別覆寫, open 省略時展開
 - 圖表最近長度 1 - 365, 單位分鐘 / 小時 / 天, interval 1 / 5 / 15 分鐘或 1 / 6 / 24 小時. top 最多 200, maximum 0 - 1000000000, 自訂起點需早於終點
-- observations.codex_account 為 boolean, 預設 false, 控制選配官方帳戶的自動唯讀查詢, 關閉時可手動查詢, usage 停用時一併停止查詢
+- observations.codex_account 為 boolean, 預設 false, 控制選配官方帳戶的自動唯讀查詢, 關閉後不自動查詢, usage 停用時一併停止查詢
 - shape 支援 bar / line / column / stacked / pie / donut / area. 卡片庫列出各圖表可用的形式, 趨勢可切換折線與長條圖, 固定形式的總覽卡片保留其預設
 - tool_descriptions / mcp_descriptions / mcp_tags 各最多 64 項, 說明每項 400 字元. 標籤每來源最多 4 個, 各 40 字元, 空陣列還原自動標籤. copy 最多 500 項, 每項 400 字元. MCP 分類與開關各最多 64 項
 - 主 Tab order 最多 50 項, 子頁 / 卡片順序 map 最多 100 個區域, 每區最多 100 個 ID. 無效或不存在的 ID 忽略
@@ -102,7 +102,7 @@ overview.order / hidden 各最多 500 個卡片 ID. 總覽副本以 overview-cop
 
 ## API 與呈現偏好
 
-settings.api_intervals 接受七個固定來源 codex_account、codex_cloud、public_openai、public_codex、platform_models、platform_usage、platform_costs, 每值為 60–86,400 的整數秒, 省略時預設 300. observations 的對應 boolean 控制自動查詢, 關閉時仍提供各頁查詢按鈕
+settings.api_intervals 接受七個固定來源 codex_account、codex_cloud、public_openai、public_codex、platform_models、platform_usage、platform_costs, 每值為 60–86,400 的整數秒, 省略時預設 300. observations 的對應 boolean 控制自動查詢. 目前暫時隱藏這七項的設定與查詢入口, 欄位、既有值、匯入 / 匯出及後端格式保留
 
 preferences.presentation 保存 numberNotation (standard / compact / scientific / engineering)、tagGroups、tagOutline、badgeGroups、badgeOutline、virtualScroll、notificationBell、inputEnabled, 後七項為 boolean. numberNotation 預設 standard, 分群、虛擬捲動、鈴鐺及輸入預設 false, 外框預設 true
 

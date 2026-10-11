@@ -1,5 +1,72 @@
 # 測試與建置
 
+## 2026-10-12 01:40 版本交付檢查
+
+Asia/Taipei, 0.16.0 來源, WBUI 0.11.0 pin `7c77ffea621d65db422f164552f7750f96ee94dc`
+
+- 固定 pin 建置、JavaScript 語法、差異空白與修改文件的 textlint 檢查通過, 同步修正 AI 入口及維護說明的舊版本敘述
+- Python 來源測試共 511 項, 3 項依平台條件略過, 其餘通過, 帳戶投影測試改由現行 `ApiQueries` mock 結果驗證, 不呼叫真實帳戶
+- Edge 合成資料的 loading-scope、hidden-api、retained-error、loading-layout、startup-preload、chart-copy、partial-refresh、idle-interaction 與 query-status 九個流程通過, 包含三語系及窄螢幕. 保留查詢流程僅在測試攔截頁面開啟入口, 該替換頁面的 CSP hash 不再適用, 正式入口與 CSP 保留
+- 公開來源與可達歷史的指定憑證格式檢查未發現符合模式的內容, 測試、截圖及暫存資料使用隔離目錄, 正式服務未重新啟動, 本機測試不代表 macOS / Linux 原生執行檔已驗收
+
+## 2026-10-11 21:51 共用載入範圍與統計規則
+
+Asia/Taipei, HEAD `32ee725` / 0.15.0 之後的未提交修改, `frontend/app.js` SHA-256 前 16 字元為 `3d8623dfa7155a2c`. 沿用既有 WBUI 0.11.0 pin `7c77ffea621d65db422f164552f7750f96ee94dc`, 本輪未修改 WBUI 或 pin
+
+- `frontend/app.js` 以 WBUI `createDataState` 共用容器 / 卡片載入呈現, 完整快照到達後自動切換. `frontend/style.css` 保留頁面標題及單一整區提示, 容器模式停用卡片內效果, 卡片內容、焦點與偏好保留, 已預載目錄可先查看
+- 統計來源相容 `.wb-statistic-label` / `.wb-statistic-value` 與舊名稱, 百分比及不適合加總的表格欄位不提供總和. 四張監測 / 總覽原始效能圖及副本不顯示總數, 原來源 ID 保留, 不再提供的來源維持 `--`
+- `tests/test_frontend_build.py` 使用受控的已安裝版本與有效 hash 測試穩定 Tag 數字排序 / annotated Tag, 防降版實作未變, 最後來源的 Python 建置測試 16/16 通過, 固定 pin 建置、JavaScript 語法及差異空白檢查通過
+- 新增 `tests/loading-scope-flow.cjs` / `tests/hidden-api-flow.cjs`, Edge 隔離頁面核對一個整區提示、初次失敗 / 重試、三種寬度的切換 / 焦點 / 節點身分、表格有效樣本 / 最新缺值 / 執行耗時總和、三語系 API 隱藏及舊雲端分頁恢復. 每組 API 設定與間隔保留, 無七個 API 來源請求或 pageerror
+- 合成整理樣本 1000 / 2000 / 3000 ms 的平均值為 2000 ms, P99 為 2980 ms, CPU 樣本 100 / 200 / 300 ms 的平均值為 200 ms, P99 為 298 ms, 四張圖皆為三個樣本 / 三個欄位. 真正執行耗時 1000 / 2000 ms 保留總和 3000 ms, 百分比來源序號仍為 0 / 1 / 3
+- 既有 startup-preload / chart-copy / partial-refresh / retained-error / idle-interaction 流程通過. `tests/loading-layout-flow.cjs` 改為檢查新的整區提示位置後通過, 保留零值 / 更新高度 / 三種寬度版面檢查, 共八個瀏覽器流程通過. 整區及卡片載入截圖已人工檢視
+- 正式 `8787` 由既有 PID `49928` 提供, 本輪未啟動或重新啟動. 唯讀瀏覽器核對 served app bytes 與本輪來源相同, WBUI 0.11.0、API 隱藏 / 保存設定 / 舊分頁恢復、360 筆實際樣本的三欄效能統計通過. 瀏覽器內模擬更新失敗 / 恢復保留圖表節點及卡片高度, 不代表外部服務故障已重現
+
+## 2026-10-11 20:07 API 入口隱藏與時間統計
+
+Asia/Taipei, HEAD `32ee725` / 0.15.0 之後的未提交修改, `frontend/app.js` SHA-256 前 16 字元為 `0fd78b4cce4f3b3b`. 目前工作目錄另有 WBUI pin `7c77ffea621d65db422f164552f7750f96ee94dc` / 0.11.0 的未提交更新, 本輪沿用現況, 未修改 pin 或 WBUI 原始碼
+
+- `frontend/app.js` 暫時隱藏七個 API 來源的設定、官方帳戶卡、雲端對話分頁、公開 API 與 Platform 卡片. 保存的雲端分頁回到對話列表, 本機紀錄、Dots 與 MCP 本機查詢保留. 既有 API 啟用狀態、間隔與後端實作不改寫
+- 資料整理耗時與整理 CPU 時間省略總數, 保留平均值、P99 與統計範圍. 工具與 SQL 等實際執行耗時保留加總. 總覽副本沿用來源規則, 自訂來源移除不再顯示的總數, 原有平均 / P99 / 樣本數來源 ID 不變, 舊總數選擇保留為缺值
+- `docs/usage.md` / `docs/card-library.md` 說明時間統計, `docs/settings-format.md` 說明 API 欄位相容性與暫時隱藏, 本節與 `.local/task-context.md` 記錄驗證及現況
+
+Edge 隔離頁面通過三語系、1366 px 深色及 390 px 淺色的六組 API 隱藏檢查, 未產生七個來源的查詢請求, 無 pageerror. 驗證已啟用的七個設定與 600 秒間隔未被改寫, 既有雲端分頁選擇安全回到對話列表, 監測設定與 Dots 仍可使用. 人工檢視設定與時間統計截圖, 未見 API 導覽或總數欄位
+
+合成資料整理樣本 1,000 / 2,000 / 3,000 ms 顯示平均 2,000 ms、P99 2,980 ms 與 3 個樣本, CPU 樣本 100 / 200 / 300 ms 顯示平均 200 ms、P99 298 ms. 總覽副本與自訂樣本數來源 ID 驗證通過, 工具執行耗時保留總數 6,000 ms. 同一建置另通過 `chart-copy-flow` 與 `retained-error-flow`, 後者涵蓋三語系、明暗模式與 1366 / 390 / 320 px 的原有失敗效果
+
+建置與 JavaScript 語法檢查通過. Python 前端建置測試 15/16 通過, `test_stable_tags_sort_numerically_and_peel_annotated_tags` 的假資料只提供至 0.10.0, 現行 pin 已為 0.11.0, 防降版規則保留現行 pin, 與測試的較舊 Tag 預期不同. 本輪未修改這項既有測試或版本選擇流程, 測試資料的版本假設仍待更新
+
+20:09 核對隔離測試 61401 已無監聽, 測試瀏覽器與暫存檢查程式已清理. 正式 8787 另由 19:48 啟動的程序 PID 49928 提供, 上層控制程序 PID 46732, 不屬於本輪建立的程序, 保留該組程序, 取代本輪開始時沿用的服務關閉假設. 新行為只在隔離頁面驗證, 未宣稱正式服務已載入. 本輪未啟動或重新啟動正式服務, 未提交、推送或建立 Tag, 保留先前查詢修正與失敗外框的未提交成果
+
+## 2026-10-11 19:44 保留資料的更新失敗效果
+
+Asia/Taipei, HEAD `32ee725` / 0.15.0 之後的未提交修改, `frontend/app.js` SHA-256 前 16 字元為 `2f648f7707b37bb6`, `frontend/style.css` 為 `c508973a49c7baaa`. WBUI pin 維持 `cf13a9417d752001ec388ab74a0f0fddab238066` / 0.9.0
+
+- `frontend/app.js` 由 LAM 保存卡片的更新失敗狀態, 已有資料時保留內容並隱藏可見錯誤文字, 另提供螢幕閱讀器狀態. 重試期間保留效果, 成功更新後清除, 初次失敗仍提供可見錯誤說明
+- `frontend/style.css` 使用主題警示色、虛線與內側外框效果, 不增加卡片尺寸、不遮住圖表或降低資料對比, 不依賴動畫
+- `tests/retained-error-flow.cjs` 檢查三語系、明暗模式、1366 / 390 / 320 px 與 24 px 字級的 18 組設定, 每組涵蓋 SVG 與長條圖, 比對卡片、標題及圖表尺寸與位置. 另檢查表格列保留、焦點、重試、恢復、初次失敗與減少動態效果
+- `docs/usage.md` 補充顯示行為, 本節與 `.local/task-context.md` 記錄驗證及背景服務關閉的決策. 先前查詢修正與未提交成果保留
+
+固定 pin 的 Edge 隔離頁面通過 `retained-error-flow`、`partial-refresh-flow` 與 `idle-interaction-flow`, 無 pageerror. 人工檢視 SVG 與長條圖的失敗外框畫面, 內容清楚且沒有失敗文字重疊. 既有兩個流程確認局部更新、焦點及下一次來源事件恢復. Python 前端建置測試 16/16、建置、JavaScript 語法與 diff 檢查通過
+
+使用者已於 19:31 要求關閉背景執行, 正式 8787 維持停止, 本節是隔離頁面與原始碼驗證, 尚未在正式服務驗證新效果. 19:45 核對正式 8787 與自建測試 54814 均無監聽, 測試瀏覽器已關閉. 本輪未修改 WBUI、pin 或其他使用端, 未提交、推送或建立 Tag
+
+## 2026-10-11 19:20 未查詢顯示與正式查詢修正
+
+Asia/Taipei, HEAD `32ee725` / 0.15.0 之後的未提交修改, `frontend/app.js` SHA-256 前 16 字元為 `0296cde4ab00f0a2`, 正式 8787 提供的資產與來源 hash 相同. WBUI pin 維持 `cf13a9417d752001ec388ab74a0f0fddab238066` / 0.9.0
+
+- `frontend/app.js` 隱藏尚未查詢的狀態, 查詢期間的背景更新保留 loading, HTTP 404 明確提示重新啟動 LAM. 官方帳戶結果與時間移入查詢工具列, 空白狀態不另顯示未取得文案
+- `frontend/locales.json` 補齊服務未更新提示的英文與日文
+- `tests/query-status-flow.cjs` 補齊初始隱藏、查詢期間背景更新、舊服務 404、恢復與帳戶工具列檢查
+- 本節與 `.local/task-context.md` 記錄新的驗收與服務現況. 建置同步 `_web/app.js`、`_web/locales.json` 與 `_web/manifest.json`, 其餘頁面資產與 WBUI pin 沿用原版本
+
+最新固定 pin 的 Edge 隔離頁面通過 `query-status-flow`、`api-query-flow` 與 `cloud-activity-flow`, 檢查初始隱藏、pending、成功 / 失敗、404 / 恢復、雲端分頁、MCP、Dots、三語系與 1366 / 390 / 320 px. 人工檢視未查詢畫面, 查詢按鈕與篩選保留, 未顯示尚未查詢. Python 前端建置 / 查詢排程 20/20 通過, JavaScript 語法與 diff 檢查通過
+
+正式 8787 原先七個新查詢端點都回傳 HTTP 404. 核對發現舊啟動器的建置子程序自 2026-10-10 未結束, 單獨恢復後仍無法完成更新. 本次只重新啟動已核對的 LAM 控制程序與專屬子程序, 使用原有 Python、home、設定、連接埠與固定 pin. 新控制程序 PID 43820 的自動建置 / 服務更新已實測, 正式版本為 0.15.0
+
+正式 API 的七項查詢均回傳 HTTP 200, OpenAI 狀態、Codex 版本、帳戶及雲端對話為 `health=ok`, 三個 Platform 來源為 `missing_credentials`. 同一正式頁面的七個查詢按鈕完成驗證, 雲端對話顯示空資料的成功結果, 帳戶查詢成功, Codex 為 0.162.1, OpenAI 的部分服務異常是來源結果, Platform 明確顯示未設定金鑰, 無 pageerror. 未取得金鑰的 Platform 資料與權限仍待驗收, 未將缺少設定當成查詢失敗
+
+合成服務與測試瀏覽器均已關閉, 保留正式 8787 常駐. 本輪未提交、推送或建立 Tag, 未修改 WBUI 或其他使用端
+
 ## 2026-10-11 15:10 v0.15.0 版本核對
 
 Asia/Taipei, `pyproject.toml` 與 `src/local_activity_monitor/__init__.py` 更新至 0.15.0. 版本更新後重新通過 84/84 Python 建置 / API / 本機 metadata / MCP 測試與 JavaScript Client Hints runtime 檢查, 四個建置前端檔案與來源 bytes 一致

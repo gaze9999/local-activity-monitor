@@ -26,7 +26,7 @@ async page => {
   try{
     await page.evaluate(()=>{sessionStorage.setItem('lam-finite-sse-fixture','true');localStorage.setItem('local-activity-monitor.preferences.v1',JSON.stringify({themeVersion:1,appearance:{mode:'dark',theme:'steam',accent:'blue',font:14}}));});
     await page.setViewportSize({width:1600,height:1000});await page.goto(origin);
-    await page.locator('section.panel').filter({has:page.locator('#overview-account-card')}).getByText('載入中',{exact:true}).waitFor();await page.locator('section.panel').filter({has:page.locator('#overview-account-card')}).getByText('連線中斷',{exact:true}).waitFor();
+    await page.locator('#view-overview > .wb-data-state[data-state="loading"]').waitFor();await page.locator('#view-overview > .wb-data-state').getByText('連線中斷',{exact:true}).waitFor();
     phase='ready';await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));await page.locator('#overview-account-card').getByText('pro',{exact:true}).waitFor();
     const account=await page.locator('#overview-account-card').innerText();check(account.includes('0')&&account.includes('否'),'zero/false account values');check(await page.getByRole('tab',{name:'用量與額度',exact:true}).getAttribute('aria-selected')==='false','cold overview must not require usage page');
     await page.evaluate(()=>document.fonts.ready);await page.waitForFunction(()=>document.getAnimations().every(animation=>animation.effect.getTiming().iterations===Infinity||animation.playState!=='running'));
