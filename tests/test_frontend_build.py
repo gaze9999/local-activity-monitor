@@ -149,8 +149,18 @@ class FrontendBuildTests(unittest.TestCase):
         builder.verify_offline(self.library, updated)
         self.assertFalse(list((self.root / ".local").glob(".build*")))
 
+    def set_library_version(self, version):
+        source = self.library / "workbench-ui.js"
+        source.write_text('global.WorkbenchUI=Object.freeze({version:"' + version + '"});', encoding="utf-8")
+        path = self.library / "manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["sha256"][source.name] = hashlib.sha256(source.read_bytes()).hexdigest()
+        path.write_text(json.dumps(manifest))
+
     def test_source_archive_adds_complete_verified_assets_and_rejects_corruption(self):
         builder.build(self.root)
+        # A compatible release fixture, never a claim about the real pinned bundle.
+        self.set_library_version("0.13.0")
         destination = self.root / "release/source.zip"
         def git_archive(command, **kwargs):
             with zipfile.ZipFile(command[-1], "w") as archive:
@@ -170,6 +180,50 @@ class FrontendBuildTests(unittest.TestCase):
                 source_archive.archive(self.root, destination)
             self.assertEqual(destination.read_bytes(), before)
             git.assert_called_once()
+
+    def test_offline_packaging_rejects_legacy_and_mismatched_revisions_without_writes(self):
+        builder.build(self.root)
+        destination = self.root / "release/source.zip"
+        destination.parent.mkdir()
+        destination.write_bytes(b"existing archive")
+        for version in ("0.12.0", "0.13.0-rc.1", "invalid"):
+            with self.subTest(version=version):
+                self.set_library_version(version)
+                before = {path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}
+                with patch.object(source_archive.subprocess, "run") as git:
+                    with self.assertRaisesRegex(ValueError, "0.13.0"):
+                        source_archive.archive(self.root, destination)
+                    git.assert_not_called()
+                self.assertEqual(before, {path: path.read_bytes() for path in before})
+        self.set_library_version("0.13.0")
+        builder.verify_bundle(self.root)
+        path = self.app / "manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["workbench_revision"] = "b" * 40
+        path.write_text(json.dumps(manifest))
+        with patch.object(source_archive.subprocess, "run") as git:
+            with self.assertRaisesRegex(builder.PreparationError, "revision"):
+                source_archive.archive(self.root, destination)
+            git.assert_not_called()
+        self.assertEqual(destination.read_bytes(), b"existing archive")
+
+    def test_offline_build_rejects_incompatible_updates_before_replacing_assets(self):
+        builder.build(self.root)
+        self.set_library_version("0.12.0")
+        before = {path: path.read_bytes() for parent in (self.library, self.app) for path in parent.iterdir() if path.is_file()}
+        with self.assertRaisesRegex(ValueError, "0.13.0"):
+            builder.build(self.root, offline=True)
+        with (self.root / "frontend/app.js").open("ab") as stream:
+            stream.write(b"\n/* changed frontend */\n")
+        with self.assertRaisesRegex(ValueError, "0.13.0"):
+            builder.build(self.root, offline=True)
+        self.assertEqual(before, {path: path.read_bytes() for path in before})
+        self.assertEqual(json.loads((self.root / "workbench-ui.json").read_text()), self.pin)
+        self.assertFalse(list((self.root / ".local").glob(".build*")))
+        self.set_library_version("0.13.0")
+        builder.build(self.root, offline=True)
+        builder.verify_bundle(self.root)
+        self.assertEqual((self.root / "frontend/app.js").read_bytes(), (self.app / "app.js").read_bytes())
 
     def test_stable_tags_sort_numerically_and_peel_annotated_tags(self):
         # Control the installed version independently of the checkout's current pin.

@@ -1,6 +1,7 @@
 import importlib.util
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -19,6 +20,16 @@ class ReleaseAssemblyTests(unittest.TestCase):
         with patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}), patch.object(sys, "argv", ["build_release.py", "--release"]), self.assertRaises(SystemExit) as result:
             release.main()
         self.assertEqual(result.exception.code, 2)
+
+    def test_incompatible_ui_stops_before_native_packaging(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            with patch.object(release, "__file__", str(root / "tools/build_release.py")), patch.object(sys, "argv", ["build_release.py"]), patch.object(release.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "verify-offline")) as run:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    release.main()
+                self.assertIn("--verify-offline", run.call_args.args[0])
+                run.assert_called_once()
+            self.assertEqual(list(root.iterdir()), [])
 
     def test_independent_windows_and_macos_test_archives(self):
         for platform in ("win32", "darwin", "linux"):
@@ -81,6 +92,7 @@ class ReleaseAssemblyTests(unittest.TestCase):
                     self.assertIn("local-activity-monitor/launch-cli", names)
                 self.assertFalse(any("--smoke-test" in command for command in calls))
                 self.assertEqual(sum("PyInstaller" in command for command in calls), 1)
+                self.assertIn("--verify-offline", calls[0])
 
 
 if __name__ == "__main__":

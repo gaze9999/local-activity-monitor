@@ -37,9 +37,10 @@
 
 Workbench UI 負責共用元件、布局與 UIUX, LAM 負責資料投影、欄位意義、tooltip 及保存. 串接前讀取該 revision 的 AI guide、型別規格與使用教學, 共用修正交由 WBUI 維護
 
+- Store 訂閱使用 subscribe(options, listener), 需要 WBUI 0.13.0 以上. 原生及來源封裝使用 `python tools/build_frontend.py --verify-offline`, 核對實際版本、資產 checksum、固定 pin 與頁面 revision. 不相容時保留既有頁面、資產及封裝檔, 來源更新先完成交付及 pin / 資產同步, 再核對封裝
 - 技能檔案樹使用穩定節點 ID, 檢查展開、鍵盤導覽、載入、返回與關閉清理
 - Git、SQL、工具、Log、專案資料夾與指示文件僅在已識別明細中按需讀取, 檢查允許路徑、大小、敏感欄位遮蔽與快取失效
-- 結構化內容由目前 WBUI 0.11.0 pin 的 `parseData` 處理, 依實際格式核對結構顯示與原文, 解析失敗保留原文. Markdown 以文字節點及允許連結呈現
+- 結構化內容由目前 WBUI 0.13.0 pin 的 `parseData` 處理, 依實際格式核對結構顯示與原文, 解析失敗保留原文. Markdown 以文字節點及允許連結呈現
 - MCP 來源卡檢查用途、狀態、最後更新時間及明細入口. 可編輯資料檔檢查格式、版本衝突、取消與原子保存
 - 頁尾來源區塊預設收合, 位置、欄位、健康狀態、上限與回補量取自當次讀取結果. 切換子頁列出相關來源
 

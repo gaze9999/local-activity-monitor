@@ -1,5 +1,56 @@
 # 測試與建置
 
+## 2026-10-13 01:25 0.17.0 來源交付檢查
+
+Asia/Taipei, 0.17.0 來源候選, 固定 WBUI 0.13.0 / `9c6b2898c5f959d948e2ed5ac5465227158b28e7`. 此 minor 記錄 Store 訂閱遷移、最低共用庫版本及離線封裝相容性要求, 既有 v0.16.0 保留原提交
+
+- Python 3.12.14 的來源套件與 runtime 版本同為 0.17.0, 固定離線建置驗證通過. 完整 unittest 共 515 項, 512 項通過、3 項略過, 兩項因本機無法建立 symlink, 一項因標準函式庫的大型 HTTP 基準逾時, 該環境下的大型應用本文傳輸仍未驗收
+- JavaScript 語法、runtime UI、頁面效能與 usage projection 檢查通過. 本次版本調整未改動已驗收的 app / WBUI 資產, 沿用上述固定來源的四個 Edge 流程, 不將前一節 0.16.0 原生候選當成 0.17.0 封裝證據
+- 前景服務仍回報 0.16.0, source watcher 所屬的資產建置程序停滯, 以相同 Python 3.14.7 獨立執行固定離線建置成功, 原因尚未確認. 此現況與 Python 持續增加的回報分開追蹤, 來源 / Tag 交付不代表正式服務已載入 0.17.0
+
+## 2026-10-13 01:12 Windows 可攜包與正式前景服務
+
+Asia/Taipei, LAM 0.16.0 / main HEAD cef4072 後的未提交來源, 固定 WBUI 0.13.0 / `9c6b2898c5f959d948e2ed5ac5465227158b28e7`. 使用者授權隔離安裝建置工具、Windows 可攜包驗收及正式服務重啟, 並指定最後以前景開啟 launch-cli.cmd
+
+- 隔離環境使用 Python 3.12.14、專案鎖定的 PyInstaller 6.22.3 與 build 1.6.1. 本機候選透過既有 build_release.py 建置, 未使用正式發布模式, ZIP 含 121 個項目, SHA-256 為 `378bb23864dc99030f975549ab7aa18fcc3fcdd8b23505d2545fe48c5435d1e4`, 不代表正式 Release
+- 原生 smoke 檢查通過 HTTP、內附資產、0.16.0 版本、空 home、CSP、圖示及來源檔案存取邊界. 搬移至含繁體中文及空白的路徑後, 移除開發來源與 Python 路徑覆寫, 核對 WBUI / 頁面 manifest、checksum 與必要授權檔, 選定的使用者設定、憑證及資料庫檔名未包含於候選 ZIP
+- 搬移後以隔離空 home 執行內附 launch-cli.exe, Edge 155.0.4283.45 確認 LAM 0.16.0 / WBUI 0.13.0、七個可見主要頁面及 390 / 320 px 無整頁橫向溢出, 無 pageerror. 關閉控制輸入後執行檔正常退出 0, 所屬程序及測試連接埠已回收
+- 正式 8787 服務沿用同一 home 識別及監測設定, 以前景 launch-cli.cmd 載入 LAM 0.16.0 / WBUI 0.13.0. 唯讀 Edge 驗收讀到 856 個中繼資料對話, 七個主要頁面及 390 / 320 px 通過, served app / WBUI bytes 與已驗收來源相同, 無設定寫入、pageerror 或設定變更
+- Python 持續增加的回報尚未重現. 第一組原啟動流程從 01:01 至 01:09 維持三個所屬 Python 程序, 另有一分鐘連續六次盤點一致, 重複開啟辨識 already_running 並退出 0. 關閉本輪啟動器後三個程序及 8787 均回收, 再從使用者確認的 launch-cli.cmd 前景開啟仍為三個, 新增的 MCP 程序歸屬 Codex 主程式. 本次未修改啟動器或關閉 Codex 管理的 MCP, 這項回報仍保留待重現狀態
+- 自建封裝環境、搬移目錄、建置 staging 與暫存驗證程式已清理, 候選 ZIP、記錄檔及本機驗收報告保留. 指定的前景服務維持執行, macOS / Linux 原生驗收及 LAM Git / Release 交付仍未完成
+
+## 2026-10-13 00:08 固定 WBUI 0.13.0 與離線資產同步
+
+Asia/Taipei, 使用者授權交付 WBUI 來源及更新 LAM 固定版本. WBUI main 已提交並推送 `9c6b2898c5f959d948e2ed5ac5465227158b28e7`, 遠端完整 SHA 已核對, 本次未建立 Tag / Release. LAM main HEAD 仍為 cef4072, 本輪及既有修改保留未提交
+
+- 透過共用建置 helper 指定上述完整 revision, 先驗證既有資產, 再原子同步 workbench-ui.json、WBUI 離線資產及 LAM 頁面. 四份共用資產與來源位元組一致, JS / CSS 的 SHA-256 前 16 字元為 2b169d04a0831404 / 4d0f6ed20add226f, app.js 仍為 f69e3ecd11699438
+- 離線相容性、checksum、pin 與頁面 revision 檢查通過, 開發選擇器在完整同步後移除. 清除測試程序的 WORKBENCH_UI_PATH 後, 預設 loader 使用 LAM 內附 _workbench 目錄, 不需要相鄰 checkout
+- Python 3.12.14 的前端建置 18/18、UI 資產 7/7、模擬原生封裝流程 3/3 通過. 第二次固定來源建置確認無須重建, 未執行原生發布包建置
+- Edge 155.0.4283.45 的 files-navigation、presentation-settings、output-detail、loading-scope 四組隔離流程通過, 實際 runtime 為 0.13.0. 包含三語系、320 / 390 / 1366 px、列 / 焦點 / 選取保留、設定重載、1,000 筆虛擬資料與明細取消 / 清理, 未觀察到 pageerror
+- AI 入口、使用、架構、功能、維護及效能文件同步目前固定來源, 歷史量測保留原受測版本. 本次未手動重啟正式服務或修改 Universe Idle / Sites, 正式執行與原生包驗收仍屬後續工作
+
+## 2026-10-12 22:47 Store 遷移的載入與封裝檢查
+
+Asia/Taipei, main HEAD cef4072, 未提交候選, 前端與 WBUI 來源沿用下節已驗收的 hash
+
+- `ui_assets.py` 在開發及離線載入時確認 WBUI 0.13.0 以上, 舊版、預覽版及無效版本資訊明確拒絕. `build_frontend.py --verify-offline` 在替換資產前檢查相容性, `archive_source.py` 另核對資產 / 頁面 / pin revision, 原生封裝及兩個發布工作流程皆採用此檢查
+- Python 3.12.14 的前端建置 18/18、UI 資產 7/7、封裝流程 3/3 通過. 使用隔離資料驗證正常建置、相容候選、舊版拒絕、修改後的失敗保留、revision 不符、checksum 損壞與來源封裝保留, 原生封裝測試模擬建置工具, 不代表跨平台執行檔已建置
+- 實際本機開發載入 0.13.0, 對目前 0.12.0 離線資產執行封裝檢查時按預期失敗, pin 與兩份資產 manifest 的 SHA-256 維持一致, 未產生正式封裝
+- Edge 155.0.4283.45 的 files-navigation 與 loading-scope 合成流程通過, 核對 320 / 390 px、熱度開關、列 / 焦點 / 選取保留、容器 / 卡片載入及統計缺值. WBUI reactive-motion 補驗通過插入 / 移除、焦點 / 選取、快速更新、動畫停用、表格欄對齊與清理
+- 修改包含 `src/local_activity_monitor/ui_assets.py`、三份建置 / 封裝工具、發布 workflow、三份回歸測試及 AI / 維護文件, workflow YAML、兩個封裝檢查入口、兩庫 diff 空白及四份文件的本機 textlint / 人工語意複核通過. 本次未執行 Git 交付、手動重啟正式服務或修改 Sites / Universe Idle, 固定 pin 及離線發布仍待 WBUI 來源交付
+
+## 2026-10-12 22:13 本機表格修正與 WBUI Store 遷移
+
+Asia/Taipei, LAM HEAD cef4072 後的未提交來源, app.js SHA-256 前 16 字元為 f69e3ecd11699438. WBUI 固定 pin 保留 0.12.0 / 03c10244, 既有開發選擇器直接提供本機 0.13.0 候選, JavaScript SHA-256 前 16 字元為 2b169d04a0831404. 開發選擇器的 revision 是 pin 基準, 不是未提交資產的固定修訂
+
+- 列比對原先把 tooltip 處理後移除的 title 視為資料改變, 造成相同紀錄重建. 現在依實際提示語意比對並排除衍生的 heat-cell 樣式, 保留資料變更判定與操作回呼更新
+- snapshotStore 及 tableRowStores 遷移為 subscribe(options, listener), 由共用 Python Assets 載入本機 WBUI src, 沒有手工複製候選到正式離線資產
+- presentation-settings-flow 改用可見檔案排行的合成資料, 不再點擊隱藏的 Platform API 入口. 1,000 筆資料初始掛載 17 列, 捲動、排序與停用後還原完整列通過
+- 原生 Python 的前端建置 16/16、UI 資產 6/6 通過, JavaScript 語法及 runtime UI / page metrics / usage projection 通過. 正式 pin 的取得、失敗保留與防降版檢查維持原規則
+- Edge 155.0.4283.45 通過 files-navigation、presentation-settings、table-stream-interaction、partial-refresh、output-detail、loading-scope 六組合成流程. 包含三語系、320 / 390 / 1366 px、熱度開關下的列 / 焦點 / 文字選取、設定重載、明細關閉 / 取消要求、載入範圍及統計零值 / 缺值
+- 瀏覽器核對實際 WBUI runtime 為 0.13.0, gallery 數量及 LAM 合成檔案表格的 390 px 截圖已人工檢視, 沒有 pageerror. 本次沒有驗證真實帳戶、其他平台或發布包
+- 文件同步目前 pin 與開發候選邊界, 固定 pin 更新及離線封裝需等 WBUI 來源提交後完成. 本次未執行 Git 交付或手動重啟正式 8787
+
 ## 2026-10-12 01:40 版本交付檢查
 
 Asia/Taipei, 0.16.0 來源, WBUI 0.11.0 pin `7c77ffea621d65db422f164552f7750f96ee94dc`
@@ -399,3 +450,10 @@ Wheel 與 sdist 輸出至 `dist/`, 原生測試包位於 `.local/package-tests/`
 所有套件通過後產生 `SHA256SUMS.txt`, 檔案保存在 Actions artifacts. 0.x 使用 minor tag, 1.0.0 起可透過 `publish` 附加至草稿 Release. 版本與下載紀錄可從 [Actions](https://github.com/gaze9999/local-activity-monitor/actions/workflows/release.yml)查詢
 
 本批自建隔離 fixture 與測試瀏覽器均已關閉, 正式 8787 未由本輪重新啟動
+
+## 2026-10-12 WBUI pin 更新
+
+- 使用既有穩定 Tag 選擇器與建置器, 將 WBUI 從 0.11.0 / 7c77ffea 更新至 0.12.0 / 03c10244, 完整 SHA 保存於 workbench-ui.json. 兩組離線 manifest、逐檔 hash 與 LAM 前端來源核對一致, 正式 8787 頁面已由既有 watcher 自動載入 0.12.0, 本輪未手動重新啟動
+- 原生 Windows 的 16 項前端建置、更新失敗保留與防降版測試通過, JavaScript 語法檢查通過. 沙箱暫存目錄的權限失敗已改在原生環境重驗
+- Edge 合成資料驗證通過載入範圍、三語系 / 三寬度的可見顯示設定、九方位通知與保存、工具 / MCP / Git / 錯誤 / Markdown 輸出及 modal 關閉 / 取消請求. output-detail-flow 的資源斷言改為核對 modal 所有權, 保留主頁控制器, 並拒絕未釋放的 modal 或 detached 資源
+- 完整 presentation-settings-flow 仍引用已隱藏的 API 入口, 本次僅驗證其可見設定區段. files-navigation-flow 的「未變記錄保留列 DOM」斷言, 在相同合成資料、Edge 與 CSP bypass 條件下比較 0.11.0 / 0.12.0 都失敗, 保留為既有待查問題, 不宣稱完整表格流程通過

@@ -16,7 +16,7 @@ def main():
     if args.release and os.environ.get("GITHUB_ACTIONS") != "true":
         parser.error("--release is restricted to GitHub Actions; omit it for a local test build")
     root = Path(__file__).resolve().parents[1]
-    subprocess.run([sys.executable, str(root/"tools/build_frontend.py")], cwd=root, check=True)
+    subprocess.run([sys.executable, str(root/"tools/build_frontend.py"), "--verify-offline"], cwd=root, check=True)
     sys.path.insert(0, str(root/"src"))
     from local_activity_monitor import __version__
     system = {"win32": "windows", "darwin": "macos", "linux": "linux"}[sys.platform]

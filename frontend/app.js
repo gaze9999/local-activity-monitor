@@ -1005,7 +1005,7 @@ function renderSourceStatus(value){
   let availability=$("source-availability");if(!availability){availability=node("span");availability.id="source-availability";$("source-retention").before(availability);}availability.textContent=ui("資料來源 ")+fmt(value[4])+" / "+fmt(value[5]);availability.title=ui("最近檢查成功 / 已啟用資料來源, 對應來源 Log 的檢查列");availability.tabIndex=0;
 }
 const snapshotStore=WorkbenchUI.createStore?.({});
-snapshotStore?.subscribe(renderSourceStatus,{select:selectSourceStatus,equals:(a,b)=>a.every((value,index)=>value===b[index]),immediate:false});
+snapshotStore?.subscribe({select:selectSourceStatus,equals:(a,b)=>a.every((value,index)=>value===b[index]),immediate:false},renderSourceStatus);
 function render(next){
   data=next;if(snapshotStore)snapshotStore.set({...next,locale});else renderSourceStatus(selectSourceStatus({...next,locale}));threadIndex=new Map((data.codex.threads||[]).map(thread=>[thread.thread_id,thread]));const c=data.codex,j=data.jev,threads=c.threads||[];
   if($("font-family").options.length<2&&data.monitor?.fonts?.length)applyAppearance();
@@ -2123,14 +2123,15 @@ function updateHoveredRows(view,rows){
 }
 const virtualTableRows=new WeakMap();
 function targetTableRows(body){return virtualTableRows.get(body)||tableRowStores.get(body)?.get()||[...body.children];}
-function updateTableChildren(body,rows,pageDirection=0){if(!WorkbenchUI.createStore||!WorkbenchUI.reconcileChildren){body.replaceChildren(...rows);return;}let store=tableRowStores.get(body);const previous=store?.get();if(previous?.length===rows.length&&previous.every((row,index)=>row===rows[index])&&body.children.length===rows.length&&rows.every((row,index)=>body.children[index]===row))return;if(!store){store=WorkbenchUI.createStore([]);store.subscribe(items=>WorkbenchUI.reconcileChildren(body,items,{motion:body.children.length>0&&childMotion(body),pageDirection:tablePageDirections.get(body)||0}),{immediate:false});tableRowStores.set(body,store);}tablePageDirections.set(body,pageDirection);store.set(rows);}
+function updateTableChildren(body,rows,pageDirection=0){if(!WorkbenchUI.createStore||!WorkbenchUI.reconcileChildren){body.replaceChildren(...rows);return;}let store=tableRowStores.get(body);const previous=store?.get();if(previous?.length===rows.length&&previous.every((row,index)=>row===rows[index])&&body.children.length===rows.length&&rows.every((row,index)=>body.children[index]===row))return;if(!store){store=WorkbenchUI.createStore([]);store.subscribe({immediate:false},items=>WorkbenchUI.reconcileChildren(body,items,{motion:body.children.length>0&&childMotion(body),pageDirection:tablePageDirections.get(body)||0}));tableRowStores.set(body,store);}tablePageDirections.set(body,pageDirection);store.set(rows);}
 function replaceRows(id,...rows){
   const body=$(id);let view=tableViews.get(id);
   if(!view&&!specialTables.has(id)&&body.isConnected&&!body.closest("dialog:not([open])")){attachTables(false,body.closest(".panel")||body.parentElement);view=tableViews.get(id);}
   const previous=view?.rows||[...body.children];
   if(backgroundSnapshot&&tableInteracting(view)){if(view.updateGuard?.contentHeld===false)updateHoveredRows(view,rows);deferTable(view);return;}
   if(view){view.pendingUpdate=false;delete view.table.dataset.pendingUpdate;if(view.disclosureSummary)view.disclosureSummary.title="";}
-  const signature=row=>JSON.stringify(rowCells(row).map(cell=>[cell.textContent,cell.className,cell.title,cell.dataset.sortValue,cell.dataset.heatValue,[...cell.querySelectorAll("button,a")].map(el=>[el.textContent,el.title,el.getAttribute("href")])]));
+  const helpText=el=>{const text=el.title||el.dataset.help||"",label=(el.getAttribute("aria-label")||el.textContent||"").trim();return el.dataset.helpSameText!=="true"&&text.trim()===label?fieldDescription(label)||"":text;};
+  const signature=row=>JSON.stringify(rowCells(row).map(cell=>[cell.textContent,[...cell.classList].filter(name=>name!=="heat-cell").join(" "),helpText(cell),cell.dataset.sortValue,cell.dataset.heatValue,[...cell.querySelectorAll("button,a")].map(el=>[el.textContent,helpText(el),el.getAttribute("href")])]));
   const retained=new Map();for(const row of previous){const key=signature(row);if(!retained.has(key))retained.set(key,[]);retained.get(key).push(row);}
   rows=rows.map(row=>{const old=retained.get(signature(row))?.shift();if(!old)return row;old._rowAction=row._rowAction;const controls=rowCells(row).flatMap(cell=>[...cell.querySelectorAll("button")]);for(const [index,control]of rowCells(old).flatMap(cell=>[...cell.querySelectorAll("button")]).entries())control._action=controls[index]?._action;return old;});
   if(view){view.rows=rows;view.metricRevision=(view.metricRevision||0)+1;view.sourceChanged=false;collapseTable(view,id);applyTableColumns(id);if(!specialTables.has(id)){paginateTable(id);return;}}
