@@ -4,11 +4,20 @@ from functools import lru_cache
 import os
 import json
 from pathlib import Path
+import re
 import sys
 
 
 class MissingUIAssetsError(RuntimeError):
     pass
+
+
+def require_ui_version(path):
+    if path.stat().st_size > 8 * 1024 * 1024:
+        raise ValueError("Invalid Workbench UI asset size")
+    match = re.search(r'global\.WorkbenchUI\s*=\s*Object\.freeze\(\{\s*version:\s*"((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))"', path.read_text(encoding="utf-8"))
+    if not match or tuple(map(int, match[1].split("."))) < (0, 13, 0):
+        raise ValueError("LAM requires Workbench UI 0.13.0 or later for subscribe(options, listener); update the exact pin and verified offline assets, or select a compatible development source")
 
 
 def development_source(project):
@@ -40,11 +49,15 @@ def load_ui_assets():
         spec = importlib.util.spec_from_file_location("workbench_assets", loader)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        return module.Assets(source / "src")
+        assets = module.Assets(source / "src")
+        require_ui_version(assets.path("workbench-ui.js"))
+        return assets
     try:
         from . import _workbench
     except ImportError:
         raise MissingUIAssetsError("Workbench UI is missing. Run the CLI launcher to prepare the pinned source automatically, use a complete LAM release, or set WORKBENCH_UI_PATH to an existing checkout.") from None
     if not callable(getattr(_workbench, "Assets", None)):
         raise ValueError("Embedded Workbench UI is incomplete. Existing files were preserved; restore the assets from a complete LAM release.")
-    return _workbench.Assets(package / "_workbench", verify=True)
+    assets = _workbench.Assets(package / "_workbench", verify=True)
+    require_ui_version(assets.path("workbench-ui.js"))
+    return assets

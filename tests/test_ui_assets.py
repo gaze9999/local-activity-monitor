@@ -57,6 +57,11 @@ class UIAssetTests(unittest.TestCase):
                 self.assertIs(ui_assets.load_ui_assets(), first)
                 self.assertEqual(first.path("workbench-ui.js"), source / "src/workbench-ui.js")
                 run.assert_not_called()
+                (source / "src/workbench-ui.js").write_text('global.WorkbenchUI=Object.freeze({version:"0.12.0"});', encoding="utf-8")
+                ui_assets.load_ui_assets.cache_clear()
+                with self.assertRaisesRegex(ValueError, "0.13.0"):
+                    ui_assets.load_ui_assets()
+                run.assert_not_called()
 
     def test_frozen_bundle_uses_embedded_assets_and_checks_hashes(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -75,6 +80,25 @@ class UIAssetTests(unittest.TestCase):
                 ui_assets.load_ui_assets.cache_clear()
                 with self.assertRaises(ValueError):
                     ui_assets.load_ui_assets()
+
+    def test_frozen_bundle_rejects_legacy_store_even_with_valid_hashes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            package = Path(folder).resolve() / "src/local_activity_monitor"
+            bundle = package / "_workbench"
+            bundle.mkdir(parents=True)
+            for name in loader.FILES:
+                shutil.copyfile(SOURCE / name, bundle / name)
+            (bundle / "workbench-ui.js").write_text('global.WorkbenchUI=Object.freeze({version:"0.12.0"});', encoding="utf-8")
+            hashes = {name: hashlib.sha256((bundle / name).read_bytes()).hexdigest() for name in loader.FILES}
+            manifest = {"version": 1, "revision": "a" * 40, "sha256": hashes}
+            (bundle / "manifest.json").write_text(json.dumps(manifest))
+            before = {path.name: path.read_bytes() for path in bundle.iterdir()}
+            with patch.object(ui_assets, "__file__", str(package / "ui_assets.py")), patch.object(sys, "frozen", True, create=True), patch.object(local_activity_monitor, "_workbench", loader, create=True), patch("subprocess.run") as run:
+                ui_assets.load_ui_assets.cache_clear()
+                with self.assertRaisesRegex(ValueError, "0.13.0"):
+                    ui_assets.load_ui_assets()
+                run.assert_not_called()
+            self.assertEqual(before, {path.name: path.read_bytes() for path in bundle.iterdir()})
 
     def test_incomplete_embedded_loader_is_preserved_without_setup(self):
         with tempfile.TemporaryDirectory() as folder:

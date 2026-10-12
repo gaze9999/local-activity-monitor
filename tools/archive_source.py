@@ -8,11 +8,13 @@ import zipfile
 def archive(root, destination):
     root = Path(root).resolve()
     bundle = root / "src/local_activity_monitor/_workbench"
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from build_frontend import verify_bundle
+    frontend = verify_bundle(root)
     sys.path.insert(0, str(root / "src"))
     from local_activity_monitor import _workbench
     _workbench.Assets(bundle, verify=True)
-    from local_activity_monitor.frontend_assets import FILES, FrontendAssets
-    frontend = FrontendAssets(root / "src/local_activity_monitor/_web")
+    from local_activity_monitor.frontend_assets import FILES
     destination = Path(destination).resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "-C", str(root), "archive", "--format=zip", "--prefix=local-activity-monitor/", "HEAD", "-o", str(destination)], check=True)

@@ -12,9 +12,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from prepare_ui import PreparationError, ensure_ui, latest_pin, offline_pin, read_pin, remove_temporary, unsafe_path, verify_offline
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from local_activity_monitor.frontend_assets import FILES, FrontendAssets
+from local_activity_monitor.ui_assets import require_ui_version
 
 
-def build(root, source=None, *, latest=False, revision=None):
+def verify_bundle(root):
+    root = Path(root).resolve()
+    pin = read_pin(root)
+    library = root / "src/local_activity_monitor/_workbench"
+    verify_offline(library, pin)
+    require_ui_version(library / "workbench-ui.js")
+    frontend = FrontendAssets(root / "src/local_activity_monitor/_web")
+    if frontend.manifest["workbench_revision"] != pin["revision"]:
+        raise PreparationError("LAM 頁面與離線 Workbench UI revision 不符, 保留既有內容")
+    return frontend
+
+
+def build(root, source=None, *, latest=False, revision=None, offline=False):
     root = Path(root).resolve()
     source = Path(source or os.environ.get("WORKBENCH_UI_PATH", root.parent / "workbench-ui"))
     pin = read_pin(root)
@@ -51,6 +64,8 @@ def build(root, source=None, *, latest=False, revision=None):
     fingerprint = hashlib.sha256(json.dumps({"format": 1, "revision": selected["revision"],
                             "sources": {name: hashlib.sha256(content).hexdigest() for name, content in inputs.items()}}, sort_keys=True).encode()).hexdigest()
     if existing and existing.manifest["inputs"] == fingerprint and asset_pin == selected:
+        if offline:
+            verify_bundle(root)
         return "LAM 頁面已是最新建置, Workbench UI " + selected["revision"][:12]
     staging = root / ".local"
     if unsafe_path(staging) or staging.resolve() != root / ".local":
@@ -70,7 +85,9 @@ def build(root, source=None, *, latest=False, revision=None):
                 if selected == pin or not library.exists():
                     raise
                 print("無法準備新版 Workbench UI, 保留目前版本", file=sys.stderr)
-                return build(root, source)
+                return build(root, source, offline=offline)
+        if offline:
+            require_ui_version(candidate / "workbench-ui.js")
         app = temporary / "_web"
         app.mkdir()
         for name, content in inputs.items():
@@ -123,9 +140,12 @@ def main():
     selection.add_argument("--latest", action="store_true", help="Check the latest stable WBUI tag using existing Git authentication")
     selection.add_argument("--revision", help="Build an explicitly selected full WBUI commit SHA")
     parser.add_argument("--source", type=Path)
+    parser.add_argument("--verify-offline", action="store_true", help="Require a compatible pinned offline bundle before packaging")
     args = parser.parse_args()
     try:
-        print(build(Path(__file__).resolve().parents[1], args.source, latest=args.latest, revision=args.revision))
+        root = Path(__file__).resolve().parents[1]
+        result = build(root, args.source, latest=args.latest, revision=args.revision, offline=args.verify_offline)
+        print(result)
     except (PreparationError, OSError, ValueError, RuntimeError) as error:
         parser.exit(1, "頁面建置失敗: " + str(error) + "\n")
 

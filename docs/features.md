@@ -50,10 +50,10 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 
 | 項目 | 現況 | 所屬工作 |
 | --- | --- | --- |
-| TOML、XML、CSV / TSV 結構預覽 | LAM 保持 WBUI 0.9.0, 相鄰 WBUI 0.10.0 候選已實作安全 XML、CSV / TSV 與 TOML 子集, 尚未採用 | 取得可固定的候選修訂並另獲准更新 pin 後, 依格式上限驗收串接 |
+| TOML、XML、CSV / TSV 結構預覽 | 目前 WBUI 0.13.0 pin 提供安全 XML、CSV / TSV 與 TOML 子集, LAM 按需輸出由 parseData 解析 | 依選定格式與上限核對結構、原文及失敗回退, 不視為完整格式標準 |
 | SQL AST、完整 YAML 與 Markdown | 已有 SQL 排版、YAML 子集及 Markdown 預覽 | WBUI 依使用情境補齊 dialect、節點、source map 與格式規格 |
 | 更多程式碼 parser | WBUI 的 `registerParser` 用於資料結構解析, 程式碼已有通用 tokenizer 與可視範圍上色 | WBUI 另定程式碼上色介面、逐行狀態、grammar 授權、語意 token 與 Worker 取消, LAM 保留來源格式及完整原文 |
-| 共用元件與互動 | 組合搜尋、條件篩選、sortable list、列拖曳、跨容器拖放、圖表縮放及面板編輯列為候選 | WBUI 維護[元件盤點](https://github.com/gaze9999/workbench-ui/blob/v0.9.0/docs/component-coverage.md)與[互動待辦](https://github.com/gaze9999/workbench-ui/blob/v0.9.0/docs/interaction-roadmap.md), LAM 按資料用途選用 |
+| 共用元件與互動 | 組合搜尋、條件篩選、sortable list、列拖曳、跨容器拖放、圖表縮放及面板編輯列為候選 | WBUI 維護[元件盤點](https://github.com/gaze9999/workbench-ui/blob/9c6b2898c5f959d948e2ed5ac5465227158b28e7/docs/component-coverage.md)與[互動待辦](https://github.com/gaze9999/workbench-ui/blob/9c6b2898c5f959d948e2ed5ac5465227158b28e7/docs/interaction-roadmap.md), LAM 按資料用途選用 |
 | 數值精算 / 公式 / 3D | 共用庫規劃候選, 尚未有可呼叫的數學或 3D 引擎 | WBUI 定義資料 / 精度 / 解析 / renderer, 使用端提供業務公式、變數、資產與授權, 不新增必裝相依套件 |
 | 遠端 LAM 存取、配對及登入 | 已有[遠端存取設計](remote-access.md), 尚未實作 | 待確認部署、HTTPS、權限及配對規格, 目前服務維持 loopback |
 
@@ -83,7 +83,7 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 
 空資料、列動作、分頁邊界、樹狀圖示與載入狀態的行為參考 [PrimeNG Table](https://primeng.dev/table)、[HeroUI Table](https://beta.heroui.com/docs/components/table) 與 [Nuxt UI Table](https://github.com/nuxt/ui/blob/v4/src/runtime/components/Table.vue)、[Tree](https://github.com/nuxt/ui/blob/v4/src/runtime/components/Tree.vue), 採用項目依 LAM 的資料與操作用途決定
 
-後續優先評估大型表格的可視範圍呈現、階層導覽、組合搜尋與欄位條件篩選, 其餘候選沿 [WBUI 元件盤點](https://github.com/gaze9999/workbench-ui/blob/v0.9.0/docs/component-coverage.md) 管理
+後續優先評估大型表格的可視範圍呈現、階層導覽、組合搜尋與欄位條件篩選, 其餘候選沿 [WBUI 元件盤點](https://github.com/gaze9999/workbench-ui/blob/9c6b2898c5f959d948e2ed5ac5465227158b28e7/docs/component-coverage.md) 管理
 
 程式碼上色可參考 VS Code 的 [TextMate 語法上色](https://code.visualstudio.com/api/language-extensions/syntax-highlight-guide) 與 [語意上色](https://code.visualstudio.com/api/language-extensions/semantic-highlight-guide). TextMate 依 grammar 分詞, 語意 token 由能分析專案的 provider 提供, 兩者與 TOML、CSV 等結構解析分開評估
 
@@ -95,7 +95,7 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 
 ## 實作與驗證入口
 
-完整任務分流見 [AI 入口](../AI.md), 共用 API 必須核對 `workbench-ui.json` 的實際版本. 目前本機候選與 1.0.0 待辦依 WBUI 自己的 AI 入口與索引查找, 上方 0.9.0 連結是固定版本的歷史文件
+完整任務分流見 [AI 入口](../AI.md), 共用 API 必須核對 `workbench-ui.json` 的實際版本. 元件候選與 1.0.0 待辦依 WBUI 自己的 AI 入口與索引查找, 上方連結使用目前固定來源的完整 SHA
 
 | 檔案 | 用途 |
 | --- | --- |
@@ -113,4 +113,4 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 
 SQL / SQLite、網路、MCP、錯誤紀錄與技能各自提供歷史分頁入口, 查詢量上限每頁 200 筆. Context 明細依記錄位置保留既有區段與捲動錨點, 重新讀取只替換新增或修改的畫面內容, 來源仍採原有有界按需讀取. 父子代理關聯取自實際 Thread ID, 用途標籤獨立成欄並標示 Goal / Plan 紀錄
 
-包含新 WBUI API 的來源可啟用連續虛擬捲動、數值記號、Tag / badge 分群、通知歷史與鍵盤 / 手把 binding, 正式固定 pin 尚未更新, 詳見[使用說明](usage.md)與[驗證紀錄](validation.md)
+目前 WBUI 0.13.0 pin 支援連續虛擬捲動、數值記號、Tag / badge 分群、通知歷史與鍵盤 / 手把 binding, LAM 依顯示設定啟用, 詳見[使用說明](usage.md)與[驗證紀錄](validation.md)
