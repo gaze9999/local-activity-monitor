@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from local_activity_monitor.process_lifecycle import cli_lifetime
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from watch import stop_child
+from watch import build_frontend, stop_child
 
 
 def write_status(root, status):
@@ -59,10 +59,10 @@ def main(args=None):
     try:
         with cli_lifetime():
             record("build_frontend", "starting")
-            prepared = subprocess.run([sys.executable, "-X", "utf8", "-I", "-B", str(root / "tools/build_frontend.py"), "--latest"], cwd=root)
-            if prepared.returncode:
-                record("build_frontend", "failed", exit_code=prepared.returncode)
-                return prepared.returncode
+            prepared = build_frontend(root, latest=True)
+            if prepared:
+                record("build_frontend", "failed", exit_code=prepared)
+                return prepared
             record("watcher", "starting")
             child = subprocess.Popen(
                 [sys.executable, "-X", "utf8", "-I", "-B", str(root/"tools/watch.py"), "--watch-stdin", "--codex", "--open", *args],

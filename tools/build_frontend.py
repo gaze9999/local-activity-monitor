@@ -13,6 +13,7 @@ from prepare_ui import PreparationError, ensure_ui, latest_pin, offline_pin, rea
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from local_activity_monitor.frontend_assets import FILES, FrontendAssets
 from local_activity_monitor.ui_assets import require_ui_version
+from local_activity_monitor.process_lifecycle import cli_lifetime
 
 
 def verify_bundle(root):
@@ -151,4 +152,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    with cli_lifetime():
+        main()

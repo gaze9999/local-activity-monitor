@@ -93,13 +93,10 @@ class PerformanceDebugTests(unittest.TestCase):
 
     def test_native_memory_samples_do_not_accumulate_pointer_types(self):
         process_memory()
-        cache = getattr(ctypes, '_pointer_type_cache', None)
-        if cache is None:
-            self.skipTest('CPython ctypes cache unavailable')
-        before = len(cache)
-        for _ in range(100):
-            process_memory()
-        self.assertEqual(len(cache), before)
+        with patch.object(ctypes, 'POINTER', wraps=ctypes.POINTER) as pointer:
+            for _ in range(100):
+                process_memory()
+        pointer.assert_not_called()
 
 
 if __name__ == '__main__':

@@ -51,7 +51,7 @@ Workbench UI 負責共用元件、布局與 UIUX, LAM 負責資料投影、欄�
 - 同一 fixture、視窗、偏好及 WBUI revision 比較 cold / warm / update / cancel / close 的耗時、程序 CPU / RSS、讀取量、HTTP 大小及瀏覽器指標
 - 頁面效能檢查 TTFB、FCP、LCP、CLS、首次資料呈現、長任務與 Event Timing. LCP 使用首次進入背景前樣本, CLS 使用 1 秒間隔 / 5 秒群組, 最慢互動顯示最大 duration
 - CLI 檢查已有 Python、缺少 Python、參數、Unicode 路徑、服務重用及停止. WBUI 取得檢查正式 tag、Release 選擇、認證、離線重用、無效資產保留與建置回復
-- Watcher 在成功建置後重啟自己建立的子程序, 失敗時保留現有服務. 檢查修改穩定時間與退出清理
+- Watcher 依來源內容與修改穩定時間判斷更新, 相同內容重新存檔不重啟. 建置及來源載入失敗保留現有服務, 替代服務啟動失敗恢復同一舊程序. 檢查修復後更新、切換期間取消及退出清理
 
 ## 建置與交付
 
