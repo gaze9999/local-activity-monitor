@@ -1410,21 +1410,56 @@ def serve(argv=None, watch_stdin=False):
     print(json.dumps({"status": "listening", "url": url, "codex_metadata": args.codex}), flush=True)
     if args.open:
         webbrowser.open(url)
+    control = threading.Condition()
+    desired = "run"
+    serving = threading.Event()
     if watch_stdin:
         def watch_control():
+            nonlocal desired
             try:
-                command = sys.stdin.readline()
-                if not command or command.strip() == "restart":
-                    dashboard.monitor.event("restart_requested" if command else "launcher_closed")
-                    server.shutdown()
+                while True:
+                    command = sys.stdin.readline()
+                    action = command.strip()
+                    if command and action not in {"pause", "resume", "restart"}:
+                        continue
+                    with control:
+                        desired = {"pause": "pause", "resume": "run"}.get(action, "stop")
+                        control.notify_all()
+                    if desired != "run" and serving.is_set():
+                        server.shutdown()
+                    if desired == "stop":
+                        dashboard.monitor.event("restart_requested" if command else "launcher_closed")
+                        return
             except OSError:
-                pass
+                with control:
+                    desired = "stop"
+                    control.notify_all()
+                if serving.is_set():
+                    server.shutdown()
         threading.Thread(target=watch_control, name="watch-control", daemon=True).start()
     try:
-        server.serve_forever(poll_interval=.5)
+        while True:
+            with control:
+                if desired == "stop":
+                    break
+                serving.set()
+            server.serve_forever(poll_interval=.5)
+            serving.clear()
+            if desired != "pause":
+                break
+            address = server.server_address
+            server.server_close()
+            print(json.dumps({"status": "paused"}), flush=True)
+            with control:
+                control.wait_for(lambda: desired != "pause")
+            if desired == "stop":
+                break
+            server = LoopbackHTTPServer(address, handler(dashboard, address[1]))
+            print(json.dumps({"status": "listening", "url": url, "codex_metadata": args.codex}), flush=True)
     except KeyboardInterrupt:
         pass
     finally:
+        serving.clear()
         dashboard.stop.set()
         dashboard.api_queries.close()
         dashboard.source_changed.set()
