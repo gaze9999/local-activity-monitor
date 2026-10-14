@@ -1,36 +1,17 @@
 async page=>{
-  await page.reload();await page.waitForFunction(()=>data?.updated_at&&!busy);
-  const errors=[];page.on('pageerror',error=>errors.push(error.message));
-  if(!await page.evaluate(()=>data.codex.threads.every(t=>t.model?.startsWith('demo-model-'))))throw Error('Synthetic fixture required');
-  const api=await page.evaluate(async()=>{
-    const values=[],first=await fetch('/api/history?namespace=activity&section=mcp&limit=2').then(r=>r.json());let part=first;
-    while(true){values.push(...part.items);if(!part.next_cursor)break;part=await fetch('/api/history?namespace=activity&section=mcp&limit=2&cursor='+encodeURIComponent(part.next_cursor)).then(r=>r.json());}
-    const invalid=await fetch('/api/history?namespace=activity&section=mcp&cursor=bad');
-    return {total:first.total,count:values.length,unique:new Set(values.map(v=>JSON.stringify([v.server,v.thread_id,v.call_id,v.index,v.timestamp]))).size,invalid:invalid.status};
-  });
-  if(!api.total||api.count!==api.total||api.unique!==api.total||api.invalid!==400)throw Error(JSON.stringify(api));
-  await page.evaluate(()=>{display.table=2;openHistory('activity','mcp');});
-  await page.waitForFunction(()=>detail.historyPage&&!detail.historyLoading);
-  const locations=await page.evaluate(()=>Object.entries(historySections).map(([key,[namespace,section]])=>{const button=document.querySelector('[data-history-section="'+section+'"]');return {key,section,namespace,local:button?.closest('.panel')===document.getElementById(key)?.closest('.panel')};}));if(locations.length!==5||locations.some(item=>!item.local)||await page.locator('.log-history-library').count())throw Error('History entry placement');
-  const first=await page.locator('#detail-content tbody').textContent();
-  await page.locator('#detail-content').getByRole('button',{name:'下一頁',exact:true}).click();
-  await page.waitForFunction(()=>detail.historyIndex===1&&!detail.historyLoading);
-  if(await page.locator('#detail-content tbody').textContent()===first)throw Error('Page did not advance');
-  await page.locator('#detail-content').getByRole('button',{name:'上一頁',exact:true}).click();
-  await page.waitForFunction(()=>detail.historyIndex===0&&!detail.historyLoading);
-  if(await page.locator('#detail-content tbody').textContent()!==first)throw Error('Page did not restore');
-  await page.locator('#detail-content').getByRole('button',{name:'最後一頁',exact:true}).click();
-  await page.waitForFunction(()=>detail.historyIndex===Math.ceil(detail.historyPage.total/detail.historyLimit)-1&&!detail.historyLoading);
-  if(!await page.locator('#detail-content').getByRole('button',{name:'下一頁',exact:true}).isDisabled())throw Error('Last page boundary');
-  await page.locator('#detail-content').getByRole('button',{name:'上一頁',exact:true}).click();await page.waitForFunction(()=>!detail.historyLoading);
-  await page.locator('#detail-content').getByRole('button',{name:'第一頁',exact:true}).click();await page.waitForFunction(()=>detail.historyIndex===0&&!detail.historyLoading);
-  if(await page.locator('#detail-content tbody').textContent()!==first)throw Error('First page after last');
-  await page.locator('#detail-dialog').evaluate(el=>el.close());
-  await page.route('**/api/history?**',route=>route.fulfill({status:503,body:'Unavailable'}));
-  await page.evaluate(()=>openHistory('activity','mcp'));await page.waitForFunction(()=>detail.historyError&&!detail.historyLoading);
-  await page.unroute('**/api/history?**');await page.locator('#detail-dialog').getByRole('button',{name:'重新整理',exact:true}).click();
-  await page.waitForFunction(()=>detail.historyPage&&!detail.historyLoading);await page.locator('#detail-dialog').evaluate(el=>el.close());
-  for(const item of locations){await page.evaluate(({namespace,section})=>openHistory(namespace,section),item);await page.waitForFunction(section=>detail.section===section&&detail.historyPage&&!detail.historyLoading,item.section);const count=await page.locator('#detail-content tbody tr').count();if(count>2)throw Error('Unbounded history page '+item.section);await page.locator('#detail-dialog').evaluate(el=>el.close());}
-  await page.route('**/api/history?**',route=>route.fulfill({contentType:'application/json',body:JSON.stringify({items:[],total:0,limit:2,next_cursor:null})}));await page.evaluate(()=>openHistory('activity','sql'));await page.waitForFunction(()=>detail.historyPage&&!detail.historyLoading);if(!await page.locator('#detail-content thead').isHidden()||!await page.locator('#detail-content').getByText('沒有資料',{exact:true}).count()||!await page.locator('#detail-content').getByRole('button',{name:'下一頁',exact:true}).isDisabled())throw Error('Empty history state');await page.unroute('**/api/history?**');await page.locator('#detail-dialog').evaluate(el=>el.close());
-  if(errors.length)throw Error(JSON.stringify(errors));return {api,paging:true,errorRetry:true,locations,empty:true,errors};
+ await page.evaluate(()=>{stopEventStream();display.table=2;switchTab('mcp');});
+ const api=await page.evaluate(async()=>{const values=[],first=await fetch('/api/history?namespace=activity&section=mcp&limit=2').then(r=>r.json());let part=first;while(true){values.push(...part.items);if(!part.next_cursor)break;part=await fetch('/api/history?namespace=activity&section=mcp&limit=2&cursor='+encodeURIComponent(part.next_cursor)).then(r=>r.json());}return {total:first.total,count:values.length,unique:new Set(values.map(v=>JSON.stringify([v.server,v.thread_id,v.call_id,v.index,v.timestamp]))).size,invalid:(await fetch('/api/history?namespace=activity&section=mcp&cursor=bad')).status};});
+ if(!api.total||api.count!==api.total||api.unique!==api.total||api.invalid!==400)throw Error(JSON.stringify(api));
+ await page.evaluate(()=>{switchTab('mcp');selectInlineHistory(inlineHistories.get('mcp-rows'),true);});await page.waitForFunction(()=>inlineHistories.get('mcp-rows').page&&!inlineHistories.get('mcp-rows').loading);
+ const first=await page.evaluate(()=>JSON.stringify(inlineHistories.get('mcp-rows').page.items)),footer=page.locator('#mcp-rows').locator('xpath=ancestor::section[contains(@class,"panel")]').locator('.inline-history-pagination');
+ const header=await page.evaluate(()=>{const view=tableViews.get('mcp-rows'),index=view.headers.indexOf('工具');changeTableSort('mcp-rows',{column:index,descending:false});return {sort:view.headerCells[index].getAttribute('aria-sort'),empty:inlineHistories.get('mcp-rows').empty.hidden,pager:inlineHistories.get('mcp-rows').footer.textContent};});if(header.sort!=='ascending'||!header.empty||!header.pager.includes('第 1 /'))throw Error(JSON.stringify(header));
+ if(await page.locator('#detail-dialog').isVisible())throw Error('History opened a separate detail table');
+ await footer.getByRole('button',{name:'下一頁',exact:true}).click();await page.waitForFunction(()=>inlineHistories.get('mcp-rows').index===1&&!inlineHistories.get('mcp-rows').loading);if(await page.evaluate(()=>JSON.stringify(inlineHistories.get('mcp-rows').page.items))===first)throw Error('History page did not advance');
+ await footer.getByRole('button',{name:'上一頁',exact:true}).click();await page.waitForFunction(()=>inlineHistories.get('mcp-rows').index===0&&!inlineHistories.get('mcp-rows').loading);if(await page.evaluate(()=>JSON.stringify(inlineHistories.get('mcp-rows').page.items))!==first)throw Error('History page did not restore');
+ await footer.getByRole('button',{name:'最後一頁',exact:true}).click();await page.waitForFunction(()=>{const s=inlineHistories.get('mcp-rows');return !s.loading&&s.index===Math.ceil(s.page.total/s.limit)-1;});
+ await page.evaluate(()=>openTableSettings('mcp-rows'));await page.locator('#table-size').selectOption('10');await page.waitForFunction(()=>{const s=inlineHistories.get('mcp-rows');return !s.loading&&s.index===0&&s.limit===10&&s.page.items.length===10&&s.cursors.length===1;});await page.locator('#table-settings-close').click();
+ const results=[];for(const [key,tab]of [['sqlite-rows','sqlite'],['web-event-rows','web'],['mcp-rows','mcp'],['error-rows','errors'],['skill-rows','skills']]){await page.evaluate(([key,tab])=>{switchTab(tab);selectInlineHistory(inlineHistories.get(key),true);},[key,tab]);await page.waitForFunction(key=>!inlineHistories.get(key).loading,key);const columns=await page.locator('#'+key).evaluate(body=>({headers:body.closest('table').querySelectorAll('th').length,cells:body.rows[0]?.cells.length}));if(columns.cells&&columns.headers!==columns.cells)throw Error(JSON.stringify({key,...columns}));results.push({key,...columns});await page.evaluate(key=>selectInlineHistory(inlineHistories.get(key),false),key);}
+ await page.route('**/api/history?*',route=>route.fulfill({status:503,body:'Fixture unavailable'}));await page.evaluate(()=>selectInlineHistory(inlineHistories.get('mcp-rows'),true));await page.waitForFunction(()=>inlineHistories.get('mcp-rows').error);await page.unroute('**/api/history?*');await page.evaluate(()=>loadInlineHistory(inlineHistories.get('mcp-rows')));await page.waitForFunction(()=>!inlineHistories.get('mcp-rows').loading&&!inlineHistories.get('mcp-rows').error);
+ await page.evaluate(()=>selectInlineHistory(inlineHistories.get('mcp-rows'),false));
+ return {api,originalTables:results,inlinePaging:true,pageSize:true,sortState:true,emptyState:true,recovery:true};
 }

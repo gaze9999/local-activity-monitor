@@ -5,6 +5,7 @@ from . import __version__
 from .device_info import memory_info, processor_name, CpuUsage, system_fonts
 from .gpu_info import gpu_info
 from .performance_debug import PerformanceDebug
+from .monitor_usage import MonitorUsage
 import os
 import platform
 import json
@@ -52,6 +53,7 @@ class MonitorState:
         self.logs = deque(maxlen=self.LOG_LIMIT)
         self.journal = journal
         self.debug = PerformanceDebug(journal.with_name("performance-debug.jsonl") if journal else None)
+        self.usage = MonitorUsage()
         self.log_enabled = True
         self.log_health = "memory" if journal is None else "waiting"
         self.log_error_type = None
@@ -221,6 +223,7 @@ class MonitorState:
 
     def snapshot(self):
         with self.lock:
+            process_usage = self.usage.sample()
             collection = dict(self.collection)
             if collection["phase"] not in ("idle", "waiting", "stopped", "error"):
                 wall, cpu = self.collection_started
@@ -231,4 +234,4 @@ class MonitorState:
                 self.cpu_percent = self.cpu.sample()
                 self.device_checked_at = stamp()
                 self.memory_checked = time.monotonic()
-            return {**self.runtime, **self.memory, "log_path": str(self.journal) if self.journal else None, "collection": collection, "device_ready": self.device_ready, "cpu_usage_percent": self.cpu_percent, "cpu_scope": self.cpu.scope, "device_checked_at": self.device_checked_at if self.device_ready else None, "health": self.health, "uptime_seconds": round(time.monotonic()-self.began), "refreshes": self.refreshes, "errors": self.errors, "requests": self.requests, "http_errors": self.http_errors, "last_error_at": self.last_error_at, "error_type": self.error_type, **(self.history[-1] if self.history else {}), "snapshot_bytes": self.snapshot_bytes, "transfer_bytes": self.transfer_bytes, "history_limit": self.HISTORY_LIMIT, "event_limit": self.EVENT_LIMIT, "history": [dict(item) for item in self.history], "events": [dict(item) for item in self.events]}
+            return {**self.runtime, **self.memory, "process_usage": process_usage, "log_path": str(self.journal) if self.journal else None, "collection": collection, "device_ready": self.device_ready, "cpu_usage_percent": self.cpu_percent, "cpu_scope": self.cpu.scope, "device_checked_at": self.device_checked_at if self.device_ready else None, "health": self.health, "uptime_seconds": round(time.monotonic()-self.began), "refreshes": self.refreshes, "errors": self.errors, "requests": self.requests, "http_errors": self.http_errors, "last_error_at": self.last_error_at, "error_type": self.error_type, **(self.history[-1] if self.history else {}), "snapshot_bytes": self.snapshot_bytes, "transfer_bytes": self.transfer_bytes, "history_limit": self.HISTORY_LIMIT, "event_limit": self.EVENT_LIMIT, "history": [dict(item) for item in self.history], "events": [dict(item) for item in self.events]}

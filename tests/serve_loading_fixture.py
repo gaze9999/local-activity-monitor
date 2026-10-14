@@ -14,6 +14,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--startup-delay', type=float, default=0)
     parser.add_argument('--api-fixture', action='store_true')
+    parser.add_argument('--parent-control', action='store_true')
     options = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="lam-loading-fixture-") as folder:
         root = Path(__file__).resolve().parents[1]
@@ -137,12 +138,21 @@ def main():
             dashboard.preload()
         else:
             collect()
+        demo_thread = '00000000-0000-4000-8000-000000000001'
+        dashboard.activity_history.update(
+            [{'timestamp':stamp(anchor), 'thread_id':demo_thread, 'call_id':'demo_history_sql',
+              'statement':'SELECT', 'operation':'select', 'engine':'sqlite', 'tool':'exec_command',
+              'source':'tool_call', 'recognition':'tool_parameters', 'result':'ok', 'rows_returned':1, 'rows_affected':0}],
+            [{'timestamp':stamp(anchor), 'thread_id':demo_thread, 'call_id':'demo_history_web', 'server':'web',
+              'tool':'web.run', 'metadata':{'references':['https://example.invalid/demo']}, 'result':{'status':'ok'}}])
+        dashboard.codex.thread_state.update([{'thread_id':demo_thread, 'calls':{'demo_history_skill':
+            {'timestamp':stamp(anchor), 'skills':[{'skill':'demo-skill'}]}}}])
         original_snapshot = dashboard.snapshot
         def demo_snapshot(window='all'):
             value = original_snapshot(window)
             if value['codex'].get('usage'):
                 value['codex']['usage']['credits'] = {'balance': 0, 'has_credits': False, 'unlimited': False}
-            value['monitor'] = {'log_path': value['monitor'].get('log_path'), 'debug': value['monitor'].get('debug', {}), 'version': __version__, 'uptime_seconds': 7200, 'health': 'ok', 'requests': 24, 'errors': 0, 'collection': {'phase': 'idle'}, 'device_ready': True, 'gpus':[{'name':'Demo single GPU','dedicated_memory_bytes':8*1024**3,'shared_memory_bytes':16*1024**3,'driver_version':'demo'}], 'fonts':['Segoe UI','Microsoft JhengHei'], 'history': [], 'events': []}
+            value['monitor'] = {'log_path': value['monitor'].get('log_path'), 'debug': value['monitor'].get('debug', {}), 'version': __version__, 'process_usage': value['monitor'].get('process_usage',{}), 'uptime_seconds': 7200, 'health': 'ok', 'requests': 24, 'errors': 0, 'collection': {'phase': 'idle'}, 'device_ready': True, 'gpus':[{'name':'Demo single GPU','dedicated_memory_bytes':8*1024**3,'shared_memory_bytes':16*1024**3,'driver_version':'demo'}], 'fonts':['Segoe UI','Microsoft JhengHei'], 'history': [], 'events': []}
             return value
         dashboard.snapshot = demo_snapshot
         server = ThreadingHTTPServer(('127.0.0.1', 0), handler(dashboard, 0))
@@ -150,6 +160,11 @@ def main():
         (base / 'service.json').write_text(json.dumps({'port': server.server_port, 'synthetic': True}), encoding='utf-8')
         print(json.dumps({'url': f'http://127.0.0.1:{server.server_port}/', 'synthetic': True, 'threads': len(threads)}), flush=True)
         worker = None
+        if options.parent_control:
+            def parent_control():
+                sys.stdin.buffer.read()
+                server.shutdown()
+            threading.Thread(target=parent_control, daemon=True).start()
         if options.startup_delay:
             def delayed_collect():
                 if not dashboard.stop.wait(options.startup_delay):

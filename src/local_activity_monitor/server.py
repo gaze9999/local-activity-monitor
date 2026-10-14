@@ -145,6 +145,11 @@ class Dashboard:
         self.diagnostics = DiagnosticCollector(home)
         self.error_history = ErrorHistory(home/"monitoring/error-history.json")
         self.activity_history = ActivityHistory(home/"monitoring/activity-history.json")
+        storage = home/"monitoring"
+        names = ('lam-history.sqlite3', 'lam-history.sqlite3-wal', 'lam-history.sqlite3-shm', 'lam-history.sqlite3-journal',
+                 'local-activity-monitor.jsonl', 'local-activity-monitor.jsonl.1', 'performance-debug.jsonl',
+                 'performance-debug.jsonl.1', 'performance-debug.jsonl.2', 'performance-debug.jsonl.3')
+        self.monitor.usage.paths = tuple(storage/name for name in names)
         if self.codex:
             self.codex.history_sink = self.retain_calls
         self.stop = threading.Event()

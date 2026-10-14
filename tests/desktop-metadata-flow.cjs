@@ -1,0 +1,6 @@
+async page=>{
+ const check=(value,message)=>{if(!value)throw Error(message);};let requests=0;page.on('request',request=>{if(/\/api\/codex\/dots\?/.test(request.url()))requests++;});
+ await page.evaluate(()=>{stopEventStream();switchTab('codex');});
+ for(const locale of ['zh-TW','en','ja']){await page.evaluate(value=>{window.locale=value;applyLanguage();},locale);check(!await page.locator('#codex-schedules').isVisible()&&!await page.locator('#codex-dots').isVisible(),'Hidden passive tabs '+locale);check(await page.evaluate(()=>typeof queryDots==='undefined'&&!document.querySelector('.dots-query-actions,.schedule-query-actions')),'No manual query');}
+ await page.evaluate(()=>{locale='zh-TW';applyLanguage();selectConversationSource('schedules');});check(await page.evaluate(()=>conversationSource==='conversations'),'Obsolete saved source falls back');await page.locator('#codex-conversations').focus();await page.keyboard.press('End');check(await page.evaluate(()=>!document.activeElement.hidden&&!['codex-schedules','codex-dots'].includes(document.activeElement.id)),'Keyboard skips hidden tabs');check(requests===0,'No desktop metadata query');return {hidden:true,manualQueryRemoved:true,keyboard:true,locales:3,requests};
+}
