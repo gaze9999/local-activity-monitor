@@ -43,7 +43,7 @@ Dots 與遠端對話活動選取 Codex 桌面快取中的 host / thread / timest
 
 子代理程式與專案頁只呈現已載入 metadata, 父子關聯與專案對話數依已載入範圍計算. 最新狀態, 累計 Token 與額度不套用操作事件時間篩選, 時間未知的事件只在全部範圍顯示
 
-專案資料庫最多讀取 2,000 個專案與 5,000 個 root 關聯, 每個專案最多 32 個設定資料夾. 同一 Project ID 的名稱與資料夾優先使用資料庫, 舊 app state 只補缺值. 封存狀態使用來源的明確 boolean, 不從對話狀態猜測. 專案 icon 與本地 / 雲端類型需來源實際提供, 缺少時保留文字與未知類型
+專案資料庫最多讀取 2,000 個專案與 5,000 個 root 關聯, 每個專案最多 32 個設定資料夾. 同一 Project ID 的名稱與資料夾優先使用資料庫, 舊 app state 只補缺值. 封存狀態使用來源的明確 boolean, 不從對話狀態猜測. 專案 icon 與本機 / 雲端類型需來源實際提供, 缺少時保留文字與未知類型
 
 工具統計在表格截斷前, 使用所選範圍內的完整保留呼叫計算次數, 涉及對話, 已回傳數, 耗時樣本, 平均與 P99, 並列出最近呼叫與回應時間. 程式碼辨識的內層工具沒有獨立時間時保留缺值. Skills 計數與 Dot 產出總數也先套用範圍再截斷明細, 不以表格筆數取代總數
 
@@ -111,3 +111,7 @@ Codex Core / App 診斷的錯誤內容由已觀察的紀錄 ID 或已確認檔�
 此包裝形式沿用既有 metadata 白名單, Jev 摘要保留有效型別的 status、latency_ms、usage input_tokens / output_tokens 及其單位, 不將 answers、choice、probabilities、model 或原始 request / response 本文加入 snapshot 或活動快取. 完整內容仍依選定觀察 ID、版本、遮蔽及分頁規則按需取得
 
 這些值是來源回覆 metadata, 外層工具包含多個呼叫時不推論每個內層呼叫已成功. 未提供耗時或 Token 時維持缺值, 明確的 0 保留
+
+## LAM 使用量 metadata
+
+`monitor.process_usage` 取自目前 LAM 程序, 記憶體為目前 RSS 與峰值, CPU 一個核心滿載為 100%, 保存大小只對已確認的 LAM 資料庫與記錄檔取 metadata, 不遞迴掃描來源目錄, 不含 Codex、瀏覽器或其他程序的用量
