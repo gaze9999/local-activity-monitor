@@ -65,7 +65,7 @@ Dots 與遠端對話活動選取 Codex 桌面快取中的 host / thread / timest
 
 - SQL 內容由已觀察紀錄 ID 綁定來源, 工具回傳依同一 Call ID 按需讀取並遮蔽 credentials, 不寫入 snapshot 或歷史資料庫. 共用回傳標示為外層工具回覆, 不推論個別 SQL 結果, 不重新執行查詢. 無法取得時保持缺值, 不允許任意檔案或任意查詢
 - Jev 呼叫送出與回傳內容只在點開已觀察呼叫時讀取, 遮蔽可辨識 credentials. 混合 exec 回傳不當成 Jev 單一結果
-- 專案資料夾由已載入來源設定按需取得. Global / Project AGENTS.md 只從選定根目錄讀取, 最多 32 個根目錄, 每份最多 64 KiB, 不走訪任意檔案. 拒絕非絕對路徑, 網路路徑與 symlink, 遮蔽可辨識 credentials. 不加入 snapshot / checkpoint
+- 專案資料夾由已載入來源設定按需取得. 指引優先讀取非空 AGENTS.override.md, 其次 AGENTS.md. 已登錄父工作區須核對 .gitmodules、子儲存庫 origin 與來源索引, 才讀取父層及正式專案指引, 不追隨任意 Markdown 連結. 最多 32 個根目錄、64 份文件, 每份最多 64 KiB、文件合計最多 256 KiB. 拒絕非絕對路徑、網路路徑、symlink 與 junction, 遮蔽可辨識 credentials. 不加入 snapshot / checkpoint
 - Git 明細綁定已觀察的 Thread / Call / 操作, 按既有檔尾與讀取預算取得指令及工具回傳. 不執行內容, 多個操作共用回傳時保留外層回傳範圍, 不推論個別命令成功
 - 工作樹明細綁定最近檢查已取得的 ID, 回傳完整位置與已載入關聯對話. 拒絕任意位置與未觀察 ID. 停用 Codex 或工作樹監測後不再讀取 Git 或管理目錄, 管理設定維持唯讀
 - 工作樹查詢超出整輪時間預算時保留已取得結果, 下輪從未完成的根目錄繼續. 各列保留自己的檢查時間, 不將尚未更新的列標成最新資料
