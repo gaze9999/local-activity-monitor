@@ -2,7 +2,7 @@
 
 監測本機 Codex 與 MCP 活動的瀏覽器介面, 提供對話、用量、工具、專案及診斷明細. 後端使用 Python 3.10+ 標準函式庫, 前端使用原生 HTML / JavaScript / CSS 與 Workbench UI
 
-0.x 以提交與 minor 版本 tag 交付, 建置包保存在 [Actions artifacts](https://github.com/gaze9999/local-activity-monitor/actions/workflows/release.yml). GitHub Release 從 1.0.0 起提供
+來源交付使用已審查提交及按需建立的完整版本 Tag, patch 與 minor 均適用. 手動建置預設只保存 [Actions artifacts](https://github.com/gaze9999/local-activity-monitor/actions/workflows/release.yml), 明確啟用 `publish` 才準備草稿 Release, 0.x 與 1.x 使用相同程序
 
 ## 功能
 
@@ -185,7 +185,7 @@ node tests/test_usage_projection.mjs
 
 建置工具列在 `tools/requirements-build.txt`. `python -m build` 產生 wheel / sdist, `python tools/build_release.py` 產生 `.local/package-tests/` 的本機原生測試包. 平台 CI 使用已提交的 WBUI SHA, 各平台通過測試與服務啟動檢查後保存 artifacts 及 `SHA256SUMS.txt`
 
-0.x 每個新 minor 建立一個 `v0.x.0` tag. 1.0.0 起需明確啟用 workflow 的 `publish`, 產物先附加至草稿 Release, 核對後公開
+依交付需求建立完整 annotated Tag `vX.Y.Z`, 不要求每個 minor 都建 Tag. 手動 workflow 指定既有 Tag, 預設 `publish=false` 只保存 artifacts, 明確啟用才將通過檢查的產物附加至草稿 Release, 核對所有資產後依發布授權公開, 既有 Tag 與已發布資產不覆寫
 
 ## 文件
 
