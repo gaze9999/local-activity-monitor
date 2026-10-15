@@ -59,7 +59,7 @@ Workbench UI 負責共用元件、布局與 UIUX, LAM 負責資料投影、欄�
 2. 核對程式版本、套件 metadata、`workbench-ui.json`、兩組 manifest 與資產 hash
 3. Wheel、sdist、原始碼 zip 與原生 CLI 包檢查頁面、語系、圖示、授權文件及離線啟動
 4. 五平台 CI 執行 unittest、原生建置與隔離服務 smoke check, 核對 artifacts 及 checksum
-5. 0.x 每個新 minor 建立實際來源的 `v0.x.0` tag, 建置包保存於 Actions. 1.0.0 起才啟用草稿 Release, 核對後公開
+5. 依交付需求建立實際來源的完整 annotated Tag, patch 與 minor 均適用. 手動 workflow 指定既有 Tag, 預設只保存 Actions artifacts, 明確啟用 `publish` 才附加至草稿 Release, 資產齊備並核對後依授權公開
 
 執行方式見 [測試與建置](validation.md), 收集流程與保存上限見 [效能與資料上限](performance-report.md)
 
