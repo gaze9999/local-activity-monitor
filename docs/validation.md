@@ -513,3 +513,9 @@ Wheel 與 sdist 輸出至 `dist/`, 原生測試包位於 `.local/package-tests/`
 - 原生 Windows 的 16 項前端建置、更新失敗保留與防降版測試通過, JavaScript 語法檢查通過. 沙箱暫存目錄的權限失敗已改在原生環境重驗
 - Edge 合成資料驗證通過載入範圍、三語系 / 三寬度的可見顯示設定、九方位通知與保存、工具 / MCP / Git / 錯誤 / Markdown 輸出及 modal 關閉 / 取消請求. output-detail-flow 的資源斷言改為核對 modal 所有權, 保留主頁控制器, 並拒絕未釋放的 modal 或 detached 資源
 - 完整 presentation-settings-flow 仍引用已隱藏的 API 入口, 本次僅驗證其可見設定區段. files-navigation-flow 的「未變記錄保留列 DOM」斷言, 在相同合成資料、Edge 與 CSP bypass 條件下比較 0.11.0 / 0.12.0 都失敗, 保留為既有待查問題, 不宣稱完整表格流程通過
+
+## 2026-10-19 WBUI 0.18.0 串接
+
+固定正式 Tag v0.18.0 / `add6565`, 以既有 `build_frontend.py --revision` 建置 pin 與兩組離線資產, 四份共用資產核對確切 Git 來源, 頁面 manifest 與 pin 一致. 本機 Windows Python 3.12.14 的 18 項前端建置與 7 項資產載入測試通過
+
+Edge 155.0.4283.45 合成資料驗證通過 `partial-refresh-flow.cjs` 與 `monitor-ui-revision-flow.cjs`: hover 數值更新保留列 DOM / 成員 / 分頁, 焦點保護、恢復最新資料、失焦與減少動畫, 以及 1366 / 820 / 390 / 320 px 的表格與監測資訊. 390 px 截圖已檢視, 自建 fixture 與瀏覽器均已關閉. 正式服務與使用者資料不作為本次合成測試輸入, 既有平台及長跑驗收沿原範圍保留
