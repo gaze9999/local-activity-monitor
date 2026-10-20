@@ -197,7 +197,7 @@ Context 與工具內容載入時在內容區顯示骨架, 標題、導覽與關�
 
 總覽的活動摘要卡片在同一群組採等高布局, 保留完整內容與原有排序、分群及隱藏設定
 
-以上共用能力由目前固定的 WBUI 0.18.0 提供, 缺少能力的設定會停用並提供 tooltip. LAM 使用 subscribe(options, listener), workbench-ui.json 固定來源提交, 內附離線資產由共用 loader 建置及驗證, 預設載入不需相鄰的 WBUI checkout. 本機開發選擇器已在 pin 與離線資產同步後移除, 原生發布包與正式服務採用仍依各自驗收
+以上共用能力由目前固定的 WBUI 0.19.0 提供, 缺少能力的設定會停用並提供 tooltip. LAM 使用 subscribe(options, listener), workbench-ui.json 固定來源提交, 內附離線資產由共用 loader 建置及驗證, 預設載入不需相鄰的 WBUI checkout. 本機開發選擇器已在 pin 與離線資產同步後移除, 原生發布包與正式服務採用仍依各自驗收
 
 中文「外掛程式」參考 [OpenAI 官方繁中說明](https://help.openai.com/zh-hant/articles/20001256-codex-%E4%B8%AD%E7%9A%84%E5%A4%96%E6%8E%9B%E7%A8%8B%E5%BC%8F), Dots 保留產品名稱, 參考 [官方說明](https://help.openai.com/en/articles/20001529-dots-privacy-security-and-safety-faqs)
 

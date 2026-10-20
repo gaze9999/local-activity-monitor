@@ -519,3 +519,13 @@ Wheel 與 sdist 輸出至 `dist/`, 原生測試包位於 `.local/package-tests/`
 固定正式 Tag v0.18.0 / `add6565`, 以既有 `build_frontend.py --revision` 建置 pin 與兩組離線資產, 四份共用資產核對確切 Git 來源, 頁面 manifest 與 pin 一致. 本機 Windows Python 3.12.14 的 18 項前端建置與 7 項資產載入測試通過
 
 Edge 155.0.4283.45 合成資料驗證通過 `partial-refresh-flow.cjs` 與 `monitor-ui-revision-flow.cjs`: hover 數值更新保留列 DOM / 成員 / 分頁, 焦點保護、恢復最新資料、失焦與減少動畫, 以及 1366 / 820 / 390 / 320 px 的表格與監測資訊. 390 px 截圖已檢視, 自建 fixture 與瀏覽器均已關閉. 正式服務與使用者資料不作為本次合成測試輸入, 既有平台及長跑驗收沿原範圍保留
+
+## 2026-10-20 WBUI 0.19.0 串接
+
+固定正式 Tag v0.19.0 / `9593397`, 以既有建置工具同步 pin、共用離線資產及頁面 manifest, 四份資產逐 byte 與確切提交來源相符, LF loader 保持跨使用端相同 checksum, 未變更 LAM runtime 版本或前端資料流程
+
+- Windows Python 3.13.15 的 18 項前端建置與 7 項資產測試通過, 固定離線建置驗證通過
+- Edge 155.0.4283.45 隔離合成資料的 table-stream-interaction、loading-scope、monitor-ui-revision 三組流程通過, 涵蓋列身分 / 點擊 / 焦點保留、最新值套用、載入 / 錯誤恢復及 1366 / 820 / 390 / 320 px 表格布局
+- 最終資產實際載入 WBUI 0.19.0, 無 pageerror, 390 px 截圖已檢視, 自建服務與瀏覽器已關閉
+
+本輪驗證使用隔離來源, 未手動重啟正式監測服務或建立原生發布包, 使用端資料與偏好仍由 LAM 維護
