@@ -68,3 +68,9 @@ Workbench UI 負責共用元件、布局與 UIUX, LAM 負責資料投影、欄�
 七個 API 來源分別檢查 on / off、60–86,400 秒間隔、快取、失敗保留與恢復, 手動按鈕 / 自動間隔在對應表格工具列, 狀態緊鄰查詢控制. Dots 只重新讀取所選 home 的有界桌面快取, metadata 停用不讀取, 不接受任意路徑. MCP 本機文件查詢與狀態留在各來源, 內容預設唯讀, 編輯 / 取消 / 儲存維持原有白名單、遮蔽及版本檢查
 
 顯示偏好檢查設定往返 / 還原及舊 pin 能力偵測, 數值格式保留 0 / null 與原始排序值, Tag / badge 外框及分群立即套用. 虛擬捲動核對完整來源、可見 DOM、排序 / 篩選、捲動、停用還原及卸載, 不將分頁與虛擬捲動視為同一方法. 通知核對九方位、三語系 / 窄畫面、歷史上限、換語言保留、Escape 及動態內容清理, 輸入檢查無效 / 重複 binding、文字輸入保護及 destroy
+
+## Cloud 隔離驗收
+
+Cloud 開發只使用獨立的合成 Codex home 與資料庫, 不複製個人 sessions 或登入狀態. 先核對 workbench-ui.json、離線資產及指定來源, 再使用 local-activity-monitor --codex-home <fixture-home> --port 8787 啟動, 不啟用真實 Codex CLI 查詢作為一般健康檢查
+
+Cloud 測試不取代 Windows watcher、真實來源、SSE、Host/Origin 與持久化驗收, 核對受測版本、pin 及實際載入資產, 結果記錄於既有驗收文件
