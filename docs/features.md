@@ -53,8 +53,8 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 | TOML、XML、CSV / TSV 結構預覽 | 目前 WBUI 0.20.0 pin 提供安全 XML、CSV / TSV 與 TOML 子集, LAM 按需輸出由 parseData 解析 | 依選定格式與上限核對結構、原文及失敗回退, 不視為完整格式標準 |
 | SQL AST、完整 YAML 與 Markdown | 已有 SQL 排版、YAML 子集及 Markdown 預覽 | WBUI 依使用情境補齊 dialect、節點、source map 與格式規格 |
 | 更多程式碼 parser | WBUI 的 `registerParser` 用於資料結構解析, 程式碼已有通用 tokenizer 與可視範圍上色 | WBUI 另定程式碼上色介面、逐行狀態、grammar 授權、語意 token 與 Worker 取消, LAM 保留來源格式及完整原文 |
-| 共用元件與互動 | 組合搜尋、條件篩選、sortable list、列拖曳、跨容器拖放、圖表縮放及面板編輯列為候選 | WBUI 維護[元件盤點](https://github.com/gaze9999/workbench-ui/blob/f79ca1c76de900ceb1238c1b32a20753b1a2f335/docs/component-coverage.md)與[互動待辦](https://github.com/gaze9999/workbench-ui/blob/f79ca1c76de900ceb1238c1b32a20753b1a2f335/docs/interaction-roadmap.md), LAM 按資料用途選用 |
-| 數值精算 / 公式 / 3D | 共用庫規劃候選, 尚未有可呼叫的數學或 3D 引擎 | WBUI 定義資料 / 精度 / 解析 / renderer, 使用端提供業務公式、變數、資產與授權, 不新增必裝相依套件 |
+| 共用元件與互動 | 目前 WBUI 0.20.0 pin 已有 bindCardSort 單容器排序、圖表 zoom / 框選及 createEditableValue / createEditableGroup, 不代表 LAM 已逐項採用 | 條件篩選編輯器、一般列拖曳與跨容器拖放仍為候選, 詳見固定來源的[元件盤點](https://github.com/gaze9999/workbench-ui/blob/f79ca1c76de900ceb1238c1b32a20753b1a2f335/docs/component-coverage.md)與[互動待辦](https://github.com/gaze9999/workbench-ui/blob/f79ca1c76de900ceb1238c1b32a20753b1a2f335/docs/interaction-roadmap.md) |
+| 數值精算 / 公式 / 3D | 目前 pin 已有 parseFormula / evaluateFormula 的有限 Number AST 計算及 createChart3D 的 SVG 投影, LAM 未採用這些能力 | 十進位精算、任意精度與 GPU renderer 仍為候選, WBUI 定義格式與上限, LAM 提供業務公式、變數、資產與授權 |
 | 遠端 LAM 存取、配對及登入 | 已有[遠端存取設計](remote-access.md), 尚未實作 | 待確認部署、HTTPS、權限及配對規格, 目前服務維持 loopback |
 
 ## 待驗收
