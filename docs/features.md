@@ -113,4 +113,4 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 
 SQL / SQLite、網路、MCP、錯誤紀錄與技能各自提供歷史分頁入口, 查詢量上限每頁 200 筆. Context 明細依記錄位置保留既有區段與捲動錨點, 重新讀取只替換新增或修改的畫面內容, 來源仍採原有有界按需讀取. 父子代理關聯取自實際 Thread ID, 用途標籤獨立成欄並標示 Goal / Plan 紀錄
 
-目前 WBUI 0.13.0 pin 支援連續虛擬捲動、數值記號、Tag / badge 分群、通知歷史與鍵盤 / 手把 binding, LAM 依顯示設定啟用, 詳見[使用說明](usage.md)與[驗證紀錄](validation.md)
+目前固定的 WBUI 來源支援連續虛擬捲動、數值記號、Tag / badge 分群、通知歷史與鍵盤 / 手把 binding, 實際 revision 依 [workbench-ui.json](../workbench-ui.json) 核對, LAM 依顯示設定啟用, 詳見[使用說明](usage.md)與[驗證紀錄](validation.md)
