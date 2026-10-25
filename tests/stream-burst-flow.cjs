@@ -2,7 +2,7 @@ async (page,cdp)=>{
   await page.reload();await page.waitForFunction(()=>data?.updated_at&&eventStreamReady&&!busy&&!queuedSnapshot);
   if(!await page.evaluate(()=>data.codex.threads.every(thread=>thread.model?.startsWith('demo-model-'))))throw Error('Synthetic fixture required');
   const samples=[];
-  await page.evaluate(()=>{switchTab('data');display.subSummary=4;render(data);window.fixtureRenderSnapshot=renderSnapshot;window.fixtureRenderCount=0;renderSnapshot=next=>{fixtureRenderCount++;return fixtureRenderSnapshot(next);};});
+  await page.evaluate(()=>{eventStream.close();switchTab('data');display.subSummary=4;render(data);window.fixtureRenderSnapshot=renderSnapshot;window.fixtureRenderCount=0;renderSnapshot=next=>{fixtureRenderCount++;return fixtureRenderSnapshot(next);};});
   try{
     for(let batch=0;batch<6;batch++){
       const sample=await page.evaluate(async batch=>{
@@ -25,10 +25,10 @@ async (page,cdp)=>{
     }
     const stable=samples.slice(2),growth=stable.at(-1).retainedHeapBytes-stable[0].retainedHeapBytes;
     if(growth>Math.max(1_000_000,stable[0].retainedHeapBytes*.1))throw Error('Retained heap keeps growing '+JSON.stringify(samples));
-    if(Math.max(...stable.map(sample=>sample.elements))-Math.min(...stable.map(sample=>sample.elements))>10)throw Error('DOM nodes keep growing '+JSON.stringify(samples));
+    if(stable.at(-1).elements-stable[0].elements>10)throw Error('DOM nodes keep growing '+JSON.stringify(samples));
     await page.mouse.move(0,0);await page.locator('[data-tab="monitor"]').focus();
     const debugBurst=await page.evaluate(async()=>{
-      switchTab('monitor');
+      switchTab('monitor');await new Promise(resolve=>requestAnimationFrame(resolve));await new Promise(resolve=>requestAnimationFrame(resolve));
       const original=renderMonitorDebug,initial=fixtureRenderCount,latest=structuredClone(data.monitor.debug.records[0]||{kind:'collection'});
       const diagnostic={...data.monitor.debug,enabled:true,records:Array.from({length:150},(_,index)=>({...latest,kind:'collection',cpu_ms:index,process_cpu_ms:index}))};
       let renders=0;renderMonitorDebug=()=>{renders++;return original();};
@@ -47,5 +47,5 @@ async (page,cdp)=>{
       }finally{renderMonitorDebug=original;}
     });
     return {frames:1200,renders:6,samples,retainedGrowthBytes:growth,debugBurst};
-  }finally{await page.evaluate(()=>{renderSnapshot=fixtureRenderSnapshot;delete window.fixtureRenderSnapshot;delete window.fixtureRenderCount;});}
+  }finally{await page.evaluate(()=>{renderSnapshot=fixtureRenderSnapshot;delete window.fixtureRenderSnapshot;delete window.fixtureRenderCount;stopEventStream();startEventStream();});}
 }

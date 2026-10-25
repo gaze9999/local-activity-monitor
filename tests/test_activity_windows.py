@@ -203,7 +203,7 @@ class ActivityWindowTests(unittest.TestCase):
         dashboard.monitor.refreshes = 17
         dashboard.monitor.requests = 9
         dashboard.monitor.errors = 3
-        with patch.object(Path, 'open', side_effect=AssertionError('unexpected source read')):
+        with patch.object(dashboard.monitor.usage, 'sample', return_value={'pid': 1, 'rss_bytes': 0}), patch.object(Path, 'open', side_effect=AssertionError('unexpected source read')):
             all_data = dashboard.snapshot('all')['monitor']
             recent_data = dashboard.snapshot('1h')['monitor']
         self.assertEqual(len(all_data['history']), 3)
