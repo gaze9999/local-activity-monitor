@@ -1,5 +1,6 @@
 """SQLite migration, atomicity and ownership fixtures."""
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sqlite3
@@ -15,8 +16,10 @@ from local_activity_monitor.thread_state import ThreadState
 
 class HistoryStoreTests(unittest.TestCase):
     def test_batch_aggregates_share_snapshot_and_keep_results_independent(self):
-        self.value['mcp'] = [{'timestamp':'2026-10-10T00:00:00Z', 'server':'included', 'call_id':'first', 'nested':False},
-                             {'timestamp':'2026-10-10T00:00:00Z', 'server':'excluded', 'call_id':'second'}]
+        recent = datetime.now(timezone.utc)-timedelta(hours=1)
+        stamp, later, future = recent.isoformat(), (recent+timedelta(minutes=1)).isoformat(), (recent+timedelta(days=1)).isoformat()
+        self.value['mcp'] = [{'timestamp':stamp, 'server':'included', 'call_id':'first', 'nested':False},
+                             {'timestamp':stamp, 'server':'excluded', 'call_id':'second'}]
         self.store.save(json.dumps(self.value))
         aggregate = self.store._aggregate
         calls = 0
@@ -25,15 +28,15 @@ class HistoryStoreTests(unittest.TestCase):
             result = aggregate(db, where, args)
             calls += 1
             if calls == 1:
-                self.store.save(json.dumps(self.value|{'mcp':[{'timestamp':'2026-10-10T00:01:00Z', 'server':'included', 'call_id':'third'}]}))
+                self.store.save(json.dumps(self.value|{'mcp':[{'timestamp':later, 'server':'included', 'call_id':'third'}]}))
             return result
         with patch.object(self.store, '_aggregate', side_effect=changed_source):
-            results = self.store.aggregate_many('mcp', [None, '2026-10-10T00:00:00Z'], ['excluded'])
+            results = self.store.aggregate_many('mcp', [None, stamp], ['excluded'])
         self.assertEqual([result['total'] for result in results], [1, 1])
         self.assertEqual(self.store.aggregate('mcp', excluded_sources=['excluded'])['total'], 2)
         results[0]['servers']['included']['total'] = 99
         self.assertEqual(results[1]['servers']['included']['total'], 1)
-        self.assertEqual(self.store.aggregate_many('mcp', ['2026-10-11T00:00:00Z'])[0]['total'], 0)
+        self.assertEqual(self.store.aggregate_many('mcp', [future])[0]['total'], 0)
 
     def test_batch_aggregate_validates_ranges_even_without_database(self):
         store = history_store.HistoryStore(self.root/'missing'/'activity-history.json', 'activity')
@@ -62,7 +65,7 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], history_store.SCHEMA_VERSION)
 
     def test_schema_upgrade_backs_up_and_preserves_data(self):
-        self.value["mcp"] = [{"timestamp": "2026-10-08T00:00:00Z", "input_tokens": 0, "cache_hit": False, "missing": None}]
+        self.value["mcp"] = [{"timestamp": (datetime.now(timezone.utc)-timedelta(days=1)).isoformat(), "input_tokens": 0, "cache_hit": False, "missing": None}]
         self.store.save(json.dumps(self.value))
         current = history_store.SCHEMA_VERSION
         changes = {**history_store.MIGRATIONS, current+1: ("ALTER TABLE history_state ADD COLUMN extra TEXT",)}
