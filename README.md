@@ -132,7 +132,8 @@ local-activity-monitor --codex --open
 
 Token 分析使用每個對話的最新累計快照, Cached input 與 Reasoning output 為子項目. 帳戶額度顯示來源回報的剩餘比例與重設時間, 來源缺值顯示 `--`, 已確認零值顯示 `0`
 
-API 查詢預設關閉自動更新, 各來源頁的查詢按鈕可手動讀取. 啟用後依設定間隔更新, 官方帳戶來源透過已登入的 Codex CLI 取得方案、額度與帳戶用量, 查詢結果至少快取 60 秒. Dots 手動查詢重新讀取桌面快取, 近期活動與遠端電腦依現有紀錄呈現. OpenAI Platform 來源使用使用者設定的 API Key 環境變數, 詳見[使用說明](docs/usage.md)
+用量頁提供 Decisions 與組織費用查詢, 無 key 時使用本機監測, 設定 OPENAI_ADMIN_KEY 並重新啟動後可手動查詢, 每個來源快取 60 秒
+其他 API 入口與自動查詢設定維持隱藏, 已保存的啟用狀態及間隔繼續生效, Dots 沿用桌面快取, 詳見[使用說明](docs/usage.md)
 
 一般更新收集選定 metadata, 完整 Git、SQL、工具輸入輸出、Log 與技能文件在開啟明細時受限讀取並遮蔽 credentials. 服務使用 loopback 與 Host / Origin 檢查. 讀取範圍、保存期限與上限見 [資料盤點](docs/data-inventory.md)
 

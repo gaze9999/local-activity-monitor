@@ -788,6 +788,7 @@ class Dashboard:
         result["default_settings"] = copy.deepcopy(self.default_settings)
         result["settings"] = self.settings()
         result["api_queries"] = self.api_queries.snapshot()
+        result["platform_credentials"] = self.platform.credentials()
         account = result["api_queries"].get("codex_account", self.account._empty("waiting"))
         result["codex"]["account"] = account
         if account.get("methods", {}).get("account/rateLimits/read", {}).get("health") == "ok" and account.get("limits"):

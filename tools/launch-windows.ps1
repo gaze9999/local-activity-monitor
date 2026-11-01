@@ -1,6 +1,13 @@
 ﻿# Source checkout bootstrap. Native release bundles already contain Python.
 # Keep discovery offline even when Python Install Manager has no runtimes yet.
 $env:PYTHON_MANAGER_AUTOMATIC_INSTALL = 'false'
+foreach ($monitorVariable in @('OPENAI_ADMIN_KEY', 'OPENAI_API_KEY')) {
+    if ($null -eq [Environment]::GetEnvironmentVariable($monitorVariable, 'Process')) {
+        $monitorValue = [Environment]::GetEnvironmentVariable($monitorVariable, 'User')
+        if ($null -ne $monitorValue) { [Environment]::SetEnvironmentVariable($monitorVariable, $monitorValue, 'Process') }
+    }
+}
+Remove-Variable monitorValue -ErrorAction SilentlyContinue
 $monitorEncoding = New-Object System.Text.UTF8Encoding($false)
 [Console]::InputEncoding = $monitorEncoding
 [Console]::OutputEncoding = $monitorEncoding

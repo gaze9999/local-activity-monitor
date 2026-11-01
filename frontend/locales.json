@@ -1,5 +1,11 @@
 {
   "en": {
+    "Decisions 用量": "Decisions usage",
+    "有 key 模式: 已載入 Admin key, 查詢後確認權限": "With key: Admin key loaded, query to verify permissions",
+    "無 key 模式: 本機監測可用, Platform 查詢未啟用": "Without key: local monitoring available, Platform queries disabled",
+    "設定 OPENAI_ADMIN_KEY 並重新啟動 LAM, 金鑰只由後端讀取": "Set OPENAI_ADMIN_KEY and restart LAM; only the backend reads the key",
+    "組織費用, 依官方帳務資料彙總": "Organization cost, aggregated from official billing data",
+    "Decisions 組織用量, 每次 API 呼叫計為一筆請求": "Organization Decisions usage; each API call counts as one request",
     "概要": "Overview",
     "紀錄": "Records",
     "等待額度資料": "Waiting for allowance data",
@@ -2423,6 +2429,12 @@
     "工具結束時回報的 exit code": "Exit code reported when the tool finishes"
   },
   "ja": {
+    "Decisions 用量": "Decisions 使用量",
+    "有 key 模式: 已載入 Admin key, 查詢後確認權限": "キーあり: Admin key 読み込み済み, クエリで権限を確認",
+    "無 key 模式: 本機監測可用, Platform 查詢未啟用": "キーなし: ローカル監視は利用可能, Platform クエリは無効",
+    "設定 OPENAI_ADMIN_KEY 並重新啟動 LAM, 金鑰只由後端讀取": "OPENAI_ADMIN_KEY を設定して LAM を再起動してください, キーはバックエンドのみが読み取ります",
+    "組織費用, 依官方帳務資料彙總": "公式請求データに基づく組織全体の費用",
+    "Decisions 組織用量, 每次 API 呼叫計為一筆請求": "組織の Decisions 使用量, API 呼び出しごとに 1 リクエストとして集計",
     "概要": "概要",
     "紀錄": "記録",
     "等待額度資料": "利用枠データを待っています",

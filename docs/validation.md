@@ -1,7 +1,29 @@
 # 測試與建置
 
-目前 LAM 為 0.20.4, 固定 WBUI 0.20.5 / `d666430`, 最新證據見 [2026-10-25 固定資產更新](#2026-10-25-wbui-0205-固定資產更新)
+目前 LAM 為 0.21.0, 固定 WBUI 0.20.5 / `d666430`, 最新證據見 [Decisions 與兩種憑證模式](#2026-11-01-decisions-與兩種憑證模式)
 以下各節保留當時的版本、環境與結果, 完整平台及使用端驗收依 [功能清單](features.md#待驗收) 追蹤
+
+## 2026-11-01 Decisions 與兩種憑證模式
+
+0.21.0 來源交付, 基準 main 6b37257 / LAM 0.20.4, WBUI 固定 0.20.5 / d666430
+
+| 項目 | 實際結果 |
+| --- | --- |
+| 完整來源回歸 | Python 3.13.5, PYTHONUTF8=1, unittest discover -s tests 共 536 項, 534 項通過、2 項略過, 退出碼 0 |
+| 後端 | test_openai_platform.py 11 項與 test_api_queries.py 4 項通過, 涵蓋 Admin 認證、無 key 零外部請求、0 / null、HTTP 失敗與快取 |
+| 啟動器 | test_bootstrap.py 25 項通過, 含 POSIX 模擬與 Windows 執行, Windows 啟動器另實測使用者 key 載入及程序值優先, 初跑出現既有 fixture cp950 子執行緒解碼訊息, 設 PYTHONUTF8=1 後重跑通過 |
+| Windows 正式畫面 | 前景 PowerShell 啟動 8787 並開啟瀏覽器, 服務取得使用者 OPENAI_ADMIN_KEY, Decisions 與組織費用在畫面手動查詢成功 |
+| Decisions 即時資料 | 最近 7 個 UTC 日期的請求數與 tokens 已顯示, 零值與空日期區段呈現正確, has_more=false |
+| 費用即時資料 | 查詢成功, 回傳日期區段沒有金額明細, 畫面顯示 -- |
+| 無 key | 8788 隔離服務使用空 home, 模式正確、按鈕停用、頁面零 Platform 請求, 直接查詢回傳 missing_credentials |
+| 介面回歸 | decisions-platform-flow.cjs 合成資料涵蓋兩種模式、0 / unknown、0.3 USD、權限失敗、速率限制與恢復, 5 次攔截查詢通過 |
+| 語系與版面 | 繁中 / 英文 / 日文, 1366 / 390 px 共 6 組無整頁橫向溢出, 查詢卡片截圖已查看, console error 0 |
+| 資產 | 固定版本 --verify-offline 建置、JavaScript 語法與 diff 空白檢查通過 |
+| macOS 驗收 | 共用 Python 核心與 POSIX 入口已涵蓋來源及模擬測試, Intel / Apple Silicon 實機憑證載入與前景操作待驗收, 既有 release workflow 保留兩種架構 |
+
+重現: 設定 PYTHONPATH=src, 執行上述 unittest 模組, 以空白 home 和未設定憑證的服務頁面執行 tests/decisions-platform-flow.cjs
+瀏覽器流程以攔截回應測試有 key 與失敗狀態, 正式 API 驗證由明確授權的有 key 服務執行
+本輪前景服務使用現有 Python 直接啟動服務模組, Windows / macOS 原始碼 launch-cli 的完整 watcher 流程沿既有驗收
 
 ## 2026-10-30 macOS 前景入口準備
 

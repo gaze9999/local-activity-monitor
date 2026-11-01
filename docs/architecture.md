@@ -225,7 +225,12 @@ WBUI 的 `bindUpdateGuard` 管理 hover、焦點、文字選取、失焦與分�
 
 ## 選用查詢與共用呈現
 
-api_queries.py 管理七個固定唯讀 callback、自動查詢間隔、最近結果與 service worker 清理. 所有來源停用時 worker 不定時喚醒, 設定變動及手動查詢各自同步, 第一頁自動結果進入快照, 來源自己的 60 秒快取及讀取上限保留. openai_platform.py 只接受固定模型 / 用量 / 費用來源, 固定 HTTPS endpoint、5 秒逾時、1 MiB 回應上限與無重新導向, 失敗只回傳狀態, 不投影私人 HTTP 本文或認證內容
+GET /api/openai-platform?source=decisions 呼叫官方 /v1/organization/usage/decisions, source=costs 沿用 /v1/organization/costs, 兩者使用 OPENAI_ADMIN_KEY, 查詢最近 7 個 UTC 日期且最多 7 個日期區段
+Decisions 投影 input_tokens、input_cached_tokens、output_tokens、num_model_requests, 費用投影 amount.value 與 amount.currency
+每次未命中快取的手動查詢送出一次請求, 缺少憑證時回傳 missing_credentials 並省略外部請求
+snapshot.platform_credentials 提供 mode=no_key / with_key 與各來源 available boolean, 只讀服務環境, 本機統計沿用原有來源
+
+api_queries.py 管理八個固定唯讀 callback、自動查詢間隔、最近結果與 service worker 清理. 所有來源停用時 worker 不定時喚醒, 設定變動及手動查詢各自同步, 第一頁自動結果進入快照, 來源自己的 60 秒快取及讀取上限保留. openai_platform.py 只接受固定模型 / Completions 用量 / Decisions 用量 / 費用來源, 固定 HTTPS endpoint、5 秒逾時、1 MiB 回應上限與無重新導向, 失敗只回傳狀態, 不投影私人 HTTP 本文或認證內容
 
 Dots 的 GET /api/codex/dots 重新讀取所選 home 的固定桌面快取, 沿用 16 MiB 上限與 project_dots 投影, 拒絕連結 / reparse 檔案、無效 JSON 與過大內容, 排除私人本文與身分. metadata 檢查關閉時不讀取來源. window 只接受既有的 1h / 24h / 7d / all, 手動查詢與主頁的時間範圍一致. 原始來源不修改, 這條按需查詢不建立額外輪詢
 

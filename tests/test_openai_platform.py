@@ -24,7 +24,7 @@ class PlatformTests(unittest.TestCase):
 
     def test_missing_credentials_never_send_a_request(self):
         with patch.dict(os.environ, {}, clear=True), patch("local_activity_monitor.openai_platform.build_opener") as opener:
-            for source in ("models", "usage", "costs"):
+            for source in ("models", "usage", "decisions", "costs"):
                 self.assertEqual(OpenAIPlatformSource().query(source)["health"], "missing_credentials")
             opener.assert_not_called()
 
@@ -73,3 +73,32 @@ class PlatformTests(unittest.TestCase):
         for query in ("", "source=unknown", "source=models&source=costs", "source=models&url=https://example.test"):
             request.get_local(urlsplit("/api/openai-platform?"+query));self.assertEqual(request.reply.call_args.args[0], 400)
         request.get_local(urlsplit("/api/openai-platform?source=models"));self.assertEqual(json.loads(request.reply.call_args.args[1])["health"], "ok")
+
+    def test_decisions_endpoint_admin_auth_and_zero_values(self):
+        value, request = self.query("decisions", {"has_more": False, "data": [{"start_time": 1, "end_time": 2, "results": [{"input_tokens": 352, "input_cached_tokens": 0, "output_tokens": 0, "num_model_requests": 2}]}]})
+        self.assertEqual(urlsplit(request.full_url).path, "/v1/organization/usage/decisions")
+        self.assertEqual(request.get_header("Authorization"), "Bearer synthetic-admin")
+        self.assertEqual(value["health"], "ok")
+        self.assertEqual(value["items"][0]["output_tokens"], 0)
+        self.assertEqual(value["items"][0]["num_model_requests"], 2)
+        self.assertNotIn("synthetic-admin", json.dumps(value))
+
+    def test_modes_report_only_availability_and_never_make_requests(self):
+        for env, mode in (({}, "no_key"), ({"OPENAI_API_KEY": "model-key"}, "no_key"), ({"OPENAI_ADMIN_KEY": "admin-key"}, "with_key"), ({"OPENAI_ADMIN_KEY": "bad key"}, "no_key")):
+            with patch.dict(os.environ, env, clear=True), patch("local_activity_monitor.openai_platform.build_opener") as opener:
+                status = OpenAIPlatformSource.credentials()
+                self.assertEqual(status["mode"], mode)
+                self.assertEqual(status["available"]["decisions"], mode == "with_key")
+                self.assertEqual(status["available"]["costs"], mode == "with_key")
+                self.assertEqual(set(status), {"mode", "available"})
+                for key in env.values():
+                    self.assertNotIn(key, json.dumps(status))
+                opener.assert_not_called()
+
+    def test_decisions_empty_is_unknown_and_auth_failure_is_not_zero(self):
+        value, _ = self.query("decisions", {"has_more": False, "data": [{"start_time": 1, "end_time": 2, "results": []}]})
+        self.assertIsNone(value["items"][0]["num_model_requests"])
+        for code in (401, 403, 429):
+            value, _ = self.query("decisions", error=HTTPError("https://api.openai.com", code, "PRIVATE", {}, None))
+            self.assertNotEqual(value["health"], "ok")
+            self.assertEqual(value["items"], [])
