@@ -17,6 +17,7 @@ from .public_api import NoRedirect
 
 SOURCES = {"models": ("/models", "OPENAI_API_KEY"),
            "usage": ("/organization/usage/completions", "OPENAI_ADMIN_KEY"),
+           "decisions": ("/organization/usage/decisions", "OPENAI_ADMIN_KEY"),
            "costs": ("/organization/costs", "OPENAI_ADMIN_KEY")}
 FIELDS = ("input_tokens", "input_cached_tokens", "output_tokens", "num_model_requests")
 
@@ -29,6 +30,15 @@ class OpenAIPlatformSource:
     def __init__(self):
         self.cache = {}
         self.locks = {key: threading.Lock() for key in SOURCES}
+
+    @staticmethod
+    def credentials():
+        """Expose availability only, never credentials or account identifiers."""
+        available = {}
+        for source, (_, variable) in SOURCES.items():
+            key = os.environ.get(variable, "")
+            available[source] = bool(key and len(key) <= 4096 and all(33 <= ord(char) <= 126 for char in key))
+        return {"mode": "with_key" if available["decisions"] else "no_key", "available": available}
 
     def query(self, source):
         if source not in SOURCES:
@@ -87,7 +97,7 @@ class OpenAIPlatformSource:
                 raise ValueError("Invalid Platform bucket time")
             entries = row["results"]
             item = {"start_time": start, "end_time": end}
-            if source == "usage":
+            if source in ("usage", "decisions"):
                 for field in FIELDS:
                     numbers = [entry.get(field) if isinstance(entry, dict) else None for entry in entries]
                     item[field] = sum(numbers) if numbers and all(type(number) is int and 0 <= number <= 2**63-1 for number in numbers) else None

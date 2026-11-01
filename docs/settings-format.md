@@ -102,7 +102,7 @@ overview.order / hidden 各最多 500 個卡片 ID. 總覽副本以 overview-cop
 
 ## API 與呈現偏好
 
-settings.api_intervals 接受七個固定來源 codex_account、codex_cloud、public_openai、public_codex、platform_models、platform_usage、platform_costs, 每值為 60–86,400 的整數秒, 省略時預設 300. observations 的對應 boolean 控制自動查詢. 目前暫時隱藏這七項的設定與查詢入口, 欄位、既有值、匯入 / 匯出及後端格式保留
+settings.api_intervals 接受八個固定來源 codex_account、codex_cloud、public_openai、public_codex、platform_models、platform_usage、platform_decisions、platform_costs, 每值為 60–86,400 的整數秒, 省略時預設 300. observations 的對應 boolean 控制自動查詢. 自動查詢設定維持隱藏, 用量頁開放 platform_decisions 與 platform_costs 手動查詢, 依 platform_credentials.available 停用缺少憑證的按鈕, 既有欄位、匯入 / 匯出及保存值沿用
 
 preferences.presentation 保存 numberNotation (standard / compact / scientific / engineering)、tagGroups、tagOutline、badgeGroups、badgeOutline、virtualScroll、notificationBell、inputEnabled, 後七項為 boolean. numberNotation 預設 standard, 分群、虛擬捲動、鈴鐺及輸入預設 false, 外框預設 true
 

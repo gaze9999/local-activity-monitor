@@ -173,13 +173,48 @@ SSE 的 `transfer_bytes` 計算快照事件或心跳本文, 包含 SSE 格式字
 
 ## API 查詢與 Dots
 
-API 查詢設定與七個來源的對應入口目前暫時隱藏, 包含官方帳戶卡、雲端對話分頁、公開 API 及 OpenAI Platform 卡片. 已保存的啟用狀態、間隔及後端串接保留, 本機紀錄統計不受影響. 下列保留來源規格, 查詢間隔預設 300 秒, 接受 60–86,400 秒, 來源查詢至少快取 60 秒
+用量頁提供 Decisions 用量與組織費用卡片, 兩者依服務載入的 Admin key 顯示可用狀態, 預設手動查詢, 快取 60 秒
+其他 API 入口與自動查詢設定維持隱藏, 已保存的啟用狀態及間隔繼續生效, 間隔預設 300 秒, 接受 60–86,400 秒
 
-帳戶活動提供 Codex 官方帳戶與雲端對話. 公開 API 提供 OpenAI 服務狀態及 Codex 正式版本. OpenAI Platform 提供模型清單、最近 7 個 UTC 日期的文字模型用量及組織費用, 模型清單使用服務程序的 OPENAI_API_KEY, 用量與費用使用 OPENAI_ADMIN_KEY. 金鑰不從設定或檔案讀取, 不送到瀏覽器, 金額保留來源貨幣及十進位數值
+帳戶活動提供 Codex 官方帳戶與雲端對話. 公開 API 提供 OpenAI 服務狀態及 Codex 正式版本. OpenAI Platform 提供模型清單、最近 7 個 UTC 日期的文字模型用量、Decisions 用量及組織費用, 模型清單使用服務程序的 OPENAI_API_KEY, 用量與費用使用 OPENAI_ADMIN_KEY. 金鑰不從設定或檔案讀取, 不送到瀏覽器, 金額保留來源貨幣及十進位數值
 
 排程與 Dots 子頁預設隱藏, 保留本機快取 metadata, 不提供手動查詢. 既有雲端 / 遠端活動仍採來源紀錄與時間, 不推算下一次執行
 
 已設定且啟用的 MCP 來源卡提供本機文件清單查詢, 狀態留在該來源卡. 只查詢既有允許範圍, 不啟動 MCP 或呼叫外部服務. 文件內容仍按需開啟. Jev 資料庫大小已從監測摘要移除
+
+## Platform 無 key 與有 key 模式
+
+| 模式 | 啟動條件 | 操作 |
+| --- | --- | --- |
+| 無 key | 服務程序未載入有效格式的 OPENAI_ADMIN_KEY | 使用本機活動、工具與用量紀錄, Platform 卡片顯示設定提示, 查詢按鈕停用 |
+| 有 key | 服務程序已載入 OPENAI_ADMIN_KEY | 在用量頁按「查詢」讀取 Decisions 或組織費用, 狀態列顯示結果與時間 |
+
+模式依服務程序的憑證狀態自動判定, 載入 key 後的第一次查詢會驗證遠端權限
+只有一般 OPENAI_API_KEY 時, Decisions 與費用仍需另設 OPENAI_ADMIN_KEY
+更新 key 後重新啟動 LAM, 再重新整理頁面
+
+Windows: 在使用者環境變數新增 OPENAI_ADMIN_KEY, 值填入 Admin key, 然後執行 launch-cli.cmd
+Windows 原始碼啟動器優先採用程序變數, 缺少時載入同名使用者變數
+原生可攜包從啟動它的程序繼承環境變數, 設定後重新開啟終端機再啟動
+
+macOS: 在 LAM 根目錄的 zsh 終端機輸入以下指令, 提示出現後貼上 key, 輸入內容會隱藏
+
+```zsh
+read -rs "OPENAI_ADMIN_KEY?OpenAI Admin key: "
+printf '\n'
+export OPENAI_ADMIN_KEY
+./launch-cli.command
+```
+
+在這個終端機啟動 LAM 即可繼承 key, 結束後可執行 unset OPENAI_ADMIN_KEY
+Finder 或 Dock 啟動需使用該啟動程序可取得的環境變數, 跨電腦可由密碼管理器取用 key 並在目的端設定
+
+Decisions 卡片依官方資料顯示輸入、快取輸入、輸出 tokens 與請求數, 每次 API 呼叫計為一筆請求
+組織費用卡片彙總官方帳務金額與幣別, 預付餘額在 [OpenAI Billing](https://platform.openai.com/settings/organization/billing/overview)查看
+空資料顯示 --, 官方回傳 0 時顯示 0, 狀態區分查詢成功、權限不足、速率限制與失敗
+服務快照只提供模式與可用性, 金鑰由後端從環境變數讀取
+
+官方來源: [Decisions 用量](https://developers.openai.com/api/docs/guides/decisions#monitor-usage)、[組織費用](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/usage/methods/costs)
 
 ## 顯示與操作設定
 
