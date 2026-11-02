@@ -1,0 +1,22 @@
+name: Public content
+
+on:
+  push:
+    tags: ['v[0-9]+.0.0', 'v[1-9].[0-9]+.0', 'v[1-9][0-9]+.[0-9]+.0']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  public-content:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check all reachable history
+        run: python3 tools/check-public-content.py --history
+      - name: Verify publication guards
+        run: python3 -m unittest discover -s tests -p test_public_content.py

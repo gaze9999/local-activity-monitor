@@ -2,3 +2,6 @@
 *.sh text eol=lf
 *.command text eol=lf
 *.cmd text eol=crlf
+
+# Publication hooks run through a POSIX shell on every platform
+.githooks/* text eol=lf
