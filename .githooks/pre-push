@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+root=$(git rev-parse --show-toplevel)
+if command -v python >/dev/null 2>&1; then
+  runtime=python
+elif command -v python3 >/dev/null 2>&1; then
+  runtime=python3
+else
+  echo 'Python 3.10+ is required for the public-content check' >&2
+  exit 1
+fi
+exec "$runtime" "$root/tools/check-public-content.py" --pre-push
