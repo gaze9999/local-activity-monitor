@@ -94,6 +94,20 @@ class UIBootstrapTests(unittest.TestCase):
             prepare.ensure_ui(self.root, self.source)
         self.assertEqual(json.loads((self.root / "workbench-ui.json").read_text()), PIN)
 
+    def test_windows_commands_enable_git_long_paths_without_dropping_existing_config(self):
+        base = {"GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "safe.directory", "GIT_CONFIG_VALUE_0": "*"}
+        with patch.object(prepare.os, "name", "nt"):
+            env = prepare.long_path_env(base)
+            self.assertEqual((env["GIT_CONFIG_COUNT"], env["GIT_CONFIG_KEY_1"], env["GIT_CONFIG_VALUE_1"]), ("2", "core.longpaths", "true"))
+            self.assertEqual(env["GIT_CONFIG_KEY_0"], "safe.directory")
+            self.assertEqual(base["GIT_CONFIG_COUNT"], "1")
+            self.assertEqual(prepare.long_path_env({"GIT_CONFIG_COUNT": "x"}), {"GIT_CONFIG_COUNT": "x"})
+            with patch.object(prepare.subprocess, "run", return_value=types.SimpleNamespace(stdout="")) as run:
+                prepare.run_command(["git", "status"], env={"GIT_TERMINAL_PROMPT": "0"})
+            self.assertEqual(run.call_args.kwargs["env"]["GIT_CONFIG_KEY_0"], "core.longpaths")
+        with patch.object(prepare.os, "name", "posix"):
+            self.assertIs(prepare.long_path_env(base), base)
+
     def test_verified_cache_stages_without_clone(self):
         source_fixture(self.root / ".local/workbench-ui" / PIN["revision"])
         self.ensure()
