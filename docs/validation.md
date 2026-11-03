@@ -1,7 +1,22 @@
 # 測試與建置
 
-目前 LAM 為 0.21.0, 固定 WBUI 0.20.5 / `d666430`, 最新證據見 [Decisions 與兩種憑證模式](#2026-11-01-decisions-與兩種憑證模式)
+目前 LAM 為 0.21.2, 固定 WBUI 0.22.1 / `6b25c79`, 最新證據見 [WBUI 0.22.1 與 Windows 長路徑](#2026-11-04-wbui-0221-與-windows-長路徑)
 以下各節保留當時的版本、環境與結果, 完整平台及使用端驗收依 [功能清單](features.md#待驗收) 追蹤
+
+## 2026-11-04 WBUI 0.22.1 與 Windows 長路徑
+
+基準 main f865eb1 / LAM 0.21.1, WBUI 由 0.21.0 / e01ee3b 更新為正式 Tag v0.22.1 / 6b25c79, LAM 修訂版本更新為 0.21.2. Windows 11, Python 3.12.14, Node.js 26.13.0
+
+| 項目 | 實際結果 |
+| --- | --- |
+| 上游差異 | v0.21.0..v0.22.1 的 classic bundle 只變更 Command Palette (group / keywords / rank / setItems / register / unregister) 與 Autocomplete 內部重構, LAM 前端未使用這兩個元件 |
+| 資產 | `build_frontend.py --revision 6b25c79…` 與 `--verify-offline` 通過, 載入的 runtime 為 0.22.1 |
+| 長路徑根因 | 位於深層目錄的 checkout 準備 WBUI 時, 固定版 loader 內的 `git show <rev>:<path>` 回報 Filename too long, 建置以通用的取得失敗訊息結束 |
+| 長路徑修正 | `prepare_ui.py` 在 Windows 以 `GIT_CONFIG_*` 只對該次 Git 子程序啟用 `core.longpaths`, 保留既有的環境設定項目. 同一深層路徑且全域未設定 longpaths 時, 修正前失敗、修正後建置成功 |
+| 完整來源回歸 | unittest discover 共 550 項, 548 項通過、2 項略過, 含新增的長路徑環境測試 |
+| JavaScript | `node --check frontend/app.js`、test_runtime_ui / test_page_metrics / test_usage_projection 通過, `git diff --check` 通過 |
+| 合成資料畫面 | serve_loading_fixture.py 搭配內建瀏覽器, 標頭顯示 LAM v0.21.2 / WBUI v0.22.1, 8 個主頁切換正常, console error 0 |
+| 待驗收 | 正式資料、macOS / Linux、平台建置與下載包, 以及 WBUI 目標保留的 LAM 視覺清單未於本輪執行 |
 
 ## 2026-11-01 Decisions 與兩種憑證模式
 

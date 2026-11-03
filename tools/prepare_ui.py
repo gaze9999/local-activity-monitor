@@ -35,7 +35,23 @@ def read_pin(root):
     return value
 
 
+def long_path_env(env):
+    """Let Git and the pinned helper's Git calls exceed Windows MAX_PATH in deep checkouts."""
+    if os.name != "nt":
+        return env
+    env = dict(os.environ if env is None else env)
+    try:
+        index = int(env.get("GIT_CONFIG_COUNT") or 0)
+    except ValueError:
+        return env  # Git rejects an invalid count; keep the caller's environment unchanged.
+    if index < 0:
+        return env
+    env.update({"GIT_CONFIG_COUNT": str(index + 1), "GIT_CONFIG_KEY_" + str(index): "core.longpaths", "GIT_CONFIG_VALUE_" + str(index): "true"})
+    return env
+
+
 def run_command(command, *, env=None, timeout=_TIMEOUT):
+    env = long_path_env(env)
     try:
         return subprocess.run(command, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
                               check=True, shell=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout.strip()

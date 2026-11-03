@@ -78,6 +78,7 @@ LAM 頁面來源位於 `frontend/`. CLI 啟動會執行 `tools/build_frontend.py
 - WBUI 1.0.0 起選擇 GitHub Latest 的已發布非預覽 Release, 需要已登入的 GitHub CLI
 - 來源快取位於 `.local/workbench-ui/<revision>`, 建置成功後才將完整 SHA 寫入 `workbench-ui.json`
 - 查詢或下載失敗時沿用已驗證資產, 首次取得失敗時依錯誤訊息補齊 Git、認證或來源
+- Windows 上準備 WBUI 的 Git 子程序只對該次執行啟用 `core.longpaths`, checkout 位於深層目錄時不受 260 字元路徑限制, 不修改使用者的 Git 設定
 
 以下命令只建置 `workbench-ui.json` 記錄的版本, 用於離線重建與 CI:
 
