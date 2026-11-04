@@ -395,7 +395,7 @@
      "file": "rollout-2026-01-01T00-00-06-00000000-0000-4000-8000-000000000007.jsonl",
      "reason": "error",
      "record_hash": "<sha:5>",
-     "record_offset": 873,
+     "record_offset": 10240,
      "severity": "error",
      "source": "session",
      "thread_id": "00000000-0000-4000-8000-000000000007",
@@ -446,7 +446,7 @@
      "file": "rollout-2026-01-01T00-00-01-00000000-0000-4000-8000-000000000002.jsonl",
      "reason": "turn_failed",
      "record_hash": "<sha:10>",
-     "record_offset": 1466,
+     "record_offset": 12288,
      "severity": "error",
      "source": "session",
      "thread_id": "00000000-0000-4000-8000-000000000002",
@@ -486,56 +486,56 @@
   "threads/entries": {
    "items": [
     {
-     "offset": 8972,
+     "offset": 75776,
      "status": "completed",
      "task_start": null,
      "task_time": "T+90000ms",
      "thread_id": "00000000-0000-4000-8000-000000000001"
     },
     {
-     "offset": 889,
+     "offset": 10240,
      "status": "completed",
      "task_start": null,
      "task_time": "T+50000ms",
      "thread_id": "00000000-0000-4000-8000-000000000008"
     },
     {
-     "offset": 1165,
+     "offset": 14390,
      "status": "completed",
      "task_start": null,
      "task_time": "T-1470000ms",
      "thread_id": "00000000-0000-4000-8000-000000000007"
     },
     {
-     "offset": 826,
+     "offset": 8192,
      "status": "running",
      "task_start": "T-1798000ms",
      "task_time": "T-1798000ms",
      "thread_id": "00000000-0000-4000-8000-000000000006"
     },
     {
-     "offset": 1596,
+     "offset": 14336,
      "status": "running",
      "task_start": "T-2348000ms",
      "task_time": "T-2348000ms",
      "thread_id": "00000000-0000-4000-8000-000000000002"
     },
     {
-     "offset": 2913,
+     "offset": 26624,
      "status": "completed",
      "task_start": null,
      "task_time": "T-21400000ms",
      "thread_id": "00000000-0000-4000-8000-000000000003"
     },
     {
-     "offset": 2848,
+     "offset": 26624,
      "status": "completed",
      "task_start": null,
      "task_time": "T-259000000ms",
      "thread_id": "00000000-0000-4000-8000-000000000004"
     },
     {
-     "offset": 2836,
+     "offset": 26624,
      "status": "completed",
      "task_start": null,
      "task_time": "T-1727800000ms",
@@ -574,7 +574,7 @@
      "file": "rollout-2026-01-01T00-00-06-00000000-0000-4000-8000-000000000007.jsonl",
      "reason": "error",
      "record_hash": "<sha:5>",
-     "record_offset": 873,
+     "record_offset": 10240,
      "severity": "error",
      "source": "session",
      "thread_id": "00000000-0000-4000-8000-000000000007",
@@ -640,7 +640,7 @@
      "file": "rollout-2026-01-01T00-00-01-00000000-0000-4000-8000-000000000002.jsonl",
      "reason": "turn_failed",
      "record_hash": "<sha:10>",
-     "record_offset": 1466,
+     "record_offset": 12288,
      "severity": "error",
      "source": "session",
      "thread_id": "00000000-0000-4000-8000-000000000002",
@@ -730,7 +730,7 @@
      "file_count": 8,
      "files": [],
      "health": "ok",
-     "read_bytes": 31843,
+     "read_bytes": 286774,
      "source": "session",
      "unsupported_lines": 2
     },
@@ -754,7 +754,7 @@
      "file": "rollout-2026-01-01T00-00-06-00000000-0000-4000-8000-000000000007.jsonl",
      "reason": "error",
      "record_hash": "<sha:5>",
-     "record_offset": 873,
+     "record_offset": 10240,
      "severity": "error",
      "source": "session",
      "thread_id": "00000000-0000-4000-8000-000000000007",
@@ -820,7 +820,7 @@
      "file": "rollout-2026-01-01T00-00-01-00000000-0000-4000-8000-000000000002.jsonl",
      "reason": "turn_failed",
      "record_hash": "<sha:10>",
-     "record_offset": 1466,
+     "record_offset": 12288,
      "severity": "error",
      "source": "session",
      "thread_id": "00000000-0000-4000-8000-000000000002",
@@ -922,7 +922,7 @@
      "file_count": 8,
      "files": [],
      "health": "ok",
-     "read_bytes": 31843,
+     "read_bytes": 286774,
      "source": "session",
      "unsupported_lines": 2
     },
@@ -946,7 +946,7 @@
      "file": "rollout-2026-01-01T00-00-06-00000000-0000-4000-8000-000000000007.jsonl",
      "reason": "error",
      "record_hash": "<sha:5>",
-     "record_offset": 873,
+     "record_offset": 10240,
      "severity": "error",
      "source": "session",
      "thread_id": "00000000-0000-4000-8000-000000000007",
@@ -1012,7 +1012,7 @@
      "file": "rollout-2026-01-01T00-00-01-00000000-0000-4000-8000-000000000002.jsonl",
      "reason": "turn_failed",
      "record_hash": "<sha:10>",
-     "record_offset": 1466,
+     "record_offset": 12288,
      "severity": "error",
      "source": "session",
      "thread_id": "00000000-0000-4000-8000-000000000002",
@@ -1114,7 +1114,7 @@
      "file_count": 8,
      "files": [],
      "health": "ok",
-     "read_bytes": 31843,
+     "read_bytes": 286774,
      "source": "session",
      "unsupported_lines": 2
     },
@@ -1138,7 +1138,7 @@
      "file": "rollout-2026-01-01T00-00-06-00000000-0000-4000-8000-000000000007.jsonl",
      "reason": "error",
      "record_hash": "<sha:5>",
-     "record_offset": 873,
+     "record_offset": 10240,
      "severity": "error",
      "source": "session",
      "thread_id": "00000000-0000-4000-8000-000000000007",
@@ -1204,7 +1204,7 @@
      "file": "rollout-2026-01-01T00-00-01-00000000-0000-4000-8000-000000000002.jsonl",
      "reason": "turn_failed",
      "record_hash": "<sha:10>",
-     "record_offset": 1466,
+     "record_offset": 12288,
      "severity": "error",
      "source": "session",
      "thread_id": "00000000-0000-4000-8000-000000000002",
@@ -1306,7 +1306,7 @@
      "file_count": 8,
      "files": [],
      "health": "ok",
-     "read_bytes": 31843,
+     "read_bytes": 286774,
      "source": "session",
      "unsupported_lines": 2
     },
@@ -1399,7 +1399,7 @@
       "time": "T+60000ms"
      }
     ],
-    "bytes_read": 31843,
+    "bytes_read": 286774,
     "checks": [
      {
       "call_id": "main-pytest",
@@ -1635,7 +1635,7 @@
      },
      {
       "byte_limit": 2097152,
-      "bytes_read": 284,
+      "bytes_read": 2048,
       "directories_read": 0,
       "directory_limit": 4096,
       "fields": [
@@ -2775,7 +2775,7 @@
       "file": "rollout-2026-01-01T00-00-06-00000000-0000-4000-8000-000000000007.jsonl",
       "reason": "error",
       "record_hash": "<sha:5>",
-      "record_offset": 873,
+      "record_offset": 10240,
       "severity": "error",
       "source": "session",
       "thread_id": "00000000-0000-4000-8000-000000000007",
@@ -2832,7 +2832,7 @@
       "file": "rollout-2026-01-01T00-00-01-00000000-0000-4000-8000-000000000002.jsonl",
       "reason": "turn_failed",
       "record_hash": "<sha:10>",
-      "record_offset": 1466,
+      "record_offset": 12288,
       "severity": "error",
       "source": "session",
       "thread_id": "00000000-0000-4000-8000-000000000002",
@@ -3769,7 +3769,7 @@
       },
       {
        "byte_limit": 2097152,
-       "bytes_read": 284,
+       "bytes_read": 2048,
        "directories_read": 0,
        "directory_limit": 4096,
        "fields": [
@@ -3972,7 +3972,7 @@
       "initial_pending_files": 0,
       "listed_file_limit": 20,
       "pending_files": 0,
-      "read_bytes": 31843,
+      "read_bytes": 286774,
       "read_limit": 8388608,
       "scan_seconds": 15,
       "skill_event_limit": 500,
@@ -4188,7 +4188,7 @@
       "time": "T+60000ms"
      }
     ],
-    "bytes_read": 31843,
+    "bytes_read": 286774,
     "checks": [
      {
       "call_id": "main-pytest",
@@ -4436,7 +4436,7 @@
      },
      {
       "byte_limit": 2097152,
-      "bytes_read": 284,
+      "bytes_read": 2048,
       "directories_read": 0,
       "directory_limit": 4096,
       "fields": [
@@ -5633,7 +5633,7 @@
       "file": "rollout-2026-01-01T00-00-06-00000000-0000-4000-8000-000000000007.jsonl",
       "reason": "error",
       "record_hash": "<sha:5>",
-      "record_offset": 873,
+      "record_offset": 10240,
       "severity": "error",
       "source": "session",
       "thread_id": "00000000-0000-4000-8000-000000000007",
@@ -5690,7 +5690,7 @@
       "file": "rollout-2026-01-01T00-00-01-00000000-0000-4000-8000-000000000002.jsonl",
       "reason": "turn_failed",
       "record_hash": "<sha:10>",
-      "record_offset": 1466,
+      "record_offset": 12288,
       "severity": "error",
       "source": "session",
       "thread_id": "00000000-0000-4000-8000-000000000002",
@@ -6736,7 +6736,7 @@
       },
       {
        "byte_limit": 2097152,
-       "bytes_read": 284,
+       "bytes_read": 2048,
        "directories_read": 0,
        "directory_limit": 4096,
        "fields": [
@@ -6939,7 +6939,7 @@
       "initial_pending_files": 0,
       "listed_file_limit": 20,
       "pending_files": 0,
-      "read_bytes": 31843,
+      "read_bytes": 286774,
       "read_limit": 8388608,
       "scan_seconds": 15,
       "skill_event_limit": 500,
@@ -7167,7 +7167,7 @@
       "time": "T+60000ms"
      }
     ],
-    "bytes_read": 31843,
+    "bytes_read": 286774,
     "checks": [
      {
       "call_id": "main-pytest",
@@ -7451,7 +7451,7 @@
      },
      {
       "byte_limit": 2097152,
-      "bytes_read": 284,
+      "bytes_read": 2048,
       "directories_read": 0,
       "directory_limit": 4096,
       "fields": [
@@ -8730,7 +8730,7 @@
       "file": "rollout-2026-01-01T00-00-06-00000000-0000-4000-8000-000000000007.jsonl",
       "reason": "error",
       "record_hash": "<sha:5>",
-      "record_offset": 873,
+      "record_offset": 10240,
       "severity": "error",
       "source": "session",
       "thread_id": "00000000-0000-4000-8000-000000000007",
@@ -8787,7 +8787,7 @@
       "file": "rollout-2026-01-01T00-00-01-00000000-0000-4000-8000-000000000002.jsonl",
       "reason": "turn_failed",
       "record_hash": "<sha:10>",
-      "record_offset": 1466,
+      "record_offset": 12288,
       "severity": "error",
       "source": "session",
       "thread_id": "00000000-0000-4000-8000-000000000002",
@@ -9859,7 +9859,7 @@
       },
       {
        "byte_limit": 2097152,
-       "bytes_read": 284,
+       "bytes_read": 2048,
        "directories_read": 0,
        "directory_limit": 4096,
        "fields": [
@@ -10062,7 +10062,7 @@
       "initial_pending_files": 0,
       "listed_file_limit": 20,
       "pending_files": 0,
-      "read_bytes": 31843,
+      "read_bytes": 286774,
       "read_limit": 8388608,
       "scan_seconds": 15,
       "skill_event_limit": 500,
@@ -10302,7 +10302,7 @@
       "time": "T+60000ms"
      }
     ],
-    "bytes_read": 31843,
+    "bytes_read": 286774,
     "checks": [
      {
       "call_id": "main-pytest",
@@ -10621,7 +10621,7 @@
      },
      {
       "byte_limit": 2097152,
-      "bytes_read": 284,
+      "bytes_read": 2048,
       "directories_read": 0,
       "directory_limit": 4096,
       "fields": [
@@ -11982,7 +11982,7 @@
       "file": "rollout-2026-01-01T00-00-06-00000000-0000-4000-8000-000000000007.jsonl",
       "reason": "error",
       "record_hash": "<sha:5>",
-      "record_offset": 873,
+      "record_offset": 10240,
       "severity": "error",
       "source": "session",
       "thread_id": "00000000-0000-4000-8000-000000000007",
@@ -12039,7 +12039,7 @@
       "file": "rollout-2026-01-01T00-00-01-00000000-0000-4000-8000-000000000002.jsonl",
       "reason": "turn_failed",
       "record_hash": "<sha:10>",
-      "record_offset": 1466,
+      "record_offset": 12288,
       "severity": "error",
       "source": "session",
       "thread_id": "00000000-0000-4000-8000-000000000002",
@@ -13137,7 +13137,7 @@
       },
       {
        "byte_limit": 2097152,
-       "bytes_read": 284,
+       "bytes_read": 2048,
        "directories_read": 0,
        "directory_limit": 4096,
        "fields": [
@@ -13340,7 +13340,7 @@
       "initial_pending_files": 0,
       "listed_file_limit": 20,
       "pending_files": 0,
-      "read_bytes": 31843,
+      "read_bytes": 286774,
       "read_limit": 8388608,
       "scan_seconds": 15,
       "skill_event_limit": 500,
