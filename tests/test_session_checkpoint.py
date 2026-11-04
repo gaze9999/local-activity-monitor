@@ -1,6 +1,6 @@
 """Metadata-only restart, partial-line replay and replacement checks."""
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import tempfile
@@ -98,6 +98,50 @@ class SessionCheckpointTests(unittest.TestCase):
         self.assertIs(dashboard.codex.derived_calls[other][1],first[other][1])
         row = next(row for row in projection['threads'] if row['thread_id']==self.identity)
         self.assertIsNotNone(row['tool_events'][0]['completed_at'])
+
+    def test_window_partials_match_recomputed_projection_as_boundaries_move(self):
+        self.seed()
+        with self.path.open('a',encoding='utf-8',newline='\n') as stream:
+            stream.write(self.record('response_item',{'type':'function_call_output','call_id':'call1','output':'{}'}))
+        dashboard = Dashboard(self.home,codex=True)
+        dashboard.codex.refresh()
+        now = datetime.now(timezone.utc)
+        windows = ('1h','24h','7d','all')
+        fields = lambda value: {window:{key:value[window][key] for key in ('tools','tool_statistics','mcp_events','activity_series','observed_tool_calls')}|{'calls':[row['tool_calls'] for row in value[window]['threads']]} for window in windows}
+        for reference in (now, now+timedelta(hours=2), now):
+            cached = fields(dashboard.codex.snapshot_many(windows,reference))
+            dashboard.codex.derived_calls = {}
+            self.assertEqual(cached,fields(dashboard.codex.snapshot_many(windows,reference)))
+            self.assertEqual(cached['1h']['observed_tool_calls'],1 if reference==now else 0)
+        partials = dashboard.codex.derived_calls[self.identity][3]
+        dashboard.codex.snapshot_many(windows,now)
+        self.assertIs(dashboard.codex.derived_calls[self.identity][3],partials)
+
+    def test_mcp_summary_reuses_merged_events_until_rows_change(self):
+        self.seed()
+        with self.path.open('a',encoding='utf-8',newline='\n') as stream:
+            stream.write(self.record('response_item',{'type':'function_call_output','call_id':'call1','output':'{}'}))
+        dashboard = Dashboard(self.home,codex=True)
+        dashboard.monitor.load_device = lambda: None
+        original = dashboard.codex.snapshot_many
+        reference = [datetime.now(timezone.utc)]
+        def snapshot_windows(pause=None):
+            dashboard.codex.window_reference = reference[0]
+            return original(('1h','24h','7d','all'),reference[0],retain_sql=True)
+        dashboard.codex.snapshot_windows = snapshot_windows
+        calls = lambda window: next(source['calls'] for source in dashboard.cache[window]['mcp']['servers'] if source['server']=='future')
+        dashboard.refresh()
+        merge = dashboard.mcp_merge
+        self.assertEqual((calls('1h'),calls('all')),(1,1))
+        reference[0] += timedelta(hours=2)
+        dashboard.refresh()
+        self.assertIs(dashboard.mcp_merge,merge)
+        self.assertEqual((calls('1h'),calls('all')),(0,1))
+        with self.path.open('a',encoding='utf-8',newline='\n') as stream:
+            stream.write(self.record('response_item',{'type':'function_call','name':'mcp__future__run','call_id':'call3','arguments':'{}'}))
+        dashboard.refresh()
+        self.assertIsNot(dashboard.mcp_merge,merge)
+        self.assertEqual(calls('all'),2)
 
     def test_replaced_or_rewritten_source_invalidates_checkpoint(self):
         self.seed()

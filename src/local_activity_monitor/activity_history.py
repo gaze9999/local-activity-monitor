@@ -53,6 +53,7 @@ class ActivityHistory:
         self.last_prune_day = None
         self.repair = False
         self.last_source_key = self.future_at = self.next_future = None
+        self.merged_rows = None
         try:
             raw = self.store.load(self.BYTE_LIMIT)
             if raw is not None:
@@ -135,7 +136,7 @@ class ActivityHistory:
         if source_key is not None and source_key == self.last_source_key and self.health == 'ok' and self.last_prune_day == (current.date(), self.retention_days) and (self.future_at is None or current < self.future_at) and not self.expired(current):
             return
         self.next_future = None
-        self.merge(sql, web, mcp)
+        self.merge(sql, web, mcp, incremental=source_key is not None)
         if source_key is not None:
             self.last_source_key = source_key if self.health == 'ok' else None
             self.future_at = self.next_future-timedelta(minutes=1) if self.next_future else None
@@ -144,12 +145,51 @@ class ActivityHistory:
         boundary = current-timedelta(days=self.retention_days) if self.retention_days else datetime.min.replace(tzinfo=timezone.utc)
         return any(rows and datetime.fromisoformat(rows[-1]['timestamp'].replace('Z','+00:00'))<boundary for rows in (self.sql,self.web,self.mcp))
 
-    def merge(self, sql, web, mcp):
+    def changed(self, events):
+        """Rows not merged by the previous incremental update.
+
+        A caller passes the same row objects while their source is unchanged, and
+        merging a row again does not change the result, so those rows are skipped.
+        A row with a future time is merged once that time arrives.
+        """
+        cache = self.merged_rows if self.merged_rows and self.merged_rows['retention_days'] == self.retention_days and self.health == 'ok' and not self.repair else None
+        ceiling = datetime.now(timezone.utc)+timedelta(minutes=1)
+        rows, delta = {'retention_days': self.retention_days}, {}
+        for kind, values in events.items():
+            previous = cache[kind] if cache else {}
+            current, changed = {}, []
+            for value in values:
+                entry = previous.get(id(value))
+                if entry is not None and entry[0] is value:
+                    due = entry[1]
+                    if due is not None and due > ceiling:
+                        self.next_future = due if self.next_future is None else min(self.next_future, due)
+                    elif due is not None:
+                        changed.append(value)
+                        due = None
+                    current[id(value)] = value, due
+                    continue
+                changed.append(value)
+                due = None
+                try:
+                    date = datetime.fromisoformat(value['timestamp'].replace('Z', '+00:00'))
+                    due = date if date.tzinfo and date > ceiling else None
+                except (KeyError, ValueError, TypeError, AttributeError):
+                    pass
+                current[id(value)] = value, due
+            rows[kind], delta[kind] = current, changed
+        self.pending_rows = rows
+        return delta
+
+    def merge(self, sql, web, mcp, incremental=False):
+        events = {'sql': list(sql), 'web': list(web), 'mcp': list(mcp)}
+        if incremental:
+            events = self.changed(events)
         # Validate all incoming metadata before trimming the in-memory view.
         incoming = {'version': 3, 'retention_days': self.retention_days,
-                    'sql': self.project(list(sql), 'sql', False),
-                    'web': self.project(list(web), 'web', False),
-                    'mcp': self.project(list(mcp), 'mcp', False)}
+                    'sql': self.project(events['sql'], 'sql', False),
+                    'web': self.project(events['web'], 'web', False),
+                    'mcp': self.project(events['mcp'], 'mcp', False)}
         incoming_raw = json.dumps(incoming, ensure_ascii=True, separators=(',', ':')).encode()
         incoming_digest = hashlib.sha256(incoming_raw).digest()
         current = datetime.now(timezone.utc)
@@ -157,6 +197,8 @@ class ActivityHistory:
         boundary = current-timedelta(days=self.retention_days) if self.retention_days else datetime.min.replace(tzinfo=timezone.utc)
         expired = any(rows and datetime.fromisoformat(rows[-1]['timestamp'].replace('Z','+00:00'))<boundary for rows in (self.sql,self.web,self.mcp,incoming['sql'],incoming['web'],incoming['mcp']))
         if incoming_digest == self.last_incoming and self.last_prune_day == day and not expired and self.health == 'ok':
+            if incremental:
+                self.merged_rows = self.pending_rows
             return
         storage_error = None
         self.checked_at = current.isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -184,7 +226,8 @@ class ActivityHistory:
             entries.pop()
             raw = self.encode()
         if storage_error is not None:
-            self.repair = True
+            # A failed merge leaves the working view uncertain; the next update merges every row.
+            self.repair, self.merged_rows = True, None
             return
         # Incoming rows are already merged into storage. The whole working view is
         # written again only after a failed save, so rows kept in memory are not lost.
@@ -194,8 +237,10 @@ class ActivityHistory:
             self.repair = False
             self.saved, self.health = raw, 'ok'
             self.last_incoming = incoming_digest
+            if incremental:
+                self.merged_rows = self.pending_rows
         except (OSError, sqlite3.Error):
-            self.health = 'unavailable'
+            self.health, self.merged_rows = 'unavailable', None
 
     def encode(self):
         return json.dumps({'version': 3, 'retention_days': self.retention_days, 'sql': self.sql, 'web': self.web, 'mcp': self.mcp}, ensure_ascii=True, separators=(',', ':')).encode()

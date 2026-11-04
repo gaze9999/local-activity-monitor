@@ -100,6 +100,29 @@ class ActivityHistoryTests(unittest.TestCase):
                 self.assertEqual(merged.call_count, 1)
             self.assertEqual(history.health, 'ok')
 
+    def test_incremental_update_projects_only_new_rows_and_matches_full_merge(self):
+        rows = [self.web | {'call_id': str(index)} for index in range(5)]
+        history = ActivityHistory(self.path)
+        history.update([], rows, source_key=1)
+        # A separate full update, such as retired calls, keeps the incremental rows.
+        retired = self.web | {'call_id': 'retired'}
+        history.update([], [retired])
+        changed = rows[0] | {'duration_ms': 7, 'result': {'references': ['https://example.com/changed']}}
+        added = self.web | {'call_id': 'new'}
+        with patch.object(history, 'project', wraps=history.project) as projected:
+            history.update([], [changed]+rows[1:]+[added], source_key=2)
+        self.assertEqual(sorted(event['call_id'] for call in projected.call_args_list for event in call.args[0]), ['0', 'new'])
+        full = ActivityHistory(self.home/'full/activity-history.json')
+        full.update([], rows)
+        full.update([], [retired])
+        full.update([], [changed]+rows[1:]+[added])
+        self.assertEqual(history.web, full.web)
+        self.assertEqual(history.store.page('web', limit=200)['items'], full.store.page('web', limit=200)['items'])
+        history.retention_days = 30
+        with patch.object(history, 'project', wraps=history.project) as projected:
+            history.update([], [changed]+rows[1:]+[added], source_key=3)
+        self.assertEqual(len([event for call in projected.call_args_list for event in call.args[0]]), 6)
+
     def setUp(self):
         self.directory=tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
