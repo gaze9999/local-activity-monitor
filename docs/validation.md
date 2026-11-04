@@ -1,7 +1,22 @@
 # 測試與建置
 
-目前 LAM 為 0.22.0, 固定 WBUI 0.22.1 / `6b25c79`, 最新證據見 [後端每輪成本與 HTTP / SSE 輸出比對](#2026-11-04-後端每輪成本與-http--sse-輸出比對)
+目前 LAM 為 0.22.1, 固定 WBUI 0.22.1 / `6b25c79`, 最新證據見 [輸出比對的路徑穩定性](#2026-11-04-輸出比對的路徑穩定性)
 以下各節保留當時的版本、環境與結果, 完整平台及使用端驗收依 [功能清單](features.md#待驗收) 追蹤
+
+## 2026-11-04 輸出比對的路徑穩定性
+
+Windows 11, Python 3.12.14, LAM 0.22.1
+
+| 項目 | 實際結果 |
+| --- | --- |
+| 原因 | 0.22.0 的合成資料包含實際暫存路徑, 路徑長度與原生換行會改變 JSONL 位元組位置及設定檔讀取量, 原路徑重跑出現 9 個子案例差異 |
+| 修正 | `SessionWriter` 與合成 config 使用固定 2,048 bytes 的 UTF-8 資料及 LF, 保留實際路徑、JSON 內容和數值斷言, 超出大小明確報錯, 其餘 fixture 文字固定 LF |
+| 基準差異 | 3 份 golden 僅更新 `offset`、`record_offset`、`read_bytes`、`bytes_read`, 其他欄位及清單長度完全相同 |
+| 路徑回歸 | 短路徑與較長中文空白路徑各通過 4 項測試, 包含新增與追加後的位元組配置、超長資料拒絕、HTTP / SSE 三階段輸出及請求檢查 |
+| 完整來源回歸 | unittest discover 共 560 項, 558 項通過、2 項因 Windows symlink 權限略過, 退出碼 0, 測試結束仍有既有未關閉串流 ResourceWarning |
+
+第一次固定 JSONL 後, 中文空白路徑仍揭露 config 的 `bytes_read` 差異, 已固定 config 大小後重新核對
+重現: 設定 `PYTHONPATH=src`, 執行 `python -m unittest discover -s tests -p 'test_*contract*.py' -v`, 可用不同 `TEMP` / `TMP` 路徑比對同一組基準
 
 ## 2026-11-04 後端每輪成本與 HTTP / SSE 輸出比對
 

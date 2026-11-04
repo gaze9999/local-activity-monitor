@@ -15,6 +15,7 @@ import sqlite3
 THREADS = {name: f'00000000-0000-4000-8000-{index:012d}' for index, name in enumerate(('main', 'worker', 'day', 'week', 'old', 'running', 'noisy', 'late'), start=1)}
 SERVERS = {'demo_docs': '示範文件檢查', 'demo_search': '示範搜尋工具'}
 CLOCK_MARGIN = timedelta(minutes=5)
+RECORD_BYTES = 2048
 
 
 def anchor_time():
@@ -24,6 +25,13 @@ def anchor_time():
 
 def stamp(value):
     return value.isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+
+
+def fixed_line(text):
+    line = text.encode('utf-8')
+    if len(line) >= RECORD_BYTES:
+        raise ValueError('Contract record exceeds its fixed byte budget')
+    return line.ljust(RECORD_BYTES-1, b' ')+b'\n'
 
 
 class SessionWriter:
@@ -48,16 +56,19 @@ class SessionWriter:
                   'secondary': {'used_percent': 42, 'window_minutes': 10080, 'resets_at': int((self.anchor+timedelta(days=4)).timestamp())}, 'plan_type': 'pro'}
         self.add('event_msg', {'type': 'token_count', 'info': {'total_token_usage': usage, 'model_context_window': 258400}, 'rate_limits': limits}, seconds)
 
+    def serialized(self):
+        # Keep real paths while making byte offsets independent of root and OS.
+        return b''.join(fixed_line(json.dumps(record, ensure_ascii=False)) for record in self.records)
+
     def write(self, extra_lines=(), mtime_offset=0):
-        lines = [json.dumps(record, ensure_ascii=False) for record in self.records]+list(extra_lines)
-        self.path.write_text('\n'.join(lines)+'\n', encoding='utf-8')
+        self.path.write_bytes(self.serialized()+b''.join(line.encode('utf-8')+b'\n' for line in extra_lines))
         when = (self.anchor+timedelta(seconds=mtime_offset)).timestamp()
         os.utime(self.path, (when, when))
         self.records = []
 
     def append(self):
-        with self.path.open('a', encoding='utf-8') as stream:
-            stream.write(''.join(json.dumps(record, ensure_ascii=False)+'\n' for record in self.records))
+        with self.path.open('ab') as stream:
+            stream.write(self.serialized())
         self.records = []
 
 
@@ -71,19 +82,19 @@ def build(base, anchor):
     sessions = home/'sessions'/'2026'/'01'/'01'
     sessions.mkdir(parents=True)
     project.mkdir()
-    (project/'AGENTS.md').write_text('# Demo project\n\nSynthetic contract data only.\n', encoding='utf-8')
+    (project/'AGENTS.md').write_text('# Demo project\n\nSynthetic contract data only.\n', encoding='utf-8', newline='')
     skill = home/'skills'/'demo-skill'/'SKILL.md'
     skill.parent.mkdir(parents=True)
-    skill.write_text('---\nname: demo-skill\ndescription: Synthetic skill\n---\n# Demo skill\n', encoding='utf-8')
+    skill.write_text('---\nname: demo-skill\ndescription: Synthetic skill\n---\n# Demo skill\n', encoding='utf-8', newline='')
     config = []
     for server, description in SERVERS.items():
         source = base/server
         source.mkdir()
-        (source/'README.md').write_text('# Demo source\n', encoding='utf-8')
-        (source/'package.json').write_text(json.dumps({'name': server, 'description': description}, ensure_ascii=False), encoding='utf-8')
+        (source/'README.md').write_text('# Demo source\n', encoding='utf-8', newline='')
+        (source/'package.json').write_text(json.dumps({'name': server, 'description': description}, ensure_ascii=False), encoding='utf-8', newline='')
         config.append(f'[mcp_servers.{server}]\ncommand = "node"\nargs = {json.dumps([str(source/"server.mjs")])}\n')
-    (home/'config.toml').write_text('\n'.join(config), encoding='utf-8')
-    (home/'.codex-global-state.json').write_text('{}', encoding='utf-8')
+    (home/'config.toml').write_bytes(fixed_line('\n'.join(config)))
+    (home/'.codex-global-state.json').write_text('{}', encoding='utf-8', newline='')
 
     def meta(writer, name, seconds, **extra):
         writer.add('session_meta', {'id': THREADS[name], 'originator': 'Codex Desktop', 'cwd': str(project), 'cli_version': '0.160.0'} | extra, seconds)
