@@ -66,6 +66,39 @@ class SessionCheckpointTests(unittest.TestCase):
         self.assertEqual(second.codex.files[self.path]['tokens']['input_tokens'],123)
         self.assertEqual(second.codex.read_bytes,len(partial.encode()))
 
+    def test_revision_changes_only_with_session_state(self):
+        self.seed()
+        dashboard = Dashboard(self.home,codex=True)
+        dashboard.codex.refresh()
+        revision = dashboard.codex.revision
+        dashboard.codex.next_scan = 0
+        dashboard.codex.refresh()
+        self.assertEqual(dashboard.codex.revision,revision)
+        with self.path.open('a',encoding='utf-8',newline='\n') as stream:
+            stream.write(self.record('response_item',{'type':'function_call_output','call_id':'call1','output':'{}'}))
+        dashboard.codex.refresh()
+        self.assertGreater(dashboard.codex.revision,revision)
+
+    def test_projection_reuses_records_only_for_unchanged_threads(self):
+        self.seed()
+        other = '00000000-0000-4000-8000-000000000002'
+        (self.sessions/('rollout-'+other+'.jsonl')).write_text(json.dumps({'timestamp':self.stamp,'type':'session_meta','payload':{'id':other}})+'\n'+
+            self.record('response_item',{'type':'function_call','name':'exec_command','call_id':'call2','arguments':json.dumps({'cmd':'git status'})}),encoding='utf-8')
+        dashboard = Dashboard(self.home,codex=True)
+        dashboard.codex.refresh()
+        dashboard.codex.snapshot_windows()
+        first = dict(dashboard.codex.derived_calls)
+        dashboard.codex.snapshot_windows()
+        self.assertIs(dashboard.codex.derived_calls[self.identity][1],first[self.identity][1])
+        with self.path.open('a',encoding='utf-8',newline='\n') as stream:
+            stream.write(self.record('response_item',{'type':'function_call_output','call_id':'call1','output':'{}'}))
+        dashboard.codex.refresh()
+        projection = dashboard.codex.snapshot_windows()['all']
+        self.assertIsNot(dashboard.codex.derived_calls[self.identity][1],first[self.identity][1])
+        self.assertIs(dashboard.codex.derived_calls[other][1],first[other][1])
+        row = next(row for row in projection['threads'] if row['thread_id']==self.identity)
+        self.assertIsNotNone(row['tool_events'][0]['completed_at'])
+
     def test_replaced_or_rewritten_source_invalidates_checkpoint(self):
         self.seed()
         first = Dashboard(self.home,codex=True)

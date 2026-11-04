@@ -68,6 +68,21 @@ class EventStreamTests(unittest.TestCase):
         self.assertTrue(self.dashboard.event_clients.acquire(False))
         self.dashboard.event_clients.release()
 
+    def test_shared_snapshot_matches_copy_and_leaves_cache_unchanged(self):
+        self.dashboard.refresh()
+        before = json.dumps(self.dashboard.cache, sort_keys=True, default=str)
+        shared = self.dashboard.snapshot('24h', copy_cache=False)
+        copied = self.dashboard.snapshot('24h')
+        for value in (shared, copied):
+            value.pop('monitor')
+            value.pop('activity')
+        self.assertEqual(json.loads(json.dumps(shared)), json.loads(json.dumps(copied)))
+        self.assertEqual(json.dumps(self.dashboard.cache, sort_keys=True, default=str), before)
+        body = self.dashboard.stream_body('24h', 5)
+        self.assertIs(self.dashboard.stream_body('24h', 5), body)
+        self.assertIsNot(self.dashboard.stream_body('24h', 6), body)
+        self.assertEqual(json.loads(body)['window'], '24h')
+
     def test_window_subscription_and_invalid_queries(self):
         connection=self.connection()
         connection.request('GET','/api/events?window=all')

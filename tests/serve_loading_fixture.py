@@ -148,10 +148,11 @@ def main():
         dashboard.codex.thread_state.update([{'thread_id':demo_thread, 'calls':{'demo_history_skill':
             {'timestamp':stamp(anchor), 'skills':[{'skill':'demo-skill'}]}}}])
         original_snapshot = dashboard.snapshot
-        def demo_snapshot(window='all'):
-            value = original_snapshot(window)
+        def demo_snapshot(window='all', **options):
+            value = original_snapshot(window, **options)
             if value['codex'].get('usage'):
-                value['codex']['usage']['credits'] = {'balance': 0, 'has_credits': False, 'unlimited': False}
+                # The returned usage may be shared with the published cache.
+                value['codex']['usage'] = value['codex']['usage'] | {'credits': {'balance': 0, 'has_credits': False, 'unlimited': False}}
             value['monitor'] = {'log_path': value['monitor'].get('log_path'), 'debug': value['monitor'].get('debug', {}), 'version': __version__, 'process_usage': value['monitor'].get('process_usage',{}), 'uptime_seconds': 7200, 'health': 'ok', 'requests': 24, 'errors': 0, 'collection': {'phase': 'idle'}, 'device_ready': True, 'gpus':[{'name':'Demo single GPU','dedicated_memory_bytes':8*1024**3,'shared_memory_bytes':16*1024**3,'driver_version':'demo'}], 'fonts':['Segoe UI','Microsoft JhengHei'], 'history': [], 'events': []}
             return value
         dashboard.snapshot = demo_snapshot

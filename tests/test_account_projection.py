@@ -49,11 +49,12 @@ class AccountProjectionTests(unittest.TestCase):
         self.assertNotIn("usage", self.dashboard.cache["all"]["codex"])
 
     def test_failed_account_read_keeps_local_quota(self):
-        from local_activity_monitor.collectors import CodexCollector
+        from local_activity_monitor.collectors import WINDOWS, CodexCollector
         self.dashboard.observations.update(codex=True, codex_account=True)
         self.dashboard.codex = CodexCollector(Path(self.temp.name))
         local = {"source": "codex", "limit_id": "codex", "limits": [{"remaining_percent": 55, "window_minutes": 10080}]}
-        self.dashboard.codex.snapshot = MagicMock(return_value={"health": "ok", "threads": [], "usage": local})
+        projection = {"health": "ok", "threads": [], "usage": local}
+        self.dashboard.codex.snapshot_windows = MagicMock(return_value={window: projection for window in WINDOWS})
         self.dashboard.account.snapshot = MagicMock(return_value={"health": "error", "limits": {}, "methods": {"account/rateLimits/read": {"health": "error"}}})
         self.dashboard.api_queries.query("codex_account")
         self.dashboard.refresh()

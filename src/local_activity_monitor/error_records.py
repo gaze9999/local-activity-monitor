@@ -132,6 +132,8 @@ class DiagnosticCollector:
         self.events = deque(maxlen=self.EVENT_LIMIT)
         self.logs = deque(maxlen=self.EVENT_LIMIT)
         self.sql_events = deque(maxlen=500)
+        # Increases with each appended SQL event; activity history skips unchanged inputs by it.
+        self.sql_revision = 0
         self.api_events = deque(maxlen=1000)
         self.capture_api = True
         self.capture_sql = True
@@ -210,6 +212,7 @@ class DiagnosticCollector:
         stats["parsed_lines"] += 1
         sql = sql_diagnostic(source, body) if self.capture_sql else None
         if sql:
+            self.sql_revision += 1
             self.sql_events.append(sql | {"timestamp": when, "source": "codex_desktop", "module": source, "thread_id": thread, "file": file, "record_offset": offset, "record_hash": hashlib.sha256(line.encode()).hexdigest(), "recognition": "diagnostic_log", "result": "log_error" if level in ("error", "fatal", "critical") else "log_recorded"})
         if level in ("error", "fatal", "critical", "warn", "warning"):
             self.append(event | {"severity": "warning" if level in ("warn", "warning") else "error"}, historical)
@@ -432,6 +435,7 @@ class DiagnosticCollector:
                     stats["parsed_lines"] += 1
                     sql = sql_diagnostic(source, body) if self.capture_sql else None
                     if sql:
+                        self.sql_revision += 1
                         self.sql_events.append(sql | {"timestamp": when, "source": "codex_core", "module": source, "thread_id": event["thread_id"], "file": path.name, "record_id": identity, "recognition": "diagnostic_log", "result": "log_error" if level in ("error", "fatal", "critical") else "log_recorded"})
                     if level in ("error", "fatal", "critical", "warn", "warning"):
                         self.append(event | {"severity": "warning" if level in ("warn", "warning") else "error"}, past)
