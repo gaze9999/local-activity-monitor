@@ -393,13 +393,16 @@ def response_metadata(server, output):
     return result
 
 
+TRANSPORT_FAILURES = ("network_unavailable", "transport_error", "connection_closed", "connection_refused", "authentication_failed")
+
+
 def connection_state(events, enabled=True, diagnostics=()):
     """Describe observed responses and transport failures without probing a server."""
     direct = [event for event in events if not event.get("nested")]
     replies = [event.get("completed_at") for event in direct if event.get("completed_at")]
     latest_reply = max(replies, default=None)
     pending = [event for event in direct if not event.get("completed_at")]
-    failures = [event for event in diagnostics if event.get("code") in ("network_unavailable", "transport_error", "connection_closed", "connection_refused", "authentication_failed")]
+    failures = [event for event in diagnostics if event.get("code") in TRANSPORT_FAILURES]
     failure = max(failures, key=lambda event:event.get("timestamp") or "", default=None)
     state = "response" if latest_reply else "unconfirmed"
     time = latest_reply
@@ -413,47 +416,35 @@ def connection_state(events, enabled=True, diagnostics=()):
     return {"state": state, "observed_at": time, "last_response_at": latest_reply, "pending_calls": len(pending), "error_code": failure.get("code") if failure and state == "error" else None, "method": "local_records"}
 
 
-def summarize(sources, events, enabled=None, overrides=None, diagnostics=()):
-    enabled, overrides = enabled or {}, overrides or {}
-    catalog = dict(sources)
-    for event in events:
-        catalog.setdefault(event["server"], "observed")
-    visible = []
-    grouped = defaultdict(list)
-    for event in events:
-        if enabled.get(event["server"], True):
-            visible.append(event | {"category": category(event["server"], event["tool"], overrides)})
-            grouped[event["server"]].append(visible[-1])
-    servers = []
-    for server, origin in sorted(catalog.items()):
-        rows = grouped.get(server, [])
-        direct = [item for item in rows if not item["nested"]]
-        known = [item for item in direct if item["result"].get("status")]
-        errors = sum(item["result"].get("status") in ERRORS for item in known)
-        durations = sorted(item["duration_ms"] for item in direct if item.get("duration_ms") is not None)
-        p99 = None
-        if durations:
-            position = (len(durations)-1)*.99
-            lower = int(position)
-            p99 = round(durations[lower]+(durations[min(len(durations)-1, lower+1)]-durations[lower])*(position-lower), 2)
-        servers.append({"server": server, "origin": origin, "category": category(server, overrides=overrides), "enabled": enabled.get(server, True), "calls": len(direct), "recognized": len(rows)-len(direct), "returned": sum(bool(item.get("completed_at")) for item in direct), "known_status": len(known), "errors": errors, "average_ms": round(sum(durations)/len(durations)) if durations else None, "p99_ms": p99, "p95_ms": durations[min(len(durations)-1, int(len(durations)*.95))] if durations else None, "last_at": max((item.get("completed_at") or item["timestamp"] or "" for item in rows), default=None)})
-    for server in servers:
-        rows = grouped.get(server["server"], [])
-        metrics = {}
-        for event in sorted(rows, key=lambda item: item.get("completed_at") or item.get("timestamp") or ""):
-            for key, value in event.get("result", {}).items():
-                if type(value) is bool or type(value) in (int, float) and number(value) is not None:
-                    if key in metrics or len(metrics) < 32:
-                        metrics[key] = {"value": value, "timestamp": event.get("completed_at") or event.get("timestamp")}
-        server["latest_metrics"] = metrics
-        server["tools"] = sorted({event["tool"] for event in rows})[:TOOL_LIMIT]
-        server["connection"] = connection_state(rows, server["enabled"], [event for event in diagnostics if event.get("server") == server["server"]])
-    recording = {}
-    for event in sorted(visible, key=lambda item: item.get("completed_at") or item.get("timestamp") or ""):
+def server_summary(server, origin, rows, enabled, overrides, diagnostics):
+    """One server's row and recording state from its visible events in event order."""
+    direct = [item for item in rows if not item["nested"]]
+    known = [item for item in direct if item["result"].get("status")]
+    errors = sum(item["result"].get("status") in ERRORS for item in known)
+    durations = sorted(item["duration_ms"] for item in direct if item.get("duration_ms") is not None)
+    p99 = None
+    if durations:
+        position = (len(durations)-1)*.99
+        lower = int(position)
+        p99 = round(durations[lower]+(durations[min(len(durations)-1, lower+1)]-durations[lower])*(position-lower), 2)
+    row = {"server": server, "origin": origin, "category": category(server, overrides=overrides), "enabled": enabled, "calls": len(direct), "recognized": len(rows)-len(direct), "returned": sum(bool(item.get("completed_at")) for item in direct), "known_status": len(known), "errors": errors, "average_ms": round(sum(durations)/len(durations)) if durations else None, "p99_ms": p99, "p95_ms": durations[min(len(durations)-1, int(len(durations)*.95))] if durations else None, "last_at": max((item.get("completed_at") or item["timestamp"] or "" for item in rows), default=None)}
+    ordered = sorted(rows, key=lambda item: item.get("completed_at") or item.get("timestamp") or "")
+    metrics = {}
+    for event in ordered:
+        for key, value in event.get("result", {}).items():
+            if type(value) is bool or type(value) in (int, float) and number(value) is not None:
+                if key in metrics or len(metrics) < 32:
+                    metrics[key] = {"value": value, "timestamp": event.get("completed_at") or event.get("timestamp")}
+    row["latest_metrics"] = metrics
+    row["tools"] = sorted({event["tool"] for event in rows})[:TOOL_LIMIT]
+    row["connection"] = connection_state(rows, enabled, diagnostics)
+    state, first = None, None
+    for event in ordered:
         result = event.get("result", {})
         flags = {key: item for key, item in result.items() if isinstance(key, str) and key.endswith(("recording_enabled", "telemetry_enabled")) and type(item) is bool}
         if flags:
-            state = recording.setdefault(event["server"], {"flags": {}})
+            if state is None:
+                state, first = {"flags": {}}, event
             observed_at = event.get("completed_at") or event.get("timestamp")
             for key, item in flags.items():
                 state["flags"][key] = {"enabled": item, "health": result.get("status"), "observed_at": observed_at}
@@ -461,5 +452,64 @@ def summarize(sources, events, enabled=None, overrides=None, diagnostics=()):
             # Recording takes priority over telemetry regardless of field order.
             key = min(flags, key=lambda field: (not field.endswith("recording_enabled"), field))
             state.update(state["flags"][key], key=key)
+    return row, state, first
+
+
+class SummaryCache:
+    """Per-server summaries reused while a server's events are the same objects.
+
+    Each entry keeps its events alive, so an object identity cannot be reused
+    by a different event while the entry exists.
+    """
+
+    def __init__(self):
+        self.labelled, self.servers = {}, {}
+
+
+def summarize(sources, events, enabled=None, overrides=None, diagnostics=(), cache=None):
+    enabled, overrides = enabled or {}, overrides or {}
+    catalog = dict(sources)
+    for event in events:
+        catalog.setdefault(event["server"], "observed")
+    overrides_key = json.dumps(overrides, sort_keys=True, default=str) if cache else None
+    labelled = cache.labelled.get(overrides_key, {}) if cache else {}
+    current = {}
+    visible = []
+    grouped = defaultdict(list)
+    for event in events:
+        if enabled.get(event["server"], True):
+            entry = labelled.get(id(event))
+            if entry is None or entry[0] is not event:
+                entry = event, event | {"category": category(event["server"], event["tool"], overrides)}
+            current[id(event)] = entry
+            visible.append(entry[1])
+            grouped[event["server"]].append(entry[1])
+    if cache:
+        cache.labelled = {overrides_key: current}
+    failures = defaultdict(list)
+    for event in diagnostics:
+        failures[event.get("server")].append(event)
+    servers, states, reused = [], [], {}
+    for server, origin in sorted(catalog.items()):
+        rows, notices = grouped.get(server, []), failures.get(server, [])
+        if cache:
+            key = (origin, enabled.get(server, True), overrides_key, tuple((event.get("code"), event.get("timestamp")) for event in notices))
+            entry = cache.servers.get(server)
+            if entry is not None and entry[0] == key and len(entry[1]) == len(rows) and all(a is b for a, b in zip(entry[1], rows)):
+                summary = entry[2]
+            else:
+                summary = server_summary(server, origin, rows, enabled.get(server, True), overrides, notices)
+            reused[server] = key, rows, summary
+        else:
+            summary = server_summary(server, origin, rows, enabled.get(server, True), overrides, notices)
+        servers.append(summary[0])
+        if summary[1] is not None:
+            states.append((server, summary[1], summary[2]))
+    if cache:
+        cache.servers = reused
+    # Recording states follow their first report in time, then event order.
+    position = {id(event): index for index, event in enumerate(visible)} if states else {}
+    states.sort(key=lambda item: (item[2].get("completed_at") or item[2].get("timestamp") or "", position[id(item[2])]))
+    recording = {server: state for server, state, _ in states}
     visible.sort(key=lambda item: item["timestamp"] or "", reverse=True)
     return {"servers": servers, "events": visible[:EVENT_LIMIT], "total_events": len(visible), "categories": CATEGORIES, "recording_status": recording}

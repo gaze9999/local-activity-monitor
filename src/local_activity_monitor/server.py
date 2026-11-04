@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left
 from collections import Counter
 from datetime import datetime
 import base64
@@ -33,7 +34,7 @@ from .project_instructions import instructions, observed_file_metadata
 from .codex_connection import connection_status
 from .source_watch import SourceWatch, source_path, git_metadata_path, managed_worktree_path
 from .mcp_source_files import documents as source_documents, read_document, write_document
-from .mcp_records import CATEGORIES, EVENT_LIMIT as MCP_EVENT_LIMIT, TOOL_LIMIT as MCP_TOOL_LIMIT, SOURCE, category, discover_sources, summarize
+from .mcp_records import CATEGORIES, EVENT_LIMIT as MCP_EVENT_LIMIT, TOOL_LIMIT as MCP_TOOL_LIMIT, SOURCE, TRANSPORT_FAILURES, SummaryCache, category, discover_sources, summarize
 from .monitor_state import MonitorState
 from .worktree_info import WorktreeCollector
 from .error_records import DiagnosticCollector, error_summary, FAILURES
@@ -307,6 +308,58 @@ class Dashboard:
             self.asset_signature = signature
         return self.asset_revision
 
+    def merged_mcp_events(self, history, recent):
+        """Merge retained and current MCP events.
+
+        The previous result is reused while both inputs hold the same row objects;
+        the retained memo keeps those objects alive, so their identities stay unique.
+        """
+        previous = getattr(self, "mcp_merge", None)
+        if previous and all(len(old) == len(new) and all(a is b for a, b in zip(old, new)) for old, new in ((previous["history"], history), (previous["recent"], recent))):
+            return previous
+        known, prior = (previous["identities"], previous["merged"]) if previous else ({}, {})
+        identities, groups = {}, {}
+        for event in history+recent:
+            entry = known.get(id(event))
+            identity = entry[1] if entry is not None and entry[0] is event else mcp_identity(event)
+            identities[id(event)] = event, identity
+            groups.setdefault(identity, []).append(event)
+        merged, events, pairs = {}, [], []
+        for identity, group in groups.items():
+            entry = prior.get(identity)
+            # An identity merged from the same objects in the same order keeps its result.
+            if entry is not None and len(entry[0]) == len(group) and all(a is b for a, b in zip(entry[0], group)):
+                value, when = entry[1], entry[2]
+            else:
+                value, when = {}, None
+                for event in group:
+                    value = merge_event(value, event)
+                # Same rule as activity_windows.contains.
+                stamp = value.get("timestamp")
+                if isinstance(stamp, str):
+                    try:
+                        parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                        when = parsed if parsed.tzinfo else None
+                    except ValueError:
+                        pass
+            merged[identity] = group, value, when
+            events.append(value)
+            pairs.append((value, when))
+        times = sorted(when for _, when in pairs if when is not None)
+        self.mcp_merge = {"history": history, "recent": recent, "identities": identities, "merged": merged, "events": events, "pairs": pairs, "times": times, "summaries": {}}
+        return self.mcp_merge
+
+    def mcp_summary(self, merge, scope, sources, events, diagnostics=()):
+        """Summarize merged MCP events once per scope, settings and transport failures."""
+        key = (scope, json.dumps([sources, self.mcp_sources, self.mcp_categories], sort_keys=True, default=str), tuple((event.get("server"), event.get("code"), event.get("timestamp")) for event in diagnostics))
+        summaries = merge["summaries"]
+        if key not in summaries:
+            if len(summaries) >= 32:
+                summaries.clear()
+            caches = self.mcp_summary_caches = getattr(self, "mcp_summary_caches", {})
+            summaries[key] = summarize(sources, events(), self.mcp_sources, self.mcp_categories, diagnostics, caches.setdefault(scope[:2] if isinstance(scope, tuple) else scope, SummaryCache()))
+        return summaries[key]
+
     def _refresh(self):
         with self.refresh_lock:
             began, cpu = time.perf_counter(), time.process_time()
@@ -359,6 +412,7 @@ class Dashboard:
             self.diagnostics.capture_api = self.observations["model_api"]
             if self.observations["codex"] and (self.observations["errors"] or self.observations["logs"] or self.observations["sqlite"] or self.observations["model_api"]):
                 self.diagnostics.refresh()
+            mcp_merge = None
             if self.observations["codex"]:
                 if not self.phase("history"):
                     return
@@ -373,14 +427,9 @@ class Dashboard:
                 # An identity includes its time, so merging once for "all" and filtering by the
                 # projection's reference time equals merging each window separately.
                 reference = getattr(self.codex, "window_reference", None)
-                merged = {}
-                for event in history+codex_windows.get("all", {}).get("mcp_events", []):
-                    identity = mcp_identity(event)
-                    merged[identity] = merge_event(merged.get(identity, {}), event)
-                merged = list(merged.values())
-                for window, projection in codex_windows.items():
-                    boundary = cutoff(window, reference)
-                    projection["mcp_events"] = merged if boundary is None else [event for event in merged if contains(event, boundary)]
+                mcp_merge = self.merged_mcp_events(history, codex_windows.get("all", {}).get("mcp_events", []))
+                mcp_bounds = {window: cutoff(window, reference) for window in codex_windows}
+                codex_windows["all"]["mcp_events"] = mcp_merge["events"]
             if self.observations["codex"] and self.observations["sqlite"]:
                 history_sql = self.activity_history.snapshot("sql", copy=False)
                 sql_aggregates = dict(zip(codex_windows, self.activity_history.store.aggregate_many('sql', history_dates)))
@@ -414,7 +463,13 @@ class Dashboard:
             sources = discover_sources(self.home, descriptions, self.mcp_document_cache)
             if len(self.mcp_document_cache) > 256:
                 self.mcp_document_cache.clear()
-            mcp = summarize(sources, codex.get("mcp_events", []), self.mcp_sources, self.mcp_categories, errors)
+            if mcp_merge is None:
+                mcp = summarize(sources, codex.get("mcp_events", []), self.mcp_sources, self.mcp_categories, errors)
+            else:
+                # Only transport failures of a named server affect the summary.
+                failures = [event for event in errors if event.get("server") and event.get("code") in TRANSPORT_FAILURES]
+                mcp = self.mcp_summary(mcp_merge, "complete", sources, lambda: mcp_merge["events"], failures)
+            mcp = dict(mcp, servers=[dict(source) for source in mcp["servers"]])
             mcp["configuration"] = {"location": str(self.home/"config.toml"), "configured_sources": len(sources)}
             for source in mcp["servers"]:
                 source.update(descriptions.get(source["server"], {}))
@@ -431,7 +486,16 @@ class Dashboard:
             scoped_mcp = {}
             mcp_aggregates = dict(zip(codex_windows, self.activity_history.store.aggregate_many('mcp', history_dates, excluded_sources=[key for key,enabled in self.mcp_sources.items() if enabled is False]))) if self.observations['codex'] and self.observations['mcp'] else {}
             for window, projection in codex_windows.items():
-                report = summarize(sources, projection.pop("mcp_events", []), self.mcp_sources, self.mcp_categories)
+                events = projection.pop("mcp_events", [])
+                if mcp_merge is None:
+                    report = summarize(sources, events, self.mcp_sources, self.mcp_categories)
+                else:
+                    boundary = mcp_bounds[window]
+                    times = mcp_merge["times"]
+                    # Merged events enter a bounded window in time order, so its member
+                    # count identifies the member set while the merged events are unchanged.
+                    members = "all" if boundary is None else len(times)-bisect_left(times, boundary)
+                    report = dict(self.mcp_summary(mcp_merge, ("window", window, members), sources, lambda: mcp_merge["events"] if boundary is None else [event for event, when in mcp_merge["pairs"] if when is not None and when >= boundary]))
                 complete = {source["server"]: source for source in mcp["servers"]}
                 report["servers"] = [complete[source["server"]] | source | {"connection": complete[source["server"]]["connection"], "category": complete[source["server"]]["category"]} for source in report["servers"]]
                 # Configured and observed sources remain available even with no activity in this window.

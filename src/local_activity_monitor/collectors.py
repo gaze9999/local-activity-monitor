@@ -5,6 +5,7 @@ from .session_checkpoint import SessionCheckpoint
 from .agent_messages import agent_messages, parse_message_detail, incoming_message
 from .activity_windows import cutoff, contains
 
+from bisect import bisect_left
 from collections import Counter
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -1345,7 +1346,56 @@ class CodexCollector:
             skills = [context | {"skill": skill["skill"], "tool": call["tool"], "has_document": bool(skill.get("doc_path"))} for skill in call.get("skills", [])] if features["skills"] else []
             checks = [context | operation for operation in call.get("checks", [])] if features["checks"] else []
             return identity, call, when, duration, failure, nested_tools, tool_event, minute, git, jev, messages, sqlite, files, mcp, skills, checks
-        call_windows = {}
+        def contribute(thread_id, records):
+            """Per-window aggregates of one thread's calls, in call order."""
+            partial = {window: {"counts": Counter(), "nested": Counter(), "events": [], "jev": [], "messages": [], "changes": [], "reads": [], "failures": [], "series": Counter(), "tool_series": Counter(), "git": [], "sqlite": [], "files": [], "mcp": [], "skills": [], "checks": [], "statistics": {}} for window in windows}
+            for identity, call, when, duration, failure, nested_tools, tool_event, minute, git, jev, messages, sqlite, files, mcp, skills, checks in records:
+                # Same rule as members(): unknown times belong only to unbounded windows.
+                inside = unbounded if when is None else [window for window in windows if boundaries[window] is None or when >= boundaries[window]]
+                for window in inside:
+                    scoped = partial[window]
+                    scoped["counts"][call["tool"]] += 1
+                    if failure is not None:
+                        scoped["failures"].append(failure)
+                    if tool_event is not None:
+                        scoped["nested"].update(nested_tools)
+                        observe_tool(scoped["statistics"], call["tool"], False, 1, thread_id, call, duration)
+                        for tool, count in nested_tools.items():
+                            observe_tool(scoped["statistics"], tool, True, count, thread_id, call)
+                        scoped["events"].append(tool_event)
+                    if minute:
+                        scoped["series"][minute] += 1
+                        scoped["tool_series"][(minute, call["tool"])] += 1
+                    scoped["git"].extend(git)
+                    scoped["jev"].extend(jev)
+                    scoped["messages"].extend(messages)
+                    scoped["sqlite"].extend(sqlite)
+                    for event, read in files:
+                        scoped["files"].append(event)
+                        (scoped["reads"] if read else scoped["changes"]).append(event)
+                    scoped["mcp"].extend(mcp)
+                    scoped["skills"].extend(skills)
+                    scoped["checks"].extend(checks)
+            for scoped in partial.values():
+                scoped["events"].sort(key=lambda event: event["timestamp"] or "", reverse=True)
+                scoped["jev"].sort(key=lambda event: event["timestamp"] or "", reverse=True)
+            return partial
+
+        def combine(statistics, partial):
+            for name, part in partial.items():
+                item = statistics.get(name)
+                if item is None:
+                    statistics[name] = dict(part, threads=set(part["threads"]), durations=list(part["durations"]))
+                    continue
+                item["calls"] += part["calls"]
+                item["threads"] |= part["threads"]
+                if part["last_at"] and (item["last_at"] is None or part["last_at"] > item["last_at"]):
+                    item["last_at"] = part["last_at"]
+                if not part["nested"]:
+                    item["returned"] += part["returned"]
+                    if part["last_response_at"] is not None:
+                        item["last_response_at"] = max(item["last_response_at"] or "", part["last_response_at"])
+                    item["durations"].extend(part["durations"])
         derived = {}
         for thread in threads.values():
             thread_id = thread["thread_id"]
@@ -1389,38 +1439,31 @@ class CodexCollector:
                         local[window]["communication"].append(value)
             key = (tuple(revisions.get(thread_id, ())), thread_name, settings_key)
             previous = self.derived_calls.get(thread_id)
-            records = previous[1] if previous and previous[0] == key else [derive(thread_id, thread_name, identity, call) for identity, call in thread["calls"].items()]
-            derived[thread_id] = key, records
-            for identity, call, when, duration, failure, nested_tools, tool_event, minute, git, jev, messages, sqlite, files, mcp, skills, checks in records:
-                # Same rule as members(): unknown times belong only to unbounded windows.
-                inside = unbounded if when is None else [window for window in windows if boundaries[window] is None or when >= boundaries[window]]
-                call_windows[thread_id, identity] = inside
-                if not inside:
-                    continue
-                for window in inside:
-                    result, scoped = results[window], local[window]
-                    scoped["counts"][call["tool"]] += 1
-                    if failure is not None:
-                        result["errors"].append(failure)
-                    if tool_event is not None:
-                        scoped["nested"].update(nested_tools)
-                        observe_tool(result["statistics"], call["tool"], False, 1, thread_id, call, duration)
-                        for tool, count in nested_tools.items():
-                            observe_tool(result["statistics"], tool, True, count, thread_id, call)
-                        scoped["events"].append(tool_event)
-                    if minute:
-                        result["series"][minute] += 1
-                        result["tool_series"][(minute, call["tool"])] += 1
-                    result["git"].extend(git)
-                    scoped["jev"].extend(jev)
-                    scoped["communication"].extend(messages)
-                    result["sqlite"].extend(sqlite)
-                    for event, read in files:
-                        result["files"].append(event)
-                        (scoped["reads"] if read else scoped["changes"]).append(event)
-                    result["mcp"].extend(mcp)
-                    result["skills"].extend(skills)
-                    result["checks"].extend(checks)
+            if previous and previous[0] == key:
+                records, whens, partials = previous[1], previous[2], previous[3]
+            else:
+                records = [derive(thread_id, thread_name, identity, call) for identity, call in thread["calls"].items()]
+                whens, partials = sorted(record[2] for record in records if record[2] is not None), {}
+            # Bounded windows hold the calls at or after their boundary, so the member
+            # count of each window identifies the member set of an unchanged thread.
+            signature = tuple(windows), tuple(len(records) if boundaries[window] is None else len(whens)-bisect_left(whens, boundaries[window]) for window in windows)
+            partial = partials.get(signature)
+            if partial is None:
+                partial = contribute(thread_id, records)
+                partials = {signature: partial}
+            derived[thread_id] = key, records, whens, partials
+            for window in windows:
+                result, scoped, part = results[window], local[window], partial[window]
+                result["errors"].extend(part["failures"])
+                result["series"].update(part["series"])
+                result["tool_series"].update(part["tool_series"])
+                combine(result["statistics"], part["statistics"])
+                for name in ("git", "sqlite", "files", "mcp", "skills", "checks"):
+                    result[name].extend(part[name])
+                scoped["counts"], scoped["nested"], scoped["events"], scoped["jev"] = part["counts"], part["nested"], part["events"], part["jev"]
+                scoped["communication"].extend(part["messages"])
+                scoped["changes"].extend(part["changes"])
+                scoped["reads"].extend(part["reads"])
             intervals = dict(thread.get("task_intervals", {}))
             if thread.get("task_start") and thread["task_start"] not in intervals and base["status"] == "running":
                 intervals[thread["task_start"]] = now()
@@ -1430,8 +1473,6 @@ class CodexCollector:
                 counts, nested_counts = scoped["counts"], scoped["nested"]
                 result["tools"].update(counts)
                 result["nested_tools"].update(nested_counts)
-                scoped["events"].sort(key=lambda event: event["timestamp"] or "", reverse=True)
-                scoped["jev"].sort(key=lambda event: event["timestamp"] or "", reverse=True)
                 row = dict(base, execution=dict(base["execution"]))
                 row.update(token_updated_at=thread["token_time"] or None, tool_calls=None if thread.get("metadata_only") else sum(counts.values()), tools=dict(counts), nested_tools=dict(nested_counts), tool_events=scoped["events"][:100] if features["tool_events"] else [], jev_calls=scoped["jev"][:100] if features["jev_calls"] else [])
                 row["file_changes"] = sorted(scoped["changes"], key=lambda event: event["timestamp"] or "", reverse=True)[:200]
@@ -1476,7 +1517,7 @@ class CodexCollector:
                 retained = {(event['thread_id'], event['call_id'], event['skill']):event | {'thread_name':metadata.get(event['thread_id'], {}).get('thread_name')} for event in self.thread_state.skills if event['thread_id'] in selected and contains(event, boundary)}
                 for event in retained.values():
                     call = threads.get(event['thread_id'], {}).get('calls', {}).get(event['call_id'])
-                    if call is not None and window in call_windows.get((event['thread_id'], event['call_id']), ()):
+                    if call is not None and window in members(call):
                         event['tool'] = call['tool']
                 retained.update({(event['thread_id'], event['call_id'], event['skill']):event for event in skill_events})
                 skill_events = sorted(retained.values(), key=lambda event:event['timestamp'] or '', reverse=True)

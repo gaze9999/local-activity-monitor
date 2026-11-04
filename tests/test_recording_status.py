@@ -4,7 +4,7 @@ import tempfile
 from unittest.mock import patch
 
 from local_activity_monitor.collectors import WINDOWS
-from local_activity_monitor.mcp_records import response_metadata, summarize
+from local_activity_monitor.mcp_records import SummaryCache, response_metadata, summarize
 from local_activity_monitor.server import Dashboard, configure
 
 
@@ -15,6 +15,23 @@ class RecordingStatusTests(unittest.TestCase):
 
     def status(self, events):
         return summarize({"future": "configured"}, events)["recording_status"]
+
+    def test_cached_summary_matches_plain_summary_as_events_change(self):
+        # Equal timestamps across servers check that recording order follows event order.
+        events = [self.event({"recording_enabled": True, "status": "ok", "count": 1}, server="alpha"),
+                  self.event({"telemetry_enabled": False}, server="beta"),
+                  self.event({"status": "failed"}, "2026-10-05T00:00:01Z", "alpha") | {"duration_ms": 5}]
+        sources = {"alpha": "configured", "gamma": "configured"}
+        failures = [{"server": "beta", "code": "transport_error", "timestamp": "2026-10-05T00:00:02Z"}]
+        cache = SummaryCache()
+        steps = [(events, {}, {}, ()), (events, {}, {}, ()), (events+[self.event({"recording_enabled": False}, "2026-10-05T00:00:03Z", "beta")], {}, {}, ()),
+                 (events, {"beta": False}, {}, ()), (events, {}, {"alpha": "documents"}, failures), (list(reversed(events)), {}, {}, failures)]
+        for current, enabled, overrides, diagnostics in steps:
+            with self.subTest(events=len(current), enabled=enabled, overrides=overrides, diagnostics=len(diagnostics)):
+                cached = summarize(sources, current, enabled, overrides, diagnostics, cache)
+                plain = summarize(sources, current, enabled, overrides, diagnostics)
+                self.assertEqual(cached, plain)
+                self.assertEqual(list(cached["recording_status"]), list(plain["recording_status"]))
 
     def test_unknown_and_non_boolean_values_remain_unknown(self):
         for result in ({}, {"recording_enabled": "false"}, {"telemetry_enabled": 0},
