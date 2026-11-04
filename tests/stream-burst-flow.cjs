@@ -1,4 +1,6 @@
 async (page,cdp)=>{
+  // Runners that pass only the page get a page-owned CDP session.
+  const ownedCdp=cdp?null:await page.context().newCDPSession(page);cdp??=ownedCdp;
   await page.reload();await page.waitForFunction(()=>data?.updated_at&&eventStreamReady&&!busy&&!queuedSnapshot);
   if(!await page.evaluate(()=>data.codex.threads.every(thread=>thread.model?.startsWith('demo-model-'))))throw Error('Synthetic fixture required');
   const samples=[];
@@ -47,5 +49,5 @@ async (page,cdp)=>{
       }finally{renderMonitorDebug=original;}
     });
     return {frames:1200,renders:6,samples,retainedGrowthBytes:growth,debugBurst};
-  }finally{await page.evaluate(()=>{renderSnapshot=fixtureRenderSnapshot;delete window.fixtureRenderSnapshot;delete window.fixtureRenderCount;stopEventStream();startEventStream();});}
+  }finally{await ownedCdp?.detach();await page.evaluate(()=>{renderSnapshot=fixtureRenderSnapshot;delete window.fixtureRenderSnapshot;delete window.fixtureRenderCount;stopEventStream();startEventStream();});}
 }

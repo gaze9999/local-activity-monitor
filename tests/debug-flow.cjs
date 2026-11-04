@@ -20,7 +20,7 @@ async page=>{
     await page.evaluate(()=>{const row=targetTableRows(document.getElementById('debug-rows')).find(row=>row.textContent.includes('資料整理'));if(!row)throw Error('Collection record missing');row.dataset.fixtureDebug='true';});
     await page.locator('#debug-rows tr[data-fixture-debug="true"]').click();
     await page.waitForFunction(()=>detail?.kind==='performance'&&document.getElementById('detail-dialog').open);
-    check(await page.locator('#detail-content').textContent().then(text=>text.includes('程序累計 CPU')&&text.includes('緩衝區')),'Debug detail metrics');
+    check(await page.locator('#detail-content').textContent().then(text=>text.includes('LAM 累計 CPU')&&text.includes('緩衝區')),'Debug detail metrics');
     await page.evaluate(()=>document.getElementById('detail-dialog').close());
     const layouts=[];
     for(const language of ['zh-TW','en','ja'])for(const width of [1366,390,320]){

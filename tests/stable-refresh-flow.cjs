@@ -14,16 +14,21 @@ async page=>{
   await page.evaluate(()=>sendStableUpdate(snapshot=>{snapshot.monitor.requests++;snapshot.codex.usage.limits[0].remaining_percent=49;}));
   await page.waitForFunction(()=>!queuedSnapshot&&!snapshotFrame);
   check(await page.evaluate(()=>Object.values(stableRefs).every(({value,selector})=>value===document.querySelector(selector))&&stableRefs.source.value.open),'overview shortcuts, quota and expanded sources retain nodes');
-  await page.evaluate(()=>{switchTab('monitor');captureStable('hardware','#monitor-hardware dd');captureStable('help','#monitor-hardware .metadata-help');captureStable('meter','#monitor-device-usage progress');captureStable('deviceList','#monitor-device-usage dl');stableRefs.help.value.focus();const range=document.createRange();range.selectNodeContents(stableRefs.hardware.value);getSelection().removeAllRanges();getSelection().addRange(range);});
+  await page.evaluate(()=>{switchTab('monitor');captureStable('hardware','#monitor-hardware dd');captureStable('help','#monitor-hardware .metadata-help');captureStable('deviceList','#monitor-device-usage dl');stableRefs.help.value.focus();const range=document.createRange();range.selectNodeContents(stableRefs.hardware.value);getSelection().removeAllRanges();getSelection().addRange(range);});
   const selection=await page.evaluate(()=>getSelection().toString());
   await page.evaluate(()=>sendStableUpdate(snapshot=>{snapshot.monitor.cpu_usage_percent=31;snapshot.monitor.requests++;}));
   await page.waitForFunction(()=>!queuedSnapshot&&!snapshotFrame);
-  const device=await page.evaluate(()=>({same:Object.values(stableRefs).every(({value,selector})=>value===document.querySelector(selector)),focused:document.activeElement===stableRefs.help.value,selected:getSelection().toString(),cpu:stableRefs.meter.value.value,pending:stableRefs.deviceList.value.classList.contains('wb-data-pending')}));
-  check(device.same&&device.focused&&device.selected===selection&&device.cpu===31&&!device.pending,'device metadata focus, selection and changed CPU: '+JSON.stringify(device));
-  await page.evaluate(()=>{getSelection().removeAllRanges();document.activeElement.blur();switchTab('usage');captureStable('account','#account-usage-panel dd');captureStable('officialQuota','#account-usage-panel .official-quota-buckets dl');});
-  await page.evaluate(()=>sendStableUpdate(snapshot=>{snapshot.codex.account.account_usage.summary.lifetimeTokens=101;snapshot.codex.account.limits.fixture.primary.remaining_percent=48;}));
-  await page.waitForFunction(()=>!queuedSnapshot&&!snapshotFrame);
-  check(await page.evaluate(()=>stableRefs.account.value===document.querySelector(stableRefs.account.selector)&&stableRefs.account.value.textContent==='101'&&stableRefs.officialQuota.value===document.querySelector(stableRefs.officialQuota.selector)),'official account and quota retain fields with current values');
+  const device=await page.evaluate(()=>({same:Object.values(stableRefs).every(({value,selector})=>value===document.querySelector(selector)),focused:document.activeElement===stableRefs.help.value,selected:getSelection().toString(),requests:[...stableRefs.deviceList.value.querySelectorAll('dd')].some(dd=>dd.textContent===fmt(data.monitor.requests)),pending:stableRefs.deviceList.value.classList.contains('wb-data-pending')}));
+  check(device.same&&device.focused&&device.selected===selection&&device.requests&&!device.pending,'device metadata focus, selection and changed request count: '+JSON.stringify(device));
+  await page.evaluate(()=>{getSelection().removeAllRanges();document.activeElement.blur();});
+  // Official account fields render only while API queries are visible.
+  const accountVisible=await page.evaluate(()=>apiQueriesVisible);
+  if(accountVisible){
+    await page.evaluate(()=>{switchTab('usage');captureStable('account','#account-usage-panel dd');captureStable('officialQuota','#account-usage-panel .official-quota-buckets dl');});
+    await page.evaluate(()=>sendStableUpdate(snapshot=>{snapshot.codex.account.account_usage.summary.lifetimeTokens=101;snapshot.codex.account.limits.fixture.primary.remaining_percent=48;}));
+    await page.waitForFunction(()=>!queuedSnapshot&&!snapshotFrame);
+    check(await page.evaluate(()=>stableRefs.account.value===document.querySelector(stableRefs.account.selector)&&stableRefs.account.value.textContent==='101'&&stableRefs.officialQuota.value===document.querySelector(stableRefs.officialQuota.selector)),'official account and quota retain fields with current values');
+  }
   await page.evaluate(()=>{switchTab('mcp');selectMcpSource('all');captureStable('mcpSource','#mcp-source-cards .mcp-source-card');captureStable('mcpLink','#mcp-source-cards .source-name');captureStable('telemetry','#mcp-telemetry table');captureStable('telemetryBody','#mcp-telemetry tbody');});
   const tableSelector='#mcp-telemetry table';await page.locator(tableSelector).first().scrollIntoViewIfNeeded();await page.locator(tableSelector+' tbody td').first().hover();
   const before=await page.locator(tableSelector+' tbody').first().innerText();
@@ -43,5 +48,5 @@ async page=>{
   check(await page.evaluate(()=>stableRefs.chart.value===document.querySelector(stableRefs.chart.selector)),'unchanged chart retains rendered SVG');
   await page.evaluate(()=>sendStableUpdate(snapshot=>{snapshot.mcp.events.push({...snapshot.mcp.events[0],call_id:'synthetic-extra-call'});}));await page.waitForFunction(()=>!queuedSnapshot&&!snapshotFrame&&!chartJobs.has('overview-source-column'));
   check(await page.evaluate(()=>stableRefs.chart.value!==document.querySelector(stableRefs.chart.selector)),'changed chart data updates rendering');
-  return {overview:true,expandedSources:true,device,account:true,mcpHover:true,schemaChange:true,files:true,chartRetained:true,chartChanged:true};
+  return {overview:true,expandedSources:true,device,account:accountVisible,mcpHover:true,schemaChange:true,files:true,chartRetained:true,chartChanged:true};
 }

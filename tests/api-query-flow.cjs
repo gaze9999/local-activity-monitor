@@ -1,4 +1,6 @@
 async page=>{
+  // API query entries are hidden in the shipped page; skip until they return.
+  if(!await page.evaluate(()=>apiQueriesVisible))return {skipped:'API queries hidden'};
   const check=(value,message)=>{if(!value)throw Error(message);},requests=[];
   await page.evaluate(()=>{switchTab('usage');});check(await page.locator('#account-usage-panel .api-query-actions').getByRole('button',{name:'查詢',exact:true}).isVisible(),'manual official account query');
   await page.evaluate(()=>openSettings());await page.locator('#settings-dialog').getByRole('tab',{name:'API 查詢',exact:true}).click();

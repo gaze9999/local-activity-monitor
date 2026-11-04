@@ -12,7 +12,7 @@ async page=>{
   await page.getByRole('button',{name:'設定',exact:true}).click();
   await page.locator('#settings-dialog').getByRole('tab',{name:'設定檔',exact:true}).click();
   await page.locator('#reset-all-configuration').click();await page.locator('#confirm-accept').click();
-  await page.waitForFunction(()=>!document.getElementById('reset-all-configuration').disabled&&!busy&&appearance.font===14&&display.table===10);
+  await page.waitForFunction(()=>!document.getElementById('reset-all-configuration').disabled&&!busy&&appearance.font===15&&display.table===10);
   const reset=await page.evaluate(()=>({sameDocument:window.fixtureDocument===document.documentElement,appearance:appearance.font,table:display.table,copies:Object.keys(preferences.copy).length,tableSize:tableStates['sqlite-rows']?.size??display.table,tablePage:tableStates['sqlite-rows']?.page??1,chartTop:chartViews.get('overview-tools-chart').settings.top,defaultTop:chartViews.get('overview-tools-chart').defaults.top,scope:sourceWindows.global,settingsOpen:document.getElementById('settings-dialog').open}));
   if(!reset.sameDocument||reset.copies||reset.tableSize!==10||reset.tablePage!==1||reset.chartTop!==reset.defaultTop||reset.scope!=='24h'||!reset.settingsOpen||errors.length)throw Error(JSON.stringify({reset,errors}));
   await page.locator('#settings-dialog').evaluate(el=>el.close());await page.evaluate(settings=>post('/api/settings',settings),initial.settings);await page.evaluate(()=>refresh());return {restarted,reset,errors};

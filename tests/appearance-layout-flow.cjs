@@ -4,9 +4,9 @@ async page => {
   try {
     await page.goto(origin);await page.waitForFunction(()=>data?.codex?.threads?.length>0);await page.evaluate(()=>{if(!data.codex.threads.every(thread=>thread.model?.startsWith('demo-model-')))throw Error('Synthetic fixture required');localStorage.removeItem(preferenceKey);});await page.reload();await page.setViewportSize({width:1600,height:1000});await page.waitForFunction(()=>data?.codex?.threads?.length>0);
     check(await page.evaluate(()=>data.codex.threads.every(thread=>thread.model?.startsWith('demo-model-'))),'synthetic fixture required');
-    await page.evaluate(()=>{clearInterval(refreshTimer);appearance.reduceMotion=false;appearance.mode='dark';applyAppearance();});
+    await page.evaluate(()=>{stopEventStream();appearance.reduceMotion=false;appearance.mode='dark';applyAppearance();});
     await page.getByRole('button',{name:'設定',exact:true}).click();const settings=page.locator('#settings-dialog');await settings.getByRole('tab',{name:'外觀',exact:true}).click();
-    check(await page.locator('#theme-select option').count()===2,'obsolete slate theme removed');
+    check(await page.locator('#theme-select option[value="steam"], #theme-select option[value="slate"]').count()===0,'obsolete slate theme removed');
     await page.locator('#accent-select').selectOption('custom');await page.locator('#accent-hex').fill('#a482e6');await page.locator('#accent-hex').press('Tab');
     await page.locator('#font-family').selectOption('Microsoft JhengHei');
     check(await page.evaluate(()=>getComputedStyle(document.documentElement).getPropertyValue('--accent')==='#a482e6'&&getComputedStyle(document.documentElement).fontFamily.includes('Microsoft JhengHei')),'system font appearance applied');
@@ -23,19 +23,19 @@ async page => {
       appearance.mode=saved;applyAppearance();return results;
     });
     check(menus.every(menu=>!menu.supported||menu.appearance==='base-select'&&menu.selected!==menu.other),'open select theme '+JSON.stringify(menus));
-    for(const locale of ['en','ja','zh-TW']){await page.locator('#language-select').selectOption(locale);check(await page.locator('#theme-select option[value=workbench]').textContent()===({en:'Workbench',ja:'ワークベンチ','zh-TW':'工作台'})[locale],'theme translation');}
-    await settings.getByRole('tab',{name:'更新與追蹤',exact:true}).click();check(await page.locator('#refresh-interval').evaluate(input=>getComputedStyle(input).appearance==='textfield'&&[...document.styleSheets].some(sheet=>[...sheet.cssRules].some(rule=>rule.selectorText?.includes('inner-spin-button')&&rule.style.appearance==='none'))),'number spinner removed');
-    await page.locator('#refresh-interval').fill('10');await page.locator('#refresh-interval').press('ArrowUp');check(await page.locator('#refresh-interval').inputValue()==='11','native number keyboard retained');
+    for(const locale of ['en','ja','zh-TW']){await page.locator('#language-select').selectOption(locale);check(await page.locator('#theme-select option[value=workbench]').textContent()===({en:'Blue night',ja:'ブルーナイト','zh-TW':'蒼藍夜幕'})[locale],'theme translation');}
+    await settings.getByRole('tab',{name:'更新與追蹤',exact:true}).click();check(await page.locator('#activity-retention-days').evaluate(input=>getComputedStyle(input).appearance==='textfield'&&[...document.styleSheets].some(sheet=>[...sheet.cssRules].some(rule=>rule.selectorText?.includes('inner-spin-button')&&rule.style.appearance==='none'))),'number spinner removed');
+    await page.locator('#activity-retention-days').fill('10');await page.locator('#activity-retention-days').press('ArrowUp');check(await page.locator('#activity-retention-days').inputValue()==='11','native number keyboard retained');
     await page.locator('#settings-close').click();await page.reload();await page.waitForFunction(()=>data?.codex?.threads?.length>0);
     check(await page.evaluate(()=>appearance.accentColor==='#a482e6'&&appearance.fontFamily==='Segoe UI'),'system font persists');
-    await page.evaluate(()=>{clearInterval(refreshTimer);appearance.accent='blue';appearance.fontFamily='';appearance.theme='slate';applyAppearance();saveView();});
+    await page.evaluate(()=>{stopEventStream();appearance.accent='blue';appearance.fontFamily='';appearance.theme='slate';applyAppearance();saveView();});
     check(await page.evaluate(()=>appearance.theme==='workbench'&&!document.documentElement.style.getPropertyValue('--accent')&&!document.documentElement.style.getPropertyValue('--wb-accent')&&!document.documentElement.style.getPropertyValue('--wb-font-family')),'old theme migrates and overrides reset');
     await page.getByRole('tab',{name:'專案',exact:true}).click();await page.locator('#activity-tabs').getByRole('tab',{name:'驗證',exact:true}).click();
     const layouts=[];
     for(const width of [1600,820,390,320]){
       await page.setViewportSize({width,height:1000});
       await page.evaluate(async()=>{
-        clearInterval(refreshTimer);resetChartQueue();const view=chartViews.get('check-breakdown-chart');view.statisticsRoot.replaceChildren();view.statisticsPanel.classList.add('empty-statistics');arrangeContentPanels();await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+        stopEventStream();resetChartQueue();const view=chartViews.get('check-breakdown-chart');view.statisticsRoot.replaceChildren();view.statisticsPanel.classList.add('empty-statistics');arrangeContentPanels();await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
         const target=chartTarget('check-breakdown-chart');chartJobs.set('check-breakdown-chart',()=>{view.statisticsPanel.classList.remove('empty-statistics','layout-hidden');view.statisticsPanel.hidden=false;view.statisticsRoot.replaceChildren(...Array.from({length:3},(_,index)=>{const group=node('div',null,'trend-statistic-group');group.append(node('b','Synthetic operation '+index),statisticLabels({size:25,total:33,mean:1.32,p99:12.28},ui('次'),'Synthetic'));return group;}));});chartReady.add('check-breakdown-chart');drawNextChart();
       });
       await page.waitForTimeout(100);
