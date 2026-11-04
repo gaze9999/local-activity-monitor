@@ -1,7 +1,35 @@
 # 測試與建置
 
-目前 LAM 為 0.21.2, 固定 WBUI 0.22.1 / `6b25c79`, 最新證據見 [WBUI 0.22.1 與 Windows 長路徑](#2026-11-04-wbui-0221-與-windows-長路徑)
+目前 LAM 為 0.22.0, 固定 WBUI 0.22.1 / `6b25c79`, 最新證據見 [後端每輪成本與 HTTP / SSE 輸出比對](#2026-11-04-後端每輪成本與-http--sse-輸出比對)
 以下各節保留當時的版本、環境與結果, 完整平台及使用端驗收依 [功能清單](features.md#待驗收) 追蹤
+
+## 2026-11-04 後端每輪成本與 HTTP / SSE 輸出比對
+
+基準 main 1667ca2 / LAM 0.21.2, 交付為 LAM 0.22.0 (資料庫 schema v4 遷移後舊版無法開啟), Windows 11, Python 3.12.14
+
+| 項目 | 實際結果 |
+| --- | --- |
+| 輸出比對測試 | 新增 `tests/test_http_contract.py` 與 `tests/contract_fixture.py`, 以子程序在隨機 loopback 連接埠啟動服務並使用隔離的合成 CODEX_HOME, 只透過 HTTP / SSE 比對初次整理、來源追加後與重啟後 3 個狀態, 期望輸出保存於 `tests/contract_golden/` |
+| 比對範圍 | `/api/snapshot` 與 `/api/logs` 的 4 個時間範圍、SSE 首個 frame 與同範圍 HTTP 內容一致、`/api/history` 6 個分區的完整清單與 cursor 分頁、工具與 MCP 明細、請求檢查, 私密字串只出現在按需明細 |
+| 正規化 | 資料時間轉為相對固定基準時間的毫秒, 服務時鐘時間、SHA-256 與暫存路徑以代號表示, 執行中對話的耗時、服務本身的生命週期 Log 與同時間項目的順序不比對 |
+| 比對穩定性 | 期望輸出重新產生後連續 8 次通過, 每次約 19 秒, 以兩種刻意破壞的服務版本執行時分別出現 6 與 7 項不符 |
+| 每輪成本調整 | 歷史資料每輪合併寫入一次並只寫變更列, checkpoint 以單一連線批次保存, 未變更的活動歷史與 MCP 彙總略過重算, 4 個時間範圍的投影改為單次遍歷並沿用未變更對話的結果, 交付端不再深複製快照 |
+| 資料庫 | `lam-history.sqlite3` 升級至 `user_version` 4, `history_items` 新增彙總欄位與索引, 遷移前建立 `.schema-v3.bak`, 遷移後舊版 LAM 無法開啟此資料庫 |
+| 錯誤重複計算 | 同一個工具錯誤原本在錯誤清單出現兩次 (category 為 mcp 與 tool), 歷史寫入改用與投影相同的分類後只保留一筆, 期望輸出的錯誤總數各減少 1 筆, 資料庫中既有的重複列不刪除 |
+| 完整來源回歸 | unittest discover 共 558 項, 556 項通過、2 項略過, 輸出比對測試另連續 3 次通過 |
+| 效能 | 24 個 session、每檔 321 個事件的合成資料, 同一時段交錯執行基準與修改後版本, 無新資料的一輪 CPU 由 802.7 ms 降為 195.3 ms, 追加 24 筆呼叫由 2,812.5 ms 降為 679.7 ms, 保留 38,400 筆呼叫時無新資料的一輪由 8,541 ms 降為 1,998 ms, 量測程式與原始數值保存在本機 `.local/rust-evaluation/` |
+| 瀏覽器流程 (後端比較) | playwright-cli 0.1.23、Edge headless, 以修改後的 `serve_loading_fixture.py` 與 1667ca2 的後端及 fixture (前端相同) 各啟動一個合成資料服務, 每個流程前清除 localStorage / sessionStorage 並重新載入, 57 個 `tests/*-flow.cjs` 兩版各通過 33 個, 其餘 24 個在兩版以相同訊息失敗, 本輪後端修改沒有造成差異 |
+| 前端修正 | 匯入設定的 `api_intervals` 上限改依 API 來源數量 (原固定 7, 8 個來源的匯出檔無法匯入), 可編輯文件的預覽在開啟時與輸入後更新 (原為空白), 卡片拖曳綁定在節點移除後釋放, 介面說明表格沒有收合外框時切換模式不再拋錯 (原本切換到指標說明會中斷且表格空白) |
+| 流程更新 | 24 個既有失敗流程依目前前端更新: WBUI 0.22.1 的選單、骨架動畫與圖表載入延遲, 彈窗內容改為展開的區段, 工具列位於輸出右側, 捲軸配色只在 workbench 主題設定, 保留內容更新時顯示旋轉指示, 預設字級 15, LAM 服務狀態不顯示 CPU 使用率, 專案根節點預設展開, 文案「LAM 累計 CPU」, 以及 Playwright 以 DOM 順序判斷最上層對話框的限制 (確認對話框改以命中測試確認後點擊) |
+| 流程穩定性 | 修正 3 個與執行順序有關的流程: 未初始化的表格狀態、停止串流後仍排隊的快照覆蓋注入資料、Escape 先關閉滑鼠停留產生的提示再關閉對話框, stream-burst 在只傳入 page 的執行器自行建立 CDP session |
+| 瀏覽器流程 (目前) | 同一合成資料服務依序執行 57 個流程, 53 個通過, touch-input 在 `--mobile` 觸控模擬 session 通過, api-query、cloud-activity、query-status 在 API 查詢入口隱藏時略過 (`apiQueriesVisible` 為 false, 見 usage.md 官方帳戶查詢說明), theme-api 與 stable-refresh 只略過 API 查詢相關段落, 失敗 0 個 |
+| 完整來源回歸 (前端修正後) | 設定 PYTHONPATH=src 後 unittest discover 共 558 項, 556 項通過、2 項略過, 輸出比對測試 2 項通過, `node --check frontend/app.js` 與 `git diff --check` 通過 |
+| 待驗收 | API 查詢入口恢復後需重新執行上述 4 個流程的 API 段落, 實體觸控、正式資料、macOS / Linux 與原生封裝未於本輪執行 |
+
+重現: 設定 PYTHONPATH=src 後執行 `python -m unittest discover -s tests -p test_http_contract.py`
+行為刻意變更並確認後, 以 `LAM_UPDATE_CONTRACT=1` 重新產生 `tests/contract_golden/` 並檢查差異
+`LAM_CONTRACT_COMMAND` 以 JSON 陣列替換服務指令, 指令需接受 `--codex-home`、`--port 0`、`--codex`, 輸出既有的 listening 行, 並在標準輸入關閉時結束
+瀏覽器流程以 `tests/serve_loading_fixture.py` 啟動合成資料服務, 每個流程前清除 localStorage / sessionStorage 並重新載入, 以 `playwright-cli run-code --filename` 執行, touch-input 需以 `open --mobile` 開啟的觸控 session 執行, 回傳 `{skipped}` 的流程視為略過
 
 ## 2026-11-04 WBUI 0.22.1 與 Windows 長路徑
 
