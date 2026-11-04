@@ -11,7 +11,11 @@ import time
 
 
 APPLICATION_ID = 0x4C414D31
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+# Aggregated payload fields are stored as columns with the same SQLite expressions
+# that aggregates previously evaluated per row, so results stay identical.
+COLUMNS = {"server": "json_extract({0},'$.server')", "operation": "json_extract({0},'$.operation')",
+           "statement": "json_extract({0},'$.statement')", "nested": "CASE WHEN json_extract({0},'$.nested')=1 THEN 1 ELSE 0 END"}
 MIGRATIONS = {1: (
     "CREATE TABLE history_state (namespace TEXT PRIMARY KEY, metadata TEXT NOT NULL, updated_at INTEGER NOT NULL)",
     "CREATE TABLE history_items (namespace TEXT NOT NULL, section TEXT NOT NULL, item_key TEXT NOT NULL, ordinal INTEGER NOT NULL, event_time TEXT, payload TEXT NOT NULL, PRIMARY KEY(namespace, section, item_key))",
@@ -19,7 +23,10 @@ MIGRATIONS = {1: (
 ), 2: ("CREATE INDEX history_recent ON history_items(namespace, section, event_time DESC, item_key DESC)", "CREATE INDEX history_cleanup ON history_items(event_time)" ),
     3: ("CREATE TABLE session_cursors (source_key TEXT PRIMARY KEY, offset INTEGER NOT NULL, signature TEXT NOT NULL, payload TEXT NOT NULL)",
         "CREATE TABLE session_calls (source_key TEXT NOT NULL, call_id TEXT NOT NULL, event_time TEXT, payload TEXT NOT NULL, PRIMARY KEY(source_key,call_id))",
-        "CREATE INDEX session_calls_recent ON session_calls(source_key,event_time DESC,call_id)",)}
+        "CREATE INDEX session_calls_recent ON session_calls(source_key,event_time DESC,call_id)",),
+    4: (*("ALTER TABLE history_items ADD COLUMN "+name for name in COLUMNS),
+        "UPDATE history_items SET "+", ".join(name+"=CASE WHEN json_valid(payload) THEN "+expression.format("payload")+" END" for name, expression in COLUMNS.items()),
+        "CREATE INDEX history_aggregate ON history_items(namespace, section, event_time, server, operation, statement, nested)",)}
 SECTIONS = {"activity": {"sql": list, "web": list, "mcp": list},
             "errors": {"events": list}, "threads": {"entries": dict, "skills": list}}
 
@@ -40,6 +47,10 @@ class HistoryStore:
         self.namespace = namespace
         self.sections = SECTIONS[namespace]
         self.imported = False
+        # Writes through this store increase revision; cached aggregates are valid only for the
+        # revision they were read at. LAM is the only writer of its history database.
+        self.revision = 0
+        self.aggregates = {}
 
     def check_paths(self):
         for path in (self.path.parent, self.path, *(self.path.with_name(self.path.name + suffix) for suffix in ("-journal", "-wal", "-shm"))):
@@ -196,9 +207,13 @@ class HistoryStore:
                         for key, payload in db.execute('SELECT item_key, payload FROM history_items WHERE namespace=? AND section=? AND item_key IN ('+placeholders+')', (self.namespace, section, *batch)):
                             previous[section, key] = payload
                 rows = [(*row[:5], json.dumps(merge_event(json.loads(previous[row[1], row[2]]), json.loads(row[5])), ensure_ascii=True, separators=(',', ':'))) if (row[1], row[2]) in previous else row for row in rows]
+            changes = db.total_changes
             db.execute("INSERT INTO history_state (namespace, metadata, updated_at) VALUES (?, ?, ?) ON CONFLICT(namespace) DO UPDATE SET metadata=excluded.metadata, updated_at=excluded.updated_at WHERE history_state.metadata != excluded.metadata",
                        (self.namespace, json.dumps(metadata, separators=(",", ":")), time.time_ns()))
-            db.executemany("INSERT INTO history_items VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(namespace, section, item_key) DO UPDATE SET event_time=excluded.event_time, payload=excluded.payload WHERE history_items.payload != excluded.payload", rows)
+            db.executemany("INSERT INTO history_items (namespace, section, item_key, ordinal, event_time, payload, "+", ".join(COLUMNS)+") VALUES (?1, ?2, ?3, ?4, ?5, ?6, "+", ".join(expression.format("?6") for expression in COLUMNS.values())+") "
+                           "ON CONFLICT(namespace, section, item_key) DO UPDATE SET event_time=excluded.event_time, payload=excluded.payload, "+", ".join(name+"=excluded."+name for name in COLUMNS)+" WHERE history_items.payload != excluded.payload", rows)
+            if db.total_changes != changes:
+                self.revision += 1
 
     @staticmethod
     def item_key(namespace, section, item):
@@ -219,7 +234,7 @@ class HistoryStore:
         if not isinstance(excluded_sources, (list, tuple)) or len(excluded_sources)>64 or any(not isinstance(value,str) or not 1<=len(value)<=80 for value in excluded_sources):
             raise ValueError("Invalid excluded sources")
         if excluded_sources:
-            where += " AND (json_extract(payload, '$.server') IS NULL OR json_extract(payload, '$.server') NOT IN ("+','.join('?' for _ in excluded_sources)+"))"
+            where += " AND (server IS NULL OR server NOT IN ("+','.join('?' for _ in excluded_sources)+"))"
             args.extend(excluded_sources)
         after = None
         if cursor is not None:
@@ -275,12 +290,12 @@ class HistoryStore:
             raise ValueError("Invalid excluded sources")
         where, args = "namespace=? AND section=?", [self.namespace, section]
         if excluded_sources:
-            where += " AND (json_extract(payload, '$.server') IS NULL OR json_extract(payload, '$.server') NOT IN ("+','.join('?' for _ in excluded_sources)+"))"
+            where += " AND (server IS NULL OR server NOT IN ("+','.join('?' for _ in excluded_sources)+"))"
             args.extend(excluded_sources)
-        queries = []
+        queries, current = [], datetime.now(timezone.utc)
         for since in boundaries:
             if since is None:
-                queries.append((where, args))
+                queries.append((where, args, None, None))
                 continue
             try:
                 stamp = datetime.fromisoformat(since.replace('Z', '+00:00'))
@@ -289,12 +304,30 @@ class HistoryStore:
                 boundary = stamp.astimezone(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
             except (ValueError, TypeError, AttributeError) as error:
                 raise ValueError("Invalid history date") from error
-            queries.append((where+" AND event_time>=?", [*args, boundary]))
+            # Rolling windows keep one cache entry per span, such as the last hour.
+            queries.append((where+" AND event_time>=?", [*args, boundary], boundary, round((current-stamp).total_seconds()/60)))
         if not self.path.exists():
-            return [self._aggregate(None, *query) for query in queries]
+            return [self._aggregate(None, where, args) for where, args, _, _ in queries]
+        # Read the revision before the snapshot: a write during this read leaves the entry stale, never wrong.
+        revision = self.revision
         with closing(self.connect()) as db, db:
             db.execute('BEGIN')
-            return [self._aggregate(db, *query) for query in queries]
+            results = []
+            for query, query_args, boundary, span in queries:
+                key = (section, tuple(excluded_sources), span)
+                cached = self.aggregates.get(key)
+                # Without writes, a later boundary returns the same rows unless a row lies between the two boundaries.
+                if cached and cached[0] == revision == self.revision and (boundary is None or cached[1] <= boundary and db.execute(
+                        'SELECT 1 FROM history_items WHERE '+where+' AND event_time>=? AND event_time<? LIMIT 1', (*args, cached[1], boundary)).fetchone() is None):
+                    # Cached as JSON so each caller receives an independent value without deepcopy.
+                    results.append(json.loads(cached[2]))
+                    continue
+                value = self._aggregate(db, query, query_args)
+                if len(self.aggregates) >= 64 and key not in self.aggregates:
+                    self.aggregates.clear()
+                self.aggregates[key] = (revision, boundary, json.dumps(value, separators=(',', ':')))
+                results.append(value)
+            return results
 
     @staticmethod
     def _aggregate(db, where, args):
@@ -304,17 +337,17 @@ class HistoryStore:
         if db is None:
             return result
         epoch = "CAST(strftime('%s',event_time) AS INTEGER)"
-        nested = "CASE WHEN json_extract(payload,'$.nested')=1 THEN 1 ELSE 0 END"
+        nested = "nested"
         total, dated, earliest, latest = db.execute('SELECT count(*), count('+epoch+'), min('+epoch+'), max('+epoch+') FROM history_items WHERE '+where, args).fetchone()
         result.update(total=total, dated_total=dated, undated_total=total-dated)
         if not total:
             return result
         for field in ('operation', 'statement'):
-            column = "json_extract(payload,'$."+field+"')"
+            column = field
             rows = db.execute('SELECT '+column+', count(*) FROM history_items WHERE '+where+' AND '+column+' IS NOT NULL GROUP BY '+column+' ORDER BY count(*) DESC, '+column+' LIMIT 201', args).fetchall()
             result[field+'s'] = {name:count for name,count in rows[:200]}
             result['classification_truncated'] |= len(rows)>200
-        column = "json_extract(payload,'$.server')"
+        column = "server"
         rows = db.execute('SELECT '+column+', count(*), sum('+nested+') FROM history_items WHERE '+where+' AND '+column+' IS NOT NULL GROUP BY '+column+' ORDER BY count(*) DESC, '+column+' LIMIT 201', args).fetchall()
         result['servers'] = {name:{'total':count, 'direct':count-inferred, 'nested':inferred} for name,count,inferred in rows[:200]}
         result['classification_truncated'] |= len(rows)>200
@@ -327,7 +360,7 @@ class HistoryStore:
             slots = {stamp:item for (stamp,_,_),item in zip(rows,result['series'])}
             result['classification_series_truncated'] = False
             for field in ('operation', 'server'):
-                column = "json_extract(payload,'$."+field+"')"
+                column = field
                 grouped = db.execute('SELECT ('+epoch+'/?) * ?, '+column+', count(*), sum('+nested+') FROM history_items WHERE '+where+' AND '+epoch+' IS NOT NULL AND '+column+' IS NOT NULL GROUP BY 1, 2 ORDER BY 1, 2 LIMIT 14401', (bucket,bucket,*args)).fetchall()
                 result['classification_series_truncated'] |= len(grouped)>14400
                 for stamp,name,count,inferred in grouped[:14400]:
@@ -344,6 +377,8 @@ class HistoryStore:
         boundary = (datetime.now(timezone.utc)-timedelta(days=days)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         with closing(self.connect(write=True)) as db, db:
             cursor = db.execute("DELETE FROM history_items WHERE rowid IN (SELECT rowid FROM history_items WHERE event_time<? AND section!='entries' ORDER BY event_time LIMIT ?)", (boundary, batch))
+            if cursor.rowcount:
+                self.revision += 1
             return cursor.rowcount
 
     def read_document(self, byte_limit):

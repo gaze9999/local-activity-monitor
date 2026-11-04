@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from local_activity_monitor.codex_metadata import CATALOG_LIMIT, INDEX_TAIL_LIMIT, read_metadata
-from local_activity_monitor.collectors import CodexCollector
+from local_activity_monitor.collectors import WINDOWS, CodexCollector
 from local_activity_monitor.server import Dashboard
 from local_activity_monitor.mcp_records import summarize
 from local_activity_monitor.thread_state import ThreadState
@@ -93,7 +93,8 @@ class SourceCoverageTests(unittest.TestCase):
         busy = rare | {"server": "busy", "tool": "run", "timestamp": "2026-10-04T00:00:02Z", "completed_at": "2026-10-04T00:00:03Z", "result": {}}
         events = [rare | {"thread_id": THREAD, "call_id": "rare-call"}] + [busy | {"thread_id": THREAD, "call_id": "busy-"+str(index)} for index in range(1000)]
         dashboard = Dashboard(self.home, codex=True)
-        with patch.object(dashboard.codex, "snapshot", return_value={"health": "ok", "threads": [], "tools": {}, "mcp_events": events}):
+        projection = {"health": "ok", "threads": [], "tools": {}, "mcp_events": events}
+        with patch.object(dashboard.codex, "snapshot_windows", return_value={window: projection for window in WINDOWS}):
             dashboard.refresh()
         mcp = dashboard.snapshot("all")["mcp"]
         source = next(source for source in mcp["servers"] if source["server"] == "rare")

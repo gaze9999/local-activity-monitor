@@ -29,6 +29,7 @@ class ErrorHistory:
         self.events = []
         self.saved = None
         self.last_incoming = None
+        self.repair = False
         self.health, self.error_type = "waiting", None
         try:
             raw = self.store.load(self.BYTE_LIMIT)
@@ -92,10 +93,13 @@ class ErrorHistory:
                 self.events.pop()
                 raw = json.dumps({"version": 1, "events": self.events}, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
             if storage_error is not None:
+                self.repair = True
                 return
+            # Incoming rows are already stored. Rewrite the retained view only after a failed save.
             try:
-                if raw != self.saved and raw != incoming:
+                if self.repair and raw != self.saved and raw != incoming:
                     self.store.save(raw)
+                self.repair = False
                 self.saved = raw
                 self.last_incoming = digest
                 self.health, self.error_type = "ok", None

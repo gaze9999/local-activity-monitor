@@ -76,6 +76,30 @@ class ActivityHistoryTests(unittest.TestCase):
             self.assertEqual(history.health, 'unavailable')
             self.assertEqual(history.checked_at, clock.now.return_value.isoformat(timespec='milliseconds').replace('+00:00', 'Z'))
 
+    def test_unchanged_source_key_skips_projection_until_a_future_row_is_due(self):
+        initial = datetime.now(timezone.utc)
+        future = self.web | {'call_id': 'future', 'timestamp': (initial+timedelta(minutes=5)).isoformat()}
+        with patch('local_activity_monitor.activity_history.datetime', wraps=datetime) as clock:
+            clock.now.return_value = initial
+            history = ActivityHistory(self.path)
+            history.update([], [self.web, future], source_key=1)
+            self.assertEqual([event['call_id'] for event in history.web], ['call1'])
+            with patch.object(history, 'merge', side_effect=AssertionError('Unchanged input should not be projected')):
+                history.update([], [self.web, future], source_key=1)
+            with patch.object(history, 'merge', wraps=history.merge) as merged:
+                history.update([], [self.web], source_key=2)
+                self.assertEqual(merged.call_count, 1)
+            history.update([], [self.web, future], source_key=3)
+            clock.now.return_value = initial+timedelta(minutes=4, seconds=30)
+            history.update([], [self.web, future], source_key=3)
+            self.assertEqual(sorted(event['call_id'] for event in history.web), ['call1', 'future'])
+            with patch.object(history.store, 'save', side_effect=PermissionError):
+                history.update([], [self.web | {'call_id': 'failed'}], source_key=4)
+            with patch.object(history, 'merge', wraps=history.merge) as merged:
+                history.update([], [self.web | {'call_id': 'failed'}], source_key=4)
+                self.assertEqual(merged.call_count, 1)
+            self.assertEqual(history.health, 'ok')
+
     def setUp(self):
         self.directory=tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

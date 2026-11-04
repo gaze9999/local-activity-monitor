@@ -1,5 +1,6 @@
 """Discover MCP sources and retain bounded operation metadata, never raw payloads."""
-from collections import Counter
+from collections import Counter, defaultdict
+from functools import lru_cache
 import json
 import ast
 import ipaddress
@@ -158,6 +159,12 @@ def identity(tool):
 def category(server, tool="", overrides=None):
     if overrides and server in overrides:
         return overrides[server]
+    return default_category(server, tool)
+
+
+@lru_cache(maxsize=4096)
+def default_category(server, tool):
+    """Keyword category; names repeat across events, so results are cached."""
     if server == "web":
         return "web"
     label = (server+" "+tool).lower()
@@ -412,12 +419,14 @@ def summarize(sources, events, enabled=None, overrides=None, diagnostics=()):
     for event in events:
         catalog.setdefault(event["server"], "observed")
     visible = []
+    grouped = defaultdict(list)
     for event in events:
         if enabled.get(event["server"], True):
             visible.append(event | {"category": category(event["server"], event["tool"], overrides)})
+            grouped[event["server"]].append(visible[-1])
     servers = []
     for server, origin in sorted(catalog.items()):
-        rows = [item for item in visible if item["server"] == server]
+        rows = grouped.get(server, [])
         direct = [item for item in rows if not item["nested"]]
         known = [item for item in direct if item["result"].get("status")]
         errors = sum(item["result"].get("status") in ERRORS for item in known)
@@ -429,7 +438,7 @@ def summarize(sources, events, enabled=None, overrides=None, diagnostics=()):
             p99 = round(durations[lower]+(durations[min(len(durations)-1, lower+1)]-durations[lower])*(position-lower), 2)
         servers.append({"server": server, "origin": origin, "category": category(server, overrides=overrides), "enabled": enabled.get(server, True), "calls": len(direct), "recognized": len(rows)-len(direct), "returned": sum(bool(item.get("completed_at")) for item in direct), "known_status": len(known), "errors": errors, "average_ms": round(sum(durations)/len(durations)) if durations else None, "p99_ms": p99, "p95_ms": durations[min(len(durations)-1, int(len(durations)*.95))] if durations else None, "last_at": max((item.get("completed_at") or item["timestamp"] or "" for item in rows), default=None)})
     for server in servers:
-        rows = [event for event in visible if event["server"] == server["server"]]
+        rows = grouped.get(server["server"], [])
         metrics = {}
         for event in sorted(rows, key=lambda item: item.get("completed_at") or item.get("timestamp") or ""):
             for key, value in event.get("result", {}).items():

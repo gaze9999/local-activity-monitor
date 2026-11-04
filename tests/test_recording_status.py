@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 from unittest.mock import patch
 
+from local_activity_monitor.collectors import WINDOWS
 from local_activity_monitor.mcp_records import response_metadata, summarize
 from local_activity_monitor.server import Dashboard, configure
 
@@ -85,7 +86,8 @@ class RecordingStatusTests(unittest.TestCase):
             home = Path(directory)
             dashboard = Dashboard(home, codex=True)
             event = self.event({'recording_enabled': True, 'status': 'ok'}, server='jev')
-            with patch.object(dashboard.codex, 'snapshot', return_value={'health': 'ok', 'threads': [], 'tools': {}, 'mcp_events': [event]}):
+            projection = {'health': 'ok', 'threads': [], 'tools': {}, 'mcp_events': [event]}
+            with patch.object(dashboard.codex, 'snapshot_windows', return_value={window: projection for window in WINDOWS}):
                 dashboard.refresh()
                 state = dashboard.snapshot('all')['mcp']['recording_status']['jev']
                 self.assertTrue(state['enabled'])

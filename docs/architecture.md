@@ -173,7 +173,7 @@ GPU 容量語意依 [Microsoft DXGI](https://learn.microsoft.com/en-us/windows/w
 
 ## 回補資料儲存
 
-`history_store.py` 使用 `CODEX_HOME/monitoring/lam-history.sqlite3`, `application_id` 為 LAM 識別碼, `user_version` 目前為 3. `history_state` 保存 activity / errors / threads 分區的格式及設定, `history_items` 逐筆保存資料, 依分區、項目類型與時間建立索引. 各分區按穩定項目識別碼 UPSERT, 未變動的 payload 不重寫, 不再每輪刪除整個分區. SQLite 採 WAL 與短交易, 寫入等待上限 0.2 秒, 讀取連線使用 mode=ro 與 query_only, 讀取不占用收集器的更新鎖
+`history_store.py` 使用 `CODEX_HOME/monitoring/lam-history.sqlite3`, `application_id` 為 LAM 識別碼, `user_version` 目前為 4, `history_items` 另以 server、operation、statement、nested 欄位保存彙總用的值, 寫入時由 payload 以相同的 SQLite 運算式計算, 彙總查詢不必逐列解析 payload. `history_state` 保存 activity / errors / threads 分區的格式及設定, `history_items` 逐筆保存資料, 依分區、項目類型與時間建立索引. 各分區按穩定項目識別碼 UPSERT, 未變動的 payload 不重寫, 不再每輪刪除整個分區. SQLite 採 WAL 與短交易, 寫入等待上限 0.2 秒, 讀取連線使用 mode=ro 與 query_only, 讀取不占用收集器的更新鎖
 
 首次載入先檢查 SQLite 分區, 尚無資料時讀取既有 JSON, 經欄位白名單、型別、去重與期限規則投影後匯入. JSON 原檔保留, 已匯入分區以 SQLite 為準. 512 KiB / 1 MiB 限制只套用記憶體工作集合, 不限制 SQLite 歷史保存筆數, 資料庫另包含索引及頁面空間
 

@@ -86,26 +86,41 @@ class SessionCheckpoint:
             return None
 
     def save(self, path, state):
-        if state['offset'] is None:
-            return False
-        offset = state['offset']-len(state['buffer'])
-        projected = {key:state[key] for key in FIELDS if key in state}
+        return any(item is state for item in self.save_many([(path, state)]))
+
+    def save_many(self, items):
+        """Save several sources in one transaction; return the states that were saved."""
+        cursors, calls, retired, saved, oversized = [], [], [], [], False
         try:
-            payload = json.dumps({'version':1,'state':projected},ensure_ascii=True,separators=(',',':'),allow_nan=False)
-            if len(payload)>self.BYTE_LIMIT:
-                self.health = 'oversized'
-                return False
-            signature = self.signature(path,offset)
-            if signature is None:
-                return False
-            with closing(self.store.connect(write=True)) as db, db:
-                db.execute('INSERT INTO session_cursors VALUES(?,?,?,?) ON CONFLICT(source_key) DO UPDATE SET offset=excluded.offset, signature=excluded.signature, payload=excluded.payload WHERE session_cursors.offset!=excluded.offset OR session_cursors.signature!=excluded.signature OR session_cursors.payload!=excluded.payload', (self.key(path),offset,signature,payload))
-                calls = [(self.key(path),identity,call.get('timestamp'),json.dumps({key:call[key] for key in CALL_FIELDS if key in call},ensure_ascii=True,separators=(',',':'),allow_nan=False)) for identity in state.get('dirty_calls',()) if (call:=state['calls'].get(identity)) is not None]
-                db.executemany('INSERT INTO session_calls VALUES(?,?,?,?) ON CONFLICT(source_key,call_id) DO UPDATE SET event_time=excluded.event_time,payload=excluded.payload WHERE session_calls.payload!=excluded.payload',calls)
-                db.executemany('DELETE FROM session_calls WHERE source_key=? AND call_id=?', [(self.key(path),identity) for identity in state.get('retired_ids',())])
-            state['dirty_calls'],state['retired_ids'] = set(),set()
-            self.health = 'ok'
-            return True
+            for path, state in items:
+                if state['offset'] is None:
+                    continue
+                offset = state['offset']-len(state['buffer'])
+                projected = {key:state[key] for key in FIELDS if key in state}
+                payload = json.dumps({'version':1,'state':projected},ensure_ascii=True,separators=(',',':'),allow_nan=False)
+                if len(payload)>self.BYTE_LIMIT:
+                    oversized = True
+                    continue
+                signature = self.signature(path,offset)
+                if signature is None:
+                    continue
+                key = self.key(path)
+                cursors.append((key,offset,signature,payload))
+                calls.extend((key,identity,call.get('timestamp'),json.dumps({name:call[name] for name in CALL_FIELDS if name in call},ensure_ascii=True,separators=(',',':'),allow_nan=False)) for identity in state.get('dirty_calls',()) if (call:=state['calls'].get(identity)) is not None)
+                retired.extend((key,identity) for identity in state.get('retired_ids',()))
+                saved.append(state)
+            if cursors:
+                with closing(self.store.connect(write=True)) as db, db:
+                    db.executemany('INSERT INTO session_cursors VALUES(?,?,?,?) ON CONFLICT(source_key) DO UPDATE SET offset=excluded.offset, signature=excluded.signature, payload=excluded.payload WHERE session_cursors.offset!=excluded.offset OR session_cursors.signature!=excluded.signature OR session_cursors.payload!=excluded.payload', cursors)
+                    db.executemany('INSERT INTO session_calls VALUES(?,?,?,?) ON CONFLICT(source_key,call_id) DO UPDATE SET event_time=excluded.event_time,payload=excluded.payload WHERE session_calls.payload!=excluded.payload',calls)
+                    db.executemany('DELETE FROM session_calls WHERE source_key=? AND call_id=?', retired)
         except (OSError,sqlite3.Error,ValueError,TypeError,RecursionError):
             self.health = 'unavailable'
-            return False
+            return []
+        for state in saved:
+            state['dirty_calls'],state['retired_ids'] = set(),set()
+        if oversized:
+            self.health = 'oversized'
+        elif saved:
+            self.health = 'ok'
+        return saved

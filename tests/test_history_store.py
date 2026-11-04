@@ -15,6 +15,28 @@ from local_activity_monitor.thread_state import ThreadState
 
 
 class HistoryStoreTests(unittest.TestCase):
+    def test_cached_aggregates_follow_writes_and_rows_leaving_the_window(self):
+        current = datetime.now(timezone.utc)
+        self.value['mcp'] = [{'timestamp':(current-timedelta(minutes=60)).isoformat(), 'server':'edge', 'call_id':'edge'},
+                             {'timestamp':(current-timedelta(minutes=30)).isoformat(), 'server':'inside', 'call_id':'inside'}]
+        self.store.save(json.dumps(self.value))
+        aggregate = self.store._aggregate
+        with patch.object(self.store, '_aggregate', side_effect=aggregate) as counted:
+            before = (current-timedelta(minutes=60, seconds=20)).isoformat()
+            self.assertEqual(self.store.aggregate_many('mcp', [before, None])[0]['total'], 2)
+            first = self.store.aggregate_many('mcp', [before, None])
+            self.assertEqual(counted.call_count, 2)
+            first[0]['servers']['inside']['total'] = 99
+            self.assertEqual(self.store.aggregate('mcp', before)['servers']['inside']['total'], 1)
+            self.assertEqual(counted.call_count, 2)
+            # The same one-hour span moves past the edge row, so the cached total is not reused.
+            after = (current-timedelta(minutes=60)+timedelta(seconds=20)).isoformat()
+            self.assertEqual(self.store.aggregate_many('mcp', [after])[0]['total'], 1)
+            self.assertEqual(counted.call_count, 3)
+            self.store.save(json.dumps(self.value|{'mcp':[{'timestamp':(current-timedelta(minutes=10)).isoformat(), 'server':'inside', 'call_id':'new'}]}))
+            self.assertEqual(self.store.aggregate_many('mcp', [after, None])[1]['total'], 3)
+            self.assertEqual(counted.call_count, 5)
+
     def test_batch_aggregates_share_snapshot_and_keep_results_independent(self):
         recent = datetime.now(timezone.utc)-timedelta(hours=1)
         stamp, later, future = recent.isoformat(), (recent+timedelta(minutes=1)).isoformat(), (recent+timedelta(days=1)).isoformat()
@@ -78,6 +100,34 @@ class HistoryStoreTests(unittest.TestCase):
         with closing(sqlite3.connect(backup)) as db:
             self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], current)
             self.assertEqual(db.execute("SELECT count(*) FROM history_items").fetchone()[0], 1)
+
+    def test_version_three_rows_gain_aggregate_columns_with_identical_results(self):
+        path = self.root/"v3"/"lam-history.sqlite3"
+        path.parent.mkdir()
+        stamp = (datetime.now(timezone.utc)-timedelta(hours=1)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        rows = [("mcp", "a", {"timestamp": stamp, "server": "docs", "tool": "read", "nested": True}),
+                ("mcp", "b", {"timestamp": stamp, "server": "search", "tool": "find", "nested": False}),
+                ("sql", "c", {"timestamp": stamp, "statement": "SELECT", "operation": "read"})]
+        with closing(sqlite3.connect(path)) as db, db:
+            for target in (1, 2, 3):
+                for statement in history_store.MIGRATIONS[target]:
+                    db.execute(statement)
+            db.execute(f"PRAGMA application_id={history_store.APPLICATION_ID}")
+            db.execute("PRAGMA user_version=3")
+            db.executemany("INSERT INTO history_items VALUES (?, ?, ?, ?, ?, ?)", [("activity", section, key, 0, stamp, json.dumps(item)) for section, key, item in rows])
+        store = history_store.HistoryStore(path.with_name("activity-history.json"), "activity")
+        mcp = store.aggregate("mcp")
+        self.assertEqual((mcp["total"], mcp["servers"]), (2, {"docs": {"total": 1, "direct": 0, "nested": 1}, "search": {"total": 1, "direct": 1, "nested": 0}}))
+        self.assertEqual(store.aggregate("mcp", excluded_sources=["docs"])["total"], 1)
+        self.assertEqual(store.aggregate("sql")["statements"], {"SELECT": 1})
+        self.assertEqual(store.page("mcp", excluded_sources=["search"])["total"], 1)
+        with closing(sqlite3.connect(path)) as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(sorted(db.execute("SELECT item_key, server, operation, statement, nested FROM history_items")),
+                             [("a", "docs", None, None, 1), ("b", "search", None, None, 0), ("c", None, "read", "SELECT", 0)])
+        with closing(sqlite3.connect(path.with_name(path.name+".schema-v3.bak"))) as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(db.execute("SELECT count(*) FROM history_items").fetchone()[0], 3)
 
     def test_failed_schema_upgrade_rolls_back_columns_data_and_version(self):
         current = history_store.SCHEMA_VERSION

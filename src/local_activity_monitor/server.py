@@ -138,6 +138,8 @@ class Dashboard:
         self.default_settings = {"debug_mode": False, "activity_retention_days": ActivityHistory.DEFAULT_DAYS, "max_files": 20, "track_all": False, "observations": dict(self.observations), "api_intervals": dict(self.api_intervals), "mcp_sources": {}, "mcp_categories": {}, "tool_descriptions": {}, "mcp_descriptions": {}, "mcp_tags": {}}
         self.mcp_sources, self.mcp_categories, self.tool_descriptions, self.mcp_descriptions, self.mcp_tags = {}, {}, {}, {}, {}
         self.mcp_document_cache = {}
+        # Increases on every applied settings change that may alter collected inputs.
+        self.settings_revision = 0
         self.started_at = now()
         self.monitor = MonitorState(home/"monitoring/local-activity-monitor.jsonl", defer_device=True)
         self.monitor.debug.revision = self.code_revision
@@ -158,6 +160,8 @@ class Dashboard:
         self.update_condition = threading.Condition()
         self.update_version = 0
         self.event_clients = threading.BoundedSemaphore(8)
+        self.stream_lock = threading.Lock()
+        self.stream_bodies = {}
         self.source_changed = threading.Event()
         self.retry_sources = threading.Event()
         self.source_watches = {}
@@ -201,7 +205,10 @@ class Dashboard:
                     value = event|context|{'index':index, 'duration_ms':None if event['nested'] else duration, 'container_duration_ms':duration if event['nested'] else None}
                     (web if event['server']=='web' else mcp).append(value)
                 if call.get('error'):
-                    errors.append(call['error']|context|{'timestamp':end or stamp, 'category':'tool', 'source':'tool_result', 'severity':'error', 'tool':call['tool']})
+                    # Match the session projection, whose category is part of the error identity.
+                    calls = call.get('mcp', [])
+                    event = calls[0] if call.get('isolated') and len(calls) == 1 else None
+                    errors.append(call['error']|context|{'timestamp':end or stamp, 'category':'mcp' if event and event['server']!='web' else 'tool', 'server':event['server'] if event else None, 'source':'tool_result', 'severity':'error', 'tool':event['tool'] if event else call['tool']})
         self.activity_history.update(sql,web,mcp)
         self.error_history.update(errors)
         self.codex.thread_state.update(states)
@@ -308,7 +315,7 @@ class Dashboard:
             before_bytes = (self.codex.read_bytes if self.codex else 0)+self.diagnostics.read_bytes
             if self.codex and self.observations["codex"]:
                 previous = self.cache.get("all", {}).get("codex", {})
-                targets = (self.activity_history.snapshot("sql") if self.observations["sqlite"] else [])+(self.activity_history.snapshot("mcp") if self.observations["mcp"] else [])+(self.activity_history.snapshot("web") if self.observations["web"] else [])
+                targets = (self.activity_history.snapshot("sql", copy=False) if self.observations["sqlite"] else [])+(self.activity_history.snapshot("mcp", copy=False) if self.observations["mcp"] else [])+(self.activity_history.snapshot("web", copy=False) if self.observations["web"] else [])
                 if self.observations["git"]:
                     targets.extend(previous.get("git", {}).get("events", []))
                 if self.observations["checks"]:
@@ -358,28 +365,42 @@ class Dashboard:
                 sql = codex.get("sqlite", {}).get("_retained_events", codex.get("sqlite", {}).get("events", []))+list(self.diagnostics.sql_events) if self.observations["sqlite"] else []
                 web = [event for event in codex.get("mcp_events", []) if event["server"]=="web"] if self.observations["web"] else []
                 mcp = [event for event in codex.get("mcp_events", []) if event["server"]!="web"] if self.observations["mcp"] else []
-                self.activity_history.update(sql, web, mcp)
-                history = (self.activity_history.snapshot("web") if self.observations["web"] else [])+(self.activity_history.snapshot("mcp") if self.observations["mcp"] else [])
+                # These inputs derive only from collector state, diagnostic SQL and settings.
+                source_key = (self.codex.revision if self.codex else None, self.diagnostics.sql_revision, self.settings_revision, self.observations["sqlite"], self.observations["web"], self.observations["mcp"])
+                self.activity_history.update(sql, web, mcp, source_key=source_key)
+                # merge_event builds new values, so the shared history rows stay unchanged.
+                history = (self.activity_history.snapshot("web", copy=False) if self.observations["web"] else [])+(self.activity_history.snapshot("mcp", copy=False) if self.observations["mcp"] else [])
+                # An identity includes its time, so merging once for "all" and filtering by the
+                # projection's reference time equals merging each window separately.
+                reference = getattr(self.codex, "window_reference", None)
+                merged = {}
+                for event in history+codex_windows.get("all", {}).get("mcp_events", []):
+                    identity = mcp_identity(event)
+                    merged[identity] = merge_event(merged.get(identity, {}), event)
+                merged = list(merged.values())
                 for window, projection in codex_windows.items():
-                    retained = {}
-                    for event in [item for item in history if contains(item, cutoff(window))]+projection.get("mcp_events", []):
-                        identity = mcp_identity(event)
-                        retained[identity] = merge_event(retained.get(identity, {}), event)
-                    projection["mcp_events"] = list(retained.values())
+                    boundary = cutoff(window, reference)
+                    projection["mcp_events"] = merged if boundary is None else [event for event in merged if contains(event, boundary)]
             if self.observations["codex"] and self.observations["sqlite"]:
-                history_sql = self.activity_history.snapshot("sql")
+                history_sql = self.activity_history.snapshot("sql", copy=False)
                 sql_aggregates = dict(zip(codex_windows, self.activity_history.store.aggregate_many('sql', history_dates)))
+                reference = getattr(self.codex, "window_reference", None)
+                complete = codex_windows.get("all", {}).get("sqlite", {})
+                merged = {}
+                for event in history_sql+complete.get("_retained_events", complete.get("events", []))+list(self.diagnostics.sql_events):
+                    identity = sql_identity(event)
+                    merged[identity] = merge_event(merged.get(identity, {}), event)
+                merged = list(merged.values())
+                ordered = sorted(merged, key=lambda event:event.get("timestamp") or "", reverse=True)
+                identity_fields = ("source", "thread_id", "call_id", "index", "file", "record_id", "record_offset", "record_hash", "timestamp", "statement")
+                identities = {}
                 for window, projection in codex_windows.items():
                     sql = projection.setdefault("sqlite", {"events": [], "total": 0, "operations": {}})
-                    retained = [event for event in history_sql if contains(event, cutoff(window))]+sql.pop("_retained_events", sql["events"])+[event for event in self.diagnostics.sql_events if contains(event, cutoff(window))]
-                    merged = {}
-                    for event in retained:
-                        identity = sql_identity(event)
-                        merged[identity] = merge_event(merged.get(identity, {}), event)
-                    retained = list(merged.values())
-                    events = sorted(retained, key=lambda event:event.get("timestamp") or "", reverse=True)[:CodexCollector.SQL_EVENT_LIMIT]
-                    identity_fields = ("source", "thread_id", "call_id", "index", "file", "record_id", "record_offset", "record_hash", "timestamp", "statement")
-                    events = [event | {"id": hashlib.sha256(json.dumps([event.get(key) for key in identity_fields]).encode()).hexdigest()} for event in events]
+                    sql.pop("_retained_events", None)
+                    boundary = cutoff(window, reference)
+                    retained = merged if boundary is None else [event for event in merged if contains(event, boundary)]
+                    latest = ordered if boundary is None else [event for event in ordered if contains(event, boundary)]
+                    events = [event | {"id": identities.get(id(event)) or identities.setdefault(id(event), hashlib.sha256(json.dumps([event.get(key) for key in identity_fields]).encode()).hexdigest())} for event in latest[:CodexCollector.SQL_EVENT_LIMIT]]
                     sql.update(events=events, total=len(retained), operations=dict(Counter(event["operation"] for event in retained)))
                     sql['aggregate'] = sql_aggregates[window] | {'scope':'retained_database', 'window':window}
             for projection in codex_windows.values():
@@ -516,6 +537,7 @@ class Dashboard:
         if not isinstance(tags, dict) or len(tags) > 64 or any(not isinstance(key, str) or not SOURCE.fullmatch(key) or not isinstance(items, list) or len(items) > 4 or any(not isinstance(text, str) or not text.strip() or len(text.strip()) > 40 or any(ord(char) < 32 for char in text) for text in items) for key, items in tags.items()):
             raise ValueError()
         with self.refresh_lock:
+            self.settings_revision += 1
             replace = value.get("replace_customizations", False)
             next_descriptions = {key: text for key, text in (descriptions if replace else self.tool_descriptions | descriptions).items() if text.strip()}
             next_purposes = {key: text for key, text in (purposes if replace else self.mcp_descriptions | purposes).items() if text.strip()}
@@ -710,7 +732,18 @@ class Dashboard:
                 return instructions(project["folders"]) | {"scope": "project", "project_id": project_id}
         return None
 
-    def logs(self, window="all"):
+    def stream_body(self, window, version):
+        """Serialized SSE frame data, shared by connections of one window for one update within a second."""
+        with self.stream_lock:
+            cached = self.stream_bodies.get(window)
+            if cached and cached[0] == version and time.monotonic()-cached[1] < 1:
+                return cached[2]
+        body = json.dumps({'version': version, 'window': window, 'snapshot': self.snapshot(window, copy_cache=False), 'logs': self.logs(window, copy_entries=False)}, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+        with self.stream_lock:
+            self.stream_bodies[window] = (version, time.monotonic(), body)
+        return body
+
+    def logs(self, window="all", copy_entries=True):
         """List selected metadata; known diagnostic bodies are read separately on demand."""
         with self.refresh_lock:
             monitor = self.monitor.log_snapshot()
@@ -725,7 +758,7 @@ class Dashboard:
             boundary = cutoff(window)
             entries = [event for event in {error_identity(event): event for event in entries}.values() if contains(event, boundary)]
             entries.sort(key=lambda event: event.get("timestamp") or "", reverse=True)
-            return {"enabled": self.observations["logs"], "entries": copy.deepcopy(entries[:2000]), "total": len(entries), "limit": 2000, "trimmed": self.diagnostics.log_trimmed, "sources": self.diagnostics.log_sources(self.observations["codex"] and self.observations["logs"])+[monitor, {"source": "session", "health": codex.get("health", "waiting"), "files": [], "file_count": codex.get("files"), "checked_at": cached.get("updated_at"), "read_bytes": codex.get("bytes_read"), "unsupported_lines": codex.get("malformed_lines"), "backfill_pending": codex.get("error_backfill_pending")}, {"source": "jev_telemetry", "health": jev.get("health", "waiting"), "files": [], "checked_at": jev.get("reader", {}).get("checked_at")}]}
+            return {"enabled": self.observations["logs"], "entries": copy.deepcopy(entries[:2000]) if copy_entries else entries[:2000], "total": len(entries), "limit": 2000, "trimmed": self.diagnostics.log_trimmed, "sources": self.diagnostics.log_sources(self.observations["codex"] and self.observations["logs"])+[monitor, {"source": "session", "health": codex.get("health", "waiting"), "files": [], "file_count": codex.get("files"), "checked_at": cached.get("updated_at"), "read_bytes": codex.get("bytes_read"), "unsupported_lines": codex.get("malformed_lines"), "backfill_pending": codex.get("error_backfill_pending")}, {"source": "jev_telemetry", "health": jev.get("health", "waiting"), "files": [], "checked_at": jev.get("reader", {}).get("checked_at")}]}
 
     def activity_status(self):
         # Readers use the last complete activity check instead of waiting for scans.
@@ -781,10 +814,19 @@ class Dashboard:
         logs = tuple((str(path), state.get('offset'), state.get('history_cursor')) for path, state in self.diagnostics.files.items())
         return sessions, logs, self.diagnostics.sql_cursor, repr(self.diagnostics.sql_history)
 
-    def snapshot(self, window):
+    def snapshot(self, window, copy_cache=True):
+        """Snapshot for one window. copy_cache=False shares unmodified cache values; callers only serialize them."""
         with self.lock:
             cached = self.cache.get(window)
-            result = copy.deepcopy(cached) if cached is not None else {"label": "本機觀察統計", "health": "starting", "started_at": self.started_at, "updated_at": None, "settings": self.settings(), "availability": {}, "mcp": {"servers": [], "events": [], "categories": CATEGORIES}, "codex": {"health": "waiting", "threads": [], "tools": {}}, "jev": {"health": "disabled", "enabled": False, "summary": {}, "recent": [], "series": []}}
+            if cached is None:
+                result = {"label": "本機觀察統計", "health": "starting", "started_at": self.started_at, "updated_at": None, "settings": self.settings(), "availability": {}, "mcp": {"servers": [], "events": [], "categories": CATEGORIES}, "codex": {"health": "waiting", "threads": [], "tools": {}}, "jev": {"health": "disabled", "enabled": False, "summary": {}, "recent": [], "series": []}}
+            elif copy_cache:
+                result = copy.deepcopy(cached)
+            else:
+                # A published cache is replaced, never changed; copy only the levels written below.
+                result = dict(cached, codex=dict(cached.get("codex", {})))
+                if "errors" in cached:
+                    result["errors"] = dict(cached["errors"])
         result["default_settings"] = copy.deepcopy(self.default_settings)
         result["settings"] = self.settings()
         result["api_queries"] = self.api_queries.snapshot()
@@ -1050,8 +1092,7 @@ def handler(dashboard, port):
                             break
                         began, cpu = time.perf_counter(), time.process_time()
                         if current != previous:
-                            value = {'version': current, 'window': window, 'snapshot': dashboard.snapshot(window), 'logs': dashboard.logs(window)}
-                            body = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+                            body = dashboard.stream_body(window, current)
                             event = f'id: {current}\nevent: snapshot\ndata: {body}\n\n'
                         else:
                             event = ': heartbeat\n\n'
@@ -1293,7 +1334,7 @@ def handler(dashboard, port):
                 if window not in WINDOWS or set(query)-{"window"}:
                     self.reply(400, b"Invalid window")
                     return
-                raw = json.dumps(dashboard.snapshot(window), ensure_ascii=False, allow_nan=False).encode("utf-8")
+                raw = json.dumps(dashboard.snapshot(window, copy_cache=False), ensure_ascii=False, allow_nan=False).encode("utf-8")
                 self.reply(200, raw, "application/json; charset=utf-8")
             elif url.path in assets:
                 file, mime = assets[url.path]

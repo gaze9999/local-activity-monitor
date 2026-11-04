@@ -51,6 +51,8 @@ class ActivityHistory:
         self.checked_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         self.last_incoming = None
         self.last_prune_day = None
+        self.repair = False
+        self.last_source_key = self.future_at = self.next_future = None
         try:
             raw = self.store.load(self.BYTE_LIMIT)
             if raw is not None:
@@ -80,6 +82,9 @@ class ActivityHistory:
                 continue
             try:
                 date = datetime.fromisoformat(value['timestamp'].replace('Z', '+00:00'))
+                if date.tzinfo and date>ceiling:
+                    # A future row becomes eligible later, so unchanged input is not skipped past that time.
+                    self.next_future = date if self.next_future is None else min(self.next_future, date)
                 if not date.tzinfo or not boundary<=date<=ceiling:
                     continue
             except (KeyError, ValueError, TypeError, AttributeError):
@@ -124,7 +129,22 @@ class ActivityHistory:
         ordered = sorted(result.values(), key=lambda event:event['timestamp'], reverse=True)
         return ordered[:self.SQL_LIMIT if kind=='sql' else self.WEB_LIMIT if kind=='web' else self.MCP_LIMIT] if bounded else ordered
 
-    def update(self, sql, web, mcp=()):
+    def update(self, sql, web, mcp=(), source_key=None):
+        """Merge incoming metadata. A source_key identifying the caller's complete input skips an unchanged update."""
+        current = datetime.now(timezone.utc)
+        if source_key is not None and source_key == self.last_source_key and self.health == 'ok' and self.last_prune_day == (current.date(), self.retention_days) and (self.future_at is None or current < self.future_at) and not self.expired(current):
+            return
+        self.next_future = None
+        self.merge(sql, web, mcp)
+        if source_key is not None:
+            self.last_source_key = source_key if self.health == 'ok' else None
+            self.future_at = self.next_future-timedelta(minutes=1) if self.next_future else None
+
+    def expired(self, current):
+        boundary = current-timedelta(days=self.retention_days) if self.retention_days else datetime.min.replace(tzinfo=timezone.utc)
+        return any(rows and datetime.fromisoformat(rows[-1]['timestamp'].replace('Z','+00:00'))<boundary for rows in (self.sql,self.web,self.mcp))
+
+    def merge(self, sql, web, mcp):
         # Validate all incoming metadata before trimming the in-memory view.
         incoming = {'version': 3, 'retention_days': self.retention_days,
                     'sql': self.project(list(sql), 'sql', False),
@@ -164,12 +184,14 @@ class ActivityHistory:
             entries.pop()
             raw = self.encode()
         if storage_error is not None:
+            self.repair = True
             return
-        if raw==self.saved:
-            self.last_incoming, self.health = incoming_digest, 'ok'
-            return
+        # Incoming rows are already merged into storage. The whole working view is
+        # written again only after a failed save, so rows kept in memory are not lost.
         try:
-            self.store.save(raw)
+            if self.repair and raw!=self.saved:
+                self.store.save(raw)
+            self.repair = False
             self.saved, self.health = raw, 'ok'
             self.last_incoming = incoming_digest
         except (OSError, sqlite3.Error):
@@ -178,11 +200,12 @@ class ActivityHistory:
     def encode(self):
         return json.dumps({'version': 3, 'retention_days': self.retention_days, 'sql': self.sql, 'web': self.web, 'mcp': self.mcp}, ensure_ascii=True, separators=(',', ':')).encode()
 
-    def snapshot(self, kind):
+    def snapshot(self, kind, copy=True):
+        """Rows in the retention window. copy=False shares the stored rows, which callers must not modify."""
         current = datetime.now(timezone.utc)
         boundary = current-timedelta(days=self.retention_days) if self.retention_days else datetime.min.replace(tzinfo=timezone.utc)
         ceiling = current+timedelta(minutes=1)
         rows = self.sql if kind=='sql' else self.web if kind=='web' else self.mcp
         # Stored rows crossed the metadata boundary on load/update. Keep time
         # filtering live and return independent values without projecting again.
-        return [deepcopy(event) for event in rows if boundary<=datetime.fromisoformat(event['timestamp'].replace('Z','+00:00'))<=ceiling]
+        return [deepcopy(event) if copy else event for event in rows if boundary<=datetime.fromisoformat(event['timestamp'].replace('Z','+00:00'))<=ceiling]

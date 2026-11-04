@@ -163,8 +163,18 @@ class CodexCollector:
         self.related_budget = 0
         self.detail_targets, self.detail_indexes = {}, {}
         self.history_sink, self.retired_calls = None, []
+        # Per-thread call records reused by snapshot_many until a thread state revision changes.
+        self.derived_calls = {}
+        # Increases whenever retained session state changes, so unchanged inputs can be skipped.
+        self.revision = 0
+
+    def touch(self, state):
+        """Record a change; state['revision'] identifies its derived projection across rounds."""
+        self.revision += 1
+        state['revision'] = self.revision
 
     def retire_call(self, state, identity):
+        self.touch(state)
         call = state['calls'].pop(identity)
         state.setdefault('retired_ids',set()).add(identity)
         if self.history_sink is not None:
@@ -202,6 +212,8 @@ class CodexCollector:
                 if identities:
                     self.session_paths.setdefault(identities[-1], path)
             active = [path for _, path, _ in ordered]
+            if set(active) != self.files.keys():
+                self.revision += 1
             self.files = {path: self.files[path] if path in self.files else self.new_file(path) for path in active}
             for _, path, size in ordered:
                 self.files[path]["source_size"] = size
@@ -210,10 +222,12 @@ class CodexCollector:
             self.health = "unavailable"
 
     def new_file(self, path):
+        self.revision += 1
         ids = UUID_IN_NAME.findall(path.name)
-        return {"source_file": path.name, "offset": None, "buffer": b"", "discard": False, "thread_id": ids[-1] if ids else None, "model": None, "reasoning_effort": None, "execution": {}, "context_time": "", "tokens": {}, "token_time": "", "token_priority": 0, "created_at": None, "updated_at": None, "status": "observed", "activity_type": "unknown", "trigger": "unknown", "calls": {}, "partial_history": True, "bytes": 0, "task_start": None, "task_intervals": {}, "errors": [], "task_time": "", "history_cursor": None}
+        return {"revision": self.revision, "source_file": path.name, "offset": None, "buffer": b"", "discard": False, "thread_id": ids[-1] if ids else None, "model": None, "reasoning_effort": None, "execution": {}, "context_time": "", "tokens": {}, "token_time": "", "token_priority": 0, "created_at": None, "updated_at": None, "status": "observed", "activity_type": "unknown", "trigger": "unknown", "calls": {}, "partial_history": True, "bytes": 0, "task_start": None, "task_intervals": {}, "errors": [], "task_time": "", "history_cursor": None}
 
     def consume(self, state, record):
+        self.touch(state)
         payload = record.get("payload")
         if not isinstance(payload, dict):
             return
@@ -335,19 +349,29 @@ class CodexCollector:
             if limits:
                 state["allowance"] = limits
 
+    def persist(self, paths):
+        """Save retired and changed calls in one history batch before advancing checkpoints."""
+        if not self.flush_retired():
+            return False
+        if self.history_sink is None:
+            return True
+        states = [(path, self.files[path]) for path in dict.fromkeys(paths) if path in self.files]
+        if not states:
+            return True
+        changed = [{'thread_id':state['thread_id'], 'errors':state.get('pending_errors',[]), 'calls':{identity:state['calls'][identity] for identity in state.get('dirty_calls',()) if identity in state['calls']}} for _, state in states]
+        if not self.history_sink(changed):
+            self.health = 'partly_unavailable'
+            return False
+        self.session_checkpoint.save_many(states)
+        for _, state in states:
+            state['pending_errors'] = []
+        return True
+
     def refresh(self, pause=None):
         if not self.flush_retired():
             return
-        if self.history_sink is not None:
-            for path, state in self.files.items():
-                if not state.get('dirty_calls') and not state.get('retired_ids') and not state.get('pending_errors'):
-                    continue
-                changed = {'thread_id':state['thread_id'], 'errors':state.get('pending_errors',[]), 'calls':{identity:state['calls'][identity] for identity in state.get('dirty_calls',()) if identity in state['calls']}}
-                if not self.history_sink([changed]):
-                    self.health = 'partly_unavailable'
-                    return
-                self.session_checkpoint.save(path,state)
-                state['pending_errors'] = []
+        if self.history_sink is not None and not self.persist([path for path, state in self.files.items() if state.get('dirty_calls') or state.get('retired_ids') or state.get('pending_errors')]):
+            return
         self.scan()
         budget = self.READ_LIMIT
         # Preserve a quarter of each read budget for older metadata even when
@@ -357,6 +381,7 @@ class CodexCollector:
         entries = list(self.files.items())
         start_index = self.read_cursor % max(1, len(entries))
         ordered = entries[start_index:]+entries[:start_index]
+        touched = []
         for index, (path, state) in enumerate(ordered):
             if budget < 65536 or index >= 1000:
                 break
@@ -370,6 +395,7 @@ class CodexCollector:
                     self.files[path] = state = self.new_file(path)
                 if state['offset'] is None and (cached := self.session_checkpoint.load(path,max(0,self.CALL_LIMIT-sum(len(item['calls']) for item in self.files.values())))):
                     state.update(cached)
+                    self.touch(state)
                 with path.open("rb") as stream:
                     if state["offset"] is None:
                         head = stream.readline(65536)
@@ -416,21 +442,16 @@ class CodexCollector:
                     state["buffer"] = b""
                     state["discard"] = True
                 state["partial_history"] = state["offset"] < size
-                if not self.flush_retired():
-                    return
-                changed = {'thread_id':state['thread_id'], 'errors':state.get('pending_errors',[]), 'calls':{identity:state['calls'][identity] for identity in state.get('dirty_calls',()) if identity in state['calls']}}
-                if self.history_sink is not None and not self.history_sink([changed]):
-                    self.health = 'partly_unavailable'
-                    return
-                if self.history_sink is not None:
-                    self.session_checkpoint.save(path, state)
-                    state['pending_errors'] = []
+                touched.append(path)
                 if raw and pause and pause():
+                    self.persist(touched)
                     return
             except OSError:
                 self.health = "partly_unavailable"
         else:
             self.read_cursor = start_index+1
+        if not self.persist(touched):
+            return
         budget += reserve
         error_reserve = min(budget, self.READ_LIMIT//8) if self.features["errors"] and any(state.get("error_cursor") for state in self.files.values()) else 0
         budget -= error_reserve
@@ -515,6 +536,7 @@ class CodexCollector:
                         elif kind == "response_item" and payload.get("type") in ("function_call_output", "custom_tool_call_output"):
                             failure = tool_error(payload.get("output"))
                             if failure:
+                                self.touch(state)
                                 state["errors"].append({"timestamp": record["timestamp"], "source": "tool_result", "category": "tool", "severity": "error", "call_id": identifier(payload.get("call_id")), "record_offset": line_offset, "record_hash": hashlib.sha256(line).hexdigest(), **failure})
                                 state["errors"] = sorted(state["errors"], key=lambda event:event["timestamp"] or "", reverse=True)[:50]
                     except (ValueError, TypeError, AttributeError, RecursionError):
@@ -529,14 +551,13 @@ class CodexCollector:
         if not self.flush_retired():
             return
         if self.history_sink is not None:
-            for path,state in self.files.items():
-                if state.get('retired_ids'):
-                    self.session_checkpoint.save(path,state)
+            self.session_checkpoint.save_many([(path,state) for path,state in self.files.items() if state.get('retired_ids')])
         retained_errors = sorted((event.get("timestamp") or "", str(path), index, state) for path, state in self.files.items() for index, event in enumerate(state["errors"]))
         drop = {}
         for _, path, index, state in retained_errors[:max(0, len(retained_errors)-1000)]:
             drop.setdefault(path, (state, []))[1].append(index)
         for state, indexes in drop.values():
+            self.touch(state)
             for index in sorted(indexes, reverse=True):
                 del state["errors"][index]
         buffered = 0
@@ -714,6 +735,7 @@ class CodexCollector:
                         call["request_offset" if kind in ("function_call", "custom_tool_call") else "response_offset"] = offset
         except (ValueError, RecursionError):
             self.malformed += 1
+            self.touch(state)
 
     def skill_detail(self, skill, document=None, thread_id=None, call_id=None):
         empty = {"skill": skill, "files": [], "files_truncated": False, "documents": []}
@@ -1183,18 +1205,39 @@ class CodexCollector:
         return None
 
     def snapshot_windows(self, pause=None):
-        metadata_cache = {}
-        reference = datetime.now(timezone.utc)
-        snapshots = {}
-        for window in WINDOWS:
-            snapshots[window] = self.snapshot(window, reference, metadata_cache)
-            if pause and pause():
-                break
+        # Callers filtering retained history for the same windows reuse this time.
+        self.window_reference = reference = datetime.now(timezone.utc)
+        snapshots = self.snapshot_many(WINDOWS, reference, retain_sql=True)
+        if pause:
+            pause()
         return snapshots
 
     def snapshot(self, window="all", reference=None, metadata_cache=None):
-        boundary = cutoff(window, reference)
-        threads = {}
+        return self.snapshot_many((window,), reference, retain_sql=metadata_cache is not None, metadata_cache=metadata_cache)[window]
+
+    def snapshot_many(self, windows, reference=None, retain_sql=False, metadata_cache=None):
+        """Project retained state into several time windows with one pass over the calls.
+
+        Each call is parsed and derived once, then its records are added to every
+        window containing it; per-window lists keep the original thread and call order.
+        """
+        boundaries = {window: cutoff(window, reference) for window in windows}
+        unbounded = [window for window in windows if boundaries[window] is None]
+
+        def members(value):
+            # Same rule as activity_windows.contains, evaluated for all windows at once.
+            stamp = value.get("timestamp")
+            if not isinstance(stamp, str):
+                return unbounded
+            try:
+                when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            except ValueError:
+                return unbounded
+            if not when.tzinfo:
+                return unbounded
+            return [window for window in windows if boundaries[window] is None or when >= boundaries[window]]
+
+        threads, revisions = {}, {}
         for state in self.files.values():
             identity = state["thread_id"]
             if not identity:
@@ -1223,6 +1266,7 @@ class CodexCollector:
                 target.update(updated_at=state["updated_at"], activity_type=state["activity_type"], trigger=state["trigger"])
             target["calls"].update(state["calls"])
             target["partial_history"] |= state["partial_history"]
+            revisions.setdefault(identity, []).append(state.get("revision"))
         dots = {}
         metadata_sources = {}
         if metadata_cache is not None and "metadata" in metadata_cache:
@@ -1236,25 +1280,19 @@ class CodexCollector:
             plugins = read_plugins(self.root.parent, metadata_sources) if self.features["metadata"] else {"items": [], "health": "disabled"}
             if metadata_cache is not None:
                 metadata_cache["metadata"] = metadata, dots, metadata_sources, schedules, plugins
-        dots = dict(dots)
         self.thread_workdirs = {identity: entry["_cwd"] for identity, entry in metadata.items() if entry.get("_cwd")} if self.features["worktrees"] else {}
         if self.features["worktrees"]:
             for state in sorted(self.files.values(), key=lambda item: item.get("updated_at") or "", reverse=True):
                 if state.get("cwd"):
                     self.thread_workdirs.setdefault(state["thread_id"], state["cwd"])
-        dot_events = dots.pop("_retained_events", dots.get("events"))
-        if dot_events is not None:
-            scoped_dots = [event for event in dot_events if contains(event, boundary)]
-            dots.update(events=sorted(scoped_dots, key=lambda item:item.get("timestamp") or "", reverse=True)[:500], total=len(scoped_dots))
-        dots.update(window=window, activity_items_scope="latest_loaded_snapshot")
-        dots['activity'] = [event for event in dots.get('activity',[]) if contains(event,boundary)]
         pending_status = {state["thread_id"] for state in self.files.values() if state.get("history_cursor") or state["offset"] is None or state["offset"] < state.get("source_size", 0)}
-        rows, tools, nested_tools, git_events, skill_events, check_events, series, mcp_events, tool_series = [], Counter(), Counter(), [], [], [], Counter(), [], Counter()
-        file_events, error_events, sqlite_events = [], [], []
-        tool_statistics = {}
+        features = self.features
+        settings_key = (tuple(features.items()), tuple(sorted(self.mcp_sources.items())))
+        timed = any(features[key] for key in ("tool_events", "git", "checks", "mcp", "web", "files", "sqlite"))
+        results = {window: {"rows": [], "tools": Counter(), "nested_tools": Counter(), "git": [], "skills": [], "checks": [], "series": Counter(), "mcp": [], "tool_series": Counter(), "files": [], "errors": [], "sqlite": [], "statistics": {}} for window in windows}
 
-        def observe_tool(tool, nested, count, thread_id, call, duration=None):
-            item = tool_statistics.setdefault((tool, nested), {"tool": tool, "nested": nested, "calls": 0, "threads": set(), "returned": None if nested else 0, "durations": [], "last_at": None, "last_response_at": None})
+        def observe_tool(statistics, tool, nested, count, thread_id, call, duration=None):
+            item = statistics.setdefault((tool, nested), {"tool": tool, "nested": nested, "calls": 0, "threads": set(), "returned": None if nested else 0, "durations": [], "last_at": None, "last_response_at": None})
             item["calls"] += count
             item["threads"].add(thread_id)
             when = call.get("completed_at") or call.get("timestamp")
@@ -1269,136 +1307,140 @@ class CodexCollector:
         for identity, entry in metadata.items():
             if identity not in threads:
                 threads[identity] = {"thread_id": identity, "model": None, "reasoning_effort": None, "execution": {}, "tokens": {}, "token_time": "", "created_at": None, "updated_at": None, "status": "observed", "activity_type": "unknown", "trigger": "unknown", "calls": {}, "partial_history": True, "metadata_only": True}
+        def derive(thread_id, thread_name, identity, call):
+            """Window-independent records of one call, reused while its thread state is unchanged."""
+            stamp = call.get("timestamp")
+            when = None
+            if isinstance(stamp, str):
+                try:
+                    parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                    when = parsed if parsed.tzinfo else None
+                except ValueError:
+                    pass
+            duration = None
+            if timed and call["timestamp"] and call.get("completed_at"):
+                duration = max(0, round((datetime.fromisoformat(call["completed_at"].replace("Z", "+00:00"))-datetime.fromisoformat(call["timestamp"].replace("Z", "+00:00"))).total_seconds()*1000))
+            failure = None
+            if features["errors"] and call.get("error"):
+                mcp = call.get("mcp", [])
+                event = mcp[0] if call.get("isolated") and len(mcp) == 1 else None
+                if event is None or self.mcp_sources.get(event["server"], True):
+                    failure = call["error"] | {"timestamp": call.get("completed_at") or call["timestamp"], "category": "mcp" if event and event["server"] != "web" else "tool", "server": event["server"] if event else None, "tool": event["tool"] if event else call["tool"], "thread_id": thread_id, "thread_name": thread_name, "call_id": identity, "source": "tool_result", "severity": "error"}
+            nested_tools = call.get("nested_tools", {})
+            tool_event = {"call_id": identity, "tool": call["tool"], "nested_tools": nested_tools, "timestamp": call["timestamp"], "completed_at": call.get("completed_at"), "duration_ms": duration} if features["tool_events"] else None
+            minute = call["timestamp"][:16]+":00Z" if call["timestamp"] else None
+            git = [operation | {"thread_id": thread_id, "thread_name": thread_name, "call_id": identity, "index": index, "timestamp": call["timestamp"], "completed_at": call.get("completed_at"), "duration_ms": duration} for index, operation in enumerate(call.get("git", []) if features["git"] else [])]
+            jev = [operation | {"thread_id": thread_id, "call_id": identity, "index": index, "timestamp": call["timestamp"], "completed_at": call.get("completed_at")} for index, operation in enumerate(call.get("jev", []) if features["jev_calls"] else [])]
+            context = {"thread_id": thread_id, "thread_name": thread_name, "call_id": identity, "timestamp": call["timestamp"], "completed_at": call.get("completed_at"), "duration_ms": duration}
+            messages = [context|event for event in call.get('agent_messages', [])]
+            sqlite = [context | operation | {"index": index, "duration_ms": None, "container_duration_ms": duration, "result": "failed" if call.get("error") else "returned" if call.get("completed_at") else "unknown"} for index, operation in enumerate(call.get("sqlite", []))] if features["sqlite"] else []
+            files = []
+            if features["files"]:
+                for change in call.get("files", []):
+                    event = context | change
+                    if event["nested"]:
+                        event["container_duration_ms"], event["duration_ms"] = duration, None
+                    files.append((event, change["operation"] == "read"))
+            mcp = [event | context | {"index": index, "result": event.get("result", {}), "duration_ms": None if event["nested"] else duration, "container_duration_ms": duration if event["nested"] else None} for index, event in enumerate(call.get("mcp", [])) if features["web" if event["server"] == "web" else "mcp"]] if features["mcp"] or features["web"] else []
+            skills = [context | {"skill": skill["skill"], "tool": call["tool"], "has_document": bool(skill.get("doc_path"))} for skill in call.get("skills", [])] if features["skills"] else []
+            checks = [context | operation for operation in call.get("checks", [])] if features["checks"] else []
+            return identity, call, when, duration, failure, nested_tools, tool_event, minute, git, jev, messages, sqlite, files, mcp, skills, checks
+        call_windows = {}
+        derived = {}
         for thread in threads.values():
-            thread["calls"] = {key: call for key, call in thread["calls"].items() if contains(call, boundary)}
-            entry = metadata.get(thread["thread_id"], {})
-            row = {key: thread[key] for key in ("thread_id", "model", "reasoning_effort", "tokens", "created_at", "updated_at", "status", "partial_history", "activity_type", "trigger")}
-            row["execution"] = entry.get("execution", {}) | thread["execution"]
-            row["metadata_only"] = bool(thread.get("metadata_only"))
-            row["archived"] = entry.get("archived")
-            row["project_kind"] = getattr(self, "project_details", {}).get(entry.get("project_id"), {}).get("kind")
+            thread_id = thread["thread_id"]
+            entry = metadata.get(thread_id, {})
+            base = {key: thread[key] for key in ("thread_id", "model", "reasoning_effort", "tokens", "created_at", "updated_at", "status", "partial_history", "activity_type", "trigger")}
+            base["execution"] = entry.get("execution", {}) | thread["execution"]
+            base["metadata_only"] = bool(thread.get("metadata_only"))
+            base["archived"] = entry.get("archived")
+            base["project_kind"] = getattr(self, "project_details", {}).get(entry.get("project_id"), {}).get("kind")
             cached = thread.get('cached_status', {})
             if not thread.get('task_time') and not entry.get('status') and cached:
-                row['status'] = cached['status']
-            row['status_updated_at'] = thread.get('task_time') or entry.get('status_updated_at') or (entry.get('updated_at') if entry.get('status') else cached.get('task_time'))
-            row['status_source'] = ('cached_lifecycle' if thread.get('status_cached') else 'session_lifecycle') if thread.get('task_time') else entry.get('status_source') or ('catalog_status' if entry.get('status') else 'cached_lifecycle' if cached else None)
-            row["status_backfill_pending"] = thread["thread_id"] in pending_status
-            row["context_updated_at"] = thread.get("context_time") or None
+                base['status'] = cached['status']
+            base['status_updated_at'] = thread.get('task_time') or entry.get('status_updated_at') or (entry.get('updated_at') if entry.get('status') else cached.get('task_time'))
+            base['status_source'] = ('cached_lifecycle' if thread.get('status_cached') else 'session_lifecycle') if thread.get('task_time') else entry.get('status_source') or ('catalog_status' if entry.get('status') else 'cached_lifecycle' if cached else None)
+            base["status_backfill_pending"] = thread_id in pending_status
+            base["context_updated_at"] = thread.get("context_time") or None
             environment = entry.get("environment", "unknown")
             if environment == "unknown" and not thread.get("metadata_only"):
                 environment = "local"
-            row.update({"thread_name": entry.get("thread_name"), "environment": environment, "project_id": entry.get("project_id"), "project_name": entry.get("project_name"), "project_scope": entry.get("project_scope", "unknown"), "has_schedule": entry.get("has_schedule", False)})
-            row['host_id'] = entry.get('_host_id')
+            base.update({"thread_name": entry.get("thread_name"), "environment": environment, "project_id": entry.get("project_id"), "project_name": entry.get("project_name"), "project_scope": entry.get("project_scope", "unknown"), "has_schedule": entry.get("has_schedule", False)})
+            base['host_id'] = entry.get('_host_id')
             for key in ("activity_type", "trigger", "model", "reasoning_effort", "created_at", "updated_at", "status"):
-                if key in entry and (not row.get(key) or row[key] in ("unknown", "observed") or thread.get("metadata_only")):
-                    row[key] = entry[key]
+                if key in entry and (not base.get(key) or base[key] in ("unknown", "observed") or thread.get("metadata_only")):
+                    base[key] = entry[key]
             if entry.get("trigger") in ("dot", "schedule", "heartbeat"):
-                row["trigger"] = entry["trigger"]
-            if self.features["errors"]:
-                error_events.extend(event | {"thread_id": thread["thread_id"], "thread_name": row["thread_name"]} for event in thread.get("errors", []) if contains(event, boundary))
-            counts = Counter(call["tool"] for call in thread["calls"].values())
-            tools.update(counts)
-            nested_counts = Counter()
-            events, jev_calls, file_changes, file_reads = [], [], [], []
-            communication = [event|{'thread_id':thread['thread_id']} for event in thread.get('agent_incoming',[]) if contains(event,boundary)]
-            for identity, call in thread["calls"].items():
-                duration = None
-                if any(self.features[key] for key in ("tool_events", "git", "checks", "mcp", "web", "files", "sqlite")) and call["timestamp"] and call.get("completed_at"):
-                    duration = max(0, round((datetime.fromisoformat(call["completed_at"].replace("Z", "+00:00"))-datetime.fromisoformat(call["timestamp"].replace("Z", "+00:00"))).total_seconds()*1000))
-                if self.features["errors"] and call.get("error"):
-                    mcp = call.get("mcp", [])
-                    event = mcp[0] if call.get("isolated") and len(mcp) == 1 else None
-                    if event is None or self.mcp_sources.get(event["server"], True):
-                        error_events.append(call["error"] | {"timestamp": call.get("completed_at") or call["timestamp"], "category": "mcp" if event and event["server"] != "web" else "tool", "server": event["server"] if event else None, "tool": event["tool"] if event else call["tool"], "thread_id": thread["thread_id"], "thread_name": row["thread_name"], "call_id": identity, "source": "tool_result", "severity": "error"})
-                if self.features["tool_events"]:
-                    nested_counts.update(call.get("nested_tools", {}))
-                    observe_tool(call["tool"], False, 1, thread["thread_id"], call, duration)
-                    for tool, count in call.get("nested_tools", {}).items():
-                        observe_tool(tool, True, count, thread["thread_id"], call)
-                    events.append({"call_id": identity, "tool": call["tool"], "nested_tools": call.get("nested_tools", {}), "timestamp": call["timestamp"], "completed_at": call.get("completed_at"), "duration_ms": duration})
-                if call["timestamp"]:
-                    series[call["timestamp"][:16]+":00Z"] += 1
-                    tool_series[(call["timestamp"][:16]+":00Z", call["tool"])] += 1
-                for index, operation in enumerate(call.get("git", []) if self.features["git"] else []):
-                    git_events.append(operation | {"thread_id": thread["thread_id"], "thread_name": row["thread_name"], "call_id": identity, "index": index, "timestamp": call["timestamp"], "completed_at": call.get("completed_at"), "duration_ms": duration})
-                for index, operation in enumerate(call.get("jev", []) if self.features["jev_calls"] else []):
-                    jev_calls.append(operation | {"thread_id": thread["thread_id"], "call_id": identity, "index": index, "timestamp": call["timestamp"], "completed_at": call.get("completed_at")})
-                context = {"thread_id": thread["thread_id"], "thread_name": row["thread_name"], "call_id": identity, "timestamp": call["timestamp"], "completed_at": call.get("completed_at"), "duration_ms": duration}
-                communication.extend(context|event for event in call.get('agent_messages',[]))
-                if self.features["sqlite"]:
-                    for index, operation in enumerate(call.get("sqlite", [])):
-                        sqlite_events.append(context | operation | {"index": index, "duration_ms": None, "container_duration_ms": duration, "result": "failed" if call.get("error") else "returned" if call.get("completed_at") else "unknown"})
-                if self.features["files"]:
-                    for change in call.get("files", []):
-                        event = context | change
-                        if event["nested"]:
-                            event["container_duration_ms"], event["duration_ms"] = duration, None
-                        file_events.append(event)
-                        (file_reads if change["operation"] == "read" else file_changes).append(event)
-                if self.features["mcp"] or self.features["web"]:
-                    for index, event in enumerate(call.get("mcp", [])):
-                        if self.features["web" if event["server"] == "web" else "mcp"]:
-                            mcp_events.append(event | context | {"index": index, "result": event.get("result", {}), "duration_ms": None if event["nested"] else duration, "container_duration_ms": duration if event["nested"] else None})
-                if self.features["skills"]:
-                    skill_events.extend(context | {"skill": skill["skill"], "tool": call["tool"], "has_document": bool(skill.get("doc_path"))} for skill in call.get("skills", []))
-                if self.features["checks"]:
-                    check_events.extend(context | operation for operation in call.get("checks", []))
-            events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
-            jev_calls.sort(key=lambda event: event["timestamp"] or "", reverse=True)
-            nested_tools.update(nested_counts)
-            row.update(token_updated_at=thread["token_time"] or None, tool_calls=None if thread.get("metadata_only") else sum(counts.values()), tools=dict(counts), nested_tools=dict(nested_counts), tool_events=events[:100] if self.features["tool_events"] else [], jev_calls=jev_calls[:100] if self.features["jev_calls"] else [])
-            row["file_changes"] = sorted(file_changes, key=lambda event: event["timestamp"] or "", reverse=True)[:200]
-            row['agent_messages'] = sorted(communication,key=lambda event:event.get('timestamp') or '',reverse=True)[:100]
-            row["file_reads"] = sorted(file_reads, key=lambda event: event["timestamp"] or "", reverse=True)[:200]
+                base["trigger"] = entry["trigger"]
+            thread_name = base["thread_name"]
+            local = {window: {"counts": Counter(), "nested": Counter(), "events": [], "jev": [], "changes": [], "reads": [], "communication": []} for window in windows}
+            if features["errors"]:
+                for event in thread.get("errors", []):
+                    inside = members(event)
+                    if inside:
+                        value = event | {"thread_id": thread_id, "thread_name": thread_name}
+                        for window in inside:
+                            results[window]["errors"].append(value)
+            for event in thread.get('agent_incoming', []):
+                inside = members(event)
+                if inside:
+                    value = event | {'thread_id': thread_id}
+                    for window in inside:
+                        local[window]["communication"].append(value)
+            key = (tuple(revisions.get(thread_id, ())), thread_name, settings_key)
+            previous = self.derived_calls.get(thread_id)
+            records = previous[1] if previous and previous[0] == key else [derive(thread_id, thread_name, identity, call) for identity, call in thread["calls"].items()]
+            derived[thread_id] = key, records
+            for identity, call, when, duration, failure, nested_tools, tool_event, minute, git, jev, messages, sqlite, files, mcp, skills, checks in records:
+                # Same rule as members(): unknown times belong only to unbounded windows.
+                inside = unbounded if when is None else [window for window in windows if boundaries[window] is None or when >= boundaries[window]]
+                call_windows[thread_id, identity] = inside
+                if not inside:
+                    continue
+                for window in inside:
+                    result, scoped = results[window], local[window]
+                    scoped["counts"][call["tool"]] += 1
+                    if failure is not None:
+                        result["errors"].append(failure)
+                    if tool_event is not None:
+                        scoped["nested"].update(nested_tools)
+                        observe_tool(result["statistics"], call["tool"], False, 1, thread_id, call, duration)
+                        for tool, count in nested_tools.items():
+                            observe_tool(result["statistics"], tool, True, count, thread_id, call)
+                        scoped["events"].append(tool_event)
+                    if minute:
+                        result["series"][minute] += 1
+                        result["tool_series"][(minute, call["tool"])] += 1
+                    result["git"].extend(git)
+                    scoped["jev"].extend(jev)
+                    scoped["communication"].extend(messages)
+                    result["sqlite"].extend(sqlite)
+                    for event, read in files:
+                        result["files"].append(event)
+                        (scoped["reads"] if read else scoped["changes"]).append(event)
+                    result["mcp"].extend(mcp)
+                    result["skills"].extend(skills)
+                    result["checks"].extend(checks)
             intervals = dict(thread.get("task_intervals", {}))
-            if thread.get("task_start") and thread["task_start"] not in intervals and row["status"] == "running":
+            if thread.get("task_start") and thread["task_start"] not in intervals and base["status"] == "running":
                 intervals[thread["task_start"]] = now()
-            row["task_duration_ms"] = sum(max(0, round((datetime.fromisoformat(end.replace("Z", "+00:00"))-datetime.fromisoformat(start.replace("Z", "+00:00"))).total_seconds()*1000)) for start, end in intervals.items()) if intervals else None
-            row["task_runs"] = len(intervals) if intervals else None
-            rows.append(row)
-        rows.sort(key=lambda item: item["updated_at"] or "", reverse=True)
-        git_events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
-        if self.features['skills']:
-            selected = {event['thread_id'] for event in rows}
-            retained = {(event['thread_id'], event['call_id'], event['skill']):event | {'thread_name':metadata.get(event['thread_id'], {}).get('thread_name')} for event in self.thread_state.skills if event['thread_id'] in selected and contains(event, boundary)}
-            for event in retained.values():
-                call = threads.get(event['thread_id'], {}).get('calls', {}).get(event['call_id'])
-                if call is not None:
-                    event['tool'] = call['tool']
-            retained.update({(event['thread_id'], event['call_id'], event['skill']):event for event in skill_events})
-            skill_events = sorted(retained.values(), key=lambda event:event['timestamp'] or '', reverse=True)
-        skill_summary = {"events": skill_events[:self.thread_state.SKILL_LIMIT] if self.features["skills"] else [], "counts": dict(Counter(event["skill"] for event in skill_events)) if self.features["skills"] else {}, "total": len(skill_events) if self.features["skills"] else 0}
-        check_events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
-        file_events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
-        sqlite_events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
-        sqlite_summary = {"events": sqlite_events[:self.SQL_EVENT_LIMIT], "total": len(sqlite_events), "operations": dict(Counter(event["operation"] for event in sqlite_events))}
-        if metadata_cache is not None:
-            sqlite_summary["_retained_events"] = sqlite_events
-        statistics = []
-        for _, item in sorted(tool_statistics.items()):
-            durations = sorted(item.pop("durations"))
-            item["thread_count"] = len(item.pop("threads"))
-            item["known_duration_count"] = None if item["nested"] else len(durations)
-            item["average_ms"] = round(sum(durations)/len(durations), 2) if durations else None
-            item["p99_ms"] = None
-            if durations:
-                position = (len(durations)-1)*.99
-                lower = int(position)
-                item["p99_ms"] = round(durations[lower]+(durations[min(len(durations)-1, lower+1)]-durations[lower])*(position-lower), 2)
-            statistics.append(item)
-        projects = {project_id: {"id": project_id, "name": detail.get("name"), "icon": detail.get("icon"), "kind": detail.get("kind"), "thread_count": 0} for project_id, detail in getattr(self, "project_details", {}).items()}
-        for project_id, detail in getattr(self, "project_details", {}).items():
-            projects[project_id].update({key: detail[key] for key in ("origin", "created_at", "updated_at") if key in detail})
-        for row in rows:
-            project_id = row.get("project_id")
-            if project_id:
-                detail = getattr(self, "project_details", {}).get(project_id, {})
-                project = projects.setdefault(project_id, {"id": project_id, "name": row.get("project_name"), "icon": detail.get("icon"), "kind": detail.get("kind"), "thread_count": 0})
-                project["thread_count"] += 1
-        for event in error_events:
-            identity = [event.get(key) for key in ('source', 'thread_id', 'call_id', 'timestamp', 'reason', 'code', 'record_hash')]
-            event['content_id'] = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
-        return {"projects": list(projects.values()), "schedules": schedules, "plugins": plugins, "activity_scope": {"window": window, "timestamp": "call_started_at", "unknown_timestamp": "all_only", "latest_state": ["tokens", "model", "status", "usage", "schedules", "worktrees"]}, "tool_statistics": statistics, "metadata_sources": list(metadata_sources.values()), "read_state": {
+            duration_total = sum(max(0, round((datetime.fromisoformat(end.replace("Z", "+00:00"))-datetime.fromisoformat(start.replace("Z", "+00:00"))).total_seconds()*1000)) for start, end in intervals.items()) if intervals else None
+            for window in windows:
+                result, scoped = results[window], local[window]
+                counts, nested_counts = scoped["counts"], scoped["nested"]
+                result["tools"].update(counts)
+                result["nested_tools"].update(nested_counts)
+                scoped["events"].sort(key=lambda event: event["timestamp"] or "", reverse=True)
+                scoped["jev"].sort(key=lambda event: event["timestamp"] or "", reverse=True)
+                row = dict(base, execution=dict(base["execution"]))
+                row.update(token_updated_at=thread["token_time"] or None, tool_calls=None if thread.get("metadata_only") else sum(counts.values()), tools=dict(counts), nested_tools=dict(nested_counts), tool_events=scoped["events"][:100] if features["tool_events"] else [], jev_calls=scoped["jev"][:100] if features["jev_calls"] else [])
+                row["file_changes"] = sorted(scoped["changes"], key=lambda event: event["timestamp"] or "", reverse=True)[:200]
+                row['agent_messages'] = sorted(scoped["communication"], key=lambda event:event.get('timestamp') or '', reverse=True)[:100]
+                row["file_reads"] = sorted(scoped["reads"], key=lambda event: event["timestamp"] or "", reverse=True)[:200]
+                row["task_duration_ms"] = duration_total
+                row["task_runs"] = len(intervals) if intervals else None
+                result["rows"].append(row)
+        read_state = lambda: {
             "file_limit": None, "file_count": len(self.files), "pending_files": sum(state["offset"] is None or state["offset"] < state.get("source_size", 0) for state in self.files.values()), "read_mode": "incremental_all_sources",
             "read_limit": self.READ_LIMIT, "tail_bytes": self.tail_bytes, "scan_seconds": self.SCAN_INTERVAL,
             "call_limit": self.CALL_LIMIT, "buffer_limit": self.BUFFER_LIMIT,
@@ -1413,4 +1455,64 @@ class CodexCollector:
             "locations": [str(path) for path in list(self.files)[:self.SOURCE_LOCATION_LIMIT]], "listed_file_limit": self.SOURCE_LOCATION_LIMIT,
             "enabled_features": [key for key, enabled in self.features.items() if enabled],
             "checkpoint": {"location": str(self.thread_state.path), "load_health": self.thread_state.load_health, "write_health": self.thread_state.write_health, "load_checked_at": self.thread_state.load_checked_at, "write_checked_at": self.thread_state.write_checked_at, "retained": len(self.thread_state.entries), "skills": len(self.thread_state.skills), "entry_limit": self.thread_state.LIMIT, "skill_limit": self.thread_state.SKILL_LIMIT, "byte_limit": self.thread_state.BYTE_LIMIT},
-        }, "usage": max((state["allowance"] for state in self.files.values() if state.get("allowance")), key=lambda item:item["updated_at"], default=None) if self.features["usage"] else None, "dots": dots, "sqlite": sqlite_summary, "source": "codex", "health": self.health, "started_at": self.started_at, "scope": "incremental_all_sources", "track_all": self.track_all, "max_files": self.max_files, "files": len(self.files), "bytes_read": self.read_bytes, "error_backfill_pending": sum(state.get("error_cursor") or 0 for state in self.files.values()), "malformed_lines": self.malformed, "threads": rows, "tools": dict(tools), "nested_tools": dict(nested_tools), "observed_tool_calls": sum(tools.values()), "activity_series": [{"time": key, "calls": value} for key, value in sorted(series.items())[-10080:]], "tool_series": [{"time": key[0], "tool": key[1], "calls": value} for key, value in sorted(tool_series.items())[-20000:]], "mcp_events": mcp_events, "error_events": error_events if self.features["errors"] else [], "file_activity": {"events": file_events[:self.FILE_EVENT_LIMIT], "total": len(file_events), "operations": dict(Counter(event["operation"] for event in file_events))}, "git": {"events": git_events[:self.GIT_EVENT_LIMIT] if self.features["git"] else [], "operations": dict(Counter(event["operation"] for event in git_events)) if self.features["git"] else {}, "total": len(git_events) if self.features["git"] else 0}, "skills": skill_summary, "checks": check_events[:self.CHECK_EVENT_LIMIT] if self.features["checks"] else []}
+        }
+        self.derived_calls = derived
+        snapshots = {}
+        for window in windows:
+            boundary, result = boundaries[window], results[window]
+            scoped_dots = dict(dots)
+            dot_events = scoped_dots.pop("_retained_events", scoped_dots.get("events"))
+            if dot_events is not None:
+                selected_dots = [event for event in dot_events if contains(event, boundary)]
+                scoped_dots.update(events=sorted(selected_dots, key=lambda item:item.get("timestamp") or "", reverse=True)[:500], total=len(selected_dots))
+            scoped_dots.update(window=window, activity_items_scope="latest_loaded_snapshot")
+            scoped_dots['activity'] = [event for event in scoped_dots.get('activity',[]) if contains(event,boundary)]
+            rows = result["rows"]
+            rows.sort(key=lambda item: item["updated_at"] or "", reverse=True)
+            git_events = sorted(result["git"], key=lambda event: event["timestamp"] or "", reverse=True)
+            skill_events = result["skills"]
+            if features['skills']:
+                selected = {event['thread_id'] for event in rows}
+                retained = {(event['thread_id'], event['call_id'], event['skill']):event | {'thread_name':metadata.get(event['thread_id'], {}).get('thread_name')} for event in self.thread_state.skills if event['thread_id'] in selected and contains(event, boundary)}
+                for event in retained.values():
+                    call = threads.get(event['thread_id'], {}).get('calls', {}).get(event['call_id'])
+                    if call is not None and window in call_windows.get((event['thread_id'], event['call_id']), ()):
+                        event['tool'] = call['tool']
+                retained.update({(event['thread_id'], event['call_id'], event['skill']):event for event in skill_events})
+                skill_events = sorted(retained.values(), key=lambda event:event['timestamp'] or '', reverse=True)
+            skill_summary = {"events": skill_events[:self.thread_state.SKILL_LIMIT] if features["skills"] else [], "counts": dict(Counter(event["skill"] for event in skill_events)) if features["skills"] else {}, "total": len(skill_events) if features["skills"] else 0}
+            check_events = sorted(result["checks"], key=lambda event: event["timestamp"] or "", reverse=True)
+            file_events = sorted(result["files"], key=lambda event: event["timestamp"] or "", reverse=True)
+            sqlite_events = sorted(result["sqlite"], key=lambda event: event["timestamp"] or "", reverse=True)
+            sqlite_summary = {"events": sqlite_events[:self.SQL_EVENT_LIMIT], "total": len(sqlite_events), "operations": dict(Counter(event["operation"] for event in sqlite_events))}
+            if retain_sql:
+                sqlite_summary["_retained_events"] = sqlite_events
+            statistics = []
+            for _, item in sorted(result["statistics"].items()):
+                durations = sorted(item.pop("durations"))
+                item["thread_count"] = len(item.pop("threads"))
+                item["known_duration_count"] = None if item["nested"] else len(durations)
+                item["average_ms"] = round(sum(durations)/len(durations), 2) if durations else None
+                item["p99_ms"] = None
+                if durations:
+                    position = (len(durations)-1)*.99
+                    lower = int(position)
+                    item["p99_ms"] = round(durations[lower]+(durations[min(len(durations)-1, lower+1)]-durations[lower])*(position-lower), 2)
+                statistics.append(item)
+            projects = {project_id: {"id": project_id, "name": detail.get("name"), "icon": detail.get("icon"), "kind": detail.get("kind"), "thread_count": 0} for project_id, detail in getattr(self, "project_details", {}).items()}
+            for project_id, detail in getattr(self, "project_details", {}).items():
+                projects[project_id].update({key: detail[key] for key in ("origin", "created_at", "updated_at") if key in detail})
+            for row in rows:
+                project_id = row.get("project_id")
+                if project_id:
+                    detail = getattr(self, "project_details", {}).get(project_id, {})
+                    project = projects.setdefault(project_id, {"id": project_id, "name": row.get("project_name"), "icon": detail.get("icon"), "kind": detail.get("kind"), "thread_count": 0})
+                    project["thread_count"] += 1
+            error_events = result["errors"]
+            for event in error_events:
+                identity = [event.get(key) for key in ('source', 'thread_id', 'call_id', 'timestamp', 'reason', 'code', 'record_hash')]
+                event['content_id'] = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+            tools, series, tool_series = result["tools"], result["series"], result["tool_series"]
+            snapshots[window] = {"projects": list(projects.values()), "schedules": schedules, "plugins": plugins, "activity_scope": {"window": window, "timestamp": "call_started_at", "unknown_timestamp": "all_only", "latest_state": ["tokens", "model", "status", "usage", "schedules", "worktrees"]}, "tool_statistics": statistics, "metadata_sources": list(metadata_sources.values()), "read_state": read_state(),
+                "usage": max((state["allowance"] for state in self.files.values() if state.get("allowance")), key=lambda item:item["updated_at"], default=None) if features["usage"] else None, "dots": scoped_dots, "sqlite": sqlite_summary, "source": "codex", "health": self.health, "started_at": self.started_at, "scope": "incremental_all_sources", "track_all": self.track_all, "max_files": self.max_files, "files": len(self.files), "bytes_read": self.read_bytes, "error_backfill_pending": sum(state.get("error_cursor") or 0 for state in self.files.values()), "malformed_lines": self.malformed, "threads": rows, "tools": dict(tools), "nested_tools": dict(result["nested_tools"]), "observed_tool_calls": sum(tools.values()), "activity_series": [{"time": key, "calls": value} for key, value in sorted(series.items())[-10080:]], "tool_series": [{"time": key[0], "tool": key[1], "calls": value} for key, value in sorted(tool_series.items())[-20000:]], "mcp_events": result["mcp"], "error_events": error_events if features["errors"] else [], "file_activity": {"events": file_events[:self.FILE_EVENT_LIMIT], "total": len(file_events), "operations": dict(Counter(event["operation"] for event in file_events))}, "git": {"events": git_events[:self.GIT_EVENT_LIMIT] if features["git"] else [], "operations": dict(Counter(event["operation"] for event in git_events)) if features["git"] else {}, "total": len(git_events) if features["git"] else 0}, "skills": skill_summary, "checks": check_events[:self.CHECK_EVENT_LIMIT] if features["checks"] else []}
+        return snapshots
