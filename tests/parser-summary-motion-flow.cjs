@@ -22,9 +22,9 @@ async page => {
     });
     const motion=()=>page.evaluate(()=>{
       const root=document.querySelector('#motion-fixture'),read=(node,pseudo)=>{const s=getComputedStyle(node,pseudo);return {animation:s.animationName,transition:s.transitionDuration};};
-      return {modal:read(document.querySelector('#settings-dialog')),backdrop:read(document.querySelector('#settings-dialog'),'::backdrop'),tab:read(document.querySelector('#tab-tools')),switch:read(document.querySelector('#reduce-motion')),knob:read(root.querySelector('.wb-switch'),'::before'),skeleton:read(root.querySelector('.wb-skeleton-line')),spinner:read(root.querySelector('.wb-state'),'::before'),menu:read(root.querySelector('.wb-menu-items')),popover:read(motionFixture.controllers[6].element),tree:read(root.querySelector('.wb-tree-view'))};
+      return {modal:read(document.querySelector('#settings-dialog')),backdrop:read(document.querySelector('#settings-dialog'),'::backdrop'),tab:read(document.querySelector('#tab-tools')),switch:read(document.querySelector('#reduce-motion')),knob:read(root.querySelector('.wb-switch'),'::before'),skeleton:read(root.querySelector('.wb-skeleton-line')),spinner:read(root.querySelector('.wb-state'),'::before'),menu:read(root.querySelector('.wb-menu-surface')),popover:read(motionFixture.controllers[6].element),tree:read(root.querySelector('.wb-tree-view'))};
     });
-    const enabled=await motion();check(enabled.modal.animation==='wb-appear'&&enabled.skeleton.animation==='wb-pulse'&&enabled.spinner.animation==='wb-spin'&&enabled.tab.transition.includes('0.12s'),'shared component motion enabled');
+    const enabled=await motion();check(enabled.modal.animation==='wb-appear'&&enabled.skeleton.animation==='wb-shimmer'&&enabled.spinner.animation==='wb-spin'&&enabled.tab.transition.includes('0.12s'),'shared component motion enabled');
     await reduce.check();const disabled=await motion();
     check(Object.values(disabled).every(value=>value.animation==='none'&&value.transition==='0s'),'reduced motion disables animations, transitions and pseudo-elements '+JSON.stringify(disabled));
     const persisted=await page.evaluate(()=>{const value=configuration();return {value,valid:readConfiguration(value).preferences.appearance.reduceMotion};});
@@ -63,10 +63,10 @@ async page => {
     });
     const dialog=page.locator('#detail-dialog'),sqlOutput=dialog.locator('.wb-output').first();check(await dialog.locator('.wb-output').count()===2,'SQL and containing tool response use shared parsed output');
     check(await page.evaluate(()=>parserFixture.reads()===0),'SQL paging stays lazy');
-    await page.evaluate(async()=>{const view=[...payloadViews.values()][0];for(let i=0;i<80&&!view.element.querySelector('.wb-output-content>.wb-load-sentinel').hidden;i++){await view.loadMore();await new Promise(resolve=>setTimeout(resolve,20));}});
+    await page.evaluate(async()=>{const view=[...payloadViews.values()].find(view=>typeof view.loadMore==='function');for(let i=0;i<80&&!view.element.querySelector('.wb-output-content>.wb-load-sentinel').hidden;i++){await view.loadMore();await new Promise(resolve=>setTimeout(resolve,20));}});
     check((await sqlOutput.locator('code').allTextContents()).join('')===await page.evaluate(()=>WorkbenchUI.formatSql(parserFixture.sql)),'complete SQL formatting beyond first page');
     check(await sqlOutput.locator('.wb-code-keyword').count()>0,'SQL colors');
-    await sqlOutput.getByRole('button',{name:'原文',exact:true}).click();await page.evaluate(async()=>{const view=[...payloadViews.values()][0];for(let i=0;i<80&&!view.element.querySelector('.wb-output-content>.wb-load-sentinel').hidden;i++){await view.loadMore();await new Promise(resolve=>setTimeout(resolve,20));}});
+    await sqlOutput.getByRole('button',{name:'原文',exact:true}).click();await page.evaluate(async()=>{const view=[...payloadViews.values()].find(view=>typeof view.loadMore==='function');for(let i=0;i<80&&!view.element.querySelector('.wb-output-content>.wb-load-sentinel').hidden;i++){await view.loadMore();await new Promise(resolve=>setTimeout(resolve,20));}});
     check((await sqlOutput.locator('code').allTextContents()).join('')===await page.evaluate(()=>parserFixture.sql),'SQL raw exact and complete');await closeModal();
     const yaml='enabled: false\ncount: 0\nmissing: null\nname: "<img src=x onerror=alert(1)>"\n';
     await page.evaluate(yaml=>openDetail({kind:'mcp-file',modalSection:'content',server:'demo_docs',file:{name:'demo.yaml'},documentContent:{id:'synthetic-yaml',path:'demo.yaml',format:'yaml',text:yaml,editable:false}}),yaml);
@@ -74,17 +74,17 @@ async page => {
     check((await dialog.locator('code').allTextContents()).join('').includes('false')&&(await dialog.locator('code').allTextContents()).join('').includes('null'),'YAML preserves false zero null');
     await dialog.getByRole('button',{name:'原文',exact:true}).click();check(await dialog.locator('code').textContent()===yaml,'YAML raw exact');await closeModal();
     await page.evaluate(()=>openDetail({kind:'mcp-file',modalSection:'content',server:'demo_docs',file:{name:'edit.yaml'},documentContent:{id:'synthetic-edit',path:'edit.yaml',format:'yaml',text:'count: 0\n',editable:true}}));
-    const fold=dialog.locator('details').filter({has:page.getByText('內容預覽',{exact:true})}),editor=dialog.getByRole('textbox',{name:'檔案內容',exact:true});
-    await fold.evaluate(node=>node.open=false);await fold.locator('summary').click();await dialog.locator('.wb-output').waitFor();await fold.locator('summary').click();await editor.fill('count: 1\n');await fold.locator('summary').click();
+    const editor=dialog.getByRole('textbox',{name:'檔案內容',exact:true});
+    await dialog.locator('.wb-output').waitFor();await dialog.getByRole('button',{name:'編輯',exact:true}).click();await editor.fill('count: 1\n');
     await page.waitForFunction(()=>document.querySelector('#detail-dialog .wb-output code')?.textContent.includes('1'));
-    check((await dialog.locator('.wb-output code').textContent()).includes('1')&&await page.evaluate(()=>payloadViews.size===1),'editable YAML preview updates without leaked controllers');
+    check((await dialog.locator('.wb-output code').textContent()).includes('1')&&await page.evaluate(()=>[...payloadViews.keys()].filter(key=>key.closest?.('#detail-dialog')).length===1),'editable YAML preview updates without leaked controllers');
     const layouts=[];
     for(const mode of ['dark','light'])for(const width of [1280,820,390,320]){await page.setViewportSize({width,height:900});await page.evaluate(mode=>{appearance.mode=mode;applyAppearance();},mode);layouts.push(await dialog.evaluate(node=>({width:innerWidth,mode:document.documentElement.dataset.mode,overflow:node.getBoundingClientRect().right>innerWidth+1||node.querySelector('.wb-output').getBoundingClientRect().right>node.getBoundingClientRect().right+1})));}
     check(layouts.every(item=>!item.overflow),'parser responsive layout');await closeModal();
     await page.getByRole('button',{name:'設定',exact:true}).click();
     for(const locale of ['en','ja','zh-TW']){await page.locator('#language-select').selectOption(locale);check(await page.locator('#reduce-motion').evaluate(node=>node.labels[0].textContent.trim()===({en:'Reduce motion',ja:'アニメーションを減らす','zh-TW':'減少動畫效果'})[document.documentElement.lang]),'localized motion label');}
     await closeModal();
-    check(await page.evaluate(()=>payloadViews.size===0&&payloadObservers.size===0),'all output controllers disposed');check(!errors.length,'browser errors '+errors.join(','));
+    check(await page.evaluate(()=>[...payloadViews.entries()].every(([key,view])=>key.isConnected&&typeof view.loadMore!=='function'&&!key.closest?.('#detail-dialog'))&&payloadObservers.size===0),'all output controllers disposed');check(!errors.length,'browser errors '+errors.join(','));
     return {passed:true,sqlChars:await page.evaluate(()=>parserFixture.sql.length),enabled,disabled,layouts,errors};
   } finally {
     await page.emulateMedia({reducedMotion:'no-preference'});

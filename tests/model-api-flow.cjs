@@ -14,7 +14,8 @@ async page => {
     check(await page.evaluate(()=>[...document.querySelectorAll('#model-api-rows tr')].some(row=>{const cells=[...row.cells].map(cell=>cell.textContent);return cells.includes('連線事件')&&cells[7]==='--'&&cells[8]==='--';})),'connection has no invented duration or tokens');
     await page.locator('#model-api-rows tr').filter({hasText:'req_demo_failed'}).click();await page.locator('#detail-dialog').waitFor({state:'visible'});
     const detail=await page.locator('#detail-content').innerText();check(detail.includes('429')&&detail.includes('req_demo_failed')&&!detail.includes('PRIVATE'),'metadata detail without raw error body');
-    await page.keyboard.press('Escape');
+    // Escape dismisses a hover tooltip before the dialog, so move the pointer away first.
+    await page.mouse.move(0,0);await page.waitForFunction(()=>![...document.querySelectorAll('.wb-tooltip')].some(node=>!node.hidden&&node.getClientRects().length));await page.keyboard.press('Escape');
     await page.getByRole('button',{name:'模型 API Tab 設定',exact:true}).click();
     const dialog=page.locator('#tab-dialog');await dialog.getByRole('tab',{name:'監測項目',exact:true}).click();
     const toggle=dialog.getByRole('switch',{name:'模型 API 呼叫監測',exact:true});await toggle.uncheck();

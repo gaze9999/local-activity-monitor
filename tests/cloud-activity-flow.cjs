@@ -1,4 +1,6 @@
 async page=>{
+  // API query entries are hidden in the shipped page; skip until they return.
+  if(!await page.evaluate(()=>apiQueriesVisible))return {skipped:'API queries hidden'};
   const check=(value,message)=>{if(!value)throw Error(message);},requests=[];let fail=false;
   await page.route('**/api/codex/cloud*',async route=>{const cursor=new URL(route.request().url()).searchParams.get('cursor');requests.push(cursor);await route.fulfill({status:200,json:fail?{health:'error'}:{health:'ok',checked_at:new Date().toISOString(),items:[{id:cursor?'task_older':'task_recent',title:cursor?'Older cloud chat':'Recent cloud chat',status:'completed',updated_at:new Date().toISOString(),environment_label:'Demo environment'}],cursor:cursor?null:'page_2'}});});
   await page.evaluate(async()=>{await changeSettings({observations:{codex_cloud:false}});stopEventStream();switchTab('codex');selectConversationSource('cloud');});

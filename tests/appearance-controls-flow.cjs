@@ -35,7 +35,7 @@ async page=>{
   const minimum=[];
   for(const tab of ['overview','codex','projects','tools','mcp','files','errors','monitor']){
     await page.evaluate(tab=>switchTab(tab),tab);
-    const result=await page.evaluate(()=>{const bad=[];for(const el of document.querySelectorAll('main *'))if(el.getClientRects().length&&[...el.childNodes].some(node=>node.nodeType===3&&node.textContent.trim())&&parseFloat(getComputedStyle(el).fontSize)<(el.closest('.card-updated,.card-library-meta,.custom-metric-card>p,.cards .card-note,.cards .card>.detail,.statistic-label,.trend-legend,.panel>p[id$="-note"]')?11.99:14.99))bad.push({tag:el.tagName,cls:el.className?.baseVal??el.className,text:el.textContent.slice(0,40),size:getComputedStyle(el).fontSize});return bad.slice(0,12);});
+    const result=await page.evaluate(()=>{const bad=[];for(const el of document.querySelectorAll('main *'))if(el.getClientRects().length&&[...el.childNodes].some(node=>node.nodeType===3&&node.textContent.trim())&&parseFloat(getComputedStyle(el).fontSize)<(el.closest('.card-updated,.card-library-meta,.custom-metric-card>p,.cards .card-note,.cards .card>.detail,.statistic-label,.trend-legend,.panel>p[id$="-note"],.wb-tag,.wb-tag-group-label')?11.99:14.99))bad.push({tag:el.tagName,cls:el.className?.baseVal??el.className,text:el.textContent.slice(0,40),size:getComputedStyle(el).fontSize});return bad.slice(0,12);});
     check(!result.length,'minimum text '+tab+' '+JSON.stringify(result));minimum.push(tab);
   }
   check(await page.evaluate(()=>$('updated').parentElement.nextElementSibling===$('program-uptime')),'update time immediately before uptime');

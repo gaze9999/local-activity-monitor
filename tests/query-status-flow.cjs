@@ -1,4 +1,6 @@
 async page=>{
+  // API query entries are hidden in the shipped page; skip until they return.
+  if(!await page.evaluate(()=>apiQueriesVisible))return {skipped:'API queries hidden'};
   const check=(value,message)=>{if(!value)throw Error(message);};
   check(await page.evaluate(()=>data.codex.threads.every(thread=>thread.model?.startsWith('demo-model-'))),'Synthetic fixture required');
   // Exercise retained query behavior separately from the hidden-entry acceptance flow.

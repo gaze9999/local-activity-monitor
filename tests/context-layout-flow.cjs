@@ -18,7 +18,7 @@ async page=>{
     return {parentId:parent.thread_id,childId:child.thread_id,saved};
   });
   await page.waitForFunction(()=>detail?.contextLoaded);
-  const child=await page.evaluate(()=>({id:detail.thread.thread_id,text:JSON.stringify(detail.contextContent),title:document.getElementById('detail-title').textContent,folds:[...document.querySelectorAll('#detail-content .structured-payload')].map(el=>el.open)}));
+  const child=await page.evaluate(()=>({id:detail.thread.thread_id,text:JSON.stringify(detail.contextContent),title:document.getElementById('detail-title').textContent,folds:[...document.querySelectorAll('#detail-content .structured-payload')].map(el=>el.tagName==='SECTION'||el.open)}));
   check(child.id===result.childId&&child.text.includes('CHILD_CONTEXT_ONLY')&&!child.text.includes('PARENT_CONTEXT_ONLY'),'child context identity');check(child.title.includes('子代理')&&child.folds.every(Boolean),'child role and initial disclosure');
   await page.evaluate(id=>{document.getElementById('detail-dialog').close();const row=tableViews.get('context-rows').rows.find(row=>row.textContent.includes(title(threadIndex.get(id))));const buttons=[...row.querySelectorAll('button')];buttons.find(button=>button.textContent==='代理訊息').click();},result.childId);
   check(await page.evaluate(()=>detail.section==='agent-messages'&&document.querySelector('#detail-dialog [role="tab"][aria-selected="true"]').textContent==='代理訊息'),'message button targets correct section');

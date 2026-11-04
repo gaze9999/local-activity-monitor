@@ -14,15 +14,19 @@ async page=>{
   });
   for(const item of palettes)check(new Set(item.colors).size===4&&item.contrast.every(value=>value>=3)&&item.accent===item.hex,'theme palette '+JSON.stringify(item));
   check(new Set(palettes.map(item=>item.accent)).size===6,'theme-specific accents');
-  await page.evaluate(()=>{openSettings();});await page.locator('#settings-dialog').getByRole('tab',{name:'API 查詢',exact:true}).click();
   const layouts=[];
-  check(await page.locator('#observation-api input[name=codex_account]').count()===1,'account API setting exists');
-  check(await page.locator('#observation-api .api-setting-row').count()===7,'seven source settings');
-  for(const lang of ['zh-TW','en','ja'])for(const width of [1366,390,320]){
-    await page.setViewportSize({width,height:900});await page.evaluate(lang=>{locale=lang;applyLanguage();appearance.font=24;applyAppearance();},lang);
-    const overflow=await page.locator('#observation-api').evaluate(el=>el.scrollWidth>el.clientWidth+1);check(!overflow,'API layout '+lang+' '+width);layouts.push({lang,width});
+  // API query settings are hidden in the shipped page; palettes and modal tables still run.
+  const apiVisible=await page.evaluate(()=>apiQueriesVisible);
+  if(apiVisible){
+    await page.evaluate(()=>{openSettings();});await page.locator('#settings-dialog').getByRole('tab',{name:'API 查詢',exact:true}).click();
+    check(await page.locator('#observation-api input[name=codex_account]').count()===1,'account API setting exists');
+    check(await page.locator('#observation-api .api-setting-row').count()===7,'seven source settings');
+    for(const lang of ['zh-TW','en','ja'])for(const width of [1366,390,320]){
+      await page.setViewportSize({width,height:900});await page.evaluate(lang=>{locale=lang;applyLanguage();appearance.font=24;applyAppearance();},lang);
+      const overflow=await page.locator('#observation-api').evaluate(el=>el.scrollWidth>el.clientWidth+1);check(!overflow,'API layout '+lang+' '+width);layouts.push({lang,width});
+    }
+    await page.locator('#settings-close').click();
   }
-  await page.locator('#settings-close').click();
   await page.evaluate(()=>{stopEventStream();locale='zh-TW';applyLanguage();appearance.font=15;appearance.theme='sand';appearance.mode='dark';applyAppearance();switchTab('monitor');});
   const modalTables=await page.evaluate(()=>{
     const rows=Array.from({length:31},(_,index)=>{const row=node('tr');cell(row,index);return row;});
@@ -34,5 +38,5 @@ async page=>{
     content.append(one,two);attachTables(false,content);const state=[one,two].map(section=>[...section.querySelectorAll('table')].map(el=>!!el.closest('.table-disclosure')));$('detail-close').click();return {single,state};
   });check(modalTables.single&&modalTables.state.every(items=>JSON.stringify(items)==='[true,false]'),'modal last table remains open '+JSON.stringify(modalTables));
   await page.locator('#monitor-codex').screenshot({path:'.local/codex-card.png'});
-  return {palettes,layouts,requests,modalTables};
+  return {palettes,layouts,requests,modalTables,apiSettings:apiVisible?'checked':'skipped: API queries hidden'};
 }
