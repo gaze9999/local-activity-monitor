@@ -2,6 +2,7 @@
 from __future__ import annotations
 from .thread_state import ThreadState
 from .session_checkpoint import SessionCheckpoint
+from .session_scan import LINE_LIMIT, backfill, forward
 from .agent_messages import agent_messages, parse_message_detail, incoming_message
 from .activity_windows import cutoff, contains
 
@@ -425,23 +426,14 @@ class CodexCollector:
                     budget -= len(raw)
                     self.read_bytes += len(raw)
                 line_offset = state["offset"]-len(raw)-len(state["buffer"])
-                data = state["buffer"] + raw
-                lines = data.split(b"\n")
-                state["buffer"] = lines.pop()
-                if state["discard"] and lines:
-                    skipped = lines.pop(0)
-                    line_offset += len(skipped)+1
+                skipped, state["buffer"], state["discard"], lines = forward(state["buffer"] + raw, state["discard"], LINE_LIMIT)
+                if skipped:
                     if state["history_cursor"] is not None:
-                        state["history_cursor"] += len(skipped)+1
+                        state["history_cursor"] += skipped
                     if state.get("error_cursor") is not None:
-                        state["error_cursor"] += len(skipped)+1
-                    state["discard"] = False
-                for line in lines:
-                    self.parse(state, line, line_offset)
-                    line_offset += len(line)+1
-                if len(state["buffer"]) > 1024*1024:
-                    state["buffer"] = b""
-                    state["discard"] = True
+                        state["error_cursor"] += skipped
+                for position, line in lines:
+                    self.parse(state, line, line_offset+position)
                 state["partial_history"] = state["offset"] < size
                 touched.append(path)
                 if raw and pause and pause():
@@ -472,13 +464,10 @@ class CodexCollector:
                 budget -= len(raw)
                 self.read_bytes += len(raw)
                 state["bytes"] += len(raw)
-                lines = raw.split(b"\n")
-                first = lines.pop(0) if start else b""
-                state["history_cursor"] = start+len(first)+1 if start and lines else start
-                if state["history_cursor"] >= end:
-                    state["history_cursor"] = start
-                for line in reversed(lines):
-                    if len(line) <= 1024*1024 and (b'"task_started"' in line or b'"task_complete"' in line):
+                skipped, lines = backfill(raw, start > 0, LINE_LIMIT, reverse=True)
+                state["history_cursor"] = start+skipped if skipped <= len(raw) and start+skipped < end else start
+                for _, line in lines:
+                    if b'"task_started"' in line or b'"task_complete"' in line:
                         try:
                             record = json.loads(line)
                             if isinstance(record, dict) and record.get("type") == "event_msg" and isinstance(record.get("payload"), dict) and record["payload"].get("type") in ("task_started", "task_complete"):
@@ -509,17 +498,10 @@ class CodexCollector:
                 budget -= len(raw)
                 self.read_bytes += len(raw)
                 state["bytes"] += len(raw)
-                lines = raw.split(b"\n")
-                first = lines.pop(0) if begin else b""
-                state["error_cursor"] = min(end-1, begin+len(first)+1) if begin and lines else begin
-                positioned = []
-                line_offset = begin+len(first)+1 if begin else 0
-                for line in lines:
-                    positioned.append((line_offset, line))
-                    line_offset += len(line)+1
-                for line_offset, line in reversed(positioned):
-                    if not line or len(line) > 1024*1024:
-                        continue
+                skipped, lines = backfill(raw, begin > 0, LINE_LIMIT, reverse=True)
+                state["error_cursor"] = min(end-1, begin+skipped) if begin and skipped <= len(raw) else begin
+                for position, line in lines:
+                    line_offset = begin+position
                     try:
                         record = json.loads(line)
                         if not isinstance(record, dict) or not isinstance(record.get("payload"), dict):
@@ -618,13 +600,11 @@ class CodexCollector:
                     body = stream.read(end-start)
                 self.related_budget -= len(body)
                 self.read_bytes += len(body)
-                lines = body.split(b"\n")
-                first = lines.pop(0) if start else b""
-                line_offset = start+len(first)+1 if start else 0
-                index["cursor"] = line_offset if line_offset < end else start
+                skipped, lines = backfill(body, start > 0, LINE_LIMIT, reverse=False)
+                index["cursor"] = start+skipped if start+skipped < end else start
                 needles = [call.encode("utf-8") for call in targets]
-                for raw in lines:
-                    if len(raw) <= 1024*1024 and any(needle in raw for needle in needles):
+                for position, raw in lines:
+                    if any(needle in raw for needle in needles):
                         try:
                             record = json.loads(raw)
                             payload = record.get("payload") if isinstance(record, dict) else None
@@ -633,10 +613,9 @@ class CodexCollector:
                                 kind = payload.get("type")
                                 if kind in ("function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"):
                                     key = "request_offset" if kind in ("function_call", "custom_tool_call") else "response_offset"
-                                    index["positions"].setdefault(call, {}).setdefault(key, line_offset)
+                                    index["positions"].setdefault(call, {}).setdefault(key, start+position)
                         except (ValueError, AttributeError, RecursionError):
                             pass
-                    line_offset += len(raw)+1
             except OSError:
                 continue
 
@@ -710,7 +689,7 @@ class CodexCollector:
         source_info[str(self.root)+"#subagent_lifecycle"] = report
 
     def parse(self, state, raw, offset=None):
-        if not raw or len(raw) > 1024*1024:
+        if not raw or len(raw) > LINE_LIMIT:
             return
         try:
             record = json.loads(raw)

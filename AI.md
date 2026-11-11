@@ -9,6 +9,7 @@ Local Activity Monitor owns local source projections, collection, HTTP endpoints
 | Task | Documentation | Implementation / focused check |
 | --- | --- | --- |
 | Data provenance, missing values or health | `docs/data-inventory.md`, `docs/architecture.md` | Matching collector / projection in `src/local_activity_monitor/`, source fixture tests, null / zero / false distinctions |
+| Session JSONL framing and offsets | `docs/maintenance.md#rust-session-掃描器` | `rust/session-scan/`, `src/local_activity_monitor/session_scan.py`, `tests/test_session_scan.py`, `tests/test_http_contract.py` |
 | Tabs, details, live updates or file-page delay | `docs/usage.md`, `docs/performance-report.md` | `frontend/app.js`, `frontend/style.css`, `files-navigation-flow.cjs`, `partial-refresh-flow.cjs`, `table-stream-interaction-flow.cjs` |
 | Summary sources, custom cards or groups | `docs/card-library.md`, `docs/settings-format.md` | Summary / card layout helpers in `frontend/app.js`, `settings-cards-flow.cjs`, `settings-sources-flow.cjs`, stable IDs and keyboard / pointer cancel |
 | Table columns or instructions layout | `docs/usage.md` | `dragColumn` / `moveColumn` / `renderTableColumns` and instructions detail in `frontend/app.js`, `table-column-flow.cjs`, `instructions-layout-flow.cjs`, `detail-tabs-flow.cjs` |

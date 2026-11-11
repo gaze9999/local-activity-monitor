@@ -64,6 +64,14 @@ Workbench UI 負責共用元件、布局與 UIUX, LAM 負責資料投影、欄�
 
 執行方式見 [測試與建置](validation.md), 收集流程與保存上限見 [效能與資料上限](performance-report.md)
 
+## Rust session 掃描器
+
+在原始碼儲存庫根目錄, 使用 Cargo 和啟用 GIL 的 CPython 3.10 以上版本執行 `python tools/build_rust.py` (macOS 可用 `python3`), 下一次從原始碼啟動時會載入建置完成的 Rust 模組, 未建置時使用 Python 掃描器
+
+Rust 逐行產出 Codex session JSONL 的位元組位置及內容, 供即時收集、lifecycle 與錯誤回補、按需明細索引使用, JSON 解析、欄位投影與 SQLite 保存仍由既有 Python 流程處理
+
+以 `python -c "import sys; sys.path.insert(0, 'src'); from local_activity_monitor.session_scan import forward; print(forward.__module__)"` 核對實際載入的模組, Rust 模式顯示 `local_activity_monitor._session_scan`
+
 ## 新共用能力與查詢驗收
 
 八個 API 後端來源分別檢查 on / off、60–86,400 秒間隔、快取、失敗與恢復, 用量頁的 Decisions / 組織費用卡片檢查手動查詢、憑證模式與狀態, 其他入口及自動查詢設定維持隱藏. Dots 只重新讀取所選 home 的有界桌面快取, metadata 停用不讀取, 不接受任意路徑. MCP 本機文件查詢與狀態留在各來源, 內容預設唯讀, 編輯 / 取消 / 儲存維持原有白名單、遮蔽及版本檢查
