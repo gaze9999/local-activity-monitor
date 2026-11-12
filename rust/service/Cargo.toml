@@ -1,0 +1,41 @@
+[package]
+name = "local-activity-monitor"
+version = "0.22.3"
+edition = "2021"
+publish = false
+
+[dependencies]
+lam-session-core = { path = "../session-core", features = ["sqlite-python"] }
+jiter = "0.18.0"
+notify = { version = "8.2", default-features = false, features = ["macos_kqueue"] }
+walkdir = "2"
+
+base64 = "0.22"
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
+flate2 = "1"
+form_urlencoded = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+lam-history-store = { path = "../history-store" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+regex = "1"
+rusqlite = { version = "0.42.0", default-features = false, features = ["libsqlite3-sys", "bundled"] }
+sha2 = "0.10"
+shlex = "1.3"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-io-timeout = "1.2"
+webbrowser = { version = "1.2.7", features = ["hardened"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.191"
+rustix = { version = "1", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }

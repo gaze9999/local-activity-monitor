@@ -275,7 +275,14 @@ class HistoryStore:
         more = len(rows) > limit
         rows = rows[:limit]
         next_cursor = base64.urlsafe_b64encode(json.dumps([rows[-1][1] or '', rows[-1][2]], separators=(',', ':')).encode()).decode() if more else None
-        return {"items": [json.loads(row[0]) for row in rows], "total": total, "limit": limit, "offset": offset, "next_cursor": next_cursor}
+        items = [json.loads(row[0]) for row in rows]
+        if self.namespace == "errors" and section == "events":
+            from .error_records import sanitize_error_identifiers
+            items = [sanitize_error_identifiers(item) for item in items]
+        if self.namespace == "activity" and section == "mcp":
+            from .mcp_records import sanitize_mcp_resources
+            items = [sanitize_mcp_resources(item) for item in items]
+        return {"items": items, "total": total, "limit": limit, "offset": offset, "next_cursor": next_cursor}
 
     def aggregate(self, section, since=None, excluded_sources=()):
         """Aggregate retained metadata in SQLite without loading event payloads."""

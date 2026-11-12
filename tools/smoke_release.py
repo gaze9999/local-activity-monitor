@@ -1,4 +1,5 @@
 """Start only a supplied build against a disposable home and check its HTTP UI."""
+import argparse
 import json
 import gzip
 import os
@@ -36,10 +37,18 @@ def main():
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root/"src"))
     from local_activity_monitor import __version__
-    executable = Path(sys.argv[1]).resolve()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("executable", type=Path)
+    parser.add_argument("--rust-assets", type=Path, help="Test a Rust service with this verified asset root")
+    options = parser.parse_args()
+    executable = options.executable.resolve()
     with tempfile.TemporaryDirectory() as directory:
         home = Path(directory)
-        args = [str(executable), "--codex-home", str(home), "--port", "0", "--no-browser"]
+        args = [str(executable), "--codex-home", str(home), "--port", "0"]
+        if options.rust_assets is None:
+            args.append("--no-browser")
+        else:
+            args.extend(["--assets", str(options.rust_assets.resolve()), "--codex"])
         if executable.suffix == ".py":
             args.insert(0, sys.executable)
         env = dict(os.environ, CODEX_HOME=str(home), LOCALAPPDATA=str(home), XDG_DATA_HOME=str(home), HOME=str(home))

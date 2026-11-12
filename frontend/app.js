@@ -1021,10 +1021,11 @@ function renderVisibleContent(){
   if(panelNeeded("overview-account-card"))renderBilling();
   if(snapshotDisplayState==="ready"||data.initial_sections)setSnapshotState(snapshotDisplayState);
 }
-function selectSourceStatus(value){const read=value.codex?.read_state||{},sources=sourceRows(value.logs?.sources||[],value.sources||{}).filter(source=>source.enabled!==false&&source.health!=="disabled");return [value.settings?.activity_retention_days??90,read.file_count||0,read.pending_files??read.initial_pending_files??0,value.locale,sources.filter(source=>source.health==="ok").length,sources.length];}
+let partialRetention=null;
+function selectSourceStatus(value){const read=value.codex?.read_state||{},sources=sourceRows(value.logs?.sources||[],value.sources||{}).filter(source=>source.enabled!==false&&source.health!=="disabled");return [value.settings?.activity_retention_days??partialRetention,read.file_count||0,read.pending_files??read.initial_pending_files??0,value.locale,sources.filter(source=>source.health==="ok").length,sources.length];}
 function renderSourceStatus(value){
   const [days,total,pending]=value;
-  $("source-retention").textContent=days?ui("活動紀錄 ")+fmt(days)+ui(" 天"):ui("不自動刪除");
+  $("source-retention").textContent=days==null?"--":days?ui("活動紀錄 ")+fmt(days)+ui(" 天"):ui("不自動刪除");
   $("source-backfill").textContent=pending?ui("回補 ")+fmt(total-pending)+" / "+fmt(total):"";
   $("source-backfill").hidden=!total||!pending;
   let availability=$("source-availability");if(!availability){availability=node("span");availability.id="source-availability";$("source-retention").before(availability);}availability.textContent=ui("資料來源 ")+fmt(value[4])+" / "+fmt(value[5]);availability.title=ui("最近檢查成功 / 已啟用資料來源, 對應來源 Log 的檢查列");availability.tabIndex=0;
@@ -1103,7 +1104,7 @@ function sqlLocation(event){return !event.database?null:event.database===":memor
 function renderSQLite(){
   const sql=data.codex.sqlite||{},events=sql.events||[];
   const aggregate=sql.aggregate?.scope==="retained_database"?sql.aggregate:null;
-  $("sqlite-scope").textContent=data.settings.observations.sqlite===false?ui("SQL 操作檢查已停用"):ui("從工具呼叫與 SQL 診斷辨識操作類型")+" · "+fmt(aggregate?.total??events.length)+ui(" 筆操作")+(aggregate?ui(" · SQLite 保存範圍統計"):"");
+  $("sqlite-scope").textContent=data.settings?.observations?.sqlite===false?ui("SQL 操作檢查已停用"):ui("從工具呼叫與 SQL 診斷辨識操作類型")+" · "+fmt(aggregate?.total??events.length)+ui(" 筆操作")+(aggregate?ui(" · SQLite 保存範圍統計"):"");
   cards("sqlite-cards",[[ui("SQL 操作"),fmt(events.length),ui("最近保留的操作紀錄")],[ui("資料庫"),fmt(new Set(events.map(sqlLocation).filter(Boolean)).size),ui("可確認的檔案與記憶體資料庫")],[ui("SQL 診斷紀錄"),fmt(events.filter(e=>e.recognition==="diagnostic_log").length),ui("來源實際提供的 SQL metadata")],[ui("工具失敗"),fmt(new Set(events.filter(e=>e.result==="failed").map(e=>e.thread_id+":"+e.call_id)).size),ui("整次工具呼叫的回傳狀態")]]);
   replaceRows("sqlite-rows",...sqlEventRows(events));
   $("sqlite-empty").textContent=events.length?"":ui("目前時間範圍沒有 SQL 紀錄");
@@ -1869,6 +1870,36 @@ addEventListener("pagehide",()=>{clearTimeout(chromeTimer);chromeTimer=0;stopEve
 addEventListener("online",()=>{if(connectionLost)refresh();});
 function syncSessionTracking(){}
 function syncRetentionSettings(){if(document.activeElement!==$("activity-retention-days"))$("activity-retention-days").value=data?.settings?.activity_retention_days??90;}
+$("apply-activity-retention").addEventListener("click",async()=>{
+  const input=$("activity-retention-days");
+  if(!input.checkValidity()) { input.reportValidity(); return; }
+  const button=$("apply-activity-retention");
+  button.disabled=true;
+  try{
+    if(data.settings){
+      await changeSettings({activity_retention_days:Number(input.value)});
+      syncRetentionSettings();
+    }else{
+      const result=await post("/api/settings",{activity_retention_days:Number(input.value)});
+      input.value=result.activity_retention_days;
+      partialRetention=result.activity_retention_days;
+      renderSourceStatus(selectSourceStatus({...data,locale}));
+      feedback("settings-message",ui("設定已套用"));
+    }
+  }catch(error){
+    if(!data.settings){
+      try{
+        const current=await request("/api/settings");
+        if(current.ok&&Number.isInteger(current.data?.activity_retention_days)){
+          partialRetention=current.data.activity_retention_days;
+          renderSourceStatus(selectSourceStatus({...data,locale}));
+        }
+      }catch{}
+    }
+    feedback("settings-message",error.message,"error");
+  }
+  finally{button.disabled=false;}
+});
 function connectionRecovered(){connectionLost=false;}
 function queueReconnect(closed=false){connectionLost=true;$("live").textContent=ui(closed?"連線中斷, 請重新整理頁面":"連線中斷, 自動重試中");setSnapshotState("error");renderConnectionStatus(true);}
 function refresh(){
@@ -1906,7 +1937,7 @@ async function acceptSnapshot({stream,value}){
   try{
     let next=value.snapshot;
     const frontendRevision=next.frontend_revision||next.revision?.split("-").at(-1),backendRevision=next.backend_revision||next.activity?.code_revision;
-    if(loadedBackendRevision&&backendRevision&&loadedBackendRevision!==backendRevision)preferencesApplied=false;
+    if(loadedBackendRevision&&backendRevision&&loadedBackendRevision!==backendRevision){preferencesApplied=false;partialRetention=null;}
     loadedBackendRevision=backendRevision||loadedBackendRevision;
     if(loadedFrontendRevision&&frontendRevision&&loadedFrontendRevision!==frontendRevision&&!document.querySelector("dialog[open]")){
       pendingRevision=frontendRevision;const ready=await request("/",{cache:"no-store"});if(!ready.ok)throw new Error();
@@ -1914,7 +1945,7 @@ async function acceptSnapshot({stream,value}){
     }
     loadedFrontendRevision??=frontendRevision;
     if(!loadedRevision||!document.querySelector("dialog[open]"))loadedRevision=next.revision||loadedRevision;
-    if(!preferencesApplied){
+    if(!preferencesApplied&&next.settings){
       preferencesApplied=true;
       if(preferences.settings){const saved=Object.fromEntries(Object.entries(compatibleSettings(preferences.settings,next.settings,next.mcp?.categories||{})).filter(([key,value])=>JSON.stringify(value)!==JSON.stringify(next.settings[key])));if(Object.keys(saved).length){try{await post("/api/settings",saved);return;}catch(error){if(![400,409].includes(error.status))throw error;preferences.settings=null;}}}
     }
@@ -2030,10 +2061,24 @@ function renderObservationSettings(){
   }
   if(!recordingCards.childElementCount)recording.append(node("p","--","empty"));syncHelp();
 }
-function openSettings(){
+let settingsNavigation,settingsSections;
+async function openSettings(){
   $("language-select").value=locale;
   $("display-options").value=display.options.join(", ");fillDisplayOptions($("default-ranking"),display.ranking);fillDisplayOptions($("default-table"),display.table);$("default-lines").value=display.lines??displayDefaults.lines;for(const [id,key]of [["default-main-summary","mainSummary"],["default-sub-summary","subSummary"]])$(id).value=display[key]??displayDefaults[key];
   if(!data)return;applyAppearance();syncSessionTracking();syncRetentionSettings();
+  let retention=null;
+  if(!data.settings){
+    try{const response=await request("/api/settings");if(response.ok&&Number.isInteger(response.data?.activity_retention_days)){retention=response.data.activity_retention_days;partialRetention=retention;renderSourceStatus(selectSourceStatus({...data,locale}));}}catch{}
+  }
+  settingsNavigation.setAvailable(data.settings?settingsSections:retention===null?["外觀","顯示"]:["外觀","顯示","更新與追蹤"],"外觀");
+  $("debug-mode").closest(".setting-row").hidden=!data.settings;
+  $("debug-help").hidden=!data.settings;
+  if(!data.settings){
+    if(retention!==null)$("activity-retention-days").value=retention;
+    if(!$("settings-dialog").open)openDialog($("settings-dialog"));
+    if(retention===null)feedback("settings-message",ui("資料暫時無法讀取"),"error");
+    return;
+  }
   renderObservationSettings();
   docTools=[...new Set([...docTools,...Object.keys(data.codex.tools||{}),...Object.keys(data.codex.nested_tools||{}),...Object.keys(data.settings.tool_descriptions||{})])].sort();renderToolDocs();
   $("settings-message").textContent="";if(!$("settings-dialog").open)openDialog($("settings-dialog"));
@@ -2399,7 +2444,7 @@ function groupSettings(){
   for(const child of [...content.children]){if(child.dataset.modalSection){if(child.dataset.modalSection==="資料來源"){panel=null;continue;}panel=node("section");groups.push([child.dataset.modalSection,ui(child.dataset.modalSection),panel]);}panel?.append(child);}
   const position=groups.findIndex(([key])=>key==="設定檔");for(const [index,[key,id]]of [["監測項目","observation-data"],["API 查詢","observation-api"],["MCP 來源","observation-mcp"],["來源紀錄","observation-recording"]].filter(([key])=>apiQueriesVisible||key!=="API 查詢").entries()){const section=node("section");section.append(node("h4",ui(key)));const target=node("div");target.id=id;section.append(target);groups.splice(position+index,0,[key,ui(key),section]);}
   const privacy=node("section"),maskRow=node("label",null,"setting-row"),maskControl=node("input");maskControl.id="content-masking";maskControl.type="checkbox";maskControl.className="switch";maskControl.setAttribute("role","switch");maskControl.setAttribute("aria-label",ui("遮蔽明細中的敏感資料"));maskControl.checked=contentMasked();maskControl.addEventListener("change",()=>setContentMasking(maskControl.checked));maskRow.append(node("span",ui("遮蔽敏感資料")),maskControl);privacy.append(node("h4",ui("內容與隱私")),maskRow,node("p",ui("套用到訊息, 工具執行回覆, SQL, 錯誤與 Context 的按需明細, 不修改來源或歷史快照"),"muted"));bindHelp(maskControl,ui("關閉後顯示來源原有內容, 設定套用到所有支援遮蔽的按需明細"));groups.splice(groups.findIndex(([key])=>key==="設定檔"),0,["內容與隱私",ui("內容與隱私"),privacy]);
-  setupPresentationSettings(groups.find(([key])=>key==="顯示")[2]);settingsLayout(content,groups,"settings-sections","外觀",status);
+  setupPresentationSettings(groups.find(([key])=>key==="顯示")[2]);settingsSections=groups.map(([key])=>key);settingsNavigation=settingsLayout(content,groups,"settings-sections","外觀",status);
   $("workbench-version").textContent="WBUI "+(window.WorkbenchUI.version?"v"+window.WorkbenchUI.version:ui("尚未提供"));
 }
 function groupTabSettings(){

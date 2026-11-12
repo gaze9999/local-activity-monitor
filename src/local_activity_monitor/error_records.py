@@ -25,6 +25,19 @@ def identifier(value):
     return value if isinstance(value, str) and IDENTIFIER.fullmatch(value) else None
 
 
+def error_identifier(value):
+    value = identifier(value)
+    return value if value and not value.startswith(("sk-", "sk_")) else None
+
+
+def sanitize_error_identifiers(value):
+    if not isinstance(value, dict):
+        return value
+    return {key: item for key, item in value.items()
+            if key not in ("code", "request_id", "trace_id", "error_type", "method")
+            or not isinstance(item, str) or not item.startswith(("sk-", "sk_"))}
+
+
 def diagnostic_details(text):
     """Extract trace identifiers and recognized failure causes, never free-form text."""
     if not isinstance(text, str):
@@ -38,7 +51,7 @@ def diagnostic_details(text):
     for key, aliases in (("request_id", "request_id|requestId"), ("trace_id", "trace_id|traceId|correlationId"), ("error_type", "errorName|error_type"), ("method", "method")):
         for alias in aliases.split('|'):
             item = pairs.get(alias)
-            if isinstance(item, str) and re.fullmatch(r'[a-zA-Z0-9_.:-]{1,160}', item):
+            if isinstance(item, str) and re.fullmatch(r'[a-zA-Z0-9_.:-]{1,160}', item) and not item.startswith(('sk-', 'sk_')):
                 result[key] = item
                 break
     heading = re.split(r'\s[a-zA-Z_][a-zA-Z0-9_]*[=:]', text, maxsplit=1)[0]
@@ -71,13 +84,13 @@ def tool_error(output):
     if value.get("isError") is not True and not value.get("error") and status not in FAILURES and exit_code in (None, 0):
         return None
     error = value.get("error")
-    code = identifier(error.get("code")) if isinstance(error, dict) else None
-    result = {"code": code or identifier(value.get("error_code")) or ("process_exit" if exit_code not in (None, 0) else identifier(status) or "tool_error"), "exit_code": exit_code}
+    code = error_identifier(error.get("code")) if isinstance(error, dict) else None
+    result = {"code": code or error_identifier(value.get("error_code")) or ("process_exit" if exit_code not in (None, 0) else error_identifier(status) or "tool_error"), "exit_code": exit_code}
     if isinstance(error, dict):
         result.update(diagnostic_details(error.get("message")))
         for key in ("request_id", "trace_id", "error_type"):
             item = identifier(error.get(key))
-            if item:
+            if item and not item.startswith(("sk-", "sk_")):
                 result[key] = item
         status = error.get("http_status", error.get("status_code"))
         if type(status) is int and 100 <= status <= 599:
@@ -200,7 +213,7 @@ class DiagnosticCollector:
         fields = {}
         for item in re.finditer(r'\b([a-zA-Z_][a-zA-Z0-9_]*)=("(?:\\.|[^"\\])*"|[^\s]+)', body):
             key, value = item.groups()
-            if key in ("conversationId", "threadId", "thread_id", "errorCode", "errorName", "method") and value != "null" and not value.startswith('"') and identifier(value):
+            if key in ("conversationId", "threadId", "thread_id", "errorCode", "errorName", "method") and value != "null" and not value.startswith('"') and error_identifier(value):
                 fields[key] = value
         thread = next((fields[key] for key in ("conversationId", "threadId", "thread_id") if key in fields and re.fullmatch(UUID, fields[key])), None)
         heading = re.split(r"\s[a-zA-Z_][a-zA-Z0-9_]*=", body, maxsplit=1)[0]

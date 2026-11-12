@@ -6,6 +6,9 @@ __pycache__/
 build/
 dist/
 /rust/session-scan/target/
+/rust/history-store/target/
+/rust/service/target/
+/rust/session-core/target/
 /src/local_activity_monitor/_session_scan.abi3.so
 /src/local_activity_monitor/_session_scan.pyd
 

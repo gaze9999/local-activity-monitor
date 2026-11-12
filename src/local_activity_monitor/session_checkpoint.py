@@ -6,6 +6,7 @@ import re
 import sqlite3
 
 from .history_store import HistoryStore
+from .session_scan import decode_record
 
 
 FIELDS = ('thread_id', 'model', 'reasoning_effort', 'execution', 'context_time',
@@ -54,7 +55,7 @@ class SessionCheckpoint:
             offset, signature, payload = row
             if type(offset) is not int or offset<0 or not isinstance(payload,str) or len(payload)>self.BYTE_LIMIT or self.signature(path,offset)!=signature:
                 return None
-            value = json.loads(payload)
+            value = decode_record(payload)
             if not isinstance(value,dict) or value.get('version')!=1 or not isinstance(value.get('state'),dict):
                 return None
             state = value['state']
@@ -67,7 +68,7 @@ class SessionCheckpoint:
             for identity, raw in calls:
                 if not isinstance(raw,str) or (call_bytes:=call_bytes+len(raw))>self.BYTE_LIMIT:
                     return None
-                state['calls'][identity] = json.loads(raw)
+                state['calls'][identity] = decode_record(raw)
             for identity, call in state['calls'].items():
                 if not isinstance(identity,str) or not 1<=len(identity)<=160 or not isinstance(call,dict) or set(call)-set(CALL_FIELDS) or not isinstance(call.get('tool'),str) or not isinstance(call.get('timestamp'),(str,type(None))):
                     return None

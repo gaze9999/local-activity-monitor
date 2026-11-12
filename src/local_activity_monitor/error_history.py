@@ -5,7 +5,7 @@ import json
 import sqlite3
 import threading
 
-from .error_records import identifier
+from .error_records import identifier, sanitize_error_identifiers
 from .history_store import HistoryStore
 
 
@@ -51,6 +51,7 @@ class ErrorHistory:
         ceiling = datetime.now(timezone.utc)+timedelta(minutes=1)
         result = {}
         for value in events:
+            value = sanitize_error_identifiers(value)
             if not isinstance(value, dict) or value.get("severity") not in ("error", "warning"):
                 continue
             try:

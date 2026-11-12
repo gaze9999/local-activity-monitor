@@ -2,7 +2,7 @@
 from __future__ import annotations
 from .thread_state import ThreadState
 from .session_checkpoint import SessionCheckpoint
-from .session_scan import LINE_LIMIT, backfill, forward
+from .session_scan import LINE_LIMIT, backfill, decode_record, forward, integer, project_counters
 from .agent_messages import agent_messages, parse_message_detail, incoming_message
 from .activity_windows import cutoff, contains
 
@@ -21,7 +21,7 @@ from .codex_metadata import execution_metadata, read_metadata, spawn_metadata
 from .codex_schedules import read_schedules
 from .codex_plugins import read_plugins
 from .payload_detail import bounded_payload, complete_payload, visible_context_record, payload_masking
-from .error_records import identifier, tool_error
+from .error_records import error_identifier, identifier, tool_error
 from .mcp_records import mcp_operations, response_metadata, decoded_output
 from .operation_records import file_operations, git_commands, shell_parts, invocations, invocation_expressions, operations, qualified_tool, redact, workflow_operations
 from .sqlite_records import sql_content, sqlite_operations
@@ -36,10 +36,6 @@ WINDOWS = {"1h": 1, "24h": 24, "7d": 168, "all": None}
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def integer(value):
-    return value if type(value) is int and 0 <= value <= 2**63 - 1 else None
 
 
 def name(value):
@@ -238,11 +234,11 @@ class CodexCollector:
         if when and (not state["updated_at"] or when > state["updated_at"]):
             state["updated_at"] = when
         if self.features["errors"] and kind == "event_msg":
-            event_type = identifier(payload.get("type"))
+            event_type = error_identifier(payload.get("type"))
             if event_type and (event_type in ("error", "turn_aborted", "turn_failed") or event_type.endswith("_failed")):
                 error = payload.get("error")
-                code = identifier(error.get("code")) if isinstance(error, dict) else None
-                state["errors"].append({"timestamp": when, "category": "conversation", "code": code or identifier(payload.get("error_code")) or event_type, "reason": event_type, "file": state.get("source_file"), "source": "session", "severity": "warning" if event_type == "turn_aborted" else "error"})
+                code = error_identifier(error.get("code")) if isinstance(error, dict) else None
+                state["errors"].append({"timestamp": when, "category": "conversation", "code": code or error_identifier(payload.get("error_code")) or event_type, "reason": event_type, "file": state.get("source_file"), "source": "session", "severity": "warning" if event_type == "turn_aborted" else "error"})
                 state.setdefault('pending_errors',[]).append(state['errors'][-1])
                 state["errors"] = sorted(state["errors"], key=lambda event:event["timestamp"] or "", reverse=True)[:50]
         if kind == "session_meta":
@@ -341,8 +337,7 @@ class CodexCollector:
             info = payload.get("info")
             usage, priority = info.get("total_token_usage") if isinstance(info, dict) else None, 1
         if isinstance(usage, dict) and when and (when > state["token_time"] or when == state["token_time"] and priority >= state["token_priority"]):
-            clean = {key: integer(usage.get(key)) for key in COUNTERS}
-            if any(value is not None for value in clean.values()):
+            if (clean := project_counters(usage, COUNTERS)) is not None:
                 state.update(tokens=clean, token_time=when, token_priority=priority)
         if kind == "event_msg" and payload.get("type") == "token_count" and isinstance(payload.get("info"), dict):
             state["execution"].update(execution_metadata({"context_window": payload["info"].get("model_context_window")}))
@@ -469,7 +464,7 @@ class CodexCollector:
                 for _, line in lines:
                     if b'"task_started"' in line or b'"task_complete"' in line:
                         try:
-                            record = json.loads(line)
+                            record = decode_record(line)
                             if isinstance(record, dict) and record.get("type") == "event_msg" and isinstance(record.get("payload"), dict) and record["payload"].get("type") in ("task_started", "task_complete"):
                                 self.consume(state, record)
                                 if state["task_time"]:
@@ -503,7 +498,7 @@ class CodexCollector:
                 for position, line in lines:
                     line_offset = begin+position
                     try:
-                        record = json.loads(line)
+                        record = decode_record(line)
                         if not isinstance(record, dict) or not isinstance(record.get("payload"), dict):
                             continue
                         date = datetime.fromisoformat(record.get("timestamp", "").replace("Z", "+00:00"))
@@ -606,7 +601,7 @@ class CodexCollector:
                 for position, raw in lines:
                     if any(needle in raw for needle in needles):
                         try:
-                            record = json.loads(raw)
+                            record = decode_record(raw)
                             payload = record.get("payload") if isinstance(record, dict) else None
                             call = payload.get("call_id") or payload.get("id") if isinstance(payload, dict) else None
                             if record.get("type") == "response_item" and call in targets:
@@ -672,7 +667,7 @@ class CodexCollector:
                     if b'"task_started"' not in line and b'"task_complete"' not in line:
                         continue
                     try:
-                        record = json.loads(line)
+                        record = decode_record(line)
                         payload = record.get("payload") if isinstance(record, dict) else None
                         if record.get("type") != "event_msg" or not isinstance(payload, dict) or payload.get("type") not in ("task_started", "task_complete"):
                             continue
@@ -692,7 +687,7 @@ class CodexCollector:
         if not raw or len(raw) > LINE_LIMIT:
             return
         try:
-            record = json.loads(raw)
+            record = decode_record(raw)
             if isinstance(record, dict):
                 self.consume(state, record)
                 payload = record.get("payload")
@@ -750,7 +745,7 @@ class CodexCollector:
                     identities = {event["call_id"] for event in self.thread_state.skills if event["thread_id"] == state["thread_id"] and event["skill"] == skill}
                     for raw in tail.splitlines():
                         try:
-                            record = json.loads(raw)
+                            record = decode_record(raw)
                             payload = record.get("payload") if isinstance(record, dict) else None
                             if record.get("type") != "response_item" or not isinstance(payload, dict) or payload.get("type") not in ("function_call", "custom_tool_call") or (payload.get("call_id") or payload.get("id")) not in identities or targeted and (payload.get("call_id") or payload.get("id")) != call_id:
                                 continue
@@ -874,7 +869,7 @@ class CodexCollector:
             try:
                 for raw in self.detail_lines(path, self.detail_position(thread_id, call_id, call)):
                     try:
-                        record = json.loads(raw)
+                        record = decode_record(raw)
                         payload = record.get('payload') if isinstance(record, dict) else None
                         if record.get('type') != 'response_item' or not isinstance(payload, dict) or (payload.get('call_id') or payload.get('id')) != call_id:
                             continue
@@ -926,7 +921,7 @@ class CodexCollector:
                 result, output = None, None
                 for raw in self.detail_lines(path, positions):
                     try:
-                        record = json.loads(raw)
+                        record = decode_record(raw)
                         payload = record.get("payload") if isinstance(record, dict) else None
                         if not isinstance(payload, dict) or record.get("type") != "response_item" or (payload.get("call_id") or payload.get("id")) != event.get("call_id"):
                             continue
@@ -995,7 +990,7 @@ class CodexCollector:
             try:
                 for raw in self.detail_lines(path, self.detail_position(thread_id, call_id, call)):
                     try:
-                        record = json.loads(raw)
+                        record = decode_record(raw)
                         payload = record.get('payload') if isinstance(record, dict) else None
                         if record.get('type') != 'response_item' or not isinstance(payload, dict) or (payload.get('call_id') or payload.get('id')) != call_id:
                             continue
@@ -1034,22 +1029,14 @@ class CodexCollector:
                 with path.open('rb') as stream:
                     stream.seek(start)
                     raw = stream.read(end-start)
-                lines = raw.split(b'\n')
-                record_offset = start
-                if start:
-                    record_offset += len(lines[0])+1
-                    lines = lines[1:]
+                _, lines = backfill(raw, start > 0, LINE_LIMIT, reverse=False)
                 messages = []
-                for line in lines:
-                    offset = record_offset
-                    record_offset += len(line)+1
-                    if not line or len(line)>1024*1024:
-                        continue
+                for position, line in lines:
                     try:
-                        record = json.loads(line)
+                        record = decode_record(line)
                         value = visible_context_record(record)
                         if value is not None:
-                            messages.append({'record_offset':offset,'timestamp':timestamp(record.get('timestamp')),**value})
+                            messages.append({'record_offset':start+position,'timestamp':timestamp(record.get('timestamp')),**value})
                     except (ValueError,TypeError,AttributeError,RecursionError):
                         continue
                 return {'text':complete_payload(messages[-32:])['value'],'scope':'preceding_visible_messages' if call_id else 'latest_visible_messages','truncated':start>0 or len(messages)>32,'context_state':'recorded' if messages else 'not_recorded','masked':payload_masking.get()}
@@ -1078,7 +1065,7 @@ class CodexCollector:
             try:
                 for raw in self.detail_lines(path, self.detail_position(thread_id, call_id, call)):
                     try:
-                        record = json.loads(raw)
+                        record = decode_record(raw)
                         payload = record.get('payload') if isinstance(record, dict) else None
                         if record.get('type') != 'response_item' or not isinstance(payload, dict) or (payload.get('call_id') or payload.get('id')) != call_id:
                             continue
@@ -1116,7 +1103,7 @@ class CodexCollector:
                     positions["record_offset"] = event["record_offset"]
                 for raw in self.detail_lines(path, positions):
                     try:
-                        record = json.loads(raw)
+                        record = decode_record(raw)
                         payload = record.get('payload') if isinstance(record, dict) else None
                         if event.get("record_hash") and hashlib.sha256(raw.rstrip(b"\n")).hexdigest() != event["record_hash"]:
                             continue
@@ -1154,7 +1141,7 @@ class CodexCollector:
             try:
                 for raw in self.detail_lines(path, self.detail_position(thread_id, call_id, call)):
                     try:
-                        record = json.loads(raw)
+                        record = decode_record(raw)
                         payload = record.get("payload") if isinstance(record, dict) else None
                         if record.get("type") != "response_item" or not isinstance(payload, dict) or (payload.get("call_id") or payload.get("id")) != call_id:
                             continue

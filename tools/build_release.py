@@ -9,10 +9,31 @@ import subprocess
 import sys
 import tempfile
 
+def build_rust_preview(root, output, work, system):
+    manifest = root/"rust/service/Cargo.toml"
+    subprocess.run(["cargo", "build", "--locked", "--release", "--manifest-path", str(manifest),
+                    "--target-dir", str(work)], cwd=root, check=True)
+    bundle = output/"local-activity-monitor"
+    bundle.mkdir()
+    suffix = ".exe" if system == "windows" else ""
+    executable = bundle/("local-activity-monitor"+suffix)
+    shutil.copy2(work/"release"/executable.name, executable)
+    for name in ("_web", "_workbench"):
+        shutil.copytree(root/"src/local_activity_monitor"/name, bundle/name)
+    for name in ("LICENSE", "NOTICE"):
+        shutil.copy2(root/name, bundle/name)
+    subprocess.run([sys.executable, str(root/"tools/smoke_release.py"), str(executable),
+                    "--rust-assets", str(bundle)], cwd=output, check=True)
+    return bundle
+
+
 def main():
     parser = argparse.ArgumentParser(description="Build and test native bundles. Local output is test-only.")
     parser.add_argument("--release", action="store_true", help="Release workflow only")
+    parser.add_argument("--rust-preview", action="store_true", help="Build a local Rust test bundle")
     args = parser.parse_args()
+    if args.release and args.rust_preview:
+        parser.error("--rust-preview is for local testing only")
     if args.release and os.environ.get("GITHUB_ACTIONS") != "true":
         parser.error("--release is restricted to GitHub Actions; omit it for a local test build")
     root = Path(__file__).resolve().parents[1]
@@ -33,6 +54,10 @@ def main():
     work = root/"build"/target if args.release else destination/"build"
     # Existing output may contain user files. Use a fresh release directory.
     output.mkdir(parents=True, exist_ok=False)
+    if args.rust_preview:
+        bundle = build_rust_preview(root, output, work, system)
+        print(bundle)
+        return
     subprocess.run([
         sys.executable, "-m", "PyInstaller", "--onedir", "--console", "--noupx",
         "--name", "launch-cli", "--paths", str(root/"src"),

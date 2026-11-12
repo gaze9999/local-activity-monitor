@@ -68,9 +68,99 @@ Workbench UI 負責共用元件、布局與 UIUX, LAM 負責資料投影、欄�
 
 在原始碼儲存庫根目錄, 使用 Cargo 和啟用 GIL 的 CPython 3.10 以上版本執行 `python tools/build_rust.py` (macOS 可用 `python3`), 下一次從原始碼啟動時會載入建置完成的 Rust 模組, 未建置時使用 Python 掃描器
 
-Rust 逐行產出 Codex session JSONL 的位元組位置及內容, 供即時收集、lifecycle 與錯誤回補、按需明細索引使用, JSON 解析、欄位投影與 SQLite 保存仍由既有 Python 流程處理
+Rust 逐行產出 Codex session JSONL 的位元組位置及內容, 並解碼即時收集、回補、按需明細與 SQLite checkpoint 讀出的 JSON, token 計數只採用白名單內的非負整數, 保留已確認的零值
+
+遇到超出 Rust 解碼器支援範圍的資料時, 由 CPython 保留原有解析行為, 包含帶 BOM 的位元組輸入及超過 64 位元有號整數範圍的數值
 
 以 `python -c "import sys; sys.path.insert(0, 'src'); from local_activity_monitor.session_scan import forward; print(forward.__module__)"` 核對實際載入的模組, Rust 模式顯示 `local_activity_monitor._session_scan`
+
+## Rust 歷史儲存模組
+
+`rust/history-store` 提供 Rust 程序直接存取 LAM SQLite v4 資料庫的介面, 包含建庫、已投影資料的交易寫入、游標分頁、彙總、清理及 checkpoint 讀寫
+
+在原始碼儲存庫根目錄執行 `cargo test --locked --manifest-path rust/history-store/Cargo.toml`, 測試使用各自的暫存資料庫
+
+Rust 服務在獨立程序串接儲存模組, 歷史查詢使用唯讀連線, session checkpoint 使用交易寫入, 每個程序由各自的 SQLite 實作管理檔案鎖定 [SQLite 檔案鎖定說明](https://www.sqlite.org/howtocorrupt.html#multiple_copies_of_sqlite_linked_into_the_same_application)
+
+Rust 服務啟動時會將已存在的 LAM SQLite v1 至 v3 資料庫升級至 v4, 先驗證 `lam-history.sqlite3.schema-v<N>.bak`, 再以交易套用升級, 若升級失敗, 歷史查詢回傳 503, 原資料庫與已完成的備份保留供重試
+
+## Rust 舊版 JSON 歷史匯入
+
+Rust 服務啟動時會檢查所選目錄的 `monitoring/activity-history.json` 與 `monitoring/error-history.json`, 加上 `--codex` 時也檢查 `monitoring/thread-state.json`
+
+每種資料各自驗證檔案大小、格式及欄位, 套用保留期限後才寫入 SQLite, 已有 metadata 或資料列的類別以 SQLite 為準, 舊檔保留供核對
+
+單一來源無效時會在啟動輸出標示該類別, 其他來源仍可匯入, 修正後可重新啟動再試
+
+## Rust session checkpoint
+
+以 `--codex` 啟用收集後, Rust 在所選資料目錄的 `monitoring/lam-history.sqlite3` 儲存最後完整記錄的位置、已選取的對話欄位及工具呼叫摘要, checkpoint 使用 `rust:v1:` 開頭的鍵值, 初次從 Python 切換至 Rust 時會從來源重新收集一次
+
+重啟時核對檔案識別及已讀前綴兩端的摘要, 驗證成功後從已提交的位置續讀, 前綴改寫或檔案更換時重新收集, 未完成的半行在重啟後重新讀取
+
+舊版 Rust checkpoint 會重讀來源以補齊工具錯誤摘要, 來源已不存在時只能查詢先前保存的歷史
+
+`/api/snapshot` 的 `codex.read_state.checkpoint` 提供讀寫狀態與樣本位元組計數, SQLite 忙碌時待下一次來源更新重試, 若回報 `conflict`, 保留另一個程序已提交的位置, 停止重複的收集程序後可重啟續讀
+
+## Rust 服務入口
+
+`python3 tools/build_release.py --rust-preview` 使用本機 Cargo 建置最佳化執行檔, 驗證固定前端資產後組成測試包, 並用隔離資料目錄執行煙霧測試, 通過後印出測試包路徑
+
+從測試包啟動時將 `--assets` 指向包根目錄, 可搭配 `--codex-home <fixture-home> --port 0` 驗證隔離服務, 加上 `--codex` 才會收集, 此模式限本機測試
+
+`tools/smoke_release.py <rust-binary> --rust-assets <asset-root>` 使用隔離資料目錄驗證執行檔及固定資產, Rust 快照的 `monitor.version` 取自 `rust/service/Cargo.toml`, 版本調整時一併核對 lockfile 與 Python 發行版本
+
+未指定 `--codex-home` 時使用 `CODEX_HOME`, 該值未設定或為空時使用使用者目錄下的 `.codex`, 未指定 `--port` 時使用 8787, 指定 `--port 0` 可取得臨時連接埠
+
+指定非零連接埠時, 入口會查詢 loopback 上既有服務的 `/api/instance`, 應用程式及資料目錄識別碼均相符時回傳 `already_running`, 識別不符時由連接埠綁定結果回報失敗
+
+加入 `--open` 時會在新服務啟動或重用既有服務後開啟該服務的 loopback 網址, 優先使用 `BROWSER` 指定的程式, 否則使用平台預設瀏覽器, 暫停後恢復不會再次開啟
+
+加入 `--watch-stdin` 後可逐行傳送 `pause`、`resume` 與 `restart`, 暫停會釋放監聽連接埠並回傳 `paused`, 恢復會重新綁定同一連接埠並回傳 `listening`, `restart` 或輸入結束會關閉程序, 恢復時若連接埠已被占用則回報啟動失敗
+
+開發用啟動器可設定 `LAM_RUST_SERVICE` 為已建置的 Rust 執行檔絕對路徑, 使用既有前端建置產物和替換流程, 未設定時使用 Python 服務
+
+替換程序使用 `--prepare --watch-stdin` 先驗證資產並回傳 `source_ready`, 收到 `start` 後才綁定連接埠及啟動收集, Rust 原始碼變更後須先重新建置執行檔
+
+在原始碼儲存庫根目錄執行下列指令, 將 `<fixture-home>` 換成已存在的隔離資料目錄, 啟動後從 `listening` 訊息取得 URL
+
+```sh
+cargo run --locked --manifest-path rust/service/Cargo.toml -- --codex-home "<fixture-home>" --port 0
+```
+
+`/api/instance` 回傳所選資料目錄的識別碼, `/api/history?section=web` 唯讀查詢該目錄的 SQLite v4 歷史資料
+
+`POST /api/refresh` 接受同源的空 JSON 物件, 回傳目前的活動狀態, 啟用 Codex 收集時會排入一輪更新, 重複請求會合併等待中的更新, 未啟用時維持停用
+
+加入 `--codex` 後, 服務監看所選目錄下的 `sessions/`, `/api/snapshot?window=all` 提供對話狀態、模型、最新 token 累計值及直接工具呼叫, 時間範圍為 `1h`、`24h`、`7d` 與 `all`, `/api/activity` 回傳目前的收集及監看狀態, 已保存的對話與 Skills 歷史可由 `/api/history` 查詢
+
+`/api/events?window=all` 串流推送同一版快照及記錄, 最多同時接受 8 條串流, 閒置 15 秒會送心跳, `/api/logs?window=all` 回傳 session 錯誤摘要與 Codex Core 記錄摘要
+
+直接 MCP 與 Web 呼叫的摘要出現在快照的 `mcp` 欄位, 並可從 `/api/history?section=mcp` 或 `/api/history?section=web` 查詢已保存的事件, 寫入時沿用 SQLite 的活動保留天數, 與 session checkpoint 一同提交
+
+`functions.exec` 記錄中的 `tools.<name>(...)` 也會辨識, 變數或運算式只保留呼叫名稱, MCP 與 Web 事件分開顯示內層呼叫及外層耗時, 外層回應只有在辨識到單一呼叫時才會投影至該事件
+
+快照的 `codex.git` 與 `codex.checks` 提供直接及巢狀工具呼叫中的 Git 操作及驗證指令分類, 只保留操作名稱、類別或儲存庫名稱, 以及外層呼叫識別碼與耗時, 各顯示至多 500 筆事件
+
+快照的 `codex.sqlite` 提供從 SQLite CLI、MCP 與記錄中的 Python 程式碼辨識的操作摘要, 外層結果與耗時各自標示, `/api/history?section=sql` 查詢已保存的事件
+
+以 `--codex` 啟用後, Rust 也會唯讀查詢所選資料目錄的 `logs_*.sqlite`, 每輪新增與回補各讀取至多 2,000 筆, 警告及錯誤摘要會出現在快照的 `errors` 欄位, SQL 摘要只採用來源實際記錄的耗時與筆數, 缺值維持缺值, 快照及歷史皆不保存原始本文
+
+若 Core 診斷歷史寫入失敗, `/api/logs` 的 Core 來源會顯示 `storage_health: unavailable`, 保留同批待寫入的 SQL 與錯誤摘要, 於下一次來源更新時重試
+
+session 與 Core 的警告及錯誤摘要可由 `/api/history?namespace=errors&section=events` 查詢, 保存天數沿用活動歷史設定, `/api/snapshot` 與 `/api/logs` 會合併即時事件與最近 24 小時的已保存摘要, 歷史預覽最多讀取 1,000 筆及 512 KiB
+
+session 錯誤摘要與 checkpoint 在同一筆交易提交, 若檔案持續變更而無法固定續讀位置, 先保存摘要並保留已提交的位置
+
+工具失敗摘要也寫入相同交易, 多個內層呼叫共用的回覆歸屬外層工具, 未觀察到呼叫的獨立回覆保留來源位移及雜湊
+
+Core 錯誤與同批 SQL 摘要一起保存, 錯誤歷史的讀寫狀態可查看快照的 `errors.history`
+
+以 `--codex` 啟用後, `codex.sqlite.aggregate` 及 `mcp.history_aggregate` 彙總所選時間範圍內的 SQLite 保留資料, 獨立於事件清單上限, 歷史讀取失敗時可由 `history_health` 判斷彙總不可用
+
+要核對頁面資產, 先以既有建置工具準備固定版本, 再加上 `--assets src/local_activity_monitor`, 服務會在開始監聽前核對 manifest 與雜湊, 可直接核對靜態回應, 完整快照欄位及設定端點待移植
+
+執行 `cargo test --locked --manifest-path rust/service/Cargo.toml` 驗證 HTTP 行為, 測試使用暫存資料庫與臨時連接埠
 
 ## 新共用能力與查詢驗收
 

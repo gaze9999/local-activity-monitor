@@ -7,13 +7,33 @@ from unittest.mock import patch
 from unittest.mock import MagicMock
 
 from local_activity_monitor.collectors import CodexCollector
-from local_activity_monitor.mcp_records import category, connection_state, discover_sources, response_metadata
+from local_activity_monitor.mcp_records import category, connection_state, discover_sources, request_metadata, response_metadata
+from local_activity_monitor.history_store import HistoryStore
+from datetime import datetime, timezone
 from local_activity_monitor.server import Dashboard, handler
 
 THREAD = '00000000-0000-0000-0000-000000000001'
 
 
 class McpObservationTests(unittest.TestCase):
+    def test_resource_identifiers_exclude_credential_prefixes(self):
+        request = request_metadata("fixture", "read", {"page_id": "sk-PRIVATE", "runId": "safe"})
+        response = response_metadata("fixture", {"threadId": "sk_PRIVATE", "projectId": "safe"})
+        self.assertEqual(request["resources"], {"runId": "safe"})
+        self.assertNotIn("threadId", response)
+        self.assertEqual(response["projectId"], "safe")
+
+    def test_existing_mcp_history_filters_credential_resources(self):
+        store = HistoryStore(self.home/"monitoring/activity-history.json", "activity")
+        event = {"timestamp": datetime.now(timezone.utc).isoformat(), "server": "fixture",
+                 "tool": "read", "metadata": {"resources": {"page_id": "sk-PRIVATE", "runId": "safe"}},
+                 "result": {"threadId": "sk_PRIVATE", "projectId": "safe"}}
+        store.save(json.dumps({"version": 3, "retention_days": 90, "mcp": [event]}).encode())
+        page = store.page("mcp")
+        self.assertEqual(page["items"][0]["metadata"]["resources"], {"runId": "safe"})
+        self.assertEqual(page["items"][0]["result"], {"projectId": "safe"})
+        self.assertNotIn("PRIVATE", json.dumps(page))
+
     def test_choice_result_in_codex_text_blocks_is_metadata_only(self):
         response = {"status":"ok", "model":"jev-1.13.0", "answers":{"synthetic":{"type":"choice", "choice":"unknown", "confidence":1, "probabilities":{"unknown":1}}}, "usage":{"input_tokens":916, "output_tokens":108}, "latency_ms":1172}
         blocks = [{"type":"input_text", "text":"Script completed\nOutput:\n"}, {"type":"input_text", "text":response}]

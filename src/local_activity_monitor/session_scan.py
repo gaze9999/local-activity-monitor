@@ -1,8 +1,18 @@
-"""Frame bounded session chunks while keeping byte offsets source-relative."""
+"""Frame and decode bounded session records without persisting their contents."""
 from importlib import import_module
+import json
 
 
 LINE_LIMIT = 1024 * 1024
+
+
+def integer(value):
+    return value if type(value) is int and 0 <= value <= 2**63 - 1 else None
+
+
+def _counters(usage, keys):
+    clean = {key: integer(usage.get(key)) for key in keys}
+    return clean if any(value is not None for value in clean.values()) else None
 
 
 def _positioned(lines, start, limit):
@@ -47,3 +57,13 @@ except ModuleNotFoundError as error:
 
 forward = _native.forward if _native is not None else _forward
 backfill = _native.backfill if _native is not None else _backfill
+project_counters = getattr(_native, "counters", _counters)
+_decode = getattr(_native, "decode", None)
+
+
+def decode_record(raw):
+    if _decode is not None:
+        result = _decode(raw)
+        if result is not NotImplemented:
+            return result
+    return json.loads(raw)

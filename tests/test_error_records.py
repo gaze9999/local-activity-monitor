@@ -8,7 +8,8 @@ import unittest
 from unittest.mock import patch
 
 from local_activity_monitor.collectors import CodexCollector
-from local_activity_monitor.error_records import DiagnosticCollector, diagnostic_roots, tool_error
+from local_activity_monitor.error_records import DiagnosticCollector, diagnostic_details, diagnostic_roots, tool_error
+from local_activity_monitor.error_history import ErrorHistory
 from local_activity_monitor.server import Dashboard
 
 THREAD = "00000000-0000-4000-8000-000000000001"
@@ -16,6 +17,48 @@ TIME = "2026-10-04T03:32:58Z"
 
 
 class ErrorRecordTests(unittest.TestCase):
+    def test_desktop_diagnostics_exclude_credential_identifiers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            collector = DiagnosticCollector(Path(directory))
+            collector.desktop_line(f'{TIME} ERROR [fixture] errorCode=sk-PRIVATE errorName=sk_PRIVATE method=sk-PRIVATE requestId=req-safe')
+            event = collector.snapshot()["events"][0]
+            self.assertEqual(event["code"], "codex_diagnostic")
+            self.assertEqual(event["request_id"], "req-safe")
+            self.assertNotIn("PRIVATE", json.dumps(event))
+
+    def test_credential_like_error_codes_use_fallback(self):
+        result = tool_error({"isError": True, "error": {"code": "sk-PRIVATE", "request_id": "req-safe"}})
+        self.assertEqual(result["code"], "tool_error")
+        self.assertNotIn("PRIVATE", json.dumps(result))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root/f"rollout-{THREAD}.jsonl"
+            event = {"timestamp": datetime.now(timezone.utc).isoformat(), "type": "event_msg",
+                     "payload": {"type": "error", "error": {"code": "sk-PRIVATE"}}}
+            path.write_text(json.dumps(event)+"\n", encoding="utf-8")
+            collector = CodexCollector(root)
+            collector.features["metadata"] = False
+            collector.refresh()
+            errors = collector.snapshot("all")["error_events"]
+            self.assertEqual(errors[0]["code"], "error")
+            self.assertNotIn("PRIVATE", json.dumps(errors))
+
+    def test_existing_error_history_hides_credential_identifiers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            history = ErrorHistory(Path(directory)/"error-history.json")
+            event = {"timestamp": datetime.now(timezone.utc).isoformat(), "source": "codex_core",
+                     "category": "codex", "severity": "error", "code": "sk-PRIVATE",
+                     "request_id": "sk-PRIVATE", "trace_id": "sk_PRIVATE", "method": "safe"}
+            history.store.save(json.dumps({"version": 1, "events": [event]}).encode())
+            restored = ErrorHistory(Path(directory)/"error-history.json")
+            self.assertNotIn("PRIVATE", json.dumps(restored.snapshot()))
+            self.assertNotIn("PRIVATE", json.dumps(restored.store.page("events")))
+            self.assertEqual(restored.store.page("events")["items"][0]["method"], "safe")
+
+    def test_diagnostic_identifiers_exclude_credential_prefixes(self):
+        details = diagnostic_details("request_id=sk-PRIVATE requestId=req-safe trace_id=sk_PRIVATE errorName=sk-PRIVATE method=sk_PRIVATE")
+        self.assertEqual(details, {"request_id": "req-safe"})
+
     def test_windows_sandbox_appdata_uses_desktop_profile_without_expanding_fixtures(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -2,6 +2,7 @@
 from pathlib import Path
 import hashlib
 import json
+import os
 from queue import Empty, Queue
 import subprocess
 import sys
@@ -86,7 +87,14 @@ class ServiceProcess:
     def __init__(self, root, args, prepared=False):
         self.events = Queue()
         mode = "--prepare-child" if prepared else "--serve-child"
-        self.process = subprocess.Popen([sys.executable, "-X", "utf8", "-I", "-B", str(root / "tools/watch.py"), mode, *args], cwd=root, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8")
+        binary = os.environ.get("LAM_RUST_SERVICE")
+        if binary:
+            command = [str(Path(binary).resolve()), "--watch-stdin", "--assets", str(root / "src/local_activity_monitor")]
+            if prepared:
+                command.append("--prepare")
+        else:
+            command = [sys.executable, "-X", "utf8", "-I", "-B", str(root / "tools/watch.py"), mode]
+        self.process = subprocess.Popen([*command, *args], cwd=root, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8")
         self.reader = Thread(target=self.read_output, daemon=True)
         self.reader.start()
 

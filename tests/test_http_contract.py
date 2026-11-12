@@ -71,7 +71,7 @@ class Service:
         try:
             connection.request('GET', '/api/events?window='+window)
             response = connection.getresponse()
-            lines = [response.fp.readline() for _ in range(4)]
+            lines = [response.readline() for _ in range(4)]
             assert lines[1] == b'event: snapshot\n' and lines[2].startswith(b'data: ') and lines[3] == b'\n', lines[:2]
             frame = json.loads(lines[2][6:])
             assert lines[0] == f'id: {frame["version"]}\n'.encode()

@@ -190,9 +190,27 @@ def resource_ids(args):
     ids = {}
     for key in ("page_id", "pageId", "threadId", "runId", "operationId", "deploymentId", "projectId", "file_key"):
         value = args.get(key)
-        if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value):
+        if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value) and not value.startswith(("sk-", "sk_")):
             ids[key] = value
     return ids
+
+
+def sanitize_mcp_resources(event):
+    if not isinstance(event, dict):
+        return event
+    event = dict(event)
+    metadata = event.get("metadata")
+    if isinstance(metadata, dict) and isinstance(metadata.get("resources"), dict):
+        metadata = dict(metadata)
+        metadata["resources"] = {key: value for key, value in metadata["resources"].items()
+                                 if not isinstance(value, str) or not value.startswith(("sk-", "sk_"))}
+        event["metadata"] = metadata
+    result = event.get("result")
+    if isinstance(result, dict):
+        names = ("page_id", "pageId", "threadId", "runId", "operationId", "deploymentId", "projectId", "file_key")
+        event["result"] = {key: value for key, value in result.items()
+                           if key not in names or not isinstance(value, str) or not value.startswith(("sk-", "sk_"))}
+    return event
 
 
 def request_metadata(server, tool, args):
