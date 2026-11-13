@@ -794,6 +794,7 @@ impl Monitor {
                     collector.set_phase("sessions");
                     let session_timer = crate::performance_debug::PhaseTimer::start(true);
                     let (health, pending, changed) = collector.refresh(&root, &stop, errors_enabled, sqlite_enabled, command_switches);
+                    if changed { collector.overflow_workdir_scan = None; }
                     let session_phase = session_timer.map(|timer| timer.finish());
                     if changed {
                         schedule_dirty.store(true, Ordering::Release);
@@ -891,7 +892,7 @@ impl Monitor {
                             let mut scratch = HashMap::new();
                             if collector.populate_overflow_workdirs(&root, &mut scratch) { schedule_dirty.store(true, Ordering::Release); let _ = events.try_send(()); }
                             collector.overflow_thread_workdirs = scratch.into_iter().filter_map(|(id,entry)| entry["_cwd"].as_str().map(|cwd| (id,cwd.to_owned()))).collect();
-                        } else { collector.overflow_workdirs.clear(); }
+                        } else { collector.overflow_workdirs.clear(); collector.overflow_workdir_scan = None; }
                         changed |= previous_workdirs != collector.overflow_thread_workdirs;
                         collector.project_details.clear();
                         collector.project_roots_status = projects::RootStatus::default();
@@ -905,7 +906,7 @@ impl Monitor {
                         let (mut projects, roots_status) = projects::read(&home, &mut metadata, command_switches.worktrees, &mut metadata_reports);
                         if command_switches.worktrees {
                             if collector.populate_overflow_workdirs(&root, &mut metadata) { schedule_dirty.store(true, Ordering::Release); let _ = events.try_send(()); }
-                        } else { collector.overflow_workdirs.clear(); }
+                        } else { collector.overflow_workdirs.clear(); collector.overflow_workdir_scan = None; }
                         if !roots_status.complete { projects::preserve_roots(&mut projects, &collector.project_details); }
                         let dots = crate::dots::background(&home, &metadata, reference);
                         schedules::merge_remote_state(&home, &mut metadata);
@@ -1788,6 +1789,19 @@ struct CachedOverflowWorkdir {
     cwd: String,
 }
 
+#[derive(Default)]
+struct OverflowWorkdirScan {
+    revision: i64,
+    after: String,
+    retained: BTreeMap<String, String>,
+    validating: bool,
+    validated: String,
+    winners: BTreeMap<String, Option<chrono::DateTime<Utc>>>,
+    metadata: HashMap<String, Value>,
+    bytes: usize,
+    incomplete: bool,
+}
+
 struct SourceMembership {
     db: rusqlite::Connection,
     generation: i64,
@@ -2322,6 +2336,7 @@ struct Collector {
     related_budget: usize,
     overflow_details_ready: BTreeSet<String>,
     overflow_workdirs: BTreeMap<String, CachedOverflowWorkdir>,
+    overflow_workdir_scan: Option<OverflowWorkdirScan>,
     overflow_thread_workdirs: BTreeMap<String, String>,
     cursor: usize,
     read_bytes: u64,
@@ -2653,6 +2668,7 @@ impl Collector {
             related_budget: 0,
             overflow_details_ready: BTreeSet::new(),
             overflow_workdirs: BTreeMap::new(),
+            overflow_workdir_scan: None,
             overflow_thread_workdirs: BTreeMap::new(),
             cursor: 0,
             read_bytes: 0,
@@ -3719,140 +3735,217 @@ impl Collector {
         metadata: &mut HashMap<String, Value>,
         cache_limit: usize,
     ) -> bool {
-        let active_calls = self
-            .files
-            .values()
-            .map(|state| state.projection.calls.len())
-            .sum();
-        let (mut overflow, incomplete) = self.overflow_projections(active_calls);
-        overflow.sort_by_key(|item| std::cmp::Reverse(item.projection.updated()));
-        if !incomplete {
-            let retained: BTreeSet<_> = overflow
-                .iter()
-                .map(|item| item.source_key.as_str())
-                .collect();
-            self.overflow_workdirs
-                .retain(|key, _| retained.contains(key.as_str()));
+        if self.discovery.is_some() {
+            return self.overflow_workdir_scan.is_some();
         }
+        if !self.source_membership_complete || self.source_membership.is_none() {
+            self.overflow_workdir_scan = None;
+            return false;
+        }
+        let Some(membership) = self.source_membership.as_ref() else { return false };
+        let Ok(Some(mut store)) = self.checkpoints.snapshot_reader() else { return false };
+        const STAGING_LIMIT: usize = 16 * 1024 * 1024;
+        const CURSOR_ROUND_LIMIT: usize = 16 * 1024 * 1024;
+        const SOURCE_ROUND_LIMIT: usize = 64;
+        let mut scan = self.overflow_workdir_scan.take()
+            .filter(|scan| scan.revision == membership.revision)
+            .unwrap_or_else(|| OverflowWorkdirScan { revision: membership.revision, ..Default::default() });
+        scan.incomplete |= membership.unverified_count().map_or(true, |count| count != 0);
+        let mut cursor_bytes = 0usize;
+        let mut sources = 0usize;
         let mut cached_bytes: usize = self
             .overflow_workdirs
-            .values()
-            .map(|entry| entry.cwd.len())
+            .iter()
+            .map(|(key, entry)| key.len() + entry.checkpoint_signature.len() + entry.cwd.len() + 256)
             .sum();
         let mut budget = ROUND_LIMIT;
         let mut pending = false;
-        for item in &overflow {
-            let (Some(id), Some(position)) = (
-                item.projection.id.as_ref(),
-                item.projection.workdir_position.as_ref(),
-            ) else {
-                continue;
-            };
-            if metadata
-                .get(id)
-                .and_then(|entry| entry.get("_cwd"))
-                .and_then(Value::as_str)
-                .is_some_and(|cwd| !cwd.is_empty())
-            {
-                continue;
-            }
-            let active = self
-                .files
-                .values()
-                .filter(|state| {
-                    state.projection.id.as_deref() == Some(id.as_str())
-                        && state.projection.workdir.is_some()
-                })
-                .map(|state| state.projection.updated())
-                .max();
-            if active.is_some_and(|updated| updated >= item.projection.updated()) {
-                continue;
-            }
-            let cached = self
-                .overflow_workdirs
-                .get(&item.source_key)
-                .filter(|entry| {
-                    let fingerprint = source_fingerprint(
-                        entry.source_signature.0,
-                        entry.source_signature.1,
-                        entry.source_signature.2,
-                    );
-                    entry.checkpoint_signature == item.checkpoint_signature
-                        && fingerprint.as_deref().is_some_and(|fingerprint| {
-                            self.source_membership.as_ref().is_some_and(|index| {
-                                index
-                                    .matches_verified(
-                                        &item.source_key,
-                                        fingerprint,
-                                        &item.checkpoint_signature,
-                                    )
-                                    .unwrap_or(false)
-                            })
+        if !scan.validating {
+            'pages: loop {
+                let page = match membership.materialized_page(&scan.after, 16) {
+                    Ok(page) => page,
+                    Err(_) => { scan.incomplete = true; break; }
+                };
+                if page.is_empty() { break; }
+                for (key, signature) in &page {
+                    // One bounded cursor lookahead may exceed the round threshold,
+                    // with a 16 MiB cursor plus bounded key/signature overhead.
+                    if sources >= SOURCE_ROUND_LIMIT || cursor_bytes >= CURSOR_ROUND_LIMIT
+                        || budget < LINE_LIMIT + 2048 {
+                        pending = true;
+                        break 'pages;
+                    }
+                    sources += 1;
+                    // Workdir discovery needs cursor metadata, never call payloads.
+                    // Decode one source at a time so total cursor bytes can exceed
+                    // the per-read budget without retaining all projections.
+                    let expected = lam_history_store::ExpectedCursor { source_key: key, signature: Some(signature) };
+                    let item = match store.selected_checkpoint(&expected, &[]) {
+                        Ok(Some(checkpoint)) => {
+                            cursor_bytes += checkpoint.cursor.payload.len() + checkpoint.cursor.signature.len() + checkpoint.cursor.source_key.len();
+                            checkpoint::snapshot_projection(checkpoint, false)
+                        },
+                        _ => { cursor_bytes += CURSOR_ROUND_LIMIT; None },
+                    };
+                    let Some(item) = item else { scan.incomplete = true; scan.after = key.clone(); continue };
+                    let retained_cost = item.source_key.len() + item.checkpoint_signature.len() + 256;
+                    // Reserve bounded bookkeeping and the maximum workdir result
+                    // before mutating the staged state. Never publish a truncated scan.
+                    if scan.bytes.saturating_add(retained_cost + 320 + 4 * 4096 + 256) > STAGING_LIMIT {
+                        scan.incomplete = true;
+                        break 'pages;
+                    }
+                    scan.bytes += retained_cost;
+                    scan.retained.insert(item.source_key.clone(), item.checkpoint_signature.clone());
+                    scan.after = key.clone();
+                    let (Some(id), Some(position)) = (
+                        item.projection.id.as_ref(),
+                        item.projection.workdir_position.as_ref(),
+                    ) else {
+                        continue;
+                    };
+                    let updated = item.projection.updated();
+                    if scan.winners.get(id).is_some_and(|previous| *previous >= updated) {
+                        continue;
+                    }
+                    if metadata
+                        .get(id)
+                        .and_then(|entry| entry.get("_cwd"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|cwd| !cwd.is_empty())
+                    {
+                        continue;
+                    }
+                    let active = self
+                        .files
+                        .values()
+                        .filter(|state| {
+                            state.projection.id.as_deref() == Some(id.as_str())
+                                && state.projection.workdir.is_some()
                         })
-                })
-                .map(|entry| entry.cwd.clone());
-            if let Some(cwd) = cached {
-                metadata
-                    .entry(id.clone())
-                    .or_insert_with(|| json!({"thread_id":id}))["_cwd"] = json!(cwd);
-                continue;
+                        .map(|state| state.projection.updated())
+                        .max();
+                    if active.is_some_and(|updated| updated >= item.projection.updated()) {
+                        continue;
+                    }
+                    let cached = self
+                        .overflow_workdirs
+                        .get(&item.source_key)
+                        .filter(|entry| {
+                            let fingerprint = source_fingerprint(
+                                entry.source_signature.0,
+                                entry.source_signature.1,
+                                entry.source_signature.2,
+                            );
+                            entry.checkpoint_signature == item.checkpoint_signature
+                                && fingerprint.as_deref().is_some_and(|fingerprint| {
+                                    self.source_membership.as_ref().is_some_and(|index| {
+                                        index
+                                            .matches_verified(
+                                                &item.source_key,
+                                                fingerprint,
+                                                &item.checkpoint_signature,
+                                            )
+                                            .unwrap_or(false)
+                                    })
+                                })
+                        })
+                        .map(|entry| entry.cwd.clone());
+                    if let Some(cwd) = cached {
+                        if !scan.winners.contains_key(id) {
+                            scan.bytes += 2 * id.len() + cwd.len() + 256;
+                        } else {
+                            scan.bytes = scan.bytes.saturating_sub(scan.metadata.get(id).and_then(|entry| entry["_cwd"].as_str()).map_or(0, str::len)) + cwd.len();
+                        }
+                        scan.winners.insert(id.clone(), updated);
+                        scan.metadata
+                            .entry(id.clone())
+                            .or_insert_with(|| json!({"thread_id":id}))["_cwd"] = json!(cwd);
+                        continue;
+                    }
+                    if let Some(previous) = self.overflow_workdirs.remove(&item.source_key) {
+                        cached_bytes = cached_bytes.saturating_sub(item.source_key.len() + previous.checkpoint_signature.len() + previous.cwd.len() + 256);
+                    }
+                    let Some(path) = self.overflow_path(root, &item) else {
+                        continue;
+                    };
+                    budget -= 2048;
+                    let mut index = details::Index::default();
+                    let guard = details::CheckpointGuard {
+                        directory: self.checkpoints.directory().to_path_buf(),
+                        source_key: item.source_key.clone(),
+                        signature: item.checkpoint_signature.clone(),
+                    };
+                    if !index.add_projection(root, path, &item.anchor, &item.projection, Some(guard)) {
+                        continue;
+                    }
+                    let Some(file) = index.select(id) else {
+                        self.overflow_workdirs.remove(&item.source_key);
+                        continue;
+                    };
+                    let Some(signature) = file.source_signature() else {
+                        self.overflow_workdirs.remove(&item.source_key);
+                        continue;
+                    };
+                    budget -= LINE_LIMIT;
+                    let Some(cwd) = file.workdir(position) else {
+                        continue;
+                    };
+                    if !scan.winners.contains_key(id) {
+                            scan.bytes += 2 * id.len() + cwd.len() + 256;
+                        } else {
+                            scan.bytes = scan.bytes.saturating_sub(scan.metadata.get(id).and_then(|entry| entry["_cwd"].as_str()).map_or(0, str::len)) + cwd.len();
+                        }
+                    scan.winners.insert(id.clone(), updated);
+                    let cache_cost = item.source_key.len() + item.checkpoint_signature.len() + cwd.len() + 256;
+                    if cached_bytes.saturating_add(cache_cost) > cache_limit {
+                        scan.metadata
+                            .entry(id.clone())
+                            .or_insert_with(|| json!({"thread_id":id}))["_cwd"] = json!(cwd);
+                        continue;
+                    }
+                    cached_bytes += cache_cost;
+                    self.overflow_workdirs.insert(
+                        item.source_key.clone(),
+                        CachedOverflowWorkdir {
+                            checkpoint_signature: item.checkpoint_signature.clone(),
+                            source_signature: signature,
+                            cwd: cwd.clone(),
+                        },
+                    );
+                    scan.metadata
+                        .entry(id.clone())
+                        .or_insert_with(|| json!({"thread_id":id}))["_cwd"] = json!(cwd);
+                }
+
             }
-            if let Some(previous) = self.overflow_workdirs.remove(&item.source_key) {
-                cached_bytes = cached_bytes.saturating_sub(previous.cwd.len());
-            }
-            let Some(path) = self.overflow_path(root, item) else {
-                continue;
-            };
-            if budget < LINE_LIMIT + 2048 {
-                pending = true;
-                continue;
-            }
-            budget -= 2048;
-            let mut index = details::Index::default();
-            let guard = details::CheckpointGuard {
-                directory: self.checkpoints.directory().to_path_buf(),
-                source_key: item.source_key.clone(),
-                signature: item.checkpoint_signature.clone(),
-            };
-            if !index.add_projection(root, path, &item.anchor, &item.projection, Some(guard)) {
-                continue;
-            }
-            let Some(file) = index.select(id) else {
-                self.overflow_workdirs.remove(&item.source_key);
-                continue;
-            };
-            let Some(signature) = file.source_signature() else {
-                self.overflow_workdirs.remove(&item.source_key);
-                continue;
-            };
-            if budget < LINE_LIMIT {
-                pending = true;
-                continue;
-            }
-            budget -= LINE_LIMIT;
-            let Some(cwd) = file.workdir(position) else {
-                continue;
-            };
-            if cached_bytes.saturating_add(cwd.len()) > cache_limit {
-                metadata
-                    .entry(id.clone())
-                    .or_insert_with(|| json!({"thread_id":id}))["_cwd"] = json!(cwd);
-                continue;
-            }
-            cached_bytes += cwd.len();
-            self.overflow_workdirs.insert(
-                item.source_key.clone(),
-                CachedOverflowWorkdir {
-                    checkpoint_signature: item.checkpoint_signature.clone(),
-                    source_signature: signature,
-                    cwd: cwd.clone(),
-                },
-            );
-            metadata
-                .entry(id.clone())
-                .or_insert_with(|| json!({"thread_id":id}))["_cwd"] = json!(cwd);
+            if !pending && !scan.incomplete { scan.validating = true; }
         }
-        pending
+        if scan.validating && !scan.incomplete {
+            use std::ops::Bound::{Excluded, Unbounded};
+            for (key, signature) in scan.retained.range((Excluded(scan.validated.clone()), Unbounded)).take(SOURCE_ROUND_LIMIT.saturating_sub(sources)) {
+                if store.checkpoint_signature(key).ok().flatten().as_deref() != Some(signature.as_str())
+                    || !membership.is_verified(key).unwrap_or(false) {
+                    scan.incomplete = true;
+                    break;
+                }
+                scan.validated = key.clone();
+            }
+            pending = !scan.incomplete && scan.retained.last_key_value().is_some_and(|(key, _)| key != &scan.validated);
+        }
+        if pending {
+            self.overflow_workdir_scan = Some(scan);
+            return true;
+        }
+        if !scan.incomplete {
+            self.overflow_workdirs.retain(|key, _| scan.retained.contains_key(key));
+            for (id, entry) in scan.metadata {
+                if !metadata.get(&id).and_then(|value| value.get("_cwd")).and_then(Value::as_str).is_some_and(|cwd| !cwd.is_empty()) {
+                    metadata.entry(id.clone()).or_insert_with(|| json!({"thread_id":id}))["_cwd"] = entry["_cwd"].clone();
+                }
+            }
+        }
+        false
     }
 
     fn detail_index(&self, root: &Path) -> (details::Index, BTreeSet<String>) {
@@ -4963,6 +5056,88 @@ impl Drop for Collector {
 #[cfg(test)]
 mod log_tests {
     use super::*;
+
+    #[test]
+    fn overflow_workdirs_stream_cursor_metadata_beyond_snapshot_budget() {
+        for (count, padding) in [(3, 9 * 1024 * 1024), (65, 0)] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let ids: Vec<_> = (1..=count).map(|i| format!("00000000-0000-4000-8000-{i:012}")).collect();
+            for (i, id) in ids.iter().enumerate() {
+                std::fs::write(root.join(format!("rollout-{id}.jsonl")), format!("{}\n", json!({
+                    "timestamp":"2026-11-13T01:00:00Z", "type":"session_meta",
+                    "payload":{"id":id,"cwd":format!("/fixture/workdir-{i}")}
+                }))).unwrap();
+            }
+            let mut collector = Collector::new(root.join("monitoring"), true, None);
+            let stopped = AtomicBool::new(false);
+            for _ in 0..4 {
+                let (_, pending, _) = collector.refresh(&root, &stopped, true, false, CommandSwitches::default());
+                if !pending { break; }
+            }
+            assert_eq!(collector.files.len(), count);
+            let mut store = lam_history_store::Store::open(&root.join("monitoring"), lam_history_store::Access::ReadWrite).unwrap().unwrap();
+            let mut verified = Vec::new();
+            for path in collector.files.keys() {
+                let key = checkpoint::key(&root, path).unwrap();
+                let mut checkpoint = store.checkpoint(&key, 0).unwrap().unwrap();
+                // Valid JSON whitespace exercises raw cursor byte limits without
+                // introducing unsupported fields or real source data.
+                checkpoint.cursor.payload.push_str(&" ".repeat(padding));
+                store.save_checkpoints(std::slice::from_ref(&checkpoint.cursor), &[], &[]).unwrap();
+                let metadata = std::fs::metadata(path).unwrap();
+                verified.push(VerifiedMembership { key, fingerprint: source_fingerprint(file_identity(&metadata), metadata.len(), metadata.modified().ok()).unwrap(),
+                    checkpoint_signature: checkpoint.cursor.signature, materialized: true, call_headers: Some(Vec::new()) });
+            }
+            let mut membership = SourceMembership::new().unwrap();
+            membership.insert(&verified.iter().map(|row| MembershipRecord { key: row.key.clone(), fingerprint: Some(row.fingerprint.clone()) }).collect::<Vec<_>>()).unwrap();
+            membership.mark_verified(&verified).unwrap();
+            collector.source_membership = Some(membership);
+            collector.source_membership_complete = true;
+            collector.discovered_files = Some(count);
+            collector.discovery = None;
+            collector.files.clear();
+            if padding > 0 {
+                assert!(collector.overflow_projections(0).1);
+                assert_eq!(collector.overflow_projections(0).0.len(), 1);
+            }
+            let mut metadata = HashMap::new();
+            assert!(collector.populate_overflow_workdirs_with_limit(&root, &mut metadata, 0));
+            assert!(metadata.is_empty(), "do not publish a partial scan");
+            assert!(collector.overflow_workdir_scan.as_ref().unwrap().retained.len() <= 64);
+            assert!(collector.overflow_workdir_scan.as_ref().unwrap().bytes <= 16 * 1024 * 1024);
+            let mut resumed_after = collector.overflow_workdir_scan.as_ref().unwrap().after.clone();
+            assert!(!resumed_after.is_empty());
+            let mut rounds = 1;
+            while collector.populate_overflow_workdirs_with_limit(&root, &mut metadata, 0) {
+                rounds += 1;
+                assert!(rounds <= count + 1, "must not repeatedly scan the prefix");
+                assert!(metadata.is_empty());
+                let after = collector.overflow_workdir_scan.as_ref().unwrap().after.clone();
+                let scan = collector.overflow_workdir_scan.as_ref().unwrap();
+                assert!(after > resumed_after || scan.validating);
+                resumed_after = after;
+            }
+            for (i, id) in ids.iter().enumerate() {
+                assert_eq!(metadata[id]["_cwd"], format!("/fixture/workdir-{i}"));
+            }
+            assert!(collector.overflow_workdirs.is_empty());
+            assert!(collector.overflow_workdir_scan.is_none());
+            // A writer changing an already staged source invalidates publication.
+            let mut stale_metadata = HashMap::new();
+            assert!(collector.populate_overflow_workdirs_with_limit(&root, &mut stale_metadata, 0));
+            let key = collector.overflow_workdir_scan.as_ref().unwrap().retained.first_key_value().unwrap().0.clone();
+            let mut changed = store.checkpoint(&key, 0).unwrap().unwrap().cursor;
+            changed.signature = "changed-between-rounds".into();
+            store.save_checkpoints(&[changed], &[], &[]).unwrap();
+            let mut rounds = 0;
+            while collector.populate_overflow_workdirs_with_limit(&root, &mut stale_metadata, 0) {
+                rounds += 1;
+                assert!(rounds <= count + 1);
+            }
+            assert!(stale_metadata.is_empty());
+        }
+    }
 
     #[test]
     fn selects_latest_calls_across_working_and_verified_sources_with_path_ties() {
