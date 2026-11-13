@@ -227,34 +227,40 @@ pub fn apply_diagnostics<T: std::borrow::Borrow<Value>>(
 }
 
 fn server_summary<'a>(server: &str, events: &[&'a Value]) -> (Value, Option<RecordingState<'a>>) {
-    let direct: Vec<_> = events
-        .iter()
-        .copied()
-        .filter(|event| event["nested"].as_bool() != Some(true))
-        .collect();
-    let mut durations: Vec<_> = direct
-        .iter()
-        .filter_map(|event| event["duration_ms"].as_f64())
-        .filter(|duration| duration.is_finite() && *duration >= 0.0)
-        .collect();
+    let mut calls = 0usize;
+    let mut returned = 0usize;
+    let mut pending = 0usize;
+    let mut known_status = 0usize;
+    let mut errors = 0usize;
+    let mut pending_at = None;
+    let mut last_response = None;
+    let mut durations = Vec::new();
+    let mut tools = BTreeSet::new();
+    for event in events {
+        if let Some(tool) = field(event, "tool") {
+            tools.insert(tool);
+            if tools.len() > TOOL_LIMIT { tools.pop_last(); }
+        }
+        if event["nested"].as_bool() == Some(true) { continue; }
+        calls += 1;
+        if let Some(duration) = event["duration_ms"].as_f64()
+            .filter(|duration| duration.is_finite() && *duration >= 0.0)
+        {
+            durations.push(duration);
+        }
+        if let Some(status) = field(&event["result"], "status") {
+            known_status += 1;
+            errors += usize::from(ERROR_STATES.contains(&status));
+        }
+        if let Some(time) = field(event, "completed_at") {
+            returned += 1;
+            last_response = last_response.max(Some(time));
+        } else {
+            pending += 1;
+            pending_at = pending_at.max(field(event, "timestamp"));
+        }
+    }
     durations.sort_by(f64::total_cmp);
-    let statuses: Vec<_> = direct
-        .iter()
-        .filter_map(|event| field(&event["result"], "status"))
-        .collect();
-    let returned = direct
-        .iter()
-        .filter_map(|event| field(event, "completed_at"))
-        .collect::<Vec<_>>();
-    let pending = direct
-        .iter()
-        .filter(|event| field(event, "completed_at").is_none())
-        .collect::<Vec<_>>();
-    let pending_at = pending
-        .iter()
-        .filter_map(|event| field(event, "timestamp"))
-        .max();
-    let last_response = returned.iter().copied().max();
     let connection = if pending_at > last_response {
         "pending"
     } else if last_response.is_some() {
@@ -262,10 +268,6 @@ fn server_summary<'a>(server: &str, events: &[&'a Value]) -> (Value, Option<Reco
     } else {
         "unconfirmed"
     };
-    let tools: BTreeSet<_> = events
-        .iter()
-        .filter_map(|event| field(event, "tool"))
-        .collect();
     let (metrics, recording) = measurements(events);
     let average = (!durations.is_empty())
         .then(|| (durations.iter().sum::<f64>() / durations.len() as f64).round_ties_even());
@@ -282,12 +284,12 @@ fn server_summary<'a>(server: &str, events: &[&'a Value]) -> (Value, Option<Reco
     (
         json!({
             "server":server, "origin":"observed", "category":mcp::category(server, ""), "enabled":true,
-            "calls":direct.len(), "recognized":events.len()-direct.len(), "returned":returned.len(),
-            "known_status":statuses.len(), "errors":statuses.iter().filter(|status| ERROR_STATES.contains(status)).count(),
+            "calls":calls, "recognized":events.len()-calls, "returned":returned,
+            "known_status":known_status, "errors":errors,
             "average_ms":average, "p95_ms":p95, "p99_ms":p99, "last_at":events.iter().filter_map(|event| last(event)).max(),
             "latest_metrics":metrics, "tools":tools.into_iter().take(TOOL_LIMIT).collect::<Vec<_>>(),
             "connection":{"state":connection,"observed_at":if connection == "pending" {pending_at} else {last_response},
-                          "last_response_at":last_response,"pending_calls":pending.len(),"error_code":null,"method":"local_records"}
+                          "last_response_at":last_response,"pending_calls":pending,"error_code":null,"method":"local_records"}
         }),
         recording,
     )
@@ -391,6 +393,104 @@ pub fn scoped_summary(events: &[Value], cutoff: DateTime<Utc>, health: &str, all
 #[cfg(test)]
 mod connection_tests {
     use super::*;
+    #[test]
+    fn snapshot_server_scalar_summary_matches_full_vectors() {
+        let mut events = Vec::new();
+        for index in 0..2100 {
+            let completed = match index % 4 { 0 => json!(null), 1 => json!(""),
+                2 => json!(format!("{:04}", index / 3)), _ => json!(17) };
+            let status = match index % 5 { 0 => json!("error"), 1 => json!("ok"),
+                2 => json!(""), 3 => json!(false), _ => json!("missing_dependencies") };
+            let duration = match index % 5 { 0 => json!(null), 1 => json!(-1),
+                2 => json!(-0.0), 3 => json!(index as f64 / 3.0), _ => json!("123") };
+            let nested = match index % 3 { 0 => json!(true), 1 => json!(false), _ => json!("true") };
+            events.push(json!({"server":"fixture", "tool":format!("tool-{:04}",2100-index),
+                "timestamp":if index % 7 == 0 {Value::Null} else {json!(format!("{:04}", index / 2))},
+                "completed_at":completed,"duration_ms":duration,"nested":nested,
+                "result":{"status":status,"observed_count":index,"recording_enabled":index%2==0}}));
+        }
+        events.push(json!({"tool":"","nested":true,"duration_ms":99999,"result":{"status":"error"}}));
+        events.push(json!({"tool":null,"completed_at":"same","timestamp":"same"}));
+        events.push(json!({"tool":"same","timestamp":"same"}));
+        for reverse in [false,true] {
+            if reverse { events.reverse(); }
+            for limit in [0,1,2,100,events.len()] {
+                let values: Vec<_> = events.iter().take(limit).collect();
+                let actual = server_summary("fixture", &values);
+                let expected = legacy_server_summary("fixture", &values);
+                assert_eq!(actual,expected);
+                assert!(actual.0["tools"].as_array().unwrap().len()<=TOOL_LIMIT);
+            }
+        }
+    }
+
+    fn legacy_server_summary<'a>(server: &str, events: &[&'a Value]) -> (Value, Option<RecordingState<'a>>) {
+        let direct: Vec<_> = events
+            .iter()
+            .copied()
+            .filter(|event| event["nested"].as_bool() != Some(true))
+            .collect();
+        let mut durations: Vec<_> = direct
+            .iter()
+            .filter_map(|event| event["duration_ms"].as_f64())
+            .filter(|duration| duration.is_finite() && *duration >= 0.0)
+            .collect();
+        durations.sort_by(f64::total_cmp);
+        let statuses: Vec<_> = direct
+            .iter()
+            .filter_map(|event| field(&event["result"], "status"))
+            .collect();
+        let returned = direct
+            .iter()
+            .filter_map(|event| field(event, "completed_at"))
+            .collect::<Vec<_>>();
+        let pending = direct
+            .iter()
+            .filter(|event| field(event, "completed_at").is_none())
+            .collect::<Vec<_>>();
+        let pending_at = pending
+            .iter()
+            .filter_map(|event| field(event, "timestamp"))
+            .max();
+        let last_response = returned.iter().copied().max();
+        let connection = if pending_at > last_response {
+            "pending"
+        } else if last_response.is_some() {
+            "response"
+        } else {
+            "unconfirmed"
+        };
+        let tools: BTreeSet<_> = events
+            .iter()
+            .filter_map(|event| field(event, "tool"))
+            .collect();
+        let (metrics, recording) = measurements(events);
+        let average = (!durations.is_empty())
+            .then(|| (durations.iter().sum::<f64>() / durations.len() as f64).round_ties_even());
+        let p95 = (!durations.is_empty())
+            .then(|| durations[(durations.len() * 95 / 100).min(durations.len() - 1)]);
+        let p99 = (!durations.is_empty()).then(|| {
+            let position = (durations.len() - 1) as f64 * 0.99;
+            let lower = position as usize;
+            let next = (lower + 1).min(durations.len() - 1);
+            let value =
+                durations[lower] + (durations[next] - durations[lower]) * (position - lower as f64);
+            (value * 100.0).round_ties_even() / 100.0
+        });
+        (
+            json!({
+                "server":server, "origin":"observed", "category":mcp::category(server, ""), "enabled":true,
+                "calls":direct.len(), "recognized":events.len()-direct.len(), "returned":returned.len(),
+                "known_status":statuses.len(), "errors":statuses.iter().filter(|status| ERROR_STATES.contains(status)).count(),
+                "average_ms":average, "p95_ms":p95, "p99_ms":p99, "last_at":events.iter().filter_map(|event| last(event)).max(),
+                "latest_metrics":metrics, "tools":tools.into_iter().take(TOOL_LIMIT).collect::<Vec<_>>(),
+                "connection":{"state":connection,"observed_at":if connection == "pending" {pending_at} else {last_response},
+                              "last_response_at":last_response,"pending_calls":pending.len(),"error_code":null,"method":"local_records"}
+            }),
+            recording,
+        )
+    }
+
     #[test]
     fn snapshot_streamed_diagnostics_match_full_collection_and_tie_precedence() {
         let base = json!({"servers":[
