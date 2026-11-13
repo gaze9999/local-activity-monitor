@@ -1477,6 +1477,22 @@ impl Projection {
     }
 
     pub fn merge(&mut self, other: &Self) {
+        self.merge_selected(other, None);
+    }
+
+    /// Merge one source in traversal order. Later selected calls replace earlier
+    /// calls with the same ID before any window totals are computed. An empty
+    /// selection still contributes this source's metadata.
+    pub(super) fn merge_selected(&mut self, other: &Self, selected: Option<&BTreeSet<String>>) {
+        self.merge_metadata(other);
+        self.calls.extend(other.calls.iter()
+            .filter(|(id, _)| selected.is_none_or(|ids| ids.contains(*id)))
+            .map(|(id, call)| (id.clone(), call.clone())));
+    }
+
+    /// Apply cursor metadata exactly once per source, never once per payload
+    /// page. Timestamp tie rules intentionally differ for context and status.
+    pub(super) fn merge_metadata(&mut self, other: &Self) {
         self.agent_incoming
             .extend(other.agent_incoming.iter().cloned());
         for (key, value) in &other.execution {
@@ -1510,12 +1526,6 @@ impl Projection {
         }
         self.intervals
             .extend(other.intervals.iter().map(|(&start, &end)| (start, end)));
-        self.calls.extend(
-            other
-                .calls
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone())),
-        );
     }
 
     pub fn file_events(&self, boundary: Option<Time>, files_enabled: bool) -> Vec<Value> {
@@ -1662,4 +1672,146 @@ impl Projection {
             "agent_messages":communication,"file_changes":file_changes,"file_reads":file_reads,
         })
     }
+}
+
+#[cfg(test)]
+mod snapshot_merge_tests {
+    use super::*;
+
+    fn call(tool: &str, time: Option<&str>) -> Call {
+        serde_json::from_value(json!({"tool":tool,"time":time,"completed":null,"sequence":1})).unwrap()
+    }
+
+    fn source(tag: &str, time: Option<Time>) -> Projection {
+        let mut source = Projection::for_id(Some("00000000-0000-4000-8000-000000000001".into()));
+        source.created = time;
+        source.updated = time;
+        source.context_at = time;
+        source.context_seen = true;
+        source.model = Some(tag.into());
+        source.effort = Some(tag.into());
+        source.trigger = Some(tag.into());
+        source.execution.insert("origin".into(), json!(tag));
+        source.tokens_at = time;
+        source.tokens = Some([Some(tag.len() as i64); 6]);
+        source.status_at = time;
+        source.status = Some(Status::Running);
+        source.task_start = time;
+        if let Some(time) = time {
+            source.intervals.insert(time, time + chrono::Duration::seconds(tag.len() as i64));
+        }
+        source.calls.insert("duplicate".into(), call(tag, Some("2026-11-13T01:00:00Z")));
+        source.calls.insert(format!("unique-{tag}"), call(tag, None));
+        source
+    }
+
+    fn assert_equivalent(left: &Projection, right: &Projection) {
+        assert_eq!(serde_json::to_value(left).unwrap(), serde_json::to_value(right).unwrap());
+        assert_eq!(serde_json::to_value(&left.calls).unwrap(), serde_json::to_value(&right.calls).unwrap());
+        let reference = timestamp(Some("2026-11-13T03:00:00Z")).unwrap();
+        for boundary in [None, Some(reference - chrono::Duration::hours(3)), Some(reference)] {
+            for enabled in [false, true] {
+                let (mut lt, mut ln, mut rt, mut rn) = Default::default();
+                assert_eq!(
+                    left.row(false, boundary, reference, &mut lt, &mut ln, enabled, enabled, enabled),
+                    right.row(false, boundary, reference, &mut rt, &mut rn, enabled, enabled, enabled));
+                assert_eq!(lt, rt);
+                assert_eq!(ln, rn);
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_merge_selected_matches_legacy_clone_filter_for_source_order_and_windows() {
+        let time = timestamp(Some("2026-11-13T01:00:00Z"));
+        for reverse in [false, true] {
+            let mut sources = [source("first", time), source("second", time), source("unknown", None)];
+            if reverse { sources.reverse(); }
+            let mut actual = Projection::for_id(sources[0].id.clone());
+            let mut expected = Projection::for_id(sources[0].id.clone());
+            for (n, source) in sources.iter().enumerate() {
+                // Include an empty selection: metadata still participates.
+                let selected: BTreeSet<_> = if n == 1 { BTreeSet::new() } else { source.calls.keys().cloned().collect() };
+                let mut filtered = source.clone();
+                filtered.calls.retain(|id, _| selected.contains(id));
+                legacy_merge(&mut expected, &filtered);
+                actual.merge_selected(source, Some(&selected));
+                assert_equivalent(&actual, &expected);
+            }
+            assert_eq!(actual.calls["duplicate"].tool_name(), sources[2].calls["duplicate"].tool_name());
+            assert_eq!(actual.calls.len(), 3, "winner replacement must precede counts");
+            let mut merged_all = Projection::for_id(sources[0].id.clone());
+            let mut legacy_all = Projection::for_id(sources[0].id.clone());
+            for source in &sources { merged_all.merge(source); legacy_merge(&mut legacy_all, source); }
+            assert_equivalent(&merged_all, &legacy_all);
+        }
+    }
+
+    #[test]
+    fn snapshot_metadata_merge_retains_timestamp_ties_and_interval_start_dedup() {
+        let time = timestamp(Some("2026-11-13T01:00:00Z"));
+        let first = source("first", time);
+        let mut second = source("second", time);
+        second.status = Some(Status::Observed);
+        second.status_cached = true;
+        let mut merged = Projection::for_id(first.id.clone());
+        merged.merge_metadata(&first);
+        merged.merge_metadata(&second);
+        assert!(merged.calls.is_empty());
+        assert_eq!(merged.model.as_deref(), Some("second"), "context uses >= on equal timestamps");
+        assert_eq!(merged.trigger.as_deref(), Some("second"), "updated uses >=");
+        assert!(merged.status == first.status, "status uses >, not >=");
+        assert!(!merged.status_cached);
+        assert_eq!(merged.intervals.len(), 1);
+        assert_eq!(merged.intervals[&time.unwrap()], time.unwrap() + chrono::Duration::seconds(6));
+        assert_eq!(merged.tokens, second.tokens);
+        let mut expected = Projection::for_id(first.id.clone());
+        let mut first = first;
+        let mut second = second;
+        first.calls.clear(); second.calls.clear();
+        legacy_merge(&mut expected, &first); legacy_merge(&mut expected, &second);
+        assert_equivalent(&merged, &expected);
+    }
+    fn legacy_merge(target: &mut Projection, other: &Projection) {
+        target.agent_incoming
+            .extend(other.agent_incoming.iter().cloned());
+        for (key, value) in &other.execution {
+            target.execution
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+        target.created = [target.created, other.created].into_iter().flatten().min();
+        if other.updated >= target.updated {
+            target.updated = other.updated;
+            target.kind = other.kind;
+            target.trigger = other.trigger.clone();
+        }
+        if other.context_seen && other.context_at >= target.context_at {
+            target.context_at = other.context_at;
+            target.model = other.model.clone();
+            target.effort = other.effort.clone();
+            if other.context_at.is_some() {
+                target.execution.extend(other.execution.clone());
+            }
+        }
+        if other.tokens_at.is_some() && other.tokens_at >= target.tokens_at {
+            target.tokens_at = other.tokens_at;
+            target.tokens = other.tokens;
+        }
+        if other.status_at > target.status_at {
+            target.status_at = other.status_at;
+            target.status_cached = other.status_cached;
+            target.status = other.status;
+            target.task_start = other.task_start;
+        }
+        target.intervals
+            .extend(other.intervals.iter().map(|(&start, &end)| (start, end)));
+        target.calls.extend(
+            other
+                .calls
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+    }
+
 }

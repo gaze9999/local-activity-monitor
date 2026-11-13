@@ -4429,9 +4429,8 @@ impl Collector {
                 if let Some(selection) = &selection {
                     let key = self.session_root.as_deref().and_then(|root| checkpoint::key(root, path));
                     let selected = key.as_ref().and_then(|key| selection.calls.get(key));
-                    let mut filtered = state.projection.clone();
-                    filtered.calls.retain(|id, _| selected.is_some_and(|ids| ids.contains(id)));
-                    projection.merge(&filtered);
+                    let empty = BTreeSet::new();
+                    projection.merge_selected(&state.projection, Some(selected.unwrap_or(&empty)));
                 } else {
                     projection.merge(&state.projection);
                 }
