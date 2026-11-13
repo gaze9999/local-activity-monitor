@@ -62,6 +62,7 @@ pub struct Restored {
     pub projection: Projection,
 }
 
+#[derive(Clone)]
 pub struct SnapshotProjection {
     pub projection: Projection,
     pub calls_incomplete: bool,
