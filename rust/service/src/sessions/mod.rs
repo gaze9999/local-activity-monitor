@@ -4420,6 +4420,8 @@ impl Collector {
             .filter(|item| item.calls_incomplete)
             .filter_map(|item| item.projection.id.as_deref())
             .collect();
+        let reference = self.updated.unwrap_or(self.started);
+        let cutoffs = HOURS.map(|hours| hours.map(|hours| reference - Duration::hours(hours)));
         let mut threads = BTreeMap::<&str, (Projection, bool)>::new();
         for (path, state) in self.files.iter().filter(|_| health != "disabled") {
             if let Some(id) = state.projection.id.as_deref() {
@@ -4430,9 +4432,9 @@ impl Collector {
                     let key = self.session_root.as_deref().and_then(|root| checkpoint::key(root, path));
                     let selected = key.as_ref().and_then(|key| selection.calls.get(key));
                     let empty = BTreeSet::new();
-                    projection.merge_selected(&state.projection, Some(selected.unwrap_or(&empty)));
+                    projection.merge_snapshot(&state.projection, Some(selected.unwrap_or(&empty)), &cutoffs);
                 } else {
-                    projection.merge(&state.projection);
+                    projection.merge_snapshot(&state.projection, None, &cutoffs);
                 }
                 *partial |= state.pending() || state.discard;
             }
@@ -4442,7 +4444,7 @@ impl Collector {
                 let (projection, partial) = threads
                     .entry(id)
                     .or_insert_with(|| (Projection::for_id(Some(id.to_owned())), false));
-                projection.merge(&item.projection);
+                projection.merge_snapshot(&item.projection, None, &cutoffs);
                 *partial |= item.partial;
             }
         }
@@ -4480,7 +4482,6 @@ impl Collector {
         } else {
             None
         };
-        let reference = self.updated.unwrap_or(self.started);
         let command_calls = commands::Calls::new(&threads);
         let recent = threads.iter().flat_map(|(thread, (row, _))| {
             row.calls

@@ -1638,6 +1638,7 @@ impl Projection {
         }
     }
 
+    #[cfg(test)]
     pub fn merge(&mut self, other: &Self) {
         self.merge_selected(other, None);
     }
@@ -1645,6 +1646,7 @@ impl Projection {
     /// Merge one source in traversal order. Later selected calls replace earlier
     /// calls with the same ID before any window totals are computed. An empty
     /// selection still contributes this source's metadata.
+    #[cfg(test)]
     pub(super) fn merge_selected(&mut self, other: &Self, selected: Option<&BTreeSet<String>>) {
         self.merge_metadata(other);
         self.calls.extend(other.calls.iter()
@@ -1652,11 +1654,47 @@ impl Projection {
             .map(|(id, call)| (id.clone(), call.clone())));
     }
 
+    /// Snapshot-only merge for the fixed publication windows. Retain the union
+    /// of each window's incoming preview before cloning metadata. Keeping only
+    /// the all-time winners would lose valid events at submillisecond cutoffs.
+    pub(super) fn merge_snapshot(
+        &mut self,
+        other: &Self,
+        selected: Option<&BTreeSet<String>>,
+        cutoffs: &[Option<Time>; 4],
+    ) {
+        let mut retained = BTreeSet::new();
+        for boundary in cutoffs {
+            let mut preview = BTreeMap::new();
+            for (ordinal, message) in self.agent_incoming.iter().chain(&other.agent_incoming).enumerate() {
+                if boundary.is_none_or(|cutoff| message.time().is_some_and(|time| time >= cutoff)) {
+                    retain_preview(&mut preview,
+                        (std::cmp::Reverse(message.time().map(stamp)), ordinal), ordinal, 100);
+                }
+            }
+            retained.extend(preview.into_values());
+        }
+        let existing = self.agent_incoming.len();
+        self.agent_incoming = retained.into_iter().map(|ordinal| {
+            if ordinal < existing { self.agent_incoming[ordinal].clone() }
+            else { other.agent_incoming[ordinal - existing].clone() }
+        }).collect();
+        self.merge_metadata_fields(other);
+        self.calls.extend(other.calls.iter()
+            .filter(|(id, _)| selected.is_none_or(|ids| ids.contains(*id)))
+            .map(|(id, call)| (id.clone(), call.clone())));
+    }
+
     /// Apply cursor metadata exactly once per source, never once per payload
     /// page. Timestamp tie rules intentionally differ for context and status.
+    #[cfg(test)]
     pub(super) fn merge_metadata(&mut self, other: &Self) {
         self.agent_incoming
             .extend(other.agent_incoming.iter().cloned());
+        self.merge_metadata_fields(other);
+    }
+
+    fn merge_metadata_fields(&mut self, other: &Self) {
         for (key, value) in &other.execution {
             self.execution
                 .entry(key.clone())
@@ -2247,6 +2285,55 @@ mod snapshot_merge_tests {
             let mut legacy_all = Projection::for_id(sources[0].id.clone());
             for source in &sources { merged_all.merge(source); legacy_merge(&mut legacy_all, source); }
             assert_equivalent(&merged_all, &legacy_all);
+        }
+    }
+
+    #[test]
+    fn snapshot_incoming_merge_matches_full_metadata_for_fixed_windows() {
+        let reference = timestamp(Some("2026-11-13T01:00:00Z")).unwrap()
+            + chrono::Duration::nanoseconds(500_000);
+        let cutoffs = super::super::HOURS.map(|hours| hours.map(|hours| reference - chrono::Duration::hours(hours)));
+        for reverse in [false, true] {
+            let mut sources = Vec::new();
+            for n in 0..20 {
+                let mut item = source(&format!("source-{n}"), Some(reference));
+                item.agent_incoming.clear();
+                for index in 0..100 {
+                    let time = match n % 5 {
+                        0 => None,
+                        1 => Some(reference - chrono::Duration::hours(1) - chrono::Duration::nanoseconds(1)),
+                        2 => Some(reference - chrono::Duration::hours(1)),
+                        3 => Some(reference - chrono::Duration::hours(24)),
+                        _ => Some(reference - chrono::Duration::hours(168)),
+                    };
+                    item.agent_incoming.push(super::super::agent::Incoming::parse(
+                        &format!("Message Type: MESSAGE\nTask name: task-{n}-{index}\nSender: sender-{n}\nPayload:\nPRIVATE_BODY_MUST_NOT_RENDER"), time).unwrap());
+                }
+                sources.push(item);
+            }
+            if reverse { sources.reverse(); }
+            let mut actual = Projection::for_id(Some("fixture-thread".into()));
+            let mut expected = Projection::for_id(actual.id.clone());
+            for (index, item) in sources.iter().enumerate() {
+                let selected: BTreeSet<_> = if index % 3 == 0 { BTreeSet::new() }
+                    else { item.calls.keys().cloned().collect() };
+                actual.merge_snapshot(item, Some(&selected), &cutoffs);
+                let mut filtered = item.clone();
+                filtered.calls.retain(|id, _| selected.contains(id));
+                legacy_merge(&mut expected, &filtered);
+                assert!(actual.agent_incoming.len() <= 400);
+                for boundary in cutoffs {
+                    for tools in [false, true] {
+                        let row = |projection: &Projection| projection.row(false, boundary, reference,
+                            &mut BTreeMap::new(), &mut BTreeMap::new(), tools, false, false);
+                        assert_eq!(row(&actual), row(&expected));
+                    }
+                }
+            }
+            assert_eq!(expected.agent_incoming.len(), 2000);
+            assert_eq!(actual.communication(std::iter::empty(), cutoffs[0]).len(), 100);
+            assert!(!serde_json::to_string(&actual.communication(std::iter::empty(), None)).unwrap()
+                .contains("PRIVATE_BODY_MUST_NOT_RENDER"));
         }
     }
 
