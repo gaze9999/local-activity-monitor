@@ -22,10 +22,22 @@ struct Service {
 
 impl Service {
     fn start(home: &Path, codex: bool, assets: Option<&Path>) -> Self {
+        Self::start_with_path(home, codex, assets, None)
+    }
+
+    fn start_with_path(
+        home: &Path,
+        codex: bool,
+        assets: Option<&Path>,
+        path: Option<&Path>,
+    ) -> Self {
         let mut command = Command::new(BINARY);
         command
             .args(["--port", "0", "--watch-stdin", "--codex-home"])
             .arg(home);
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
         if codex {
             command.arg("--codex");
         }
@@ -126,6 +138,30 @@ struct Reply {
     body: Vec<u8>,
 }
 
+#[cfg(unix)]
+#[test]
+fn termination_signals_stop_service_cleanly() {
+    for signal in ["TERM", "HUP"] {
+        let home = tempdir().unwrap();
+        let mut service = Service::start(home.path(), false, None);
+        assert_eq!(service.get("/api/snapshot?window=all").status, 200);
+        assert!(Command::new("kill")
+            .args([format!("-{signal}"), service.child.id().to_string()])
+            .status()
+            .unwrap()
+            .success());
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if let Some(status) = service.child.try_wait().unwrap() {
+                assert!(status.success(), "{signal}: {status}");
+                break;
+            }
+            assert!(Instant::now() < deadline, "{signal} did not stop service");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
 #[test]
 fn monitor_journal_persists_lifecycle_and_loads_it_on_restart() {
     let home = tempdir().unwrap();
@@ -189,6 +225,35 @@ fn frontend_diagnostics_validate_deduplicate_and_publish_metadata() {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+fn history_query_accepts_python_decimal_integer_syntax() {
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), false, None);
+    for query in ["limit=%EF%BC%91_%D9%A2", "limit=%2B12", "limit=000_12"] {
+        let response = service.get(&format!("/api/history?section=web&{query}&offset=-0"));
+        assert_eq!(response.status, 200, "{query}");
+        assert_eq!(response.json()["limit"], 12);
+    }
+    for query in ["limit=_12", "limit=12_", "limit=1__2", "limit=-1", "limit=201"] {
+        assert_eq!(service.get(&format!("/api/history?section=web&{query}")).status, 400, "{query}");
+    }
+}
+
+#[test]
+fn snapshot_window_uses_first_nonempty_value_like_python() {
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), false, None);
+    for query in ["window=", "unrelated=", "window=&window=24h", "window=24h&window=invalid"] {
+        let response = service.get(&format!("/api/snapshot?{query}"));
+        assert_eq!(response.status, 200, "{query}");
+        assert_eq!(response.json()["monitor"]["window"], "24h");
+    }
+    for query in ["window=invalid&window=24h", "unrelated=1", "window=&window=invalid"] {
+        assert_eq!(service.get(&format!("/api/snapshot?{query}")).status, 400, "{query}");
+    }
+    assert_eq!(service.get("/api/logs?window=").status, 400);
 }
 
 #[test]
@@ -353,6 +418,157 @@ fn reenabled_logs_rescan_core_and_desktop_sources() {
 }
 
 #[test]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+fn monitor_publishes_completed_gpu_collection() {
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), false, None);
+    let snapshot = snapshot_when(&service, |value| value["monitor"]["device_ready"] == true);
+    assert!(snapshot["monitor"]["device_checked_at"].is_string());
+    assert!(snapshot["monitor"]["gpus"]
+        .as_array()
+        .is_some_and(|items| items.len() <= 16));
+}
+
+#[test]
+fn monitor_snapshot_publishes_bounded_font_families() {
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), false, None);
+    let snapshot = snapshot_when(&service, |value| value["monitor"]["fonts"].is_array());
+    let fonts = snapshot["monitor"]["fonts"].as_array().unwrap();
+    assert!(fonts.len() <= 500);
+    assert!(fonts.iter().all(|value| value
+        .as_str()
+        .is_some_and(|name| !name.contains('/') && name.chars().count() <= 160)));
+    assert!(fonts
+        .windows(2)
+        .all(|pair| pair[0].as_str() < pair[1].as_str()));
+}
+
+#[test]
+fn service_stops_after_font_enumeration_starts() {
+    let home = tempdir().unwrap();
+    let mut service = Service::start(home.path(), false, None);
+    service.stop();
+}
+
+#[test]
+fn monitor_snapshot_exposes_process_runtime_information() {
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), false, None);
+    let snapshot = service.get("/api/snapshot").json();
+    let monitor = &snapshot["monitor"];
+    assert_eq!(monitor["process_usage"]["pid"], monitor["pid"]);
+    assert_eq!(monitor["process_usage"]["storage_health"], "ok");
+    assert!(monitor["process_usage"]["checked_at"].is_string());
+    assert!(monitor["platform"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    assert!(monitor["architecture"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    assert_eq!(monitor["process_bits"], std::mem::size_of::<usize>() * 8);
+    assert!(monitor["logical_cpus"]
+        .as_u64()
+        .is_none_or(|value| value > 0));
+    assert!(["system", "processor_group"].contains(&monitor["cpu_scope"].as_str().unwrap()));
+    assert!(monitor["cpu_usage_percent"]
+        .as_f64()
+        .is_none_or(|value| (0.0..=100.0).contains(&value)));
+    #[cfg(unix)]
+    assert!(monitor["system_release"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    assert!(
+        monitor["processor"].is_null()
+            || monitor["processor"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+    );
+    assert!(monitor["physical_memory_bytes"]
+        .as_u64()
+        .is_none_or(|value| value > 0));
+    #[cfg(target_os = "macos")]
+    {
+        assert!(monitor["processor"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
+        assert!(monitor["physical_memory_bytes"]
+            .as_u64()
+            .is_some_and(|value| value > 0));
+        assert!(monitor["available_memory_bytes"].is_null());
+    }
+}
+
+#[test]
+fn stream_does_not_increment_http_request_counter() {
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), false, None);
+    let first = service.get("/api/snapshot").json();
+    let mut stream = EventStream::connect(&service, "").unwrap();
+    let streamed = stream.snapshot();
+    assert_eq!(
+        streamed["snapshot"]["monitor"]["requests"],
+        first["monitor"]["requests"].as_u64().unwrap() + 1
+    );
+    let response = service.get("/api/snapshot").json();
+    assert_eq!(
+        response["monitor"]["requests"],
+        streamed["snapshot"]["monitor"]["requests"]
+    );
+}
+
+#[test]
+fn monitor_snapshot_reports_bounded_live_events_even_when_logs_disabled() {
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), false, None);
+    let initial = snapshot_when(&service, |value| {
+        value["monitor"]["events"]
+            .as_array()
+            .is_some_and(|events| events.iter().any(|event| event["kind"] == "started"))
+    });
+    assert_eq!(initial["monitor"]["event_limit"], 200);
+    let body = json!({"observations":{"logs":false}}).to_string();
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),&body).status,200);
+    assert_eq!(service.get("/private-fixture-missing").status, 404);
+    let snapshot = snapshot_when(&service, |value| {
+        value["monitor"]["events"].as_array().is_some_and(|events| {
+            events
+                .iter()
+                .any(|event| event["kind"] == "http_response_error" && event["http_status"] == 404)
+        })
+    });
+    assert_eq!(snapshot["settings"]["observations"]["logs"], false);
+    assert!(!snapshot["monitor"]["events"]
+        .to_string()
+        .contains("private-fixture"));
+}
+
+#[test]
+fn monitor_reports_http_requests_errors_and_snapshot_sizes() {
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), false, None);
+    let initial = service.get("/api/snapshot").json();
+    assert_eq!(initial["monitor"]["requests"], 0);
+    assert_eq!(initial["monitor"]["http_errors"], 0);
+    assert_eq!(service.get("/missing-one").status, 404);
+    assert_eq!(service.get("/missing-two").status, 404);
+    let compressed = service.request(&format!(
+        "GET /api/snapshot HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAccept-Encoding: gzip\r\n",
+        service.port
+    ));
+    assert_eq!(compressed.header("content-encoding"), Some("gzip"));
+    let mut decoded = Vec::new();
+    GzDecoder::new(compressed.body.as_slice())
+        .read_to_end(&mut decoded)
+        .unwrap();
+    let after = service.get("/api/snapshot").json();
+    assert_eq!(after["monitor"]["requests"], 4);
+    assert_eq!(after["monitor"]["http_errors"], 2);
+    assert_eq!(after["monitor"]["snapshot_bytes"], decoded.len());
+    assert_eq!(after["monitor"]["transfer_bytes"], compressed.body.len());
+}
+
+#[test]
 fn debug_setting_records_collection_only_when_enabled() {
     let home = tempdir().unwrap();
     let service = Service::start(home.path(), false, None);
@@ -382,13 +598,66 @@ fn debug_setting_records_collection_only_when_enabled() {
 }
 
 #[test]
+fn sse_write_metrics_handle_pipelined_http_before_stream() {
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), false, None);
+    let body = r#"{"debug_mode":true}"#;
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),body).status,200);
+    let mut socket =
+        TcpStream::connect_timeout(&(Ipv4Addr::LOCALHOST, service.port).into(), TIMEOUT).unwrap();
+    socket.set_read_timeout(Some(TIMEOUT)).unwrap();
+    write!(socket,"GET /api/snapshot HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\nGET /api/events HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",service.port,service.port).unwrap();
+    let mut reader = BufReader::new(socket);
+    let mut status = String::new();
+    reader.read_line(&mut status).unwrap();
+    assert!(status.contains("200"));
+    let mut length = None;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        if line == "\r\n" {
+            break;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            if key.eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse::<usize>().ok();
+            }
+        }
+    }
+    let mut first = vec![0u8; length.expect("HTTP response length")];
+    reader.read_exact(&mut first).unwrap();
+    let mut status = String::new();
+    reader.read_line(&mut status).unwrap();
+    assert!(status.contains("200"));
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        if line == "\r\n" {
+            break;
+        }
+    }
+    let mut stream = EventStream(reader);
+    let frame = stream.frame();
+    let debug = stream.frame();
+    let payload = debug.strip_prefix("event: debug\ndata: ").unwrap().trim();
+    let debug: Value = serde_json::from_str(payload).unwrap();
+    let record = debug["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["kind"] == "stream_frame")
+        .unwrap();
+    assert_eq!(record["transfer_bytes"], frame.len());
+}
+
+#[test]
 fn debug_stream_reports_connection_and_snapshot() {
     let home = tempdir().unwrap();
     let service = Service::start(home.path(), false, None);
     let body = r#"{"debug_mode":true}"#;
     assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),body).status,200);
     let mut stream = EventStream::connect(&service, "").unwrap();
-    stream.snapshot();
+    let snapshot_frame = stream.frame();
     let frame = stream.frame();
     let payload = frame.strip_prefix("event: debug\ndata: ").unwrap().trim();
     let debug: Value = serde_json::from_str(payload).unwrap();
@@ -400,7 +669,20 @@ fn debug_stream_reports_connection_and_snapshot() {
         .find(|entry| entry["kind"] == "stream_frame")
         .unwrap();
     assert!(event["snapshot_bytes"].as_u64().unwrap() > 0);
-    assert!(event.get("transfer_bytes").is_none());
+    let body = snapshot_frame
+        .split_once("\ndata: ")
+        .unwrap()
+        .1
+        .strip_suffix("\n\n")
+        .unwrap();
+    assert_eq!(event["snapshot_bytes"], body.len());
+    assert_eq!(event["transfer_bytes"], snapshot_frame.len());
+    assert!(event["write_ms"].as_f64().is_some_and(|value| value >= 0.0));
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    assert!(event["cpu_ms"].as_f64().is_some_and(|value| value >= 0.0));
+    let monitor = service.get("/api/snapshot").json();
+    assert_eq!(monitor["monitor"]["snapshot_bytes"], body.len());
+    assert_eq!(monitor["monitor"]["transfer_bytes"], snapshot_frame.len());
     drop(stream);
     let deadline = Instant::now() + TIMEOUT;
     loop {
@@ -412,6 +694,155 @@ fn debug_stream_reports_connection_and_snapshot() {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+#[cfg(unix)]
+fn debug_records_abrupt_stream_failure_without_request_data() {
+    use std::os::fd::AsRawFd;
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), false, None);
+    let body = r#"{"debug_mode":true}"#;
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),body).status,200);
+    let mut stream = EventStream::connect(&service, "").unwrap();
+    stream.snapshot();
+    let linger = libc::linger {
+        l_onoff: 1,
+        l_linger: 0,
+    };
+    let status = unsafe {
+        libc::setsockopt(
+            stream.0.get_ref().as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_LINGER,
+            (&linger as *const libc::linger).cast(),
+            std::mem::size_of::<libc::linger>() as libc::socklen_t,
+        )
+    };
+    assert_eq!(status, 0);
+    drop(stream);
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let refresh = "{}";
+        service.request_body(&format!("POST /api/refresh HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,refresh.len()),refresh);
+        let snapshot = service.get("/api/snapshot").json();
+        if snapshot["monitor"]["debug"]["records"]
+            .as_array()
+            .is_some_and(|records| {
+                records
+                    .iter()
+                    .any(|record| record["kind"] == "stream_error")
+            })
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "stream error was not recorded");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn plugin_metadata_appears_in_snapshot_and_obeys_metadata_switch() {
+    let home = tempdir().unwrap();
+    fs::write(
+        home.path().join("config.toml"),
+        "[plugins.\"fixture@provider\"]\nenabled = true\n",
+    )
+    .unwrap();
+    let path = home.path().join("plugins/cache/provider/fixture/1.0.0");
+    fs::create_dir_all(path.join("skills/example")).unwrap();
+    fs::write(path.join("skills/example/SKILL.md"), "PRIVATE_SKILL_BODY").unwrap();
+    fs::write(path.join("plugin.json"),r#"{"version":"1.0.0","skills":"./skills","mcpServers":{"demo":{"command":"PRIVATE_COMMAND"}}}"#).unwrap();
+    let service = Service::start(home.path(), true, None);
+    let found = snapshot_when(&service, |value| {
+        value["codex"]["plugins"]["items"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["id"] == "fixture@provider"))
+    });
+    let item = &found["codex"]["plugins"]["items"][0];
+    assert_eq!(item["enabled"], true);
+    assert_eq!(item["skills_count"], 1);
+    assert_eq!(item["mcp_servers"], json!(["demo"]));
+    assert!(!found.to_string().contains("PRIVATE_COMMAND"));
+    assert!(!found.to_string().contains("PRIVATE_SKILL_BODY"));
+    fs::write(
+        path.join("plugin.json"),
+        r#"{"version":"1.0.0","skills":"./skills","mcpServers":{"demo":{},"second":{}}}"#,
+    )
+    .unwrap();
+    let changed = snapshot_when(&service, |value| {
+        value["codex"]["plugins"]["items"]
+            .as_array()
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item["id"] == "fixture@provider" && item["mcp_count"] == 2)
+            })
+    });
+    assert_eq!(
+        changed["codex"]["plugins"]["items"][0]["mcp_servers"],
+        json!(["demo", "second"])
+    );
+    fs::create_dir_all(path.join("skills/new_skill")).unwrap();
+    fs::write(path.join("skills/new_skill/SKILL.md"), "private content").unwrap();
+    snapshot_when(&service, |value| {
+        value["codex"]["plugins"]["items"][0]["skills_count"] == 2
+    });
+    let replacement = path.join("staged.tmp");
+    fs::write(&replacement,r#"{"version":"1.0.0","skills":"./skills","mcpServers":{"demo":{},"second":{},"third":{}}}"#).unwrap();
+    fs::rename(replacement, path.join("plugin.json")).unwrap();
+    snapshot_when(&service, |value| {
+        value["codex"]["plugins"]["items"][0]["mcp_count"] == 3
+    });
+    fs::write(
+        home.path().join("config.toml"),
+        "[plugins.\"fixture@provider\"]\nenabled = false\n",
+    )
+    .unwrap();
+    snapshot_when(&service, |value| {
+        value["codex"]["plugins"]["items"][0]["enabled"] == false
+    });
+    let set = |enabled| {
+        let body = json!({"observations":{"metadata":enabled}}).to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),&body)
+    };
+    assert_eq!(set(false).status, 200);
+    let disabled = service.get("/api/snapshot").json();
+    assert_eq!(disabled["codex"]["plugins"]["health"], "disabled");
+    assert_eq!(set(true).status, 200);
+    snapshot_when(&service, |value| {
+        value["codex"]["plugins"]["items"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    });
+}
+
+#[test]
+fn plugin_cache_created_after_start_is_observed() {
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["plugins"]["health"] == "missing"
+    });
+    let root = home.path().join("plugins/cache/provider/created/1.0.0");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("plugin.json"), r#"{"version":"1.0.0"}"#).unwrap();
+    snapshot_when(&service, |value| {
+        value["codex"]["plugins"]["items"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["id"] == "created@provider"))
+    });
+}
+
+#[test]
+fn monitor_snapshot_reports_idle_after_collection() {
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["monitor"]["collection"]["phase"] == "idle"
+    });
+    assert_eq!(snapshot["monitor"]["collection"]["phase_ms"], 0);
+    assert_eq!(snapshot["monitor"]["collection"]["phase_cpu_ms"], 0);
 }
 
 #[test]
@@ -438,7 +869,7 @@ fn debug_collection_reports_only_measured_phase_metrics() {
             record["kind"] == "collection" && record["phase_metrics"]["sessions"].is_object()
         })
         .unwrap();
-    for phase in ["sessions", "diagnostics", "history"] {
+    for phase in ["sessions", "worktrees", "diagnostics", "history"] {
         assert!(record["phase_metrics"][phase]["elapsed_ms"]
             .as_f64()
             .is_some_and(|value| value >= 0.0));
@@ -446,7 +877,6 @@ fn debug_collection_reports_only_measured_phase_metrics() {
             .as_f64()
             .is_some_and(|value| value >= 0.0));
     }
-    assert!(record["phase_metrics"].get("worktrees").is_none());
 }
 
 #[test]
@@ -615,6 +1045,206 @@ fn state_metadata_projects_execution_and_parent_without_raw_policies() {
 }
 
 #[test]
+fn codex_connection_uses_recorded_responses_and_connection_errors() {
+    let home = tempdir().unwrap();
+    let (path, _) = native_event_fixture(home.path());
+    let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now());
+    let early = (now - chrono::Duration::seconds(10)).to_rfc3339();
+    let later = (now - chrono::Duration::seconds(5)).to_rfc3339();
+    let id = "00000000-0000-4000-8000-000000000002";
+    fs::write(
+        &path,
+        [
+            event(&early, "session_meta", json!({"id":id})),
+            event(
+                &early,
+                "event_msg",
+                json!({"type":"token_count","info":{"total_token_usage":{"input_tokens":1}}}),
+            ),
+            event(
+                &early,
+                "event_msg",
+                json!({"type":"error","error_code":"stream_disconnected"}),
+            ),
+        ]
+        .concat(),
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    let first = snapshot_when(&service, |value| {
+        value["codex"]["connection"]["state"] == "error"
+    });
+    assert_eq!(first["codex"]["connection"]["evidence"], "connection_error");
+    assert!(first["codex"]["connection"]["last_response_at"].is_string());
+    let next = event(
+        &later,
+        "event_msg",
+        json!({"type":"token_count","info":{"total_token_usage":{"input_tokens":2}}}),
+    );
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(next.as_bytes())
+        .unwrap();
+    let after = snapshot_when(&service, |value| {
+        value["codex"]["connection"]["state"] == "response"
+    });
+    assert_eq!(after["codex"]["connection"]["evidence"], "model_usage");
+    let body = json!({"observations":{"codex":false}}).to_string();
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),&body).status,200);
+    assert_eq!(
+        service.get("/api/snapshot").json()["codex"]["connection"]["state"],
+        "paused"
+    );
+}
+
+#[test]
+fn local_allowance_observation_replays_changes_after_reenable() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let later = (chrono::DateTime::parse_from_rfc3339(&stamp).unwrap()
+        + chrono::Duration::seconds(1))
+    .to_rfc3339();
+    let first = event(
+        &stamp,
+        "event_msg",
+        json!({"type":"token_count","rate_limits":{"primary":{"used_percent":25}}}),
+    );
+    fs::write(&path, &first).unwrap();
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["usage"]["limits"][0]["used_percent"] == 25
+    });
+    let post = |enabled| {
+        let body = json!({"observations":{"usage":enabled}}).to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),&body)
+    };
+    assert_eq!(post(false).status, 200);
+    let disabled = service.get("/api/snapshot?window=all").json();
+    assert_eq!(disabled["settings"]["observations"]["usage"], false);
+    assert!(disabled["codex"]["usage"].is_null());
+    let second = event(
+        &later,
+        "event_msg",
+        json!({"type":"token_count","rate_limits":{"primary":{"used_percent":80}}}),
+    );
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(second.as_bytes())
+        .unwrap();
+    let scanned = snapshot_when(&service, |value| {
+        value["codex"]["bytes_read"]
+            .as_u64()
+            .is_some_and(|n| n >= (first.len() + second.len()) as u64)
+    });
+    assert!(scanned["codex"]["usage"].is_null());
+    assert_eq!(post(true).status, 200);
+    let enabled = snapshot_when(&service, |value| {
+        value["codex"]["usage"]["limits"][0]["used_percent"] == 80
+    });
+    assert_eq!(enabled["settings"]["observations"]["usage"], true);
+}
+
+#[test]
+fn local_allowance_projects_latest_event_and_restores_checkpoint() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let rows = [
+        event(
+            &stamp,
+            "session_meta",
+            json!({"id":"00000000-0000-4000-8000-000000000002"}),
+        ),
+        event(
+            &stamp,
+            "event_msg",
+            json!({"type":"token_count","rate_limits":{"limit_id":"codex","plan_type":"pro","primary":{"used_percent":25,"window_minutes":300,"resets_at":0},"credits":{"balance":"1.25","secret":"PRIVATE"}}}),
+        ),
+    ];
+    fs::write(&path, rows.concat()).unwrap();
+    let mut service = Service::start(home.path(), true, None);
+    let initial = snapshot_when(&service, |value| {
+        value["codex"]["usage"]["limit_id"] == "codex"
+            && value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    assert_eq!(
+        initial["codex"]["usage"]["limits"][0]["remaining_percent"],
+        75.0
+    );
+    assert!(!initial.to_string().contains("PRIVATE"));
+    service.stop();
+    let restored = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&restored, |value| {
+        value["codex"]["read_state"]["checkpoint"]["restored"] == 1
+    });
+    assert_eq!(snapshot["codex"]["usage"]["limit_id"], "codex");
+}
+
+#[test]
+fn plain_execution_modes_survive_session_checkpoint_restore() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    fs::write(
+        &path,
+        [
+            event(
+                &stamp,
+                "session_meta",
+                json!({"id":"00000000-0000-4000-8000-000000000002"}),
+            ),
+            event(
+                &stamp,
+                "turn_context",
+                json!({"sandbox_policy":"workspace-write","collaboration_mode":"default"}),
+            ),
+        ]
+        .concat(),
+    )
+    .unwrap();
+    let mut service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["codex"]["threads"].as_array().is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row["execution"]["sandbox_mode"] == "workspace-write")
+        }) && value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    assert_eq!(
+        snapshot["codex"]["threads"][0]["execution"]["collaboration_mode"],
+        "default"
+    );
+    service.stop();
+    let mut restarted = Service::start(home.path(), true, None);
+    let restored = snapshot_when(&restarted, |value| {
+        value["codex"]["read_state"]["checkpoint"]["restored"] == 1
+    });
+    assert_eq!(
+        restored["codex"]["threads"][0]["execution"]["sandbox_mode"],
+        "workspace-write"
+    );
+    restarted.stop();
+    let db = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    db.execute("UPDATE session_cursors SET payload=json_remove(json_set(payload,'$.version',16),'$.projection.execution')", []).unwrap();
+    drop(db);
+    let replayed = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&replayed, |value| {
+        value["codex"]["read_state"]["checkpoint"]["invalidated"] == 1
+            && value["codex"]["threads"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["execution"]["sandbox_mode"] == "workspace-write")
+            })
+    });
+    assert!(snapshot["codex"]["bytes_read"].as_u64().unwrap() > 0);
+}
+
+#[test]
 fn session_execution_metadata_is_selected_and_survives_checkpoint_restore() {
     let home = tempdir().unwrap();
     let (path, stamp) = native_event_fixture(home.path());
@@ -636,7 +1266,7 @@ fn session_execution_metadata_is_selected_and_survives_checkpoint_restore() {
             json!({"type":"token_count","info":{"model_context_window":272000}}),
         ),
     ];
-    fs::write(path, rows.concat()).unwrap();
+    fs::write(&path, rows.concat()).unwrap();
     let mut service = Service::start(home.path(), true, None);
     let snapshot = snapshot_when(&service, |value| {
         value["codex"]["threads"].as_array().is_some_and(|rows| {
@@ -679,6 +1309,4580 @@ fn session_execution_metadata_is_selected_and_survives_checkpoint_restore() {
             })
     });
     assert!(snapshot["codex"]["bytes_read"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn agent_communication_metadata_is_bounded_private_and_replayed_from_old_checkpoint() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let id = "00000000-0000-4000-8000-000000000002";
+    let records = [
+        event(&stamp, "session_meta", json!({"id":id})),
+        event(
+            &stamp,
+            "response_item",
+            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"Message Type: MESSAGE\nTask name: /root\nSender: /root/worker\nPayload:\nPRIVATE_MESSAGE"}]}),
+        ),
+        event(
+            &stamp,
+            "response_item",
+            json!({"type":"message","role":"assistant","channel":"analysis","content":[{"type":"output_text","text":"Message Type: MESSAGE\nTask name: /root\nSender: /root/hidden\nPayload:\nPRIVATE_HIDDEN"}]}),
+        ),
+        event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call","name":"collaboration.send_message","call_id":"direct","arguments":json!({"target":"/root/worker","message":"PRIVATE_BODY"}).to_string()}),
+        ),
+        event(
+            &stamp,
+            "response_item",
+            json!({"type":"custom_tool_call","name":"exec","call_id":"nested","input":"await tools.collaboration__spawn_agent({task_name:'review', message:'PRIVATE_NESTED'})"}),
+        ),
+    ];
+    fs::write(path, records.concat()).unwrap();
+    let mut service = Service::start(home.path(), true, None);
+    let check = |snapshot: &Value| {
+        snapshot["codex"]["threads"].as_array().is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row["thread_id"] == id
+                    && row["agent_messages"]
+                        .as_array()
+                        .is_some_and(|messages| messages.len() == 3)
+            })
+        })
+    };
+    let snapshot = snapshot_when(&service, |value| {
+        check(value) && value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    let messages = snapshot["codex"]["threads"][0]["agent_messages"]
+        .as_array()
+        .unwrap();
+    assert!(messages
+        .iter()
+        .any(|message| message["direction"] == "incoming" && message["sender"] == "/root/worker"));
+    assert!(messages
+        .iter()
+        .any(|message| message["action"] == "send_message" && message["target"] == "/root/worker"));
+    assert!(messages
+        .iter()
+        .any(|message| message["action"] == "spawn_agent"
+            && message["task_name"] == "review"
+            && message["nested"] == true));
+    assert!(!snapshot.to_string().contains("PRIVATE"));
+    service.stop();
+    let db = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    let stored: String=db.query_row("SELECT group_concat(payload) FROM (SELECT payload FROM session_cursors UNION ALL SELECT payload FROM session_calls)",[],|row|row.get(0)).unwrap();
+    assert!(!stored.contains("PRIVATE"));
+    drop(db);
+    let mut resumed = Service::start(home.path(), true, None);
+    let restored = snapshot_when(&resumed, |value| {
+        check(value) && value["codex"]["read_state"]["checkpoint"]["restored"] == 1
+    });
+    assert!(!restored.to_string().contains("PRIVATE"));
+    resumed.stop();
+    let db = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    db.execute_batch("UPDATE session_cursors SET payload=json_remove(json_set(payload,'$.version',5),'$.projection.agent_incoming'); UPDATE session_calls SET payload=json_remove(payload,'$.agent_messages');").unwrap();
+    drop(db);
+    let restarted = Service::start(home.path(), true, None);
+    let replayed = snapshot_when(&restarted, |value| {
+        check(value) && value["codex"]["read_state"]["checkpoint"]["invalidated"] == 1
+    });
+    assert!(replayed["codex"]["bytes_read"].as_u64().unwrap() > 0);
+    assert!(!replayed.to_string().contains("PRIVATE"));
+}
+
+#[test]
+fn context_detail_reads_only_observed_source_and_masks_private_content() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let id = "00000000-0000-4000-8000-000000000002";
+    let records = [
+        event(&stamp, "session_meta", json!({"id":id})),
+        event(
+            &stamp,
+            "response_item",
+            json!({"type":"message","role":"user","channel":{"token":"PRIVATE_CHANNEL","kind":"final"},"content":[{"type":"input_text","text":"Visible api_key=PRIVATE_KEY"}]}),
+        ),
+        event(
+            &stamp,
+            "response_item",
+            json!({"type":"message","role":"assistant","channel":"analysis","content":[{"type":"output_text","text":"HIDDEN_ANALYSIS"}]}),
+        ),
+        event(
+            &stamp,
+            "response_item",
+            json!({"type":"reasoning","content":[{"type":"reasoning_text","text":"HIDDEN_REASONING"}],"summary":[{"type":"summary_text","text":"Public summary"}]}),
+        ),
+        event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call","name":"collaboration.send_message","call_id":"send1","arguments":json!({"target":"/root/worker","message":"PRIVATE_BODY"}).to_string()}),
+        ),
+        event(
+            &stamp,
+            "response_item",
+            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"After call"}]}),
+        ),
+    ];
+    fs::write(&path, records.concat()).unwrap();
+    let mut service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+            && value["codex"]["observed_tool_calls"] == 1
+    });
+    assert!(!snapshot.to_string().contains("PRIVATE"));
+    let route = format!("/api/codex/context?thread_id={id}&call_id=send1");
+    let masked = service.get(&route).json();
+    assert_eq!(masked["scope"], "preceding_visible_messages");
+    assert_eq!(masked["masked"], true);
+    assert!(!masked.to_string().contains("PRIVATE_KEY"));
+    assert!(!masked.to_string().contains("PRIVATE_CHANNEL"));
+    assert!(!masked.to_string().contains("HIDDEN_ANALYSIS"));
+    assert!(!masked.to_string().contains("HIDDEN_REASONING"));
+    assert!(masked.to_string().contains("Public summary"));
+    assert!(!masked.to_string().contains("After call"));
+    let unmasked = service.get(&format!("{route}&mask=0")).json();
+    assert!(unmasked.to_string().contains("PRIVATE_KEY"));
+    assert!(unmasked.to_string().contains("PRIVATE_CHANNEL"));
+    assert!(service
+        .get(&format!("/api/codex/context?thread_id={id}"))
+        .json()
+        .to_string()
+        .contains("After call"));
+    assert_eq!(service.get(&format!("{route}&mask=2")).status, 400);
+    assert_eq!(
+        service
+            .get(&format!(
+                "/api/codex/context?thread_id={id}&call_id=unknown"
+            ))
+            .status,
+        409
+    );
+    service.stop();
+    let db = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    let stored:String=db.query_row("SELECT group_concat(payload) FROM (SELECT payload FROM session_cursors UNION ALL SELECT payload FROM session_calls)",[],|row|row.get(0)).unwrap();
+    assert!(!stored.contains("PRIVATE"));
+    drop(db);
+    let mut restarted = Service::start(home.path(), true, None);
+    snapshot_when(&restarted, |value| {
+        value["codex"]["read_state"]["checkpoint"]["restored"] == 1
+    });
+    assert!(restarted
+        .get(&route)
+        .json()
+        .to_string()
+        .contains("Public summary"));
+    restarted.stop();
+    let db = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    db.execute_batch("UPDATE session_cursors SET payload=json_set(payload,'$.version',6); UPDATE session_calls SET payload=json_remove(payload,'$.request_position','$.response_position');").unwrap();
+    drop(db);
+    let replayed = Service::start(home.path(), true, None);
+    snapshot_when(&replayed, |value| {
+        value["codex"]["read_state"]["checkpoint"]["invalidated"] == 1
+            && value["codex"]["observed_tool_calls"] == 1
+    });
+    assert!(replayed
+        .get(&route)
+        .json()
+        .to_string()
+        .contains("Public summary"));
+}
+
+#[test]
+fn context_detail_projects_safe_structures_and_masks_nested_fields() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let id = "00000000-0000-4000-8000-000000000002";
+    let body = json!({"type":"message","role":"user","content":[
+        {"type":"input_text","text":"name: fixture\nitems:\n  - name: first\n    password: PRIVATE_YAML\n  - name: second\n    value: null"},
+        {"type":"input_text","text":"{\"name\":\"one\",\"token\":\"PRIVATE_JSONL\"}\n{\"name\":\"two\"}"},
+        {"type":"input_text","text":"{label:'fixture', secret:'PRIVATE_LITERAL', active:true}"},
+        {"type":"input_text","text":"{value: run()}"},
+        {"type":"input_text","text":"<result><password>PRIVATE_XML</password><count>2</count></result>"},
+        {"type":"input_text","text":"password = 'PRIVATE_TOML'\nupdated = 2026-10-05T12:00:00Z"},
+        {"type":"input_text","text":"name,password\nexample,PRIVATE_CSV"},
+        {"type":"input_text","text":"name\tcount\nexample\t2"},
+        {"type":"input_text","text":"token,token\nPRIVATE_DUPLICATE,PRIVATE_DUPLICATE"},
+        {"type":"input_text","text":"{'ok': True, 'secret': 'PRIVATE_PYTHON', 'items': (0, False)}"},
+        {"type":"input_text","text":"a,b\n\"alpha\", 'beta'"}
+    ]});
+    fs::write(
+        path,
+        format!(
+            "{}{}",
+            event(&stamp, "session_meta", json!({"id":id})),
+            event(&stamp, "response_item", body)
+        ),
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    let result = service
+        .get(&format!("/api/codex/context?thread_id={id}"))
+        .json();
+    let content = result["text"][0]["content"].as_array().unwrap();
+    assert_eq!(content[0]["text"]["items"][1]["value"], Value::Null);
+    assert_eq!(content[0]["text"]["items"][0]["password"], "[已隱藏]");
+    assert_eq!(content[1]["text"][0]["token"], "[已隱藏]");
+    assert_eq!(content[2]["text"]["secret"], "[已隱藏]");
+    assert_eq!(content[3]["text"], "{value: run()}");
+    assert_eq!(
+        content[4]["text"]["result"]["children"][0]["password"],
+        "[已隱藏]"
+    );
+    assert_eq!(content[5]["text"]["password"], "[已隱藏]");
+    assert_eq!(content[5]["text"]["updated"], "2026-10-05T12:00:00+00:00");
+    assert_eq!(content[6]["text"]["rows"][0]["password"], "[已隱藏]");
+    assert_eq!(content[7]["text"]["rows"][0]["count"], "2");
+    assert_eq!(content[8]["text"][1][0], "[已隱藏]");
+    assert_eq!(content[9]["text"]["secret"], "[已隱藏]");
+    assert_eq!(content[9]["text"]["items"], json!([0, false]));
+    assert_eq!(content[10]["text"]["rows"][0]["b"], "'beta'");
+    assert!(!result.to_string().contains("PRIVATE"));
+}
+
+#[test]
+fn agent_message_details_select_observed_calls_and_mask_request_and_response() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let id = "00000000-0000-4000-8000-000000000002";
+    let records = [
+        event(&stamp, "session_meta", json!({"id":id})),
+        event(
+            &stamp,
+            "response_item",
+            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"Visible context api_key=PRIVATE_CONTEXT"}]}),
+        ),
+        event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call","name":"collaboration.send_message","call_id":"direct","arguments":json!({"target":"/root/worker","message":"token=PRIVATE_MESSAGE","context":{"password":"PRIVATE_PASSWORD"},"unselected":"PRIVATE_IGNORED"}).to_string()}),
+        ),
+        event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call_output","call_id":"direct","output":{"token":"PRIVATE_RESPONSE","status":"ok"}}),
+        ),
+        event(
+            &stamp,
+            "response_item",
+            json!({"type":"custom_tool_call","name":"exec","call_id":"nested","input":"await tools.other({}); await tools.collaboration__spawn_agent({task_name:'review', message:'secret=PRIVATE_NESTED'}); await tools.collaboration__send_message({target:'/root/worker', message:'hello'})"}),
+        ),
+    ];
+    fs::write(&path, records.concat()).unwrap();
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["codex"]["threads"].as_array().is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row["agent_messages"]
+                    .as_array()
+                    .is_some_and(|messages| messages.len() == 3)
+            })
+        }) && value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    assert!(!snapshot.to_string().contains("PRIVATE"));
+    let direct = format!("/api/codex/agent-message?thread_id={id}&call_id=direct");
+    let masked = service.get(&direct).json();
+    assert_eq!(masked["metadata"]["action"], "send_message");
+    assert_eq!(masked["context_state"], "recorded");
+    assert_eq!(masked["response"]["status"], "ok");
+    assert!(!masked.to_string().contains("PRIVATE"));
+    assert!(masked["request"].get("unselected").is_none());
+    let raw = service.get(&format!("{direct}&mask=0")).json();
+    assert!(raw.to_string().contains("PRIVATE_MESSAGE"));
+    assert!(raw.to_string().contains("PRIVATE_RESPONSE"));
+    let nested = format!("/api/codex/agent-message?thread_id={id}&call_id=nested");
+    let first = service.get(&nested).json();
+    assert_eq!(first["metadata"]["invocation_index"], 1);
+    assert_eq!(first["metadata"]["task_name"], "review");
+    assert!(!first.to_string().contains("PRIVATE_NESTED"));
+    let second = service.get(&format!("{nested}&index=1")).json();
+    assert_eq!(second["metadata"]["action"], "send_message");
+    assert_eq!(second["metadata"]["invocation_index"], 2);
+    assert_eq!(service.get(&format!("{nested}&index=%D9%A1")).json(), second);
+    assert_eq!(service.get(&format!("{nested}&index=2")).status, 409);
+    assert_eq!(service.get(&format!("{nested}&index=100")).status, 400);
+    assert_eq!(
+        service
+            .get(&format!("/api/codex/agent-message?thread_id={id}"))
+            .status,
+        409
+    );
+}
+
+#[test]
+fn tool_detail_is_bounded_masked_and_pages_with_stable_revisions() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let id = "00000000-0000-4000-8000-000000000002";
+    let body = "漢".repeat(40000);
+    let arguments = json!({"message":body,"api_key":"PRIVATE_KEY"}).to_string();
+    let rows = [
+        event(&stamp, "session_meta", json!({"id":id})),
+        event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call","name":"fixture_tool","call_id":"call1","arguments":arguments}),
+        ),
+        event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call_output","call_id":"call1","output":{"status":"ok","token":"PRIVATE_RESPONSE"}}),
+        ),
+    ];
+    fs::write(path, rows.concat()).unwrap();
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["codex"]["observed_tool_calls"] == 1
+            && value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    assert!(!snapshot.to_string().contains("PRIVATE"));
+    let base = format!("/api/codex/tool?thread_id={id}&call_id=call1");
+    let bounded = service.get(&base).json();
+    assert_eq!(bounded["tool"], "fixture_tool");
+    assert_eq!(bounded["truncated"], true);
+    assert!(!bounded.to_string().contains("PRIVATE"));
+    let initial = service.get(&format!("{base}&lazy=1")).json();
+    let page = &initial["request"];
+    assert_eq!(page["content_page"], true);
+    assert_eq!(page["next"], 32768);
+    assert!(!initial.to_string().contains("PRIVATE"));
+    let revision = page["revision"].as_str().unwrap();
+    let next = service
+        .get(&format!(
+            "{base}&lazy=1&field=request&offset=32768&revision={revision}"
+        ))
+        .json();
+    assert!(next["next"].is_null());
+    assert_eq!(next["revision"], revision);
+    let unicode_offset: String = form_urlencoded::byte_serialize("٣٢٧٦٨".as_bytes()).collect();
+    assert_eq!(service.get(&format!("{base}&lazy=1&field=request&offset={unicode_offset}&revision={revision}")).json(), next);
+    assert_eq!(
+        service
+            .get(&format!(
+                "{base}&lazy=1&field=request&offset=32768&revision={revision}&mask=0"
+            ))
+            .status,
+        409
+    );
+    assert_eq!(
+        service
+            .get(&format!(
+                "{base}&lazy=1&field=output&offset=0&revision={revision}"
+            ))
+            .status,
+        400
+    );
+    assert_eq!(service.get(&format!("{base}&call_id=other")).status, 400);
+    assert_eq!(
+        service
+            .get(&format!("/api/codex/tool?thread_id={id}&call_id=unknown"))
+            .status,
+        409
+    );
+    let db = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    let stored:String=db.query_row("SELECT group_concat(payload) FROM (SELECT payload FROM session_cursors UNION ALL SELECT payload FROM session_calls)",[],|row|row.get(0)).unwrap();
+    assert!(!stored.contains("PRIVATE"));
+}
+
+#[test]
+fn tracking_settings_preserve_incremental_all_source_collection() {
+    let home = tempdir().unwrap();
+    let (_, stamp) = native_event_fixture(home.path());
+    let second = home
+        .path()
+        .join("sessions/rollout-demo-00000000-0000-4000-8000-000000000003.jsonl");
+    fs::write(
+        second,
+        event(
+            &stamp,
+            "session_meta",
+            json!({"id":"00000000-0000-4000-8000-000000000003"}),
+        ),
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| value["codex"]["files"] == 2);
+    let body = json!({"max_files":1,"track_all":true,"observations":{"files":false}}).to_string();
+    let response = service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body);
+    assert_eq!(response.status, 200);
+    assert_eq!(response.json()["max_files"], 1);
+    let snapshot = service.get("/api/snapshot?window=all").json();
+    assert_eq!(snapshot["codex"]["files"], 2);
+    assert_eq!(snapshot["codex"]["scope"], "incremental_all_sources");
+    assert_eq!(snapshot["codex"]["max_files"], 1);
+    assert_eq!(snapshot["codex"]["track_all"], true);
+    let settings = service.get("/api/settings").json();
+    assert_eq!(settings["max_files"], 1);
+    assert_eq!(settings["track_all"], true);
+    let invalid = r#"{"max_files":0,"track_all":false}"#;
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, invalid.len()), invalid).status, 409);
+    assert_eq!(service.get("/api/settings").json()["track_all"], true);
+    let disabled_home = tempdir().unwrap();
+    let disabled = Service::start(disabled_home.path(), false, None);
+    let body = r#"{"track_all":true}"#;
+    let response = disabled.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", disabled.port, body.len()), body);
+    assert_eq!(response.status, 200);
+    assert_eq!(response.json()["track_all"], false);
+}
+
+#[test]
+fn batch_retention_failure_preserves_settings_and_background_finishes_cleanup() {
+    let home = tempdir().unwrap();
+    let monitoring = home.path().join("monitoring");
+    let mut store = Store::open(&monitoring, Access::ReadWrite)
+        .unwrap()
+        .unwrap();
+    store
+        .set_activity_retention(0, std::time::SystemTime::now().into())
+        .unwrap();
+    drop(store);
+    let db = rusqlite::Connection::open(monitoring.join(lam_history_store::FILE_NAME)).unwrap();
+    db.execute_batch("WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<1001) INSERT INTO history_items(namespace,section,item_key,ordinal,event_time,payload) SELECT 'activity','web',n,0,'2000-01-01T00:00:00.000Z','{}' FROM ids; CREATE TRIGGER reject_retention BEFORE UPDATE ON history_state WHEN NEW.namespace='activity' BEGIN SELECT RAISE(ABORT,'fixture failure'); END;").unwrap();
+    let mut service = Service::start(home.path(), false, None);
+    let post = || {
+        let body = json!({"activity_retention_days":1,"debug_mode":true,"observations":{"files":false},"mcp_sources":{"fixture":false}}).to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body)
+    };
+    assert_eq!(post().status, 503);
+    let unchanged = service.get("/api/settings").json();
+    assert_eq!(unchanged["activity_retention_days"], 0);
+    assert_eq!(unchanged["debug_mode"], false);
+    assert_eq!(unchanged["observations"]["files"], true);
+    assert!(unchanged["mcp_sources"].get("fixture").is_none());
+    let count: i64 = db
+        .query_row("SELECT count(*) FROM history_items", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 1001);
+    db.execute_batch("DROP TRIGGER reject_retention").unwrap();
+    let applied = post();
+    assert_eq!(applied.status, 200);
+    let settings = applied.json();
+    assert_eq!(settings["activity_retention_days"], 1);
+    assert_eq!(settings["debug_mode"], true);
+    assert_eq!(settings["observations"]["files"], false);
+    assert_eq!(settings["mcp_sources"]["fixture"], false);
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let count: i64 = db
+            .query_row("SELECT count(*) FROM history_items", [], |row| row.get(0))
+            .unwrap();
+        if count == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "background cleanup did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    service.stop();
+}
+
+#[test]
+fn batch_settings_validate_observations_before_applying_changes() {
+    let home = tempdir().unwrap();
+    native_event_fixture(home.path());
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    let post = |value: Value| {
+        let body = value.to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body)
+    };
+    let invalid = post(
+        json!({"mcp_sources":{"fixture":false},"observations":{"files":false,"unknown":true},"debug_mode":true}),
+    );
+    assert_eq!(invalid.status, 409);
+    let unchanged = service.get("/api/settings").json();
+    assert!(unchanged["mcp_sources"].get("fixture").is_none());
+    assert_eq!(unchanged["observations"]["files"], true);
+    assert_eq!(unchanged["debug_mode"], false);
+    let applied = post(
+        json!({"mcp_sources":{"fixture":false},"mcp_descriptions":{"fixture":"Purpose"},"observations":{"metadata":false,"files":false,"mcp":false,"web":true,"logs":false,"tool_events":false},"debug_mode":true}),
+    );
+    assert_eq!(applied.status, 200);
+    let settings = applied.json();
+    assert_eq!(settings["mcp_sources"]["fixture"], false);
+    assert_eq!(settings["mcp_descriptions"]["fixture"], "Purpose");
+    assert_eq!(settings["observations"]["metadata"], false);
+    assert_eq!(settings["observations"]["files"], false);
+    assert_eq!(settings["observations"]["mcp"], false);
+    assert_eq!(settings["observations"]["web"], true);
+    assert_eq!(settings["observations"]["logs"], false);
+    assert_eq!(settings["observations"]["tool_events"], false);
+    assert_eq!(settings["debug_mode"], true);
+    assert_eq!(settings["activity_retention_days"], 90);
+}
+
+#[test]
+fn mcp_customization_batch_replacement_validates_before_changes() {
+    let home = tempdir().unwrap();
+    native_event_fixture(home.path());
+    fs::write(
+        home.path().join("config.toml"),
+        "[mcp_servers.fixture]\ndescription='Default'\n[mcp_servers.other]\n",
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["mcp"]["configuration"]["configured_sources"] == 2
+    });
+    let post = |value: Value| {
+        let body = value.to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body)
+    };
+    assert_eq!(
+        post(json!({"mcp_sources":{"fixture":false},"mcp_descriptions":{"fixture":"Old purpose"}}))
+            .status,
+        200
+    );
+    assert_eq!(post(json!({"replace_customizations":true,"mcp_sources":{"fixture":true},"mcp_tags":{"fixture":[" "]}})).status, 409);
+    let unchanged = service.get("/api/settings").json();
+    assert_eq!(unchanged["mcp_sources"]["fixture"], false);
+    assert_eq!(unchanged["mcp_descriptions"]["fixture"], "Old purpose");
+    let replaced = post(
+        json!({"replace_customizations":true,"mcp_sources":{"other":false},"mcp_categories":{"other":"workspace"},"mcp_descriptions":{"other":"New purpose"}}),
+    );
+    assert_eq!(replaced.status, 200);
+    let settings = replaced.json();
+    assert!(settings["mcp_sources"].get("fixture").is_none());
+    assert_eq!(settings["mcp_sources"]["other"], false);
+    assert!(settings["mcp_descriptions"].get("fixture").is_none());
+    assert_eq!(settings["mcp_descriptions"]["other"], "New purpose");
+    assert_eq!(settings["activity_retention_days"], 90);
+    let snapshot = service.get("/api/snapshot?window=all").json();
+    let rows = snapshot["mcp"]["servers"].as_array().unwrap();
+    assert!(rows.iter().any(|row| row["server"] == "fixture"
+        && row["enabled"] == true
+        && row["description"] == "Default"));
+    assert!(rows.iter().any(|row| row["server"] == "other"
+        && row["enabled"] == false
+        && row["description"] == "New purpose"));
+}
+
+#[test]
+fn mcp_customizations_validate_atomically_and_restore_default_description() {
+    let home = tempdir().unwrap();
+    native_event_fixture(home.path());
+    fs::write(
+        home.path().join("config.toml"),
+        "[mcp_servers.fixture]\ndescription='Default purpose'\n",
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["mcp"]["configuration"]["configured_sources"] == 1
+    });
+    let post = |value: Value| {
+        let body = value.to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body)
+    };
+    let response = post(
+        json!({"mcp_categories":{"fixture":"workspace"},"mcp_descriptions":{"fixture":"Custom purpose"},"mcp_tags":{"fixture":[" tag ","tag","other"]},"tool_descriptions":{"mcp__fixture__read":"Tool purpose"}}),
+    );
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.json()["mcp_tags"]["fixture"],
+        json!(["tag", "other"])
+    );
+    let snapshot = service.get("/api/snapshot?window=all").json();
+    let row = snapshot["mcp"]["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["server"] == "fixture")
+        .unwrap();
+    assert_eq!(row["category"], "workspace");
+    assert_eq!(row["description"], "Custom purpose");
+    assert_eq!(row["default_description"], "Default purpose");
+    assert_eq!(row["tags"], json!(["tag", "other"]));
+    assert_eq!(post(json!({"mcp_categories":{"fixture":"invalid"},"mcp_descriptions":{"fixture":"Should not apply"}})).status, 409);
+    assert_eq!(
+        service.get("/api/settings").json()["mcp_descriptions"]["fixture"],
+        "Custom purpose"
+    );
+    assert_eq!(post(json!({"mcp_descriptions":{"fixture":""}})).status, 200);
+    let snapshot = service.get("/api/snapshot?window=all").json();
+    let row = snapshot["mcp"]["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["server"] == "fixture")
+        .unwrap();
+    assert_eq!(row["description"], "Default purpose");
+    assert_eq!(
+        post(json!({"mcp_sources":{"fixture":false}})).json()["tool_descriptions"]
+            ["mcp__fixture__read"],
+        "Tool purpose"
+    );
+}
+
+#[test]
+fn session_sql_details_select_recorded_statement_without_persisting_sql() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    let payloads = [
+        json!({"type":"function_call","name":"mcp__sqlite__query","call_id":"direct_sql","arguments":{"query":"SELECT 'one;two'; INSERT INTO users(name,password) VALUES ('ok','PRIVATE_SQL')"}}),
+        json!({"type":"function_call_output","call_id":"direct_sql","output":{"status":"ok","password":"PRIVATE_OUTPUT"}}),
+        json!({"type":"custom_tool_call","name":"exec","call_id":"nested_sql","input":"await tools.mcp__sqlite__query({query:\"SELECT 42\"});"}),
+        json!({"type":"function_call","name":"exec_command","call_id":"shell_sql","arguments":{"cmd":"sqlite3 /tmp/demo.db 'SELECT 7'"}}),
+    ];
+    for payload in payloads {
+        file.write_all(event(&stamp, "response_item", payload).as_bytes())
+            .unwrap();
+    }
+    drop(file);
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["codex"]["sqlite"]["events"]
+            .as_array()
+            .is_some_and(|events| {
+                events
+                    .iter()
+                    .filter(|event| event["call_id"] == "direct_sql")
+                    .count()
+                    == 2
+                    && events.iter().any(|event| event["call_id"] == "nested_sql")
+                    && events.iter().any(|event| {
+                        event["call_id"] == "shell_sql" && event["statement"] == "SELECT"
+                    })
+            })
+    });
+    let events = snapshot["codex"]["sqlite"]["events"].as_array().unwrap();
+    let find = |call: &str, statement: &str| {
+        events
+            .iter()
+            .find(|event| event["call_id"] == call && event["statement"] == statement)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+    };
+    let direct = format!("/api/codex/sql?id={}", find("direct_sql", "INSERT"));
+    let detail = service.get(&direct).json();
+    assert_eq!(detail["content_status"], "available");
+    assert_eq!(detail["response_scope"], "containing_tool_call");
+    assert!(detail["sql"].as_str().unwrap().contains("[已隱藏]"));
+    assert!(!detail.to_string().contains("PRIVATE"));
+    assert!(service.get(&format!("{direct}&mask=0")).json()["sql"]
+        .as_str()
+        .unwrap()
+        .contains("PRIVATE_SQL"));
+    assert_eq!(
+        service.get(&format!("{direct}&lazy=1")).json()["sql"]["content_page"],
+        true
+    );
+    let nested = service
+        .get(&format!(
+            "/api/codex/sql?id={}",
+            find("nested_sql", "SELECT")
+        ))
+        .json();
+    assert_eq!(nested["sql"], "SELECT 42");
+    let shell = service
+        .get(&format!(
+            "/api/codex/sql?id={}",
+            find("shell_sql", "SELECT")
+        ))
+        .json();
+    assert_eq!(shell["sql"], "SELECT 7");
+    assert!(!snapshot.to_string().contains("PRIVATE_SQL"));
+    let db = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    let stored: String = db.query_row("SELECT group_concat(payload) FROM (SELECT payload FROM session_cursors UNION ALL SELECT payload FROM session_calls)", [], |row| row.get(0)).unwrap();
+    assert!(!stored.contains("PRIVATE_SQL"));
+}
+
+#[test]
+fn diagnostic_sql_details_require_observed_event_and_mask_insert_values() {
+    let home = tempdir().unwrap();
+    native_event_fixture(home.path());
+    let stamp = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let sql = "INSERT INTO users(name,password) VALUES ('ok','PRIVATE_SQL')";
+    let body = format!(
+        "summary={} elapsed=1ms",
+        serde_json::to_string(sql).unwrap()
+    );
+    let db = rusqlite::Connection::open(home.path().join("logs_fixture.sqlite")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE logs(id INTEGER PRIMARY KEY,ts REAL,level TEXT,target TEXT,message TEXT)",
+    )
+    .unwrap();
+    let timestamp = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+        .timestamp_millis() as f64
+        / 1000.0;
+    db.execute(
+        "INSERT INTO logs VALUES(1,?,'INFO','sqlx::query',?)",
+        rusqlite::params![timestamp, body],
+    )
+    .unwrap();
+    let directory = home.path().join("desktop-logs");
+    fs::create_dir(&directory).unwrap();
+    fs::write(
+        directory.join("codex-desktop-fixture.log"),
+        format!("{stamp} INFO [sqlx::query] {body}\n"),
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["codex"]["sqlite"]["events"]
+            .as_array()
+            .is_some_and(|events| {
+                events.iter().any(|event| event["source"] == "codex_core")
+                    && events
+                        .iter()
+                        .any(|event| event["source"] == "codex_desktop")
+            })
+    });
+    let locations = snapshot["sources"]["diagnostics"]["locations"].as_array().unwrap();
+    assert!(locations.iter().any(|path| path.as_str().is_some_and(|path| path.ends_with("/desktop-logs/codex-desktop-fixture.log"))));
+    assert!(locations.iter().any(|path| path.as_str().is_some_and(|path| path.ends_with("/logs_fixture.sqlite"))));
+    let events = snapshot["codex"]["sqlite"]["events"].as_array().unwrap();
+    for source in ["codex_core", "codex_desktop"] {
+        let event = events
+            .iter()
+            .find(|event| event["source"] == source)
+            .unwrap();
+        let url = format!("/api/codex/sql?id={}", event["id"].as_str().unwrap());
+        let detail = service.get(&url).json();
+        let masked = detail["sql"]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing SQL for {source}: event={event}, detail={detail}"));
+        assert!(masked.contains("'ok'") && masked.contains("[已隱藏]"));
+        assert!(!masked.contains("PRIVATE_SQL"));
+        assert!(service.get(&format!("{url}&mask=0")).json()["sql"]
+            .as_str()
+            .unwrap()
+            .contains("PRIVATE_SQL"));
+        assert_eq!(
+            service.get(&format!("{url}&lazy=1")).json()["sql"]["content_page"],
+            true
+        );
+    }
+    assert!(!snapshot.to_string().contains("PRIVATE_SQL"));
+    assert_eq!(
+        service
+            .get(&format!("/api/codex/sql?id={}", "0".repeat(64)))
+            .status,
+        409
+    );
+    assert_eq!(service.get("/api/codex/sql?id=invalid").status, 400);
+}
+
+#[test]
+fn sqlite_observation_switch_replays_session_and_diagnostics() {
+    let home = tempdir().unwrap();
+    let (session, stamp) = native_event_fixture(home.path());
+    append_records(
+        &session,
+        &[event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call","name":"mcp__sqlite__query","call_id":"initial_sql","arguments":{"query":"SELECT 1"}}),
+        )],
+    );
+    let directory = home.path().join("desktop-logs");
+    fs::create_dir(&directory).unwrap();
+    let desktop = directory.join("codex-desktop-fixture.log");
+    fs::write(
+        &desktop,
+        format!("{stamp} INFO [sqlx::query] sql=\"SELECT 2\" elapsed=2ms\n"),
+    )
+    .unwrap();
+    let source = rusqlite::Connection::open(home.path().join("logs_fixture.sqlite")).unwrap();
+    source
+        .execute_batch(
+            "CREATE TABLE logs(id INTEGER PRIMARY KEY,ts REAL,level TEXT,target TEXT,message TEXT)",
+        )
+        .unwrap();
+    let timestamp = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+        .timestamp_millis() as f64
+        / 1000.0;
+    source
+        .execute(
+            "INSERT INTO logs VALUES(1,?,'INFO','sqlx::query',?)",
+            rusqlite::params![timestamp, "sql=\"SELECT 3\" elapsed=2ms"],
+        )
+        .unwrap();
+    let service = Service::start(home.path(), true, None);
+    let initial = snapshot_when(&service, |value| {
+        value["codex"]["sqlite"]["total"]
+            .as_u64()
+            .is_some_and(|total| total >= 3)
+    });
+    let id = initial["codex"]["sqlite"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["call_id"] == "initial_sql")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let set = |value: Value| {
+        let body = value.to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body)
+    };
+    let disabled = set(json!({"observations":{"sqlite":false}}));
+    assert_eq!(disabled.status, 200);
+    assert_eq!(disabled.json()["observations"]["sqlite"], false);
+    assert_eq!(service.get("/api/history?section=sql").status, 400);
+    assert_eq!(service.get(&format!("/api/codex/sql?id={id}")).status, 409);
+    append_records(
+        &session,
+        &[event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call","name":"mcp__sqlite__query","call_id":"off_sql","arguments":{"query":"SELECT 4"}}),
+        )],
+    );
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&desktop)
+        .unwrap()
+        .write_all(format!("{stamp} ERROR [sqlx::off] sql=\"SELECT 5\" elapsed=2ms\n").as_bytes())
+        .unwrap();
+    source
+        .execute(
+            "INSERT INTO logs VALUES(2,?,'ERROR','sqlx::off',?)",
+            rusqlite::params![timestamp, "sql=\"SELECT 6\" elapsed=2ms"],
+        )
+        .unwrap();
+    let disabled_snapshot = snapshot_when(&service, |value| {
+        value["codex"]["bytes_read"]
+            .as_u64()
+            .is_some_and(|bytes| bytes >= fs::metadata(&session).unwrap().len())
+            && value["errors"]["events"].as_array().is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event["module"] == "sqlx::off" && event["source"] == "codex_core")
+                    && events.iter().any(|event| {
+                        event["module"] == "sqlx::off" && event["source"] == "codex_desktop"
+                    })
+            })
+    });
+    assert_eq!(disabled_snapshot["codex"]["sqlite"]["total"], 0);
+    assert_eq!(
+        disabled_snapshot["codex"]["sqlite"]["aggregate"]["total"],
+        0
+    );
+    let history = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    let count: i64 = history.query_row("SELECT count(*) FROM history_items WHERE namespace='sql' AND (payload LIKE '%off_sql%' OR payload LIKE '%sqlx::off%')", [], |row| row.get(0)).unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(
+        set(json!({"observations":{"sqlite":true,"errors":true}})).status,
+        200
+    );
+    snapshot_when(&service, |value| {
+        value["codex"]["sqlite"]["events"]
+            .as_array()
+            .is_some_and(|events| {
+                events.iter().any(|event| event["call_id"] == "off_sql")
+                    && events.iter().any(|event| {
+                        event["module"] == "sqlx::off" && event["source"] == "codex_core"
+                    })
+                    && events.iter().any(|event| {
+                        event["module"] == "sqlx::off" && event["source"] == "codex_desktop"
+                    })
+            })
+    });
+    assert_eq!(service.get(&format!("/api/codex/sql?id={id}")).status, 200);
+    assert_eq!(service.get("/api/history?section=sql").status, 200);
+}
+
+#[test]
+fn sqlite_observation_disabled_checkpoint_replays_after_restart() {
+    let home = tempdir().unwrap();
+    let (session, stamp) = native_event_fixture(home.path());
+    let mut service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    let body = r#"{"observations":{"sqlite":false}}"#;
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), body).status, 200);
+    append_records(
+        &session,
+        &[event(
+            &stamp,
+            "response_item",
+            json!({"type":"custom_tool_call","name":"exec","call_id":"replay_sql","input":"await tools.mcp__sqlite__query({query:\"SELECT 42\"});"}),
+        )],
+    );
+    snapshot_when(&service, |value| {
+        value["codex"]["bytes_read"]
+            .as_u64()
+            .is_some_and(|bytes| bytes >= fs::metadata(&session).unwrap().len())
+    });
+    service.stop();
+    let restarted = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&restarted, |value| {
+        value["codex"]["sqlite"]["events"]
+            .as_array()
+            .is_some_and(|events| events.iter().any(|event| event["call_id"] == "replay_sql"))
+    });
+    assert!(
+        snapshot["codex"]["read_state"]["checkpoint"]["invalidated"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+}
+
+#[test]
+fn error_observation_disabled_checkpoint_replays_after_restart() {
+    let home = tempdir().unwrap();
+    let (session, stamp) = native_event_fixture(home.path());
+    let mut service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    let body = r#"{"observations":{"errors":false}}"#;
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), body).status, 200);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&session)
+        .unwrap()
+        .write_all(
+            event(
+                &stamp,
+                "event_msg",
+                json!({"type":"turn_failed","error_code":"REPLAY_ERROR"}),
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    snapshot_when(&service, |value| {
+        value["codex"]["bytes_read"]
+            .as_u64()
+            .is_some_and(|bytes| bytes >= fs::metadata(&session).unwrap().len())
+    });
+    service.stop();
+    let restarted = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&restarted, |value| {
+        value["errors"]["events"]
+            .as_array()
+            .is_some_and(|events| events.iter().any(|event| event["code"] == "REPLAY_ERROR"))
+    });
+    assert!(
+        snapshot["codex"]["read_state"]["checkpoint"]["invalidated"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+}
+
+#[test]
+fn error_observation_switch_preserves_logs_and_replays_disabled_records() {
+    let home = tempdir().unwrap();
+    let (session, stamp) = native_event_fixture(home.path());
+    let directory = home.path().join("desktop-logs");
+    fs::create_dir(&directory).unwrap();
+    let desktop = directory.join("codex-desktop-fixture.log");
+    fs::write(
+        &desktop,
+        format!("{stamp} ERROR [codex] initial errorCode=INITIAL_DESKTOP\n"),
+    )
+    .unwrap();
+    let db = rusqlite::Connection::open(home.path().join("logs_fixture.sqlite")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE logs(id INTEGER PRIMARY KEY,ts REAL,level TEXT,target TEXT,message TEXT)",
+    )
+    .unwrap();
+    let timestamp = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+        .timestamp_millis() as f64
+        / 1000.0;
+    db.execute(
+        "INSERT INTO logs VALUES(1,?,'ERROR','codex_core','initial')",
+        [timestamp],
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    let initial = snapshot_when(&service, |value| {
+        value["errors"]["events"].as_array().is_some_and(|events| {
+            events.iter().any(|event| event["source"] == "codex_core")
+                && events
+                    .iter()
+                    .any(|event| event["source"] == "codex_desktop")
+                && events.iter().any(|event| event["source"] == "session")
+        })
+    });
+    let session_id = initial["errors"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["source"] == "session")
+        .unwrap()["content_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let set = |value: Value| {
+        let body = value.to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body)
+    };
+    assert_eq!(set(json!({"observations":{"errors":false}})).status, 200);
+    assert_eq!(
+        service
+            .get("/api/history?namespace=errors&section=events")
+            .status,
+        400
+    );
+    assert_eq!(
+        service
+            .get(&format!("/api/codex/error?id={session_id}"))
+            .status,
+        409
+    );
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&session)
+        .unwrap()
+        .write_all(
+            event(
+                &stamp,
+                "event_msg",
+                json!({"type":"turn_failed","error_code":"OFF_SESSION"}),
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&desktop)
+        .unwrap()
+        .write_all(format!("{stamp} ERROR [codex] disabled errorCode=OFF_DESKTOP\n").as_bytes())
+        .unwrap();
+    db.execute(
+        "INSERT INTO logs VALUES(2,?,'ERROR','codex_core::unique','disabled')",
+        [timestamp],
+    )
+    .unwrap();
+    let deadline = Instant::now() + TIMEOUT;
+    let logs = loop {
+        let value = service.get("/api/logs?window=all").json();
+        if value["entries"].as_array().is_some_and(|entries| {
+            entries.iter().any(|event| event["code"] == "OFF_DESKTOP")
+                && entries
+                    .iter()
+                    .any(|event| event["module"] == "codex_core::unique")
+        }) {
+            break value;
+        }
+        assert!(Instant::now() < deadline, "diagnostic logs did not update");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let disabled = service.get("/api/snapshot?window=all").json();
+    assert_eq!(disabled["errors"]["enabled"], false);
+    assert_eq!(disabled["errors"]["total"], 0);
+    assert_eq!(disabled["errors"]["history"]["retained"], 0);
+    let core_id = logs["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["module"] == "codex_core::unique")
+        .unwrap()["content_id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        service
+            .get(&format!("/api/codex/error?id={core_id}"))
+            .status,
+        200
+    );
+    let history = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    let new_errors: i64 = history.query_row("SELECT count(*) FROM history_items WHERE namespace='errors' AND (payload LIKE '%OFF_SESSION%' OR payload LIKE '%OFF_DESKTOP%' OR payload LIKE '%codex_core::unique%')", [], |row| row.get(0)).unwrap();
+    assert_eq!(new_errors, 0);
+    drop(history);
+    assert_eq!(set(json!({"observations":{"errors":true}})).status, 200);
+    snapshot_when(&service, |value| {
+        value["errors"]["events"].as_array().is_some_and(|events| {
+            events.iter().any(|event| event["code"] == "OFF_SESSION")
+                && events.iter().any(|event| event["code"] == "OFF_DESKTOP")
+                && events
+                    .iter()
+                    .any(|event| event["module"] == "codex_core::unique")
+        })
+    });
+    assert_eq!(
+        set(json!({"observations":{"errors":false,"logs":false}})).status,
+        200
+    );
+    assert_eq!(
+        service
+            .get(&format!("/api/codex/error?id={core_id}"))
+            .status,
+        409
+    );
+}
+
+#[test]
+fn error_detail_can_read_observed_event_beyond_summary_when_logs_are_disabled() {
+    let home = tempdir().unwrap();
+    let core = rusqlite::Connection::open(home.path().join("logs_fixture.sqlite")).unwrap();
+    core.execute_batch("CREATE TABLE logs(id INTEGER PRIMARY KEY,ts REAL,level TEXT,target TEXT,message TEXT)").unwrap();
+    let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now());
+    for id in 1..=600 {
+        core.execute("INSERT INTO logs VALUES(?1,?2,'ERROR','codex_core',?3)", rusqlite::params![id, (now - chrono::Duration::hours(2) + chrono::Duration::seconds(id)).timestamp() as f64, "Observed old password=PRIVATE_OLD"]).unwrap();
+    }
+    drop(core);
+    let directory = home.path().join("desktop-logs");
+    fs::create_dir(&directory).unwrap();
+    let mut desktop = String::new();
+    for index in 0..600 {
+        let stamp = (now - chrono::Duration::hours(1) + chrono::Duration::seconds(index)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        desktop.push_str(&format!("{stamp} ERROR [codex] recent index={index}\n"));
+    }
+    fs::write(directory.join("codex-desktop-fixture.log"), desktop).unwrap();
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| value["errors"]["total"].as_u64().is_some_and(|total| total >= 1200));
+    let shown = snapshot["errors"]["events"].as_array().unwrap();
+    assert_eq!(shown.len(), 1000);
+    let logs = service.get("/api/logs?window=all").json();
+    let old = logs["entries"].as_array().unwrap().iter().find(|event| event["source"] == "codex_core" && event["record_id"] == 1).unwrap();
+    let id = old["content_id"].as_str().unwrap();
+    assert!(!shown.iter().any(|event| event["content_id"] == id));
+    let body = r#"{"observations":{"logs":false}}"#;
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), body).status, 200);
+    let detail = service.get(&format!("/api/codex/error?id={id}")).json();
+    assert_eq!(detail["content_status"], "available");
+    assert!(detail["text"].as_str().unwrap().contains("Observed old"));
+    assert!(!detail.to_string().contains("PRIVATE_OLD"));
+}
+
+#[test]
+fn desktop_error_detail_reads_observed_line_without_exposing_private_data() {
+    let home = tempdir().unwrap();
+    let directory = home.path().join("desktop-logs");
+    fs::create_dir(&directory).unwrap();
+    let stamp = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    fs::write(
+        directory.join("codex-desktop-fixture.log"),
+        format!("{stamp} ERROR [codex] Observed desktop password=PRIVATE_DESKTOP\n"),
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["errors"]["events"].as_array().is_some_and(|events| {
+            events
+                .iter()
+                .any(|event| event["source"] == "codex_desktop")
+        })
+    });
+    let event = snapshot["errors"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["source"] == "codex_desktop")
+        .unwrap();
+    let url = format!(
+        "/api/codex/error?id={}",
+        event["content_id"].as_str().unwrap()
+    );
+    let detail = service.get(&url).json();
+    assert_eq!(detail["content_status"], "available");
+    assert!(detail["text"]
+        .as_str()
+        .unwrap()
+        .contains("Observed desktop"));
+    assert!(!detail.to_string().contains("PRIVATE_DESKTOP"));
+    assert!(service.get(&format!("{url}&mask=0")).json()["text"]
+        .as_str()
+        .unwrap()
+        .contains("PRIVATE_DESKTOP"));
+    assert_eq!(
+        service.get(&format!("{url}&lazy=1")).json()["text"]["content_page"],
+        true
+    );
+    assert!(!snapshot.to_string().contains("PRIVATE_DESKTOP"));
+}
+
+#[test]
+fn core_error_detail_reads_only_observed_record_and_masks_content() {
+    let home = tempdir().unwrap();
+    native_event_fixture(home.path());
+    let path = home.path().join("logs_fixture.sqlite");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TABLE logs(id INTEGER PRIMARY KEY,ts REAL,level TEXT,target TEXT,message TEXT,feedback_log_body TEXT)").unwrap();
+    let timestamp = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+        .timestamp_millis() as f64
+        / 1000.0;
+    db.execute(
+        "INSERT INTO logs VALUES(1,?,'WARN','codex_core',?,NULL)",
+        rusqlite::params![timestamp, "Observed diagnostic password=PRIVATE_DIAGNOSTIC"],
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["errors"]["events"].as_array().is_some_and(|events| {
+            events
+                .iter()
+                .any(|event| event["source"] == "codex_core" && event["record_id"] == 1)
+        })
+    });
+    let event = snapshot["errors"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["source"] == "codex_core" && event["record_id"] == 1)
+        .unwrap();
+    let id = event["content_id"].as_str().unwrap();
+    let url = format!("/api/codex/error?id={id}");
+    let detail = service.get(&url).json();
+    assert_eq!(detail["content_status"], "available");
+    assert!(detail["text"]
+        .as_str()
+        .unwrap()
+        .contains("Observed diagnostic"));
+    assert!(!detail.to_string().contains("PRIVATE_DIAGNOSTIC"));
+    assert!(service.get(&format!("{url}&mask=0")).json()["text"]
+        .as_str()
+        .unwrap()
+        .contains("PRIVATE_DIAGNOSTIC"));
+    assert_eq!(
+        service.get(&format!("{url}&lazy=1")).json()["text"]["content_page"],
+        true
+    );
+    assert!(!snapshot.to_string().contains("PRIVATE_DIAGNOSTIC"));
+    assert_eq!(
+        service
+            .get(&format!("/api/codex/error?id={}", "0".repeat(64)))
+            .status,
+        409
+    );
+}
+
+#[test]
+fn session_and_tool_error_details_require_observed_identity_and_mask_content() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    let payloads = [
+        (
+            "event_msg",
+            json!({"type":"turn_failed","message":"Session message","error":{"code":"failed","password":"PRIVATE_SESSION"}}),
+        ),
+        (
+            "response_item",
+            json!({"type":"function_call","name":"fixture_tool","call_id":"failed_call","arguments":"{}"}),
+        ),
+        (
+            "response_item",
+            json!({"type":"function_call_output","call_id":"failed_call","output":{"isError":true,"status":"failed","api_key":"PRIVATE_TOOL"}}),
+        ),
+    ];
+    for (kind, payload) in payloads {
+        file.write_all(event(&stamp, kind, payload).as_bytes())
+            .unwrap();
+    }
+    drop(file);
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["errors"]["events"].as_array().is_some_and(|events| {
+            events.iter().any(|event| event["reason"] == "turn_failed")
+                && events.iter().any(|event| event["call_id"] == "failed_call")
+        })
+    });
+    let events = snapshot["errors"]["events"].as_array().unwrap();
+    let session = events
+        .iter()
+        .find(|event| event["reason"] == "turn_failed")
+        .unwrap()["content_id"]
+        .as_str()
+        .unwrap();
+    let tool = events
+        .iter()
+        .find(|event| event["call_id"] == "failed_call")
+        .unwrap()["content_id"]
+        .as_str()
+        .unwrap();
+    let session_url = format!("/api/codex/error?id={session}");
+    let detail = service.get(&session_url).json();
+    assert_eq!(detail["content_status"], "available");
+    assert_eq!(detail["text"]["message"], "Session message");
+    assert!(!detail.to_string().contains("PRIVATE_SESSION"));
+    assert!(service
+        .get(&format!("{session_url}&mask=0"))
+        .json()
+        .to_string()
+        .contains("PRIVATE_SESSION"));
+    let paged = service.get(&format!("{session_url}&lazy=1")).json();
+    assert_eq!(paged["text"]["content_page"], true);
+    let tool_detail = service.get(&format!("/api/codex/error?id={tool}")).json();
+    assert_eq!(tool_detail["content_status"], "available");
+    assert!(!tool_detail.to_string().contains("PRIVATE_TOOL"));
+    assert_eq!(service.get("/api/codex/error?id=invalid").status, 400);
+    assert_eq!(
+        service
+            .get(&format!("/api/codex/error?id={}", "0".repeat(64)))
+            .status,
+        409
+    );
+}
+
+#[test]
+fn mcp_catalog_extracts_python_module_docstring_without_execution() {
+    let home = tempdir().unwrap();
+    native_event_fixture(home.path());
+    let real_home = home.path().canonicalize().unwrap();
+    let runtime = real_home.join("venv/bin/python");
+    let module = real_home.join("venv/lib/python3.14/site-packages/example_pkg");
+    fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+    fs::create_dir_all(&module).unwrap();
+    fs::write(&runtime, "not executable").unwrap();
+    fs::write(module.join("runner.py"), "\"\"\"Local module purpose api_key=PRIVATE_KEY\"\"\"\nraise RuntimeError('PRIVATE_CODE')\n").unwrap();
+    let runtime = serde_json::to_string(&runtime.to_string_lossy()).unwrap();
+    fs::write(
+        home.path().join("config.toml"),
+        format!("[mcp_servers.example]\ncommand={runtime}\nargs=['-m','example_pkg.runner']\n"),
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["mcp"]["servers"].as_array().is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row["server"] == "example" && row["description_source"] == "runner.py")
+        })
+    });
+    let row = snapshot["mcp"]["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["server"] == "example")
+        .unwrap();
+    assert!(row["description"]
+        .as_str()
+        .unwrap()
+        .contains("Local module purpose"));
+    assert!(!snapshot.to_string().contains("PRIVATE_KEY"));
+    assert!(!snapshot.to_string().contains("PRIVATE_CODE"));
+}
+
+#[test]
+fn mcp_catalog_reads_bounded_package_and_readme_introductions() {
+    let home = tempdir().unwrap();
+    native_event_fixture(home.path());
+    let real_home = home.path().canonicalize().unwrap();
+    let package = real_home.join("package_fixture");
+    let readme = real_home.join("readme_fixture");
+    fs::create_dir(&package).unwrap();
+    fs::create_dir(&readme).unwrap();
+    fs::write(package.join("server.py"), "PRIVATE_SCRIPT").unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"description":"Package purpose api_key=PRIVATE_KEY"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("README.md"),
+        "# Title\n\nNot the selected purpose\n",
+    )
+    .unwrap();
+    fs::write(readme.join("server.py"), "PRIVATE_SCRIPT").unwrap();
+    fs::write(
+        readme.join("README.md"),
+        "# Title\n\nProvides [local indexes](https://example.invalid)\n\n```\nPRIVATE_CODE\n```\n",
+    )
+    .unwrap();
+    let package_script =
+        serde_json::to_string(&package.join("server.py").to_string_lossy()).unwrap();
+    let readme_script = serde_json::to_string(&readme.join("server.py").to_string_lossy()).unwrap();
+    fs::write(home.path().join("config.toml"), format!("[mcp_servers.package]\nargs=[{package_script}]\n[mcp_servers.readme]\nargs=[{readme_script}]\n")).unwrap();
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["mcp"]["configuration"]["configured_sources"] == 2
+    });
+    let rows = snapshot["mcp"]["servers"].as_array().unwrap();
+    let package = rows.iter().find(|row| row["server"] == "package").unwrap();
+    let readme = rows.iter().find(|row| row["server"] == "readme").unwrap();
+    assert_eq!(package["description_source"], "package.json");
+    assert!(package["description"]
+        .as_str()
+        .unwrap()
+        .contains("Package purpose"));
+    assert_eq!(readme["description_source"], "README.md");
+    assert_eq!(readme["description"], "Provides local indexes");
+    assert!(!snapshot.to_string().contains("PRIVATE_KEY"));
+    assert!(!snapshot.to_string().contains("PRIVATE_SCRIPT"));
+    assert!(!snapshot.to_string().contains("PRIVATE_CODE"));
+}
+
+#[test]
+fn configured_mcp_catalog_updates_without_codex_collection() {
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), false, None);
+    let initial = service.get("/api/snapshot?window=all").json();
+    assert_eq!(initial["codex"]["health"], "disabled");
+    fs::write(
+        home.path().join("config.toml"),
+        "[mcp_servers.fixture]\ndescription='Local purpose'\n",
+    )
+    .unwrap();
+    let updated = snapshot_when(&service, |value| {
+        value["mcp"]["servers"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["server"] == "fixture"))
+    });
+    assert_eq!(updated["codex"]["health"], "disabled");
+    assert_eq!(updated["mcp"]["configuration"]["configured_sources"], 1);
+}
+
+#[test]
+fn configured_mcp_catalog_omits_launch_configuration_and_updates() {
+    let home = tempdir().unwrap();
+    native_event_fixture(home.path());
+    let config = home.path().join("config.toml");
+    fs::write(&config, "[mcp_servers.fixture]\ndescription='Fixture description api_key=PRIVATE_DESCRIPTION'\ncommand='PRIVATE_COMMAND'\n[mcp_servers.fixture.env]\nTOKEN='PRIVATE_ENV'\n[mcp_servers.disabled]\nenabled=false\n[plugins.\"code-review@openai-bundled\"]\nenabled=true\n").unwrap();
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["mcp"]["configuration"]["configured_sources"] == 2
+    });
+    let rows = snapshot["mcp"]["servers"].as_array().unwrap();
+    assert!(rows.iter().any(|row| row["server"] == "fixture"
+        && row["origin"] == "configured"
+        && row["description"]
+            .as_str()
+            .is_some_and(|text| text.contains("Fixture description")
+                && !text.contains("PRIVATE_DESCRIPTION"))));
+    assert!(rows.iter().any(|row| row["server"] == "code_review"));
+    assert!(!snapshot.to_string().contains("PRIVATE_COMMAND"));
+    assert!(!snapshot.to_string().contains("PRIVATE_ENV"));
+    assert!(!snapshot.to_string().contains("PRIVATE_DESCRIPTION"));
+    let scoped = service.get("/api/snapshot?window=1h").json();
+    assert_eq!(scoped["mcp"]["configuration"]["configured_sources"], 2);
+    fs::write(
+        &config,
+        "[mcp_servers.next]\ndescription='Updated source'\n",
+    )
+    .unwrap();
+    let updated = snapshot_when(&service, |value| {
+        value["mcp"]["servers"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["server"] == "next"))
+    });
+    assert_eq!(updated["mcp"]["configuration"]["configured_sources"], 1);
+    assert!(!updated["mcp"]["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["server"] == "fixture"));
+}
+
+#[test]
+fn mcp_and_web_observation_switches_filter_independently_and_replay() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let id = "00000000-0000-4000-8000-000000000002";
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    for (call, tool) in [
+        ("mcp_call", "mcp__workspace_inspection__read"),
+        ("web_call", "web__run"),
+    ] {
+        file.write_all(event(&stamp, "response_item", json!({"type":"function_call","name":tool,"call_id":call,"arguments":{"max_files":12}})).as_bytes()).unwrap();
+    }
+    drop(file);
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| value["mcp"]["total_events"] == 2);
+    let set_observation = |name: &str, enabled: bool| {
+        let body = json!({"observations":{(name):enabled}}).to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body)
+    };
+    assert_eq!(set_observation("mcp", false).status, 200);
+    let disabled = service.get("/api/snapshot?window=all").json();
+    assert_eq!(disabled["settings"]["observations"]["mcp"], false);
+    assert_eq!(disabled["mcp"]["total_events"], 1);
+    assert_eq!(disabled["mcp"]["events"][0]["server"], "web");
+    assert_eq!(
+        service
+            .get("/api/history?namespace=activity&section=mcp")
+            .status,
+        400
+    );
+    assert_eq!(
+        service
+            .get(&format!(
+                "/api/codex/mcp?thread_id={id}&call_id=mcp_call&index=0"
+            ))
+            .status,
+        409
+    );
+    fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(event(&stamp, "response_item", json!({"type":"function_call","name":"mcp__workspace_inspection__read","call_id":"while_off","arguments":{"max_files":444}})).as_bytes()).unwrap();
+    snapshot_when(&service, |value| value["codex"]["observed_tool_calls"] == 3);
+    let db = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    let stored: String = db
+        .query_row(
+            "SELECT payload FROM session_calls WHERE call_id='while_off'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!stored.contains("444"));
+    drop(db);
+    assert_eq!(set_observation("mcp", true).status, 200);
+    snapshot_when(&service, |value| {
+        value["mcp"]["events"].as_array().is_some_and(|events| {
+            events.iter().any(|event| {
+                event["call_id"] == "while_off" && event["metadata"]["max_files"] == 444
+            })
+        })
+    });
+    assert_eq!(set_observation("web", false).status, 200);
+    let disabled = service.get("/api/snapshot?window=all").json();
+    assert_eq!(disabled["settings"]["observations"]["web"], false);
+    assert!(disabled["mcp"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|event| event["server"] != "web"));
+    assert_eq!(
+        service
+            .get("/api/history?namespace=activity&section=web")
+            .status,
+        400
+    );
+    assert_eq!(
+        service
+            .get(&format!(
+                "/api/codex/mcp?thread_id={id}&call_id=web_call&index=0"
+            ))
+            .status,
+        409
+    );
+    assert_eq!(set_observation("web", true).status, 200);
+    snapshot_when(&service, |value| {
+        value["mcp"]["events"]
+            .as_array()
+            .is_some_and(|events| events.iter().any(|event| event["call_id"] == "web_call"))
+    });
+}
+
+#[test]
+fn mcp_source_disabled_checkpoint_replays_after_restart() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let mut service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    let body = json!({"mcp_sources":{"workspace_inspection":false}}).to_string();
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body).status, 200);
+    fs::OpenOptions::new().append(true).open(path).unwrap().write_all(event(&stamp, "response_item", json!({"type":"function_call","name":"mcp__workspace_inspection__read","call_id":"restart_source","arguments":{"max_files":321}})).as_bytes()).unwrap();
+    snapshot_when(&service, |value| {
+        value["codex"]["observed_tool_calls"] == 1
+            && value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    service.stop();
+    let restarted = Service::start(home.path(), true, None);
+    let restored = snapshot_when(&restarted, |value| {
+        value["mcp"]["events"].as_array().is_some_and(|events| {
+            events.iter().any(|event| {
+                event["call_id"] == "restart_source" && event["metadata"]["max_files"] == 321
+            })
+        })
+    });
+    assert!(
+        restored["codex"]["read_state"]["checkpoint"]["invalidated"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+}
+
+#[test]
+fn mcp_source_setting_filters_history_details_and_replays_on_enable() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let id = "00000000-0000-4000-8000-000000000002";
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    for (call, tool) in [
+        ("a", "mcp__workspace_inspection__read"),
+        ("b", "mcp__other__read"),
+    ] {
+        file.write_all(event(&stamp, "response_item", json!({"type":"function_call","name":tool,"call_id":call,"arguments":{"max_files":1}})).as_bytes()).unwrap();
+    }
+    drop(file);
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| value["mcp"]["total_events"] == 2);
+    let set_source = |enabled: bool| {
+        let body = json!({"mcp_sources":{"workspace_inspection":enabled}}).to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body)
+    };
+    assert_eq!(set_source(false).status, 200);
+    let disabled = service.get("/api/snapshot?window=all").json();
+    assert_eq!(
+        disabled["settings"]["mcp_sources"]["workspace_inspection"],
+        false
+    );
+    assert_eq!(disabled["mcp"]["total_events"], 1);
+    assert_eq!(disabled["mcp"]["events"][0]["server"], "other");
+    assert!(disabled["mcp"]["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["server"] == "workspace_inspection" && row["enabled"] == false));
+    let disabled_source = disabled["mcp"]["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["server"] == "workspace_inspection")
+        .unwrap();
+    assert_eq!(disabled_source["connection"]["state"], "paused");
+    assert_eq!(
+        service
+            .get(&format!("/api/codex/mcp?thread_id={id}&call_id=a&index=0"))
+            .status,
+        409
+    );
+    let history = service
+        .get("/api/history?namespace=activity&section=mcp")
+        .json();
+    assert!(history["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["server"] != "workspace_inspection"));
+    fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(event(&stamp, "response_item", json!({"type":"function_call","name":"mcp__workspace_inspection__inspect","call_id":"disabled","arguments":{"max_files":777}})).as_bytes()).unwrap();
+    fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(event(&stamp, "response_item", json!({"type":"function_call_output","call_id":"disabled","output":{"isError":true,"status":"failed"}})).as_bytes()).unwrap();
+    let disabled = snapshot_when(&service, |value| {
+        value["codex"]["observed_tool_calls"] == 3
+            && value["codex"]["threads"][0]["tool_events"]
+                .as_array()
+                .is_some_and(|events| {
+                    events.iter().any(|event| {
+                        event["call_id"] == "disabled" && event["completed_at"].is_string()
+                    })
+                })
+    });
+    assert!(!disabled["errors"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["call_id"] == "disabled"));
+    let db = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    let stored: String = db
+        .query_row(
+            "SELECT payload FROM session_calls WHERE call_id='disabled'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!stored.contains("777"));
+    drop(db);
+    assert_eq!(set_source(true).status, 200);
+    let enabled = snapshot_when(&service, |value| value["mcp"]["total_events"] == 3);
+    assert!(enabled["mcp"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["call_id"] == "disabled" && event["metadata"]["max_files"] == 777));
+    assert!(enabled["errors"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["call_id"] == "disabled"));
+    assert_eq!(
+        service
+            .get(&format!("/api/codex/mcp?thread_id={id}&call_id=a&index=0"))
+            .status,
+        200
+    );
+}
+
+#[test]
+fn mcp_detail_requires_observed_index_and_masks_static_payloads() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let id = "00000000-0000-4000-8000-000000000002";
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    let payloads = [
+        json!({"type":"function_call","name":"mcp__fixture__read_file","call_id":"direct","arguments":{"path":"example","api_key":"PRIVATE_REQUEST"}}),
+        json!({"type":"function_call_output","call_id":"direct","output":{"result":"ok","password":"PRIVATE_RESPONSE"}}),
+        json!({"type":"custom_tool_call","name":"exec","call_id":"nested","input":"await tools.mcp__fixture__first({count:1}); await tools.mcp__fixture__second({count:2,password:'PRIVATE_NESTED'});"}),
+        json!({"type":"custom_tool_call_output","call_id":"nested","output":{"status":"ok"}}),
+        json!({"type":"custom_tool_call","name":"exec","call_id":"dynamic","input":"await tools.mcp__fixture__dynamic({filePath: file, password:'PRIVATE_DYNAMIC'});"}),
+    ];
+    for payload in payloads {
+        file.write_all(event(&stamp, "response_item", payload).as_bytes())
+            .unwrap();
+    }
+    drop(file);
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| value["mcp"]["total_events"] == 4);
+    let direct = format!("/api/codex/mcp?thread_id={id}&call_id=direct&index=0");
+    let detail = service.get(&direct).json();
+    assert_eq!(detail["request"]["path"], "example");
+    assert_eq!(service.get(&direct.replace("index=0", "index=%D9%A0")).json(), detail);
+    assert_eq!(detail["response_scope"], "mcp_tool_call");
+    assert!(!detail.to_string().contains("PRIVATE"));
+    let dynamic = format!("/api/codex/mcp?thread_id={id}&call_id=dynamic&index=0");
+    let masked = service.get(&dynamic).json();
+    assert_eq!(masked["request_source"], "recorded_expression");
+    assert!(!masked.to_string().contains("PRIVATE_DYNAMIC"));
+    let unmasked = service.get(&format!("{dynamic}&mask=0")).json();
+    assert!(unmasked["request"]
+        .as_str()
+        .unwrap()
+        .contains("filePath: file"));
+    assert!(unmasked["request"]
+        .as_str()
+        .unwrap()
+        .contains("PRIVATE_DYNAMIC"));
+    let nested = format!("/api/codex/mcp?thread_id={id}&call_id=nested&index=1");
+    let detail = service.get(&format!("{nested}&lazy=1")).json();
+    assert_eq!(detail["response_scope"], "containing_tool_call");
+    assert!(detail["request"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("count"));
+    assert!(!detail.to_string().contains("PRIVATE"));
+    assert_eq!(
+        service
+            .get(&format!(
+                "/api/codex/mcp?thread_id={id}&call_id=nested&index=9"
+            ))
+            .status,
+        409
+    );
+    assert_eq!(service.get(&format!("{direct}&index=1")).status, 400);
+}
+
+#[test]
+fn command_details_select_observed_parts_and_label_outer_output() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let id = "00000000-0000-4000-8000-000000000002";
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    let payloads = [
+        json!({"type":"function_call","name":"exec_command","call_id":"gitcall","arguments":{"cmd":"git status; echo OTHER_PRIVATE"}}),
+        json!({"type":"function_call_output","call_id":"gitcall","output":{"status":"ok","api_key":"PRIVATE_KEY"}}),
+        json!({"type":"custom_tool_call","name":"exec","call_id":"checkcall","input":"await tools.exec_command({cmd:'cargo test'});"}),
+        json!({"type":"custom_tool_call_output","call_id":"checkcall","output":{"status":"ok"}}),
+    ];
+    for payload in payloads {
+        file.write_all(event(&stamp, "response_item", payload).as_bytes())
+            .unwrap();
+    }
+    drop(file);
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| value["codex"]["observed_tool_calls"] == 2);
+    let git = format!("/api/codex/git?thread_id={id}&call_id=gitcall&operation=status");
+    let detail = service.get(&git).json();
+    assert_eq!(detail["commands"], json!(["git status"]));
+    assert_eq!(detail["output_scope"], "outer_scope");
+    assert_eq!(detail["result_scope"], "containing_tool_call");
+    assert!(!detail.to_string().contains("PRIVATE_KEY"));
+    let lazy = service.get(&format!("{git}&lazy=1")).json();
+    assert_eq!(lazy["request"]["content_page"], true);
+    assert_eq!(lazy["output"]["content_page"], true);
+    let check = form_urlencoded::Serializer::new(String::new())
+        .append_pair("thread_id", id)
+        .append_pair("call_id", "checkcall")
+        .append_pair("operation", "cargo test")
+        .append_pair("lazy", "1")
+        .finish();
+    let detail = service.get(&format!("/api/codex/check?{check}")).json();
+    assert_eq!(detail["commands"], json!(["cargo test"]));
+    assert_eq!(detail["output_scope"], "outer_scope");
+    assert_eq!(service.get(&format!("{git}&operation=reset")).status, 400);
+}
+
+#[test]
+#[cfg(unix)]
+fn account_observation_schedules_only_when_enabled_and_publishes_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempdir().unwrap();
+    let bin = tempdir().unwrap();
+    let executable = bin.path().join("codex");
+    let script = r#"#!/bin/sh
+printf x >> "$CODEX_HOME/fake-count"
+while IFS= read -r line; do
+case "$line" in
+*'"id":0'*) printf '%s\n' '{"id":0,"result":{}}' ;;
+*'"id":1'*) printf '%s\n' '{"id":1,"result":{"account":{"planType":"pro","email":"PRIVATE_EMAIL"}}}' ;;
+*'"id":2'*) printf '%s\n' '{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":25}}}}' ;;
+*'"id":3'*) printf '%s\n' '{"id":3,"result":{"summary":{"lifetimeTokens":12}}}' ;;
+esac
+done
+"#;
+    fs::write(&executable, script).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let service = Service::start_with_path(home.path(), false, None, Some(bin.path()));
+    let initial = service.get("/api/snapshot?window=all").json();
+    assert_eq!(initial["settings"]["observations"]["codex_account"], false);
+    assert_eq!(initial["settings"]["api_intervals"]["codex_account"], 300);
+    assert!(!home.path().join("fake-count").exists());
+    let post = |value: Value| {
+        let body = value.to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),&body)
+    };
+    assert_eq!(
+        post(json!({"observations":{"codex_account":true},"api_intervals":{"codex_account":59}}))
+            .status,
+        409
+    );
+    assert!(!home.path().join("fake-count").exists());
+    assert_eq!(
+        post(json!({"observations":{"codex_account":true},"api_intervals":{"codex_account":60}}))
+            .status,
+        200
+    );
+    let snapshot = snapshot_when(&service, |value| {
+        value["api_queries"]["codex_account"]["health"] == "ok"
+    });
+    assert_eq!(snapshot["codex"]["account"]["plan_type"], "pro");
+    assert_eq!(
+        snapshot["codex"]["usage"]["limits"][0]["remaining_percent"],
+        75
+    );
+    assert_eq!(snapshot["sources"]["account_api"]["health"], "ok");
+    assert!(!snapshot.to_string().contains("PRIVATE_EMAIL"));
+    assert_eq!(service.get("/api/codex/account").json()["health"], "ok");
+    assert_eq!(
+        fs::read_to_string(home.path().join("fake-count")).unwrap(),
+        "x"
+    );
+    assert_eq!(
+        post(json!({"observations":{"codex_account":false}})).status,
+        200
+    );
+    let disabled = service.get("/api/snapshot?window=all").json();
+    assert_eq!(disabled["settings"]["observations"]["codex_account"], false);
+    assert_eq!(disabled["api_queries"]["codex_account"]["health"], "ok");
+}
+
+#[test]
+#[cfg(unix)]
+fn account_endpoint_uses_explicit_fake_codex_and_caches_safe_projection() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempdir().unwrap();
+    let bin = tempdir().unwrap();
+    let executable = bin.path().join("codex");
+    let script = r#"#!/bin/sh
+printf x >> "$CODEX_HOME/fake-count"
+while IFS= read -r line; do
+printf '%s\n' "$line" >> "$CODEX_HOME/fake-requests"
+case "$line" in
+*'"id":0'*) printf '%s\n' '{"id":0,"result":{}}' ;;
+*'"id":1'*) printf '%s\n' '{"id":1,"result":{"account":{"planType":"pro","email":"PRIVATE_EMAIL"}}}' ;;
+*'"id":2'*) printf '%s\n' '{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":0}}}}' ;;
+*'"id":3'*) printf '%s\n' '{"id":3,"result":{"summary":{"lifetimeTokens":0}}}' ;;
+esac
+done
+"#;
+    fs::write(&executable, script).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let service = Service::start_with_path(home.path(), false, None, Some(bin.path()));
+    assert!(!home.path().join("fake-count").exists());
+    let first = service.get("/api/codex/account").json();
+    assert_eq!(first["health"], "ok");
+    assert_eq!(first["plan_type"], "pro");
+    assert!(!first.to_string().contains("PRIVATE_EMAIL"));
+    assert_eq!(service.get("/api/codex/account").json()["health"], "ok");
+    assert_eq!(
+        fs::read_to_string(home.path().join("fake-count")).unwrap(),
+        "x"
+    );
+    let requests = fs::read_to_string(home.path().join("fake-requests")).unwrap();
+    let messages: Vec<Value> = requests
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "initialize",
+            "initialized",
+            "account/read",
+            "account/rateLimits/read",
+            "account/usage/read"
+        ]
+    );
+    assert_eq!(messages[2]["params"]["refreshToken"], false);
+}
+
+#[test]
+fn public_query_settings_are_disabled_and_invalid_sources_are_rejected() {
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), false, None);
+    let snapshot = service.get("/api/snapshot?window=all").json();
+    for key in ["public_openai", "public_codex"] {
+        assert_eq!(snapshot["settings"]["observations"][key], false);
+        assert_eq!(snapshot["settings"]["api_intervals"][key], 300);
+    }
+    assert_eq!(service.get("/api/public-query?source=other").status, 400);
+    assert_eq!(
+        service
+            .get("/api/public-query?source=openai&source=codex")
+            .status,
+        400
+    );
+    let body = json!({"api_intervals":{"public_openai":120,"public_codex":240}}).to_string();
+    let reply = service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),&body);
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.json()["api_intervals"]["public_codex"], 240);
+}
+
+#[test]
+fn legacy_interval_settings_are_validated_without_changing_effective_settings() {
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), false, None);
+    let post = |value: Value| {
+        let body = value.to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),&body)
+    };
+    for value in [
+        json!({"interval":1}),
+        json!({"interval":3600,"idle_minutes":0}),
+        json!({"idle_minutes":1440}),
+    ] {
+        let reply = post(value);
+        assert_eq!(reply.status, 200);
+        assert!(reply.json().get("interval").is_none());
+    }
+    for value in [
+        json!({"interval":0,"max_files":50}),
+        json!({"interval":3601}),
+        json!({"interval":true}),
+        json!({"idle_minutes":1441}),
+        json!({"idle_minutes":-1}),
+    ] {
+        assert_eq!(post(value).status, 409);
+    }
+    assert_eq!(
+        service.get("/api/snapshot?window=all").json()["settings"]["max_files"],
+        20
+    );
+}
+
+#[test]
+fn default_settings_restore_supported_settings_without_changing_codex_mode() {
+    for codex in [false, true] {
+        let home = tempdir().unwrap();
+        let service = Service::start(home.path(), codex, None);
+        let snapshot = service.get("/api/snapshot?window=all").json();
+        let defaults = &snapshot["default_settings"];
+        assert_eq!(defaults["observations"]["codex"], codex);
+        assert_eq!(defaults["activity_retention_days"], 90);
+        assert_eq!(defaults["api_intervals"]["platform_costs"], 300);
+        let post = |value: Value| {
+            let body = value.to_string();
+            service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),&body)
+        };
+        assert_eq!(
+            post(json!({"max_files":50,"observations":{"usage":false}})).status,
+            200
+        );
+        let mut reset = defaults.clone();
+        reset["replace_customizations"] = json!(true);
+        let reply = post(reset);
+        assert_eq!(reply.status, 200);
+        let settings = reply.json();
+        assert_eq!(settings["max_files"], 20);
+        assert_eq!(settings["observations"]["usage"], true);
+        assert_eq!(
+            post(json!({"observations":{"codex":!codex},"max_files":30})).status,
+            200
+        );
+    }
+}
+
+#[test]
+fn codex_observation_switch_hides_and_reloads_sessions() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let id = "00000000-0000-4000-8000-000000000002";
+    fs::write(
+        &path,
+        [
+            event(&stamp, "session_meta", json!({"id":id})),
+            event(&stamp, "turn_context", json!({"model":"before-disable"})),
+        ]
+        .concat(),
+    )
+    .unwrap();
+    let service = Service::start(home.path(), false, None);
+    let post = |enabled| {
+        let body = json!({"observations":{"codex":enabled}}).to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),&body)
+    };
+    assert_eq!(
+        service.get("/api/snapshot?window=all").json()["codex"]["health"],
+        "disabled"
+    );
+    assert_eq!(post(true).status, 200);
+    let initial = snapshot_when(&service, |value| {
+        value["codex"]["threads"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["model"] == "before-disable"))
+    });
+    assert_eq!(initial["settings"]["observations"]["codex"], true);
+    let body = json!({"debug_mode":false}).to_string();
+    let response = service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),&body);
+    assert_eq!(response.json()["observations"]["codex"], true);
+    assert_eq!(post(false).status, 200);
+    let disabled = service.get("/api/snapshot?window=all").json();
+    assert_eq!(disabled["codex"]["health"], "disabled");
+    assert_eq!(disabled["codex"]["threads"], json!([]));
+    assert_eq!(disabled["settings"]["observations"]["codex"], false);
+    let later = (chrono::DateTime::parse_from_rfc3339(&stamp).unwrap()
+        + chrono::Duration::seconds(1))
+    .to_rfc3339();
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(event(&later, "turn_context", json!({"model":"after-disable"})).as_bytes())
+        .unwrap();
+    assert_eq!(post(true).status, 200);
+    snapshot_when(&service, |value| {
+        value["codex"]["threads"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["model"] == "after-disable"))
+    });
+}
+
+#[test]
+fn platform_settings_default_to_disabled_and_reject_invalid_sources() {
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), false, None);
+    let snapshot = service.get("/api/snapshot?window=all").json();
+    for key in [
+        "platform_models",
+        "platform_usage",
+        "platform_decisions",
+        "platform_costs",
+    ] {
+        assert_eq!(snapshot["settings"]["observations"][key], false);
+        assert_eq!(snapshot["settings"]["api_intervals"][key], 300);
+    }
+    assert!(snapshot["platform_credentials"]["available"]["models"].is_boolean());
+    assert_eq!(service.get("/api/openai-platform?source=other").status, 400);
+    let body = json!({"api_intervals":{"platform_models":120,"platform_costs":240}}).to_string();
+    let reply = service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),&body);
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.json()["api_intervals"]["platform_costs"], 240);
+}
+
+#[cfg(unix)]
+#[test]
+fn account_and_cloud_reject_get_bodies_before_starting_codex() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempdir().unwrap();
+    let bin = tempdir().unwrap();
+    let executable = bin.path().join("codex");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nprintf x >> \"$CODEX_HOME/launched\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let service = Service::start_with_path(home.path(), false, None, Some(bin.path()));
+    for route in ["/api/codex/account", "/api/codex/cloud"] {
+        let request = format!(
+            "GET {route} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Length: 1\r\n",
+            service.port
+        );
+        assert_eq!(service.request_body(&request, "x").status, 400);
+        let request = format!(
+            "GET {route} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nTransfer-Encoding: chunked\r\n",
+            service.port
+        );
+        assert_eq!(
+            service.request_body(&request, "1\r\nx\r\n0\r\n\r\n").status,
+            400
+        );
+    }
+    assert!(!home.path().join("launched").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn cloud_observation_schedules_first_page_and_keeps_it_when_disabled() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempdir().unwrap();
+    let bin = tempdir().unwrap();
+    let executable = bin.path().join("codex");
+    fs::write(&executable, "#!/bin/sh\nprintf x >> \"$CODEX_HOME/count\"\ncase \"$*\" in *--cursor*) title=next;; *) title=first;; esac\nprintf '{\"tasks\":[{\"id\":\"task_1\",\"title\":\"%s\"}],\"cursor\":\"next\"}\\n' \"$title\"\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let service = Service::start_with_path(home.path(), false, None, Some(bin.path()));
+    let initial = service.get("/api/snapshot?window=all").json();
+    assert_eq!(initial["settings"]["observations"]["codex_cloud"], false);
+    assert_eq!(initial["settings"]["api_intervals"]["codex_cloud"], 300);
+    assert!(!home.path().join("count").exists());
+    let post = |value: Value| {
+        let body = value.to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),&body)
+    };
+    assert_eq!(
+        post(json!({"observations":{"codex_cloud":true},"api_intervals":{"codex_cloud":59}}))
+            .status,
+        409
+    );
+    assert!(!home.path().join("count").exists());
+    assert_eq!(
+        post(json!({"observations":{"codex_cloud":true},"api_intervals":{"codex_cloud":60}}))
+            .status,
+        200
+    );
+    let first = snapshot_when(&service, |value| {
+        value["api_queries"]["codex_cloud"]["health"] == "ok"
+    });
+    assert_eq!(
+        first["api_queries"]["codex_cloud"]["items"][0]["title"],
+        "first"
+    );
+    assert_eq!(
+        service.get("/api/codex/cloud?cursor=next").json()["items"][0]["title"],
+        "next"
+    );
+    assert_eq!(
+        post(json!({"observations":{"codex_cloud":false}})).status,
+        200
+    );
+    let stopped = service.get("/api/snapshot?window=all").json();
+    assert_eq!(stopped["settings"]["observations"]["codex_cloud"], false);
+    assert_eq!(
+        stopped["api_queries"]["codex_cloud"]["items"][0]["title"],
+        "first"
+    );
+    assert_eq!(fs::read_to_string(home.path().join("count")).unwrap(), "xx");
+}
+
+#[cfg(unix)]
+#[test]
+fn cloud_endpoint_validates_cursor_and_caches_each_page() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempdir().unwrap();
+    let bin = tempdir().unwrap();
+    let executable = bin.path().join("codex");
+    fs::write(&executable, "#!/bin/sh\nprintf x >> \"$CODEX_HOME/count\"\nprintf '%s\\n' '{\"tasks\":[{\"id\":\"task_1\",\"title\":\"Example\",\"secret\":\"PRIVATE\"}],\"cursor\":\"next\"}'\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let service = Service::start_with_path(home.path(), false, None, Some(bin.path()));
+    assert!(!home.path().join("count").exists());
+    assert_eq!(
+        service.get("/api/codex/cloud?cursor=bad%20cursor").status,
+        400
+    );
+    assert_eq!(
+        service.get("/api/codex/cloud?cursor=a&cursor=b").status,
+        400
+    );
+    assert!(!home.path().join("count").exists());
+    let value = service.get("/api/codex/cloud").json();
+    assert_eq!(value["health"], "ok");
+    assert!(!value.to_string().contains("PRIVATE"));
+    assert_eq!(service.get("/api/codex/cloud").json()["cursor"], "next");
+    assert_eq!(
+        service.get("/api/codex/cloud?cursor=next").json()["health"],
+        "ok"
+    );
+    assert_eq!(fs::read_to_string(home.path().join("count")).unwrap(), "xx");
+}
+
+#[test]
+fn mcp_document_preview_detects_structured_text_formats() {
+    let home = tempdir().unwrap();
+    let root = tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let fixtures = [
+        ("settings-json.txt", "{\"enabled\":true}", "JSON"),
+        ("settings-lines.txt", "{\"a\":1}\n{\"a\":2}\n", "JSONL"),
+        (
+            "settings-xml.txt",
+            "<root><name>fixture</name></root>",
+            "XML",
+        ),
+        ("settings-table.txt", "name,value\nalpha,1\nbeta,2\n", "CSV"),
+        ("settings-object.txt", "{enabled: true}", "Object literal"),
+    ];
+    let mut args = Vec::new();
+    for (name, body, _) in fixtures {
+        let path = root.join(name);
+        fs::write(&path, body).unwrap();
+        args.push(path.to_string_lossy().into_owned());
+    }
+    let args = serde_json::to_string(&args).unwrap();
+    fs::write(
+        home.path().join("config.toml"),
+        format!("[mcp_servers.fixture]\ncommand = \"node\"\nargs = {args}\n"),
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    let list = service.get("/api/mcp/files?server=fixture").json();
+    let files = list["files"].as_array().unwrap();
+    for (name, _, format) in fixtures {
+        let id = files.iter().find(|entry| entry["name"] == name).unwrap()["id"]
+            .as_str()
+            .unwrap();
+        let detail = service
+            .get(&format!("/api/mcp/files?server=fixture&document={id}"))
+            .json();
+        assert_eq!(detail["parsed_format"], format, "{name}");
+        assert!(detail.get("parsed").is_some());
+    }
+}
+
+#[test]
+fn mcp_document_edit_rejects_yaml_toml_and_origin_failures() {
+    let home = tempdir().unwrap();
+    let root = tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let yaml = root.join("settings.yaml");
+    let toml = root.join("settings.toml");
+    fs::write(&yaml, "enabled: false\n").unwrap();
+    fs::write(&toml, "enabled = false\n").unwrap();
+    fs::write(
+        home.path().join("config.toml"),
+        format!(
+            "[mcp_servers.fixture]\ncommand = \"node\"\nargs = [{},{}]\n",
+            serde_json::to_string(yaml.to_str().unwrap()).unwrap(),
+            serde_json::to_string(toml.to_str().unwrap()).unwrap()
+        ),
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    let list = service.get("/api/mcp/files?server=fixture").json();
+    let files = list["files"].as_array().unwrap();
+    let post = |value: Value, extra: &str| {
+        let body = value.to_string();
+        service.request_body(&format!("POST /api/mcp/file HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n{extra}Content-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),&body)
+    };
+    for (name, invalid) in [
+        ("settings.yaml", "value:\n\tbad: 1\n"),
+        ("settings.toml", "enabled = [\n"),
+    ] {
+        let id = files.iter().find(|entry| entry["name"] == name).unwrap()["id"]
+            .as_str()
+            .unwrap();
+        let detail = service
+            .get(&format!("/api/mcp/files?server=fixture&document={id}"))
+            .json();
+        let sha = detail["sha256"].as_str().unwrap();
+        let value = json!({"server":"fixture","document":id,"sha256":sha,"text":invalid});
+        assert_eq!(post(value.clone(), "").status, 409);
+        assert_eq!(
+            post(value, "Origin: http://external.invalid\r\n").status,
+            403
+        );
+    }
+    assert_eq!(fs::read_to_string(yaml).unwrap(), "enabled: false\n");
+    assert_eq!(fs::read_to_string(toml).unwrap(), "enabled = false\n");
+}
+
+#[test]
+fn mcp_document_edit_validates_and_preserves_changed_files() {
+    let home = tempdir().unwrap();
+    let root = tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let file = root.join("settings.json");
+    fs::write(&file, "{\"enabled\":false}").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+    }
+    fs::write(
+        home.path().join("config.toml"),
+        format!(
+            "[mcp_servers.fixture]\ncommand = \"node\"\nargs = [{}]\n",
+            serde_json::to_string(file.to_str().unwrap()).unwrap()
+        ),
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    let list = service.get("/api/mcp/files?server=fixture").json();
+    let id = list["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "settings.json")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let detail = service
+        .get(&format!("/api/mcp/files?server=fixture&document={id}"))
+        .json();
+    assert_eq!(detail["editable"], true);
+    assert_eq!(detail["parsed_format"], "JSON");
+    let sha = detail["sha256"].as_str().unwrap();
+    let post = |value: Value| {
+        let body = value.to_string();
+        service.request_body(&format!("POST /api/mcp/file HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),&body)
+    };
+    for text in ["{invalid", r#"{"api_key":"PRIVATE"}"#] {
+        assert_eq!(
+            post(json!({"server":"fixture","document":id,"sha256":sha,"text":text})).status,
+            409
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), "{\"enabled\":false}");
+    }
+    let saved =
+        post(json!({"server":"fixture","document":id,"sha256":sha,"text":"{\"enabled\":true}"}));
+    assert_eq!(saved.status, 200);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+    }
+    assert_eq!(saved.json()["text"], "{\"enabled\":true}");
+    assert_eq!(
+        post(json!({"server":"fixture","document":id,"sha256":sha,"text":"{}"})).status,
+        409
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), "{\"enabled\":true}");
+    assert!(fs::read_dir(&root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .all(|entry| !entry.file_name().to_string_lossy().starts_with(".lam-")));
+    let saved_sha = saved.json()["sha256"].as_str().unwrap().to_owned();
+    let config = fs::read_to_string(home.path().join("config.toml")).unwrap();
+    fs::write(
+        home.path().join("config.toml"),
+        "[mcp_servers.fixture]\nenabled = false\n",
+    )
+    .unwrap();
+    assert_eq!(
+        post(json!({"server":"fixture","document":id,"sha256":saved_sha,"text":"{}"})).status,
+        409
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), "{\"enabled\":true}");
+    fs::write(home.path().join("config.toml"), config).unwrap();
+    let masked = "{\"api_key\":\"PRIVATE_SECRET\"}";
+    fs::write(&file, masked).unwrap();
+    let masked_detail = service
+        .get(&format!("/api/mcp/files?server=fixture&document={id}"))
+        .json();
+    assert_eq!(masked_detail["editable"], false);
+    assert!(!masked_detail.to_string().contains("PRIVATE_SECRET"));
+}
+
+#[test]
+fn mcp_documents_only_exposes_configured_local_files_and_masks_secrets() {
+    let home = tempdir().unwrap();
+    let root = tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/server.mjs"), "").unwrap();
+    fs::write(root.join("package.json"), "{\"description\":\"Fixture\"}").unwrap();
+    fs::write(root.join("README.md"), "Fixture docs").unwrap();
+    fs::write(
+        root.join(".textlintrc.cjs"),
+        "module.exports={rulePaths:['terms.yml']}",
+    )
+    .unwrap();
+    fs::write(root.join("terms.yml"), "version: 1\nrules: []\n").unwrap();
+    fs::write(root.join("rules.yaml"), "version: 1\nrules: []\n").unwrap();
+    fs::write(
+        root.join("settings.json"),
+        r#"{"theme":"dark","api_key":"PRIVATE_SECRET"}"#,
+    )
+    .unwrap();
+    fs::write(root.join("credentials.json"), "PRIVATE_CREDENTIAL").unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(root.join("README.md"), root.join("config-link.md")).unwrap();
+        fs::hard_link(root.join("terms.yml"), root.join("rules-hardlink.yml")).unwrap();
+    }
+    let config = format!(
+        "[mcp_servers.fixture]\ncommand = \"node\"\nargs = [{}, {}, {}, {}]\n",
+        serde_json::to_string(root.join("src/server.mjs").to_str().unwrap()).unwrap(),
+        serde_json::to_string(root.join(".textlintrc.cjs").to_str().unwrap()).unwrap(),
+        serde_json::to_string(root.join("settings.json").to_str().unwrap()).unwrap(),
+        serde_json::to_string(root.join("credentials.json").to_str().unwrap()).unwrap()
+    );
+    fs::write(home.path().join("config.toml"), config).unwrap();
+    let service = Service::start(home.path(), true, None);
+    let list = service.get("/api/mcp/files?server=fixture").json();
+    let files = list["files"].as_array().unwrap();
+    let names: Vec<_> = files
+        .iter()
+        .filter_map(|file| file["name"].as_str())
+        .collect();
+    assert!(names.contains(&"README.md") && names.contains(&"settings.json"));
+    assert!(
+        !names.contains(&"credentials.json")
+            && !names.contains(&"config-link.md")
+            && !names.contains(&"rules-hardlink.yml")
+    );
+    #[cfg(unix)]
+    assert!(!names.contains(&"terms.yml"));
+    let id = files
+        .iter()
+        .find(|file| file["name"] == "settings.json")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let detail = service
+        .get(&format!("/api/mcp/files?server=fixture&document={id}"))
+        .json();
+    assert_eq!(detail["masked"], true);
+    assert_eq!(detail["editable"], false);
+    assert!(!detail.to_string().contains("PRIVATE_SECRET"));
+    let rules = files
+        .iter()
+        .find(|file| file["name"] == "rules.yaml")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        service
+            .get(&format!("/api/mcp/files?server=fixture&document={rules}"))
+            .json()["text"],
+        "version: 1\nrules: []\n"
+    );
+    assert_eq!(
+        service
+            .get(&format!("/api/mcp/files?server=fixture&document={rules}"))
+            .json()["parsed_format"],
+        "YAML subset"
+    );
+    assert_eq!(
+        service
+            .get("/api/mcp/files?server=fixture&document=00000000000000000000000000000000")
+            .status,
+        409
+    );
+    assert_eq!(service.get("/api/mcp/files?server=other").status, 409);
+    assert_eq!(
+        service
+            .get("/api/mcp/files?server=fixture&document=../../secret")
+            .status,
+        400
+    );
+}
+
+#[test]
+fn worktree_snapshot_reads_loaded_project_and_managed_roots() {
+    let home = tempdir().unwrap();
+    let home_path = home.path().canonicalize().unwrap();
+    let external = tempdir().unwrap();
+    let repo = external.path().canonicalize().unwrap().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let mut cmd = Command::new("git");
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("GIT_") {
+                cmd.env_remove(key);
+            }
+        }
+        let output = cmd
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                if cfg!(windows) { "NUL" } else { "/dev/null" },
+            )
+            .args([
+                "-C",
+                repo.to_str().unwrap(),
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                if cfg!(windows) {
+                    "core.hooksPath=NUL"
+                } else {
+                    "core.hooksPath=/dev/null"
+                },
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "fixture git command failed");
+    };
+    git(&["init", "-q"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "fixture"]);
+    let managed = home_path.join("worktrees/fixture/linked");
+    fs::create_dir_all(managed.parent().unwrap()).unwrap();
+    git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        managed.to_str().unwrap(),
+    ]);
+    git(&[
+        "worktree",
+        "lock",
+        "--reason",
+        "PRIVATE_REASON",
+        managed.to_str().unwrap(),
+    ]);
+    let state = rusqlite::Connection::open(home_path.join("state_1.sqlite")).unwrap();
+    state.execute_batch("CREATE TABLE threads(id TEXT,title TEXT,project_id TEXT,cwd TEXT); CREATE TABLE projects(id TEXT,name TEXT,updated_at_ms INTEGER); INSERT INTO projects VALUES('project','Fixture',1); CREATE TABLE project_roots(project_id TEXT,path TEXT)").unwrap();
+    state
+        .execute(
+            "INSERT INTO project_roots VALUES('project',?)",
+            [repo.to_str().unwrap()],
+        )
+        .unwrap();
+    state.execute("INSERT INTO threads VALUES('00000000-0000-4000-8000-000000000002','Fixture','project',?)",[repo.to_str().unwrap()]).unwrap();
+    let (session, stamp) = native_event_fixture(&home_path);
+    append_records(
+        &session,
+        &[event(
+            &stamp,
+            "session_meta",
+            json!({"id":"00000000-0000-4000-8000-000000000002","cwd":managed.join("src")}),
+        )],
+    );
+    let other = home_path.join("sessions/rollout-00000000-0000-4000-8000-000000000003.jsonl");
+    fs::write(
+        &other,
+        event(
+            &stamp,
+            "session_meta",
+            json!({"id":"00000000-0000-4000-8000-000000000003","cwd":managed.join("nested")}),
+        ),
+    )
+    .unwrap();
+    let mut service = Service::start(&home_path, true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["codex"]["worktrees"]["items"]
+            .as_array()
+            .is_some_and(|items| items.len() == 2)
+    });
+    let data = &snapshot["codex"]["worktrees"];
+    assert_eq!(data["health"], "ok");
+    assert_eq!(data["total"], 2);
+    assert_eq!(data["queries"], 1);
+    assert!(!data.to_string().contains(repo.to_str().unwrap()));
+    assert!(!snapshot.to_string().contains(repo.to_str().unwrap()));
+    assert!(!data.to_string().contains("PRIVATE_REASON"));
+    assert!(!snapshot
+        .to_string()
+        .contains(managed.join("nested").to_str().unwrap()));
+    let linked = data["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["managed"] == true)
+        .unwrap();
+    assert_eq!(linked["locked"], true);
+    assert_eq!(linked["detached"], true);
+    assert_eq!(linked["project_ids"], json!(["project"]));
+    assert_eq!(
+        linked["thread_ids"],
+        json!(["00000000-0000-4000-8000-000000000003"])
+    );
+    let main = data["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["managed"] == false)
+        .unwrap();
+    assert_eq!(
+        main["thread_ids"],
+        json!(["00000000-0000-4000-8000-000000000002"])
+    );
+    let url = format!("/api/codex/worktree?id={}", linked["id"].as_str().unwrap());
+    assert_eq!(service.get(&url).json()["path"], managed.to_str().unwrap());
+    git(&["switch", "-q", "-c", "fixture-notified"]);
+    snapshot_when(&service, |value| {
+        value["codex"]["worktrees"]["items"]
+            .as_array()
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item["managed"] == false && item["branch"] == "fixture-notified")
+            })
+    });
+    git(&["worktree", "unlock", managed.to_str().unwrap()]);
+    snapshot_when(&service, |value| {
+        value["codex"]["worktrees"]["items"]
+            .as_array()
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item["managed"] == true && item["locked"] == false)
+            })
+    });
+    state.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let body = "{}";
+    assert_eq!(service.request_body(&format!("POST /api/refresh HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),body).status,200);
+    let partial = snapshot_when(&service, |value| {
+        value["codex"]["worktrees"]["root_source_health"] == "partly_unavailable"
+    });
+    assert!(partial["codex"]["worktrees"]["total"].is_null());
+    assert_eq!(partial["codex"]["worktrees"]["observed_total"], 2);
+    state.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(service.request_body(&format!("POST /api/refresh HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),body).status,200);
+    snapshot_when(&service, |value| {
+        value["codex"]["worktrees"]["root_source_health"] == "ok"
+            && value["codex"]["worktrees"]["total"] == 2
+    });
+    assert_eq!(service.get("/api/codex/worktree?id=bad").status, 400);
+    let body = r#"{"observations":{"worktrees":false}}"#;
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),body).status,200);
+    assert_eq!(service.get(&url).status, 409);
+    assert_eq!(
+        service.get("/api/snapshot?window=all").json()["codex"]["worktrees"]["health"],
+        "disabled"
+    );
+    let disabled_path =
+        home_path.join("sessions/rollout-00000000-0000-4000-8000-000000000004.jsonl");
+    fs::write(
+        &disabled_path,
+        event(
+            &stamp,
+            "session_meta",
+            json!({"id":"00000000-0000-4000-8000-000000000004","cwd":managed.join("later")}),
+        ),
+    )
+    .unwrap();
+    snapshot_when(&service, |value| {
+        value["codex"]["threads"].as_array().is_some_and(|threads| {
+            threads
+                .iter()
+                .any(|thread| thread["thread_id"] == "00000000-0000-4000-8000-000000000004")
+        })
+    });
+    let body = r#"{"observations":{"worktrees":true}}"#;
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),body).status,200);
+    assert_eq!(service.get(&url).json()["path"], managed.to_str().unwrap());
+    snapshot_when(&service, |value| {
+        value["codex"]["worktrees"]["items"]
+            .as_array()
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item["managed"] == true && item["thread_count"] == 2)
+            })
+    });
+    service.stop();
+    let db = rusqlite::Connection::open(
+        home_path
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    let stored: String = db
+        .query_row(
+            "SELECT group_concat(payload) FROM session_cursors",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!stored.contains(managed.to_str().unwrap()));
+    let restarted = Service::start(&home_path, true, None);
+    let restored = snapshot_when(&restarted, |value| {
+        value["codex"]["read_state"]["checkpoint"]["restored"]
+            .as_u64()
+            .is_some_and(|count| count >= 3)
+            && value["codex"]["worktrees"]["items"]
+                .as_array()
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| item["managed"] == true && item["thread_count"] == 2)
+                })
+    });
+    assert_eq!(
+        restored["codex"]["worktrees"]["association_scope"],
+        "loaded_thread_cwd"
+    );
+}
+
+#[test]
+fn source_registry_describes_loaded_readers_and_disabled_metadata() {
+    let home = tempdir().unwrap();
+    native_event_fixture(home.path());
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    let sources = &snapshot["sources"];
+    assert_eq!(sources["session"]["health"], "ok");
+    assert_eq!(sources["session"]["mode"], "read_only");
+    assert!(sources["session"]["locations"][0]
+        .as_str()
+        .unwrap()
+        .ends_with("/sessions"));
+    assert_eq!(sources["thread_state"]["health"], "ok");
+    assert_eq!(
+        sources["activity_history"]["mode"],
+        "bounded_metadata_cache"
+    );
+    assert_eq!(
+        sources["activity_history"]["limits"]["retention_days"],
+        snapshot["settings"]["activity_retention_days"]
+    );
+    assert!(snapshot["settings"]["activity_retention_days"].is_number());
+    assert!(sources["diagnostics"]["readers"]
+        .as_array()
+        .is_some_and(|rows| rows.iter().any(|row| row["source"] == "codex_core")));
+    assert!(sources["mcp_config"]["locations"][0]
+        .as_str()
+        .unwrap()
+        .ends_with("/config.toml"));
+    assert_eq!(sources["mcp_config"]["limits"]["event_limit"], 1000);
+    assert_eq!(sources["mcp_config"]["limits"]["tool_limit"], 30);
+    assert_eq!(sources["monitor"]["mode"], "bounded_metadata_cache");
+    let body = r#"{"observations":{"metadata":false}}"#;
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),body).status,200);
+    assert_eq!(
+        service.get("/api/snapshot?window=all").json()["sources"]["catalog"]["health"],
+        "disabled"
+    );
+    let disabled_home = tempdir().unwrap();
+    let disabled = Service::start(disabled_home.path(), false, None);
+    let snapshot = disabled.get("/api/snapshot?window=all").json();
+    assert_eq!(snapshot["sources"]["session"]["health"], "disabled");
+    assert_eq!(snapshot["sources"]["diagnostics"]["health"], "disabled");
+}
+
+#[test]
+fn jev_telemetry_error_history_retries_after_storage_failure() {
+    let home = tempdir().unwrap();
+    native_event_fixture(home.path());
+    let monitoring = home.path().join("monitoring");
+    drop(Store::open(&monitoring, Access::ReadWrite).unwrap());
+    let history =
+        rusqlite::Connection::open(monitoring.join(lam_history_store::FILE_NAME)).unwrap();
+    history.execute_batch("CREATE TRIGGER reject_jev BEFORE INSERT ON history_items WHEN NEW.namespace='errors' BEGIN SELECT RAISE(ABORT,'fixture failure'); END").unwrap();
+    let path = home.path().join("jev.sqlite");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TABLE jev_events(timestamp TEXT,status TEXT,http_attempts INTEGER,input_tokens INTEGER,output_tokens INTEGER,request_bytes INTEGER,response_bytes INTEGER,response_unknown_attempts INTEGER,latency_ms INTEGER,metadata TEXT)").unwrap();
+    let time = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let metadata=json!({"timestamp":time,"operation":"rank","status":"failed","attempts":[{"status":"timeout"}]}).to_string();
+    db.execute(
+        "INSERT INTO jev_events VALUES(?,'failed',1,NULL,NULL,1,0,0,5,?)",
+        rusqlite::params![time, metadata],
+    )
+    .unwrap();
+    fs::write(
+        monitoring.join("jev-monitor.json"),
+        json!({"version":1,"enabled":true,"database":path}).to_string(),
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    let failed = snapshot_when(&service, |value| {
+        value["errors"]["history"]["health"] == "unavailable"
+            && value["errors"]["events"].as_array().is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event["source"] == "jev_telemetry")
+            })
+    });
+    assert_eq!(failed["errors"]["history"]["error_type"], "SQLiteError");
+    assert_eq!(
+        service
+            .get("/api/history?namespace=errors&section=events")
+            .json()["total"],
+        0
+    );
+    history.execute_batch("DROP TRIGGER reject_jev").unwrap();
+    let body = "{}";
+    assert_eq!(service.request_body(&format!("POST /api/refresh HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),body).status,200);
+    snapshot_when(&service, |value| {
+        value["errors"]["history"]["health"] == "ok"
+            && value["errors"]["history"]["retained"]
+                .as_u64()
+                .is_some_and(|count| count >= 1)
+    });
+    assert_eq!(
+        service
+            .get("/api/history?namespace=errors&section=events")
+            .json()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["source"] == "jev_telemetry")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn jev_telemetry_failures_enter_error_history_and_respect_observation() {
+    let home = tempdir().unwrap();
+    native_event_fixture(home.path());
+    let monitoring = home.path().join("monitoring");
+    fs::create_dir_all(&monitoring).unwrap();
+    let path = home.path().join("jev-errors.sqlite");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TABLE jev_events(timestamp TEXT,status TEXT,http_attempts INTEGER,input_tokens INTEGER,output_tokens INTEGER,request_bytes INTEGER,response_bytes INTEGER,response_unknown_attempts INTEGER,latency_ms INTEGER,metadata TEXT)").unwrap();
+    let time = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let metadata=json!({"timestamp":time,"operation":"rank","status":"failed","prompt":"PRIVATE","attempts":[{"status":"timeout","http_status":504,"body":"SECRET"},{"status":"ok"},{"status":"http_error","http_status":503}]}).to_string();
+    db.execute(
+        "INSERT INTO jev_events VALUES(?,'failed',3,NULL,NULL,1,0,0,5,?)",
+        rusqlite::params![time, metadata],
+    )
+    .unwrap();
+    fs::write(
+        monitoring.join("jev-monitor.json"),
+        json!({"version":1,"enabled":true,"database":path}).to_string(),
+    )
+    .unwrap();
+    let mut service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["errors"]["events"].as_array().is_some_and(|events| {
+            events
+                .iter()
+                .filter(|event| event["source"] == "jev_telemetry")
+                .count()
+                == 2
+        })
+    });
+    let errors = snapshot["errors"]["events"].as_array().unwrap();
+    assert!(errors.iter().any(|event| event["code"] == "timeout"
+        && event["attempt"] == 1
+        && event["http_status"] == 504));
+    assert!(errors
+        .iter()
+        .any(|event| event["code"] == "http_error" && event["attempt"] == 3));
+    assert!(!snapshot["errors"].to_string().contains("PRIVATE"));
+    let history = "/api/history?namespace=errors&section=events";
+    assert_eq!(
+        service.get(history).json()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["source"] == "jev_telemetry")
+            .count(),
+        2
+    );
+    let body = r#"{"observations":{"errors":false}}"#;
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),body).status,200);
+    assert_eq!(
+        service.get("/api/snapshot?window=all").json()["errors"]["total"],
+        0
+    );
+    service.stop();
+    let restarted = Service::start(home.path(), false, None);
+    let restored = snapshot_when(&restarted, |value| {
+        value["errors"]["history"]["health"] == "ok"
+            && value["errors"]["events"].as_array().is_some_and(|events| {
+                events
+                    .iter()
+                    .filter(|event| event["source"] == "jev_telemetry")
+                    .count()
+                    == 2
+            })
+    });
+    assert!(!restored["errors"].to_string().contains("SECRET"));
+}
+
+#[test]
+fn jev_cli_configure_only_preserves_existing_database_and_supports_override() {
+    let home = tempdir().unwrap();
+    let first = home.path().join("first.sqlite");
+    let second = home.path().join("second.sqlite");
+    let execute = |args: &[&str]| {
+        Command::new(BINARY)
+            .args([
+                "--codex-home",
+                home.path().to_str().unwrap(),
+                "--configure-only",
+            ])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let enabled = execute(&["--enable-jev", "--database", first.to_str().unwrap()]);
+    assert!(enabled.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&enabled.stdout).unwrap()["jev_recording"],
+        "enabled"
+    );
+    let path = home.path().join("monitoring/jev-monitor.json");
+    let initial: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(initial["database"], first.to_str().unwrap());
+    let disabled = execute(&["--disable-jev"]);
+    assert!(disabled.status.success());
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["database"], first.to_str().unwrap());
+    assert_eq!(saved["enabled_at"], initial["enabled_at"]);
+    assert!(!execute(&["--enable-jev", "--disable-jev"]).status.success());
+    assert!(!execute(&["--enable-jev", "--database", "relative.sqlite"])
+        .status
+        .success());
+    let replaced = execute(&["--enable-jev", "--database", second.to_str().unwrap()]);
+    assert!(replaced.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap()["database"],
+        second.to_str().unwrap()
+    );
+    assert!(!first.exists() && !second.exists());
+}
+
+#[test]
+fn jev_recording_batch_keeps_config_when_later_retention_write_fails() {
+    let home = tempdir().unwrap();
+    let monitoring = home.path().join("monitoring");
+    let mut store = Store::open(&monitoring, Access::ReadWrite)
+        .unwrap()
+        .unwrap();
+    store
+        .set_activity_retention(0, std::time::SystemTime::now().into())
+        .unwrap();
+    drop(store);
+    let path = monitoring.join("jev-monitor.json");
+    fs::write(&path,json!({"version":1,"enabled":false,"database":home.path().join("fixture.sqlite"),"enabled_at":"2026-11-12T09:00:00.000Z"}).to_string()).unwrap();
+    let db = rusqlite::Connection::open(monitoring.join(lam_history_store::FILE_NAME)).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_retention BEFORE UPDATE ON history_state WHEN NEW.namespace='activity' BEGIN SELECT RAISE(ABORT,'fixture failure'); END").unwrap();
+    let service = Service::start(home.path(), true, None);
+    let body = r#"{"recording":true,"activity_retention_days":1,"observations":{"skills":false}}"#;
+    let response=service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),body);
+    assert_eq!(response.status, 503);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap()["enabled"],
+        true
+    );
+    assert_eq!(
+        service.get("/api/settings").json()["observations"]["skills"],
+        true
+    );
+}
+
+#[test]
+fn jev_recording_batch_validates_before_applying_other_settings() {
+    let home = tempdir().unwrap();
+    let monitoring = home.path().join("monitoring");
+    fs::create_dir_all(&monitoring).unwrap();
+    let path = monitoring.join("jev-monitor.json");
+    let database = home.path().join("fixture.sqlite");
+    let before = json!({"version":1,"enabled":false,"database":database,"enabled_at":"2026-11-12T09:00:00.000Z"}).to_string();
+    fs::write(&path, &before).unwrap();
+    let service = Service::start(home.path(), true, None);
+    let post = |value: Value| {
+        let body = value.to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),&body)
+    };
+    assert_eq!(
+        post(json!({"recording":true,"observations":{"skills":"invalid"}})).status,
+        409
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    fs::write(&path, "invalid").unwrap();
+    assert_eq!(
+        post(json!({"recording":true,"observations":{"skills":false}})).status,
+        409
+    );
+    assert_eq!(
+        service.get("/api/settings").json()["observations"]["skills"],
+        true
+    );
+    fs::write(&path, &before).unwrap();
+    assert_eq!(
+        post(json!({"recording":true,"observations":{"skills":false}})).status,
+        200
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap()["enabled"],
+        true
+    );
+    let snapshot = snapshot_when(&service, |value| {
+        value["jev"]["enabled"] == true && value["settings"]["observations"]["skills"] == false
+    });
+    assert_eq!(
+        snapshot["jev"]["reader"]["locations"][0],
+        database.to_string_lossy().as_ref()
+    );
+}
+
+#[test]
+fn jev_recording_endpoint_preserves_database_and_rejects_invalid_config() {
+    let home = tempdir().unwrap();
+    let monitoring = home.path().join("monitoring");
+    fs::create_dir_all(&monitoring).unwrap();
+    let path = monitoring.join("jev-monitor.json");
+    let database = home.path().join("owned-fixture.sqlite");
+    let original = json!({"version":1,"enabled":false,"database":database,"enabled_at":"2026-11-12T09:00:00.000Z"}).to_string();
+    fs::write(&path, &original).unwrap();
+    let service = Service::start(home.path(), true, None);
+    let post = |body: &str| {
+        service.request_body(&format!("POST /api/jev/recording HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),body)
+    };
+    assert_eq!(post(r#"{"enabled":"true"}"#).status, 400);
+    assert_eq!(
+        post(r#"{"enabled":true,"database":"/tmp/unapproved"}"#).status,
+        400
+    );
+    let cross_origin = r#"{"enabled":true}"#;
+    assert_eq!(service.request_body(&format!("POST /api/jev/recording HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nOrigin: http://external.invalid\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,cross_origin.len()),cross_origin).status,403);
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    let result = post(r#"{"enabled":true}"#);
+    assert_eq!(result.status, 200);
+    assert_eq!(result.json()["enabled_at"], "2026-11-12T09:00:00.000Z");
+    let updated: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(updated["enabled"], true);
+    assert_eq!(updated["database"], database.to_string_lossy().as_ref());
+    let backups: Vec<_> = fs::read_dir(&monitoring)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".bak"))
+        .collect();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(fs::read_to_string(backups[0].path()).unwrap(), original);
+    assert_eq!(post(r#"{"enabled":false}"#).status, 200);
+    let updated: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(updated["enabled"], false);
+    assert_eq!(updated["database"], database.to_string_lossy().as_ref());
+    fs::write(&path, "invalid").unwrap();
+    assert_eq!(post(r#"{"enabled":true}"#).status, 409);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "invalid");
+    assert!(!database.exists());
+    assert!(fs::read_dir(&monitoring)
+        .unwrap()
+        .filter_map(Result::ok)
+        .all(|entry| !entry.file_name().to_string_lossy().starts_with(".monitor-")));
+}
+
+#[test]
+fn jev_watcher_tracks_database_directory_created_later() {
+    let home = tempdir().unwrap();
+    native_event_fixture(home.path());
+    let external = tempdir().unwrap();
+    let directory = external.path().join("later");
+    let database = directory.join("events.sqlite");
+    let monitoring = home.path().join("monitoring");
+    fs::create_dir_all(&monitoring).unwrap();
+    fs::write(
+        monitoring.join("jev-monitor.json"),
+        json!({"version":1,"enabled":true,"database":database}).to_string(),
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["jev"]["health"] == "not_recorded"
+            && value["sources"]["telemetry:jev"]["watch_health"] == "ok"
+    });
+    fs::create_dir(&directory).unwrap();
+    let db = rusqlite::Connection::open(&database).unwrap();
+    db.execute_batch("CREATE TABLE jev_events(timestamp TEXT,status TEXT,http_attempts INTEGER,input_tokens INTEGER,output_tokens INTEGER,request_bytes INTEGER,response_bytes INTEGER,response_unknown_attempts INTEGER,latency_ms INTEGER,metadata TEXT)").unwrap();
+    snapshot_when(&service, |value| {
+        value["jev"]["health"] == "ok" && value["jev"]["summary"]["calls"] == 0
+    });
+}
+
+#[test]
+fn jev_source_watcher_refreshes_wal_and_reconfigured_database() {
+    for codex in [true, false] {
+        let home = tempdir().unwrap();
+        let external = tempdir().unwrap();
+        if codex {
+            native_event_fixture(home.path());
+        }
+        let monitoring = home.path().join("monitoring");
+        fs::create_dir_all(&monitoring).unwrap();
+        let create = |path: &Path| {
+            let db = rusqlite::Connection::open(path).unwrap();
+            db.pragma_update(None, "journal_mode", "WAL").unwrap();
+            db.execute_batch("CREATE TABLE jev_events(timestamp TEXT,status TEXT,http_attempts INTEGER,input_tokens INTEGER,output_tokens INTEGER,request_bytes INTEGER,response_bytes INTEGER,response_unknown_attempts INTEGER,latency_ms INTEGER,metadata TEXT)").unwrap();
+            db
+        };
+        let first_path = external.path().join("first.sqlite");
+        let second_path = external.path().join("second.sqlite");
+        let first = create(&first_path);
+        let second = create(&second_path);
+        let config = monitoring.join("jev-monitor.json");
+        fs::write(
+            &config,
+            json!({"version":1,"enabled":true,"database":first_path}).to_string(),
+        )
+        .unwrap();
+        let service = Service::start(home.path(), codex, None);
+        snapshot_when(&service, |value| {
+            value["jev"]["health"] == "ok" && value["jev"]["summary"]["calls"] == 0
+        });
+        let time = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let metadata = json!({"timestamp":time,"status":"ok","operation":"rank"}).to_string();
+        first
+            .execute(
+                "INSERT INTO jev_events VALUES(?,'ok',1,1,1,1,1,0,1,?)",
+                rusqlite::params![time, metadata],
+            )
+            .unwrap();
+        snapshot_when(&service, |value| value["jev"]["summary"]["calls"] == 1);
+        fs::write(
+            &config,
+            json!({"version":1,"enabled":true,"database":second_path}).to_string(),
+        )
+        .unwrap();
+        snapshot_when(&service, |value| {
+            value["jev"]["health"] == "ok"
+                && value["jev"]["summary"]["calls"] == 0
+                && value["jev"]["reader"]["locations"][0].as_str() == second_path.to_str()
+        });
+        second
+            .execute(
+                "INSERT INTO jev_events VALUES(?,'ok',1,1,1,1,1,0,1,?)",
+                rusqlite::params![time, metadata],
+            )
+            .unwrap();
+        snapshot_when(&service, |value| {
+            value["jev"]["summary"]["calls"] == 1
+                && value["jev"]["reader"]["locations"][0].as_str() == second_path.to_str()
+        });
+    }
+}
+
+#[test]
+fn jev_telemetry_snapshot_reads_configured_database_by_window() {
+    let home = tempdir().unwrap();
+    native_event_fixture(home.path());
+    let monitoring = home.path().join("monitoring");
+    fs::create_dir_all(&monitoring).unwrap();
+    let path = home.path().join("jev-events.sqlite");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TABLE jev_events(timestamp TEXT,status TEXT,http_attempts INTEGER,input_tokens INTEGER,output_tokens INTEGER,request_bytes INTEGER,response_bytes INTEGER,response_unknown_attempts INTEGER,latency_ms INTEGER,metadata TEXT)").unwrap();
+    let time = (chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+        - chrono::Duration::hours(2))
+    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let metadata =
+        json!({"timestamp":time,"status":"ok","operation":"rank","prompt":"PRIVATE","attempts":[]})
+            .to_string();
+    db.execute(
+        "INSERT INTO jev_events VALUES(?,'ok',1,10,3,20,30,0,5,?)",
+        rusqlite::params![time, metadata],
+    )
+    .unwrap();
+    fs::write(
+        monitoring.join("jev-monitor.json"),
+        json!({"version":1,"enabled":true,"database":path}).to_string(),
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    let all = snapshot_when(&service, |value| value["jev"]["health"] == "ok");
+    assert_eq!(all["jev"]["summary"]["calls"], 1);
+    assert_eq!(all["jev"]["recent"][0]["operation"], "rank");
+    assert_eq!(all["availability"]["jev"], true);
+    assert_eq!(all["mcp"]["telemetry"]["jev"]["summary"]["calls"], 1);
+    assert_eq!(all["sources"]["telemetry:jev"]["health"], "ok");
+    assert_eq!(
+        all["sources"]["telemetry:jev"]["checked_at"],
+        all["jev"]["reader"]["checked_at"]
+    );
+    assert_eq!(
+        all["mcp"]["recording_status"]["jev"]["flags"]["config.recording_enabled"]["enabled"],
+        true
+    );
+    assert!(service.get("/api/logs?window=all").json()["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source["source"] == "jev_telemetry" && source["health"] == "ok"));
+    assert!(!all["jev"].to_string().contains("PRIVATE"));
+    assert_eq!(
+        service.get("/api/snapshot?window=1h").json()["jev"]["summary"]["calls"],
+        0
+    );
+    let set = |body: &str| {
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()), body)
+    };
+    let disabled = set(r#"{"observations":{"jev":false}}"#);
+    assert_eq!(disabled.status, 200);
+    assert_eq!(disabled.json()["observations"]["jev"], false);
+    let paused = service.get("/api/snapshot?window=all").json();
+    assert_eq!(paused["jev"]["health"], "paused");
+    assert_eq!(paused["jev"]["enabled"], true);
+    assert_eq!(paused["mcp"]["telemetry"]["jev"]["health"], "paused");
+    assert_eq!(
+        set(r#"{"observations":{"jev":true,"mcp":true}}"#).status,
+        200
+    );
+    assert_eq!(
+        service.get("/api/snapshot?window=all").json()["jev"]["summary"]["calls"],
+        1
+    );
+}
+
+#[test]
+fn retained_skill_detail_reads_observed_session_tail_after_call_retired() {
+    let home = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let root = outside.path().join("retained_skill");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("SKILL.md"), "retained document").unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    append_records(
+        &path,
+        &[event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call","name":"exec_command","call_id":"retired_skill","arguments":{"cmd":format!("cat '{}'", root.join("SKILL.md").display())}}),
+        )],
+    );
+    let mut service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["skills"]["counts"]["retained_skill"] == 1
+            && value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    service.stop();
+    let db = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    assert_eq!(
+        db.execute(
+            "DELETE FROM session_calls WHERE call_id='retired_skill'",
+            []
+        )
+        .unwrap(),
+        1
+    );
+    let service = Service::start(home.path(), true, None);
+    let restored = snapshot_when(&service, |value| {
+        value["codex"]["read_state"]["checkpoint"]["restored"] == 1
+            && value["codex"]["skills"]["counts"]["retained_skill"] == 1
+    });
+    assert_eq!(
+        restored["codex"]["skills"]["events"][0]["has_document"],
+        false
+    );
+    let query = "/api/codex/skill?skill=retained_skill&thread_id=00000000-0000-4000-8000-000000000002&call_id=retired_skill";
+    assert_eq!(
+        service.get(query).json()["documents"][0]["text"],
+        "retained document"
+    );
+    assert_eq!(service.get("/api/codex/skill?skill=retained_skill&thread_id=00000000-0000-4000-8000-000000000002&call_id=unknown").json()["documents"], json!([]));
+}
+
+#[test]
+fn skill_name_only_detail_rejects_ambiguous_origins() {
+    let home = tempdir().unwrap();
+    let a = tempdir().unwrap();
+    let b = tempdir().unwrap();
+    for folder in [a.path(), b.path()] {
+        fs::create_dir(folder.join("same")).unwrap();
+        fs::write(folder.join("same/SKILL.md"), "content").unwrap();
+    }
+    let (path, stamp) = native_event_fixture(home.path());
+    for (id, folder) in [("first", a.path()), ("second", b.path())] {
+        append_records(
+            &path,
+            &[event(
+                &stamp,
+                "response_item",
+                json!({"type":"function_call","name":"exec_command","call_id":id,"arguments":{"cmd":format!("cat '{}'", folder.join("same/SKILL.md").display())}}),
+            )],
+        );
+    }
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["skills"]["counts"]["same"] == 2
+    });
+    assert_eq!(
+        service.get("/api/codex/skill?skill=same").json()["documents"],
+        json!([])
+    );
+    assert_eq!(service.get("/api/codex/skill?skill=same&thread_id=00000000-0000-4000-8000-000000000002&call_id=first").json()["documents"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn skill_document_details_require_observed_source_and_filter_sensitive_files() {
+    let home = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let root = outside.path().join("alpha");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(root.join("references")).unwrap();
+    fs::write(root.join("SKILL.md"), "hello password=PRIVATE_SECRET\n").unwrap();
+    fs::write(root.join("README.md"), "overview").unwrap();
+    fs::write(root.join("references").join("guide.md"), "guide").unwrap();
+    fs::write(root.join("credentials.json"), "PRIVATE_CREDENTIAL").unwrap();
+    fs::write(root.join("secret.key"), "PRIVATE_KEY").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.join("README.md"), root.join("linked.md")).unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let command = format!("cat '{}'", root.join("SKILL.md").display());
+    append_records(
+        &path,
+        &[event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call","name":"exec_command","call_id":"observed_skill","arguments":{"cmd":command}}),
+        )],
+    );
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["skills"]["counts"]["alpha"]
+            .as_u64()
+            .is_some_and(|count| count >= 1)
+    });
+    let id = "00000000-0000-4000-8000-000000000002";
+    let url = format!("/api/codex/skill?skill=alpha&thread_id={id}&call_id=observed_skill");
+    let detail = service.get(&url).json();
+    assert_eq!(detail["documents"].as_array().unwrap().len(), 2);
+    assert!(!detail.to_string().contains("PRIVATE_SECRET"));
+    let files = detail["files"].as_array().unwrap();
+    assert!(files
+        .iter()
+        .any(|file| file["relative_path"] == "references/guide.md"));
+    assert!(!files
+        .iter()
+        .any(|file| ["credentials.json", "secret.key", "linked.md"]
+            .contains(&file["name"].as_str().unwrap_or(""))));
+    let selected = service
+        .get(&format!("{url}&file=references%2Fguide.md"))
+        .json();
+    assert_eq!(selected["documents"][0]["text"], "guide");
+    assert_eq!(
+        service.get(&format!("{url}&file=..%2Fsecret.key")).status,
+        400
+    );
+    let missing = service
+        .get(&format!(
+            "/api/codex/skill?skill=alpha&thread_id={id}&call_id=unobserved"
+        ))
+        .json();
+    assert_eq!(missing["documents"], json!([]));
+    let body = r#"{"observations":{"skills":false}}"#;
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), body).status, 200);
+    assert_eq!(service.get(&url).status, 409);
+}
+
+#[test]
+fn skill_snapshot_merges_retained_history_for_selected_threads_and_windows() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    append_records(
+        &path,
+        &[event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call","name":"exec_command","call_id":"current","arguments":{"cmd":"cat /tmp/shared/SKILL.md"}}),
+        )],
+    );
+    let monitoring = home.path().join("monitoring");
+    let mut store = Store::open(&monitoring, Access::ReadWrite)
+        .unwrap()
+        .unwrap();
+    let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now());
+    let old =
+        (now - chrono::Duration::hours(2)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let retained = |thread: &str, call: &str, skill: &str, time: &str| {
+        json!({"thread_id":thread,"call_id":call,"skill":skill,"timestamp":time,"has_document":false}).to_string()
+    };
+    let id = "00000000-0000-4000-8000-000000000002";
+    let rows = [
+        retained(id, "old", "retained", &old),
+        retained(id, "current", "shared", &stamp),
+        retained(
+            "00000000-0000-4000-8000-000000000099",
+            "foreign",
+            "excluded",
+            &stamp,
+        ),
+    ];
+    let writes: Vec<_> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, payload)| lam_history_store::HistoryWrite {
+            section: lam_history_store::Section::Skills,
+            key: match index {
+                0 => "a",
+                1 => "b",
+                _ => "c",
+            },
+            ordinal: index as i64,
+            event_time: Some(if index == 0 { &old } else { &stamp }),
+            payload,
+        })
+        .collect();
+    store
+        .save_history(
+            lam_history_store::Namespace::Threads,
+            r#"{"version":1}"#,
+            1,
+            None,
+            &writes,
+        )
+        .unwrap();
+    let service = Service::start(home.path(), true, None);
+    let all = snapshot_when(&service, |value| {
+        value["codex"]["skills"]["counts"]["retained"] == 1
+            && value["codex"]["skills"]["counts"]["shared"] == 1
+    });
+    assert_eq!(all["codex"]["skills"]["total"], 2);
+    assert!(all["codex"]["skills"]["counts"].get("excluded").is_none());
+    let shared = all["codex"]["skills"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["skill"] == "shared")
+        .unwrap();
+    assert_eq!(shared["has_document"], true);
+    let recent = service.get("/api/snapshot?window=1h").json();
+    assert!(recent["codex"]["skills"]["counts"]
+        .get("retained")
+        .is_none());
+    assert_eq!(recent["codex"]["skills"]["counts"]["shared"], 1);
+}
+
+#[test]
+fn skill_history_failure_rolls_back_checkpoint_and_recovers() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let monitoring = home.path().join("monitoring");
+    let key = checkpoint_key(&path);
+    let mut service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    let original = fs::metadata(&path).unwrap().len() as i64;
+    let writer = rusqlite::Connection::open(monitoring.join(lam_history_store::FILE_NAME)).unwrap();
+    writer.execute_batch("CREATE TRIGGER reject_skill BEFORE INSERT ON history_items WHEN NEW.namespace='threads' AND NEW.section='skills' BEGIN SELECT RAISE(ABORT,'fixture rejected skill'); END").unwrap();
+    append_records(
+        &path,
+        &[event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call","name":"exec_command","call_id":"skill_write","arguments":{"cmd":"cat /tmp/alpha/SKILL.md"}}),
+        )],
+    );
+    snapshot_when(&service, |value| {
+        value["codex"]["read_state"]["checkpoint"]["write_health"] == "unavailable"
+    });
+    let mut reader = Store::open(&monitoring, Access::ReadOnly).unwrap().unwrap();
+    assert_eq!(
+        reader.checkpoint(&key, 10).unwrap().unwrap().cursor.offset,
+        original
+    );
+    let history_url = "/api/history?namespace=threads&section=skills";
+    assert_eq!(service.get(history_url).json()["total"], 0);
+    writer.execute_batch("DROP TRIGGER reject_skill").unwrap();
+    append_records(
+        &path,
+        &[event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call_output","call_id":"skill_write","output":"ok"}),
+        )],
+    );
+    snapshot_when(&service, |value| {
+        value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+            && value["codex"]["threads"][0]["tool_events"]
+                .as_array()
+                .is_some_and(|events| {
+                    events.iter().any(|event| {
+                        event["call_id"] == "skill_write" && event["completed_at"].is_string()
+                    })
+                })
+    });
+    let history = service.get(history_url).json();
+    assert_eq!(history["total"], 1);
+    assert_eq!(history["items"][0]["skill"], "alpha");
+    assert_eq!(history["items"][0]["has_document"], false);
+    assert_eq!(
+        reader.checkpoint(&key, 10).unwrap().unwrap().cursor.offset,
+        fs::metadata(&path).unwrap().len() as i64
+    );
+    service.stop();
+    let restarted = Service::start(home.path(), true, None);
+    snapshot_when(&restarted, |value| {
+        value["codex"]["read_state"]["checkpoint"]["restored"] == 1
+    });
+    assert_eq!(restarted.get(history_url).json()["total"], 1);
+}
+
+#[test]
+fn skill_observation_switch_filters_and_replays_without_disabling_commands() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    append_records(
+        &path,
+        &[event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call","name":"exec_command","call_id":"initial_skill","arguments":{"cmd":"cat /tmp/alpha/SKILL.md"}}),
+        )],
+    );
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| value["codex"]["skills"]["total"] == 1);
+    let set = |value: Value| {
+        let body = value.to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body)
+    };
+    let result = set(json!({"observations":{"skills":false}}));
+    assert_eq!(result.status, 200);
+    assert_eq!(result.json()["observations"]["skills"], false);
+    assert_eq!(
+        service
+            .get("/api/history?namespace=threads&section=skills")
+            .status,
+        400
+    );
+    append_records(
+        &path,
+        &[event(
+            &stamp,
+            "response_item",
+            json!({"type":"custom_tool_call","name":"exec","call_id":"disabled_skill","input":"await tools.exec_command({cmd:'cat /tmp/beta/SKILL.md && git status'});"}),
+        )],
+    );
+    let disabled = snapshot_when(&service, |value| {
+        value["codex"]["git"]["events"]
+            .as_array()
+            .is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event["call_id"] == "disabled_skill")
+            })
+    });
+    assert_eq!(disabled["codex"]["skills"]["total"], 0);
+    let db = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    let stored: String = db
+        .query_row(
+            "SELECT payload FROM session_calls WHERE call_id='disabled_skill'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(serde_json::from_str::<Value>(&stored)
+        .unwrap()
+        .get("skills")
+        .is_none());
+    assert_eq!(
+        set(json!({"observations":{"skills":true,"git":true}})).status,
+        200
+    );
+    snapshot_when(&service, |value| {
+        value["codex"]["skills"]["counts"]["beta"] == 1
+    });
+    assert_eq!(
+        service
+            .get("/api/history?namespace=threads&section=skills")
+            .status,
+        200
+    );
+}
+
+#[test]
+fn skill_observation_disabled_checkpoint_replays_after_restart() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let mut service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    let body = r#"{"observations":{"skills":false}}"#;
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), body).status, 200);
+    append_records(
+        &path,
+        &[event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call","name":"exec_command","call_id":"replay_skill","arguments":{"cmd":"cat /tmp/gamma/SKILL.md"}}),
+        )],
+    );
+    snapshot_when(&service, |value| {
+        value["codex"]["bytes_read"]
+            .as_u64()
+            .is_some_and(|bytes| bytes >= fs::metadata(&path).unwrap().len())
+    });
+    service.stop();
+    let restarted = Service::start(home.path(), true, None);
+    let restored = snapshot_when(&restarted, |value| {
+        value["codex"]["skills"]["counts"]["gamma"] == 1
+    });
+    assert!(
+        restored["codex"]["read_state"]["checkpoint"]["invalidated"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+}
+
+#[test]
+fn skill_read_metadata_projects_commands_without_persisting_paths() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    append_records(
+        &path,
+        &[
+            event(
+                &stamp,
+                "response_item",
+                json!({"type":"function_call","name":"exec_command","call_id":"direct_skill","arguments":{"cmd":"cat '/PRIVATE_ROOT/alpha/SKILL.md'"}}),
+            ),
+            event(
+                &stamp,
+                "response_item",
+                json!({"type":"custom_tool_call","name":"exec","call_id":"nested_skill","input":"await tools.exec_command({cmd:\"sed -n '1,4p' /PRIVATE_ROOT/beta/SKILL.md\"});"}),
+            ),
+            event(
+                &stamp,
+                "response_item",
+                json!({"type":"function_call","name":"exec_command","call_id":"not_read","arguments":{"cmd":"echo /PRIVATE_ROOT/ignored/SKILL.md"}}),
+            ),
+        ],
+    );
+    let mut service = Service::start(home.path(), true, None);
+    let ready = |value: &Value| value["codex"]["skills"]["total"] == 2;
+    let snapshot = snapshot_when(&service, ready);
+    assert_eq!(snapshot["codex"]["skills"]["counts"]["alpha"], 1);
+    assert_eq!(snapshot["codex"]["skills"]["counts"]["beta"], 1);
+    assert!(!snapshot["codex"]["skills"]
+        .to_string()
+        .contains("PRIVATE_ROOT"));
+    service.stop();
+    let db = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    let stored: String = db
+        .query_row(
+            "SELECT payload FROM session_calls WHERE call_id='direct_skill'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&stored).unwrap()["skills"],
+        json!(["alpha"])
+    );
+    let restarted = Service::start(home.path(), true, None);
+    snapshot_when(&restarted, ready);
+}
+
+#[test]
+fn jev_observation_switch_preserves_mcp_and_replays_disabled_calls() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let id = "00000000-0000-4000-8000-000000000002";
+    append_records(
+        &path,
+        &[event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call","name":"mcp__jev__jev_rank","call_id":"initial_jev","arguments":{"query":"hello"}}),
+        )],
+    );
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["threads"][0]["jev_calls"]
+            .as_array()
+            .is_some_and(|calls| calls.len() == 1)
+    });
+    let set = |value: Value| {
+        let body = value.to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body)
+    };
+    let detail = format!("/api/codex/jev?thread={id}&call=initial_jev&index=0");
+    let response = set(json!({"observations":{"jev_calls":false}}));
+    assert_eq!(response.status, 200);
+    assert_eq!(response.json()["observations"]["jev_calls"], false);
+    assert_eq!(service.get(&detail).status, 409);
+    append_records(
+        &path,
+        &[event(
+            &stamp,
+            "response_item",
+            json!({"type":"custom_tool_call","name":"exec","call_id":"disabled_jev","input":"await tools.mcp__jev__jev_evaluate({text:'sample'});"}),
+        )],
+    );
+    let disabled = snapshot_when(&service, |value| {
+        value["mcp"]["events"].as_array().is_some_and(|events| {
+            events
+                .iter()
+                .any(|event| event["call_id"] == "disabled_jev")
+        })
+    });
+    assert_eq!(disabled["codex"]["threads"][0]["jev_calls"], json!([]));
+    let db = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    let stored: String = db
+        .query_row(
+            "SELECT payload FROM session_calls WHERE call_id='disabled_jev'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(serde_json::from_str::<Value>(&stored)
+        .unwrap()
+        .get("jev")
+        .is_none());
+    assert_eq!(
+        set(json!({"observations":{"jev_calls":true,"mcp":true}})).status,
+        200
+    );
+    snapshot_when(&service, |value| {
+        value["codex"]["threads"][0]["jev_calls"]
+            .as_array()
+            .is_some_and(|calls| {
+                calls.iter().any(|call| {
+                    call["call_id"] == "disabled_jev" && call["operation"] == "evaluate"
+                })
+            })
+    });
+    assert_eq!(service.get(&detail).status, 200);
+}
+
+#[test]
+fn jev_observation_disabled_checkpoint_replays_after_restart() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let mut service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    let body = r#"{"observations":{"jev_calls":false}}"#;
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), body).status, 200);
+    append_records(
+        &path,
+        &[event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call","name":"mcp__jev__jev_status","call_id":"replay_jev","arguments":{}}),
+        )],
+    );
+    snapshot_when(&service, |value| {
+        value["codex"]["bytes_read"]
+            .as_u64()
+            .is_some_and(|bytes| bytes >= fs::metadata(&path).unwrap().len())
+    });
+    service.stop();
+    let restarted = Service::start(home.path(), true, None);
+    let restored = snapshot_when(&restarted, |value| {
+        value["codex"]["threads"][0]["jev_calls"]
+            .as_array()
+            .is_some_and(|calls| calls.iter().any(|call| call["call_id"] == "replay_jev"))
+    });
+    assert!(
+        restored["codex"]["read_state"]["checkpoint"]["invalidated"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+}
+
+#[test]
+fn jev_session_metadata_tracks_direct_and_nested_calls_without_payloads() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    append_records(
+        &path,
+        &[
+            event(
+                &stamp,
+                "response_item",
+                json!({"type":"function_call","name":"mcp__jev__jev_rank","call_id":"direct_jev","arguments":{"query":"hello","api_key":"PRIVATE_JEV"}}),
+            ),
+            event(
+                &stamp,
+                "response_item",
+                json!({"type":"function_call_output","call_id":"direct_jev","output":{"value":"ok","password":"PRIVATE_JEV"}}),
+            ),
+            event(
+                &stamp,
+                "response_item",
+                json!({"type":"custom_tool_call","name":"exec","call_id":"nested_jev","input":"await tools.mcp__jev__jev_evaluate({text:'PRIVATE_JEV'}); await tools.mcp__jev__jev_status({});"}),
+            ),
+            event(
+                &stamp,
+                "response_item",
+                json!({"type":"function_call","name":"mcp__other__jev_rank","call_id":"other","arguments":{}}),
+            ),
+        ],
+    );
+    let mut service = Service::start(home.path(), true, None);
+    let assert_events = |value: &Value| {
+        value["codex"]["threads"].as_array().is_some_and(|threads| {
+            threads.iter().any(|thread| {
+                let Some(events) = thread["jev_calls"].as_array() else {
+                    return false;
+                };
+                events.len() == 3
+                    && events.iter().any(|e| {
+                        e["call_id"] == "direct_jev"
+                            && e["operation"] == "rank"
+                            && e["nested"] == false
+                            && e["index"] == 0
+                    })
+                    && events.iter().any(|e| {
+                        e["call_id"] == "nested_jev"
+                            && e["operation"] == "evaluate"
+                            && e["nested"] == true
+                            && e["index"] == 0
+                    })
+                    && events.iter().any(|e| {
+                        e["call_id"] == "nested_jev"
+                            && e["operation"] == "status"
+                            && e["nested"] == true
+                            && e["index"] == 1
+                    })
+            })
+        })
+    };
+    let snapshot = snapshot_when(&service, assert_events);
+    assert!(!snapshot.to_string().contains("PRIVATE_JEV"));
+    let id = "00000000-0000-4000-8000-000000000002";
+    let direct = format!("/api/codex/jev?thread={id}&call=direct_jev&index=0");
+    let detail = service.get(&direct).json();
+    assert_eq!(detail["operation"], "rank");
+    assert_eq!(detail["request"]["query"], "hello");
+    assert!(!detail.to_string().contains("PRIVATE_JEV"));
+    let revealed = service.get(&format!("{direct}&mask=0")).json();
+    assert_eq!(revealed["request"]["api_key"], "PRIVATE_JEV");
+    assert_eq!(revealed["response"]["password"], "PRIVATE_JEV");
+    assert_eq!(service.get(&format!("{direct}&mask=invalid")).status, 400);
+    assert_eq!(service.get(&format!("{direct}&mask=0&mask=1")).status, 400);
+    assert_eq!(service.get(&direct.replace("index=0", "index=%D9%A0")).status, 200);
+    assert_eq!(service.get(&format!("{}&lazy=1", direct.replace("index=0", "index=%2B0"))).status, 400);
+    assert_eq!(service.get("/api/codex/jev?thread=bad&call=direct_jev&index=0&lazy=1").status, 400);
+    assert_eq!(
+        service.get(&format!("{direct}&lazy=1")).json()["request"]["content_page"],
+        true
+    );
+    let revealed_page = service.get(&format!("{direct}&lazy=1&mask=0")).json();
+    assert!(revealed_page["request"]["text"].as_str().unwrap().contains("PRIVATE_JEV"));
+    let nested = service
+        .get(&format!(
+            "/api/codex/jev?thread={id}&call=nested_jev&index=1"
+        ))
+        .json();
+    assert_eq!(nested["operation"], "status");
+    assert_eq!(nested["response_scope"], "containing_tool_call");
+    assert!(nested["response"].is_null());
+    assert_eq!(
+        service
+            .get(&format!("/api/codex/jev?thread={id}&call=other&index=0"))
+            .status,
+        409
+    );
+    service.stop();
+    let db = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    let stored: String = db
+        .query_row(
+            "SELECT group_concat(payload) FROM session_calls",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!stored.contains("PRIVATE_JEV"));
+    let restarted = Service::start(home.path(), true, None);
+    snapshot_when(&restarted, assert_events);
+}
+
+#[test]
+fn command_observation_switches_filter_independently_and_replay() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let id = "00000000-0000-4000-8000-000000000002";
+    append_records(
+        &path,
+        &[event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call","name":"exec_command","call_id":"initial_command","arguments":{"cmd":"git status && cargo test"}}),
+        )],
+    );
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["git"]["total"] == 1
+            && value["codex"]["checks"]
+                .as_array()
+                .is_some_and(|checks| checks.len() == 1)
+    });
+    let set = |value: Value| {
+        let body = value.to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body)
+    };
+    let git = format!("/api/codex/git?thread_id={id}&call_id=initial_command&operation=status");
+    let check =
+        format!("/api/codex/check?thread_id={id}&call_id=initial_command&operation=cargo+test");
+    let response = set(json!({"observations":{"git":false}}));
+    assert_eq!(response.status, 200);
+    assert_eq!(response.json()["observations"]["git"], false);
+    assert_eq!(service.get(&git).status, 409);
+    assert_eq!(service.get(&check).status, 200);
+    append_records(
+        &path,
+        &[event(
+            &stamp,
+            "response_item",
+            json!({"type":"custom_tool_call","name":"exec","call_id":"git_disabled","input":"await tools.exec_command({cmd:'git log && cargo check'});"}),
+        )],
+    );
+    let disabled = snapshot_when(&service, |value| {
+        value["codex"]["checks"].as_array().is_some_and(|events| {
+            events
+                .iter()
+                .any(|event| event["call_id"] == "git_disabled")
+        })
+    });
+    assert_eq!(disabled["codex"]["git"]["total"], 0);
+    let history = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    let stored: String = history
+        .query_row(
+            "SELECT payload FROM session_calls WHERE call_id='git_disabled'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored["commands"]["git"], json!([]));
+    assert_eq!(stored["commands"]["checks"][0]["operation"], "cargo check");
+    assert_eq!(
+        set(json!({"observations":{"git":true,"checks":false}})).status,
+        200
+    );
+    let reversed = snapshot_when(&service, |value| {
+        value["codex"]["git"]["events"]
+            .as_array()
+            .is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event["call_id"] == "git_disabled")
+            })
+    });
+    assert_eq!(reversed["codex"]["checks"], json!([]));
+    assert_eq!(service.get(&git).status, 200);
+    assert_eq!(service.get(&check).status, 409);
+    append_records(
+        &path,
+        &[event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call","name":"exec_command","call_id":"checks_disabled","arguments":{"cmd":"git diff && cargo build"}}),
+        )],
+    );
+    snapshot_when(&service, |value| {
+        value["codex"]["git"]["events"]
+            .as_array()
+            .is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event["call_id"] == "checks_disabled")
+            })
+    });
+    let stored: String = history
+        .query_row(
+            "SELECT payload FROM session_calls WHERE call_id='checks_disabled'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored["commands"]["git"][0]["operation"], "diff");
+    assert_eq!(stored["commands"]["checks"], json!([]));
+    assert_eq!(set(json!({"observations":{"checks":true}})).status, 200);
+    snapshot_when(&service, |value| {
+        value["codex"]["checks"].as_array().is_some_and(|events| {
+            events
+                .iter()
+                .any(|event| event["call_id"] == "checks_disabled")
+        })
+    });
+    assert_eq!(service.get(&check).status, 200);
+}
+
+#[test]
+fn command_observation_disabled_checkpoint_replays_after_restart() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let mut service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    let body = r#"{"observations":{"git":false,"checks":false}}"#;
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), body).status, 200);
+    append_records(
+        &path,
+        &[event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call","name":"exec_command","call_id":"replay_command","arguments":{"cmd":"git status && cargo test"}}),
+        )],
+    );
+    snapshot_when(&service, |value| {
+        value["codex"]["bytes_read"]
+            .as_u64()
+            .is_some_and(|bytes| bytes >= fs::metadata(&path).unwrap().len())
+    });
+    service.stop();
+    let restarted = Service::start(home.path(), true, None);
+    let restored = snapshot_when(&restarted, |value| {
+        value["codex"]["git"]["events"]
+            .as_array()
+            .is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event["call_id"] == "replay_command")
+            })
+            && value["codex"]["checks"].as_array().is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event["call_id"] == "replay_command")
+            })
+    });
+    assert!(
+        restored["codex"]["read_state"]["checkpoint"]["invalidated"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+}
+
+#[test]
+fn file_result_arriving_while_disabled_replays_after_restart() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(event(&stamp, "response_item", json!({"type":"function_call","name":"mcp__fixture__read_file","call_id":"pending_file","arguments":{"path":"pending.txt"}})).as_bytes()).unwrap();
+    drop(file);
+    let mut service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["file_activity"]["total"] == 1
+    });
+    let body = json!({"observations":{"files":false}}).to_string();
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body).status, 200);
+    fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(event(&stamp, "response_item", json!({"type":"function_call_output","call_id":"pending_file","output":{"bytes_read":17}})).as_bytes()).unwrap();
+    snapshot_when(&service, |value| {
+        value["codex"]["threads"][0]["tool_events"][0]["completed_at"].is_string()
+    });
+    service.stop();
+    let restarted = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&restarted, |value| {
+        value["codex"]["file_activity"]["events"]
+            .as_array()
+            .is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event["call_id"] == "pending_file" && event["read_bytes"] == 17)
+            })
+    });
+    assert!(
+        snapshot["codex"]["read_state"]["checkpoint"]["invalidated"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+}
+
+#[test]
+fn file_result_byte_counts_require_one_observed_invocation() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    let payloads = [
+        json!({"type":"function_call","name":"mcp__fixture__read_file","call_id":"direct","arguments":{"path":"direct.txt"}}),
+        json!({"type":"function_call_output","call_id":"direct","output":{"structuredContent":{"bytes_read":12,"bytes_written":0,"secret":"PRIVATE_BODY"}}}),
+        json!({"type":"custom_tool_call","name":"exec","call_id":"single","input":"await tools.mcp__fixture__read_file({path:'single.txt'});"}),
+        json!({"type":"custom_tool_call_output","call_id":"single","output":[{"type":"input_text","text":"{\"status\":\"ok\",\"bytes_read\":23}"}]}),
+        json!({"type":"custom_tool_call","name":"exec","call_id":"mixed","input":"await tools.mcp__fixture__read_file({path:'mixed.txt'}); await tools.other({});"}),
+        json!({"type":"custom_tool_call_output","call_id":"mixed","output":{"bytes_read":99}}),
+    ];
+    for payload in payloads {
+        file.write_all(event(&stamp, "response_item", payload).as_bytes())
+            .unwrap();
+    }
+    drop(file);
+    let mut service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["codex"]["file_activity"]["total"] == 3
+            && value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    let events = snapshot["codex"]["file_activity"]["events"]
+        .as_array()
+        .unwrap();
+    let find = |id| events.iter().find(|event| event["call_id"] == id).unwrap();
+    assert_eq!(find("direct")["read_bytes"], 12);
+    assert_eq!(find("direct")["write_bytes"], 0);
+    assert_eq!(find("single")["read_bytes"], 23);
+    assert!(find("mixed").get("read_bytes").is_none());
+    assert!(!snapshot.to_string().contains("PRIVATE_BODY"));
+    service.stop();
+    let restarted = Service::start(home.path(), true, None);
+    let restored = snapshot_when(&restarted, |value| {
+        value["codex"]["file_activity"]["events"]
+            .as_array()
+            .is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event["call_id"] == "direct" && event["read_bytes"] == 12)
+            })
+    });
+    assert!(
+        restored["codex"]["read_state"]["checkpoint"]["restored"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+}
+
+#[test]
+fn restart_replays_checkpoint_created_while_file_observation_disabled() {
+    let home = tempdir().unwrap();
+    let (session, stamp) = native_event_fixture(home.path());
+    let mut service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    let body = json!({"observations":{"files":false}}).to_string();
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body).status, 200);
+    fs::OpenOptions::new().append(true).open(&session).unwrap().write_all(event(&stamp, "response_item", json!({"type":"function_call","name":"mcp__fixture__read_file","call_id":"restart_file","arguments":{"path":"replayed.txt"}})).as_bytes()).unwrap();
+    snapshot_when(&service, |value| {
+        value["codex"]["observed_tool_calls"] == 1
+            && value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    service.stop();
+    let restarted = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&restarted, |value| {
+        value["codex"]["file_activity"]["total"] == 1
+    });
+    assert_eq!(
+        snapshot["codex"]["file_activity"]["events"][0]["path"],
+        "replayed.txt"
+    );
+    assert!(
+        snapshot["codex"]["read_state"]["checkpoint"]["invalidated"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+}
+
+#[test]
+fn observed_file_metadata_rejects_unobserved_and_protected_paths() {
+    let home = tempdir().unwrap();
+    let (session, stamp) = native_event_fixture(home.path());
+    let id = "00000000-0000-4000-8000-000000000002";
+    let physical_home = home.path().canonicalize().unwrap();
+    let file_path = physical_home.join("document.txt");
+    let secret_path = physical_home.join(".env");
+    fs::write(&file_path, "fixture").unwrap();
+    fs::write(&secret_path, "private").unwrap();
+    let mut output = fs::OpenOptions::new().append(true).open(&session).unwrap();
+    for (call, path) in [("file1", &file_path), ("secret", &secret_path)] {
+        output.write_all(event(&stamp, "response_item", json!({"type":"function_call","name":"mcp__fixture__read_file","call_id":call,"arguments":{"path":path}})).as_bytes()).unwrap();
+    }
+    #[cfg(unix)]
+    {
+        let link = physical_home.join("link.txt");
+        std::os::unix::fs::symlink(&file_path, &link).unwrap();
+        output.write_all(event(&stamp, "response_item", json!({"type":"function_call","name":"mcp__fixture__read_file","call_id":"link","arguments":{"path":link}})).as_bytes()).unwrap();
+    }
+    drop(output);
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| {
+        value["codex"]["file_activity"]["total"]
+            .as_u64()
+            .is_some_and(|total| total >= 2)
+    });
+    let detail = |call: &str, path: &Path| {
+        let query = form_urlencoded::Serializer::new(String::new())
+            .append_pair("thread_id", id)
+            .append_pair("call_id", call)
+            .append_pair("path", path.to_str().unwrap())
+            .finish();
+        service.get(&format!("/api/codex/file?{query}"))
+    };
+    let result = detail("file1", &file_path).json();
+    assert_eq!(result["health"], "ok");
+    assert_eq!(result["bytes"], 7);
+    assert_eq!(detail("secret", &secret_path).json()["health"], "rejected");
+    assert_eq!(detail("file1", &secret_path).status, 409);
+    #[cfg(unix)]
+    assert_eq!(
+        detail("link", &physical_home.join("link.txt")).json()["health"],
+        "rejected"
+    );
+    let summary = service.get("/api/codex/file-summary?window=all").json();
+    assert!(summary["total"].as_u64().unwrap() >= 2);
+    assert!(summary["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["path"] == file_path.to_str().unwrap() && row["bytes"] == 7));
+    assert_eq!(
+        service
+            .get("/api/codex/file-summary?window=all&window=1h")
+            .status,
+        400
+    );
+    let set_files = |enabled: bool| {
+        let body = json!({"observations":{"files":enabled}}).to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body)
+    };
+    assert_eq!(set_files(false).status, 200);
+    let previous_calls = service.get("/api/snapshot?window=all").json()["codex"]
+        ["observed_tool_calls"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(detail("file1", &file_path).status, 409);
+    assert_eq!(
+        service.get("/api/codex/file-summary?window=all").status,
+        409
+    );
+    let hidden_path = physical_home.join("disabled-marker.txt");
+    fs::write(&hidden_path, "fixture").unwrap();
+    fs::OpenOptions::new().append(true).open(&session).unwrap().write_all(event(&stamp, "response_item", json!({"type":"function_call","name":"mcp__fixture__read_file","call_id":"disabled_call","arguments":{"path":hidden_path}})).as_bytes()).unwrap();
+    let disabled = snapshot_when(&service, |value| {
+        value["codex"]["observed_tool_calls"]
+            .as_u64()
+            .is_some_and(|count| count > previous_calls)
+    });
+    assert_eq!(disabled["codex"]["file_activity"]["total"], 0);
+    assert_eq!(disabled["codex"]["threads"][0]["file_reads"], json!([]));
+    let db = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    let stored: String = db
+        .query_row(
+            "SELECT payload FROM session_calls WHERE call_id='disabled_call'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!stored.contains("disabled-marker.txt"));
+    drop(db);
+    assert_eq!(set_files(true).status, 200);
+    snapshot_when(&service, |value| {
+        value["codex"]["file_activity"]["events"]
+            .as_array()
+            .is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event["call_id"] == "disabled_call")
+            })
+    });
+    assert_eq!(detail("disabled_call", &hidden_path).status, 200);
+}
+
+#[test]
+fn file_activity_projects_patch_and_nested_tool_without_body() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(event(&stamp, "response_item", json!({"type":"custom_tool_call","name":"apply_patch","call_id":"patch","input":"*** Begin Patch\n*** Update File: src/a.rs\n+PRIVATE_CONTENT\n*** End Patch"})).as_bytes()).unwrap();
+    file.write_all(event(&stamp, "response_item", json!({"type":"custom_tool_call","name":"exec","call_id":"nested","input":"await tools.mcp__fixture__read_file({path:'docs/b.txt'});"})).as_bytes()).unwrap();
+    file.write_all(event(&stamp, "response_item", json!({"type":"function_call","name":"exec_command","call_id":"shell","arguments":{"cmd":"head -n 5 docs/c.txt","workdir":"/tmp"}})).as_bytes()).unwrap();
+    drop(file);
+    let mut service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["codex"]["file_activity"]["total"] == 3
+            && value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
+    });
+    assert_eq!(
+        snapshot["codex"]["file_activity"]["operations"]["modified"],
+        1
+    );
+    assert_eq!(snapshot["codex"]["file_activity"]["operations"]["read"], 2);
+    assert_eq!(
+        snapshot["codex"]["threads"][0]["file_changes"][0]["path"],
+        "src/a.rs"
+    );
+    let reads = snapshot["codex"]["threads"][0]["file_reads"]
+        .as_array()
+        .unwrap();
+    assert!(reads.iter().any(|row| row["path"] == "docs/b.txt"));
+    assert!(reads
+        .iter()
+        .any(|row| row["path"] == "docs/c.txt" && row["range"]["first_lines"] == 5));
+    assert!(!snapshot.to_string().contains("PRIVATE_CONTENT"));
+    service.stop();
+    let restarted = Service::start(home.path(), true, None);
+    let restored = snapshot_when(&restarted, |value| {
+        value["codex"]["file_activity"]["total"] == 3
+    });
+    assert!(
+        restored["codex"]["read_state"]["checkpoint"]["restored"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+}
+
+#[test]
+fn monitor_samples_collection_cpu_with_debug_disabled() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    let call = event(
+        &stamp,
+        "response_item",
+        json!({"type":"function_call","name":"fixture","call_id":"call1","arguments":"{}"}),
+    );
+    file.write_all(call.as_bytes()).unwrap();
+    file.write_all(b"unfinished").unwrap();
+    drop(file);
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["monitor"]["history"]
+            .as_array()
+            .is_some_and(|history| !history.is_empty())
+    });
+    let monitor = &snapshot["monitor"];
+    assert_eq!(monitor["debug"]["enabled"], false);
+    assert_eq!(monitor["health"], "ok");
+    assert!(monitor["pid"].as_u64().is_some_and(|pid| pid > 0));
+    assert!(monitor["refreshes"]
+        .as_u64()
+        .is_some_and(|count| count >= 1));
+    assert!(monitor["uptime_seconds"].as_u64().is_some());
+    assert_eq!(monitor["history_limit"], 360);
+    let sample = monitor["history"].as_array().unwrap().last().unwrap();
+    assert!(sample["time"].as_str().is_some());
+    assert!(sample["refresh_ms"]
+        .as_f64()
+        .is_some_and(|value| value >= 0.0));
+    assert!(sample["cpu_ms"].as_f64().is_some_and(|value| value >= 0.0));
+    assert_eq!(monitor["cpu_ms"], sample["cpu_ms"]);
+    assert!(sample["phase_metrics"]["sessions"]["elapsed_ms"]
+        .as_f64()
+        .is_some());
+    assert!(sample["phase_metrics"]["history"]["cpu_ms"]
+        .as_f64()
+        .is_some());
+    assert!(monitor["max_phase_cpu_ms"]
+        .as_f64()
+        .is_some_and(|value| value >= 0.0));
+    assert_eq!(sample["retained_calls"], 1);
+    assert_eq!(sample["buffer_bytes"], 10);
+    assert_eq!(sample["call_limit"], 50000);
+    assert_eq!(sample["file_limit"], 5000);
+    assert_eq!(sample["buffer_limit"], 8 * 1024 * 1024);
+}
+
+#[test]
+fn idle_snapshot_and_new_stream_report_current_uptime() {
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), false, None);
+    let before = snapshot_when(&service, |value| value["monitor"]["device_ready"] == true);
+    std::thread::sleep(Duration::from_millis(1200));
+    let after = service.get("/api/snapshot?window=all").json();
+    assert!(
+        after["monitor"]["uptime_seconds"].as_u64().unwrap()
+            > before["monitor"]["uptime_seconds"].as_u64().unwrap()
+    );
+    assert_eq!(
+        after["monitor"]["refreshes"],
+        before["monitor"]["refreshes"]
+    );
+    let mut stream = EventStream::connect(&service, "?window=all").unwrap();
+    let frame = stream.snapshot();
+    let streamed = frame["snapshot"]["monitor"]["uptime_seconds"]
+        .as_u64()
+        .unwrap();
+    assert!(streamed >= after["monitor"]["uptime_seconds"].as_u64().unwrap());
+}
+
+#[test]
+fn monitor_collection_sample_counts_desktop_log_bytes() {
+    let home = tempdir().unwrap();
+    let directory = home.path().join("desktop-logs");
+    fs::create_dir(&directory).unwrap();
+    let line = "2026-11-12T00:00:00Z INFO desktop fixture\n";
+    fs::write(directory.join("codex-desktop-fixture.log"), line).unwrap();
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| {
+        value["monitor"]["history"]
+            .as_array()
+            .is_some_and(|samples| {
+                samples.iter().any(|sample| {
+                    sample["read_bytes"]
+                        .as_u64()
+                        .is_some_and(|bytes| bytes >= line.len() as u64)
+                })
+            })
+    });
+    assert_eq!(snapshot["codex"]["bytes_read"], 0);
+}
+
+#[test]
+fn tool_detail_reads_response_id_without_marking_call_completed() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let id = "00000000-0000-4000-8000-000000000002";
+    let rows = [
+        event(&stamp, "session_meta", json!({"id":id})),
+        event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call","name":"fixture_tool","call_id":"","id":"call1","arguments":"{}"}),
+        ),
+        event(
+            &stamp,
+            "response_item",
+            json!({"type":"function_call_output","id":"call1","output":"result"}),
+        ),
+    ];
+    fs::write(&path, rows.concat()).unwrap();
+    let mut service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| value["codex"]["observed_tool_calls"] == 1);
+    assert!(snapshot["codex"]["threads"][0]["tool_events"][0]["completed_at"].is_null());
+    let detail = service
+        .get(&format!("/api/codex/tool?thread_id={id}&call_id=call1"))
+        .json();
+    assert_eq!(detail["response"], "result");
+    let set_tool_events = |enabled: bool| {
+        let body = json!({"observations":{"tool_events":enabled}}).to_string();
+        service.request_body(
+            &format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()),
+            &body,
+        )
+    };
+    assert_eq!(set_tool_events(false).status, 200);
+    let disabled = service.get("/api/snapshot?window=all").json();
+    assert_eq!(disabled["settings"]["observations"]["tool_events"], false);
+    assert_eq!(disabled["codex"]["threads"][0]["tool_events"], json!([]));
+    assert_eq!(disabled["codex"]["observed_tool_calls"], 1);
+    let appended = event(
+        &stamp,
+        "response_item",
+        json!({"type":"custom_tool_call","name":"exec","call_id":"call2","input":"await tools.private_marker({}); await tools.mcp__future__get({});"}),
+    );
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(appended.as_bytes())
+        .unwrap();
+    let disabled = snapshot_when(&service, |value| value["codex"]["observed_tool_calls"] == 2);
+    let db = rusqlite::Connection::open(
+        home.path()
+            .join("monitoring")
+            .join(lam_history_store::FILE_NAME),
+    )
+    .unwrap();
+    let stored: String = db
+        .query_row(
+            "SELECT payload FROM session_calls WHERE call_id='call2'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!stored.contains("private_marker"));
+    assert!(stored.contains("mcp__future__get"));
+    drop(db);
+    let read_before_reenable = disabled["codex"]["bytes_read"].as_u64().unwrap();
+    assert_eq!(
+        service
+            .get(&format!("/api/codex/tool?thread_id={id}&call_id=call1"))
+            .status,
+        409
+    );
+    assert_eq!(set_tool_events(true).status, 200);
+    let rebuilt = snapshot_when(&service, |value| {
+        value["codex"]["bytes_read"]
+            .as_u64()
+            .is_some_and(|count| count > read_before_reenable)
+            && value["codex"]["observed_tool_calls"] == 2
+    });
+    assert_eq!(rebuilt["codex"]["nested_tools"]["private_marker"], 1);
+    assert_eq!(
+        service
+            .get(&format!("/api/codex/tool?thread_id={id}&call_id=call1"))
+            .status,
+        200
+    );
+    assert_eq!(set_tool_events(false).status, 200);
+    let appended = event(
+        &stamp,
+        "response_item",
+        json!({"type":"custom_tool_call","name":"exec","call_id":"call3","input":"await tools.restart_marker({});"}),
+    );
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(appended.as_bytes())
+        .unwrap();
+    snapshot_when(&service, |value| value["codex"]["observed_tool_calls"] == 3);
+    service.stop();
+    let restarted = Service::start(home.path(), true, None);
+    let restored = snapshot_when(&restarted, |value| {
+        value["codex"]["observed_tool_calls"] == 3
+    });
+    assert_eq!(restored["codex"]["nested_tools"]["restart_marker"], 1);
+    assert!(
+        restored["codex"]["read_state"]["checkpoint"]["invalidated"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
 }
 
 #[test]
@@ -1041,6 +6245,48 @@ fn existing_matching_service_is_reused_without_starting_another() {
 
 #[cfg(unix)]
 #[test]
+fn missing_codex_home_is_created_only_after_startup_checks() {
+    let profile = tempdir().unwrap();
+    let rejected_home = profile.path().join("rejected");
+    let rejected = Command::new(BINARY)
+        .arg("--codex-home").arg(&rejected_home)
+        .args(["--port", "0", "--assets"]).arg(profile.path().join("missing-assets"))
+        .output().unwrap();
+    assert!(!rejected.status.success());
+    assert!(!rejected_home.exists());
+
+    let home = profile.path().join("missing").join("..").join("selected");
+    let started = Command::new(BINARY)
+        .arg("--codex-home").arg(&home)
+        .args(["--port", "0", "--watch-stdin"])
+        .stdin(Stdio::null()).output().unwrap();
+    assert!(started.status.success(), "{}", String::from_utf8_lossy(&started.stderr));
+    let first_line = String::from_utf8_lossy(&started.stdout).lines().next().unwrap().to_owned();
+    assert_eq!(serde_json::from_str::<Value>(&first_line).unwrap()["status"], "listening");
+    assert!(profile.path().join("selected/monitoring").is_dir());
+    assert!(!profile.path().join("missing").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_home_expands_tilde_before_startup() {
+    let profile = tempdir().unwrap();
+    let selected = profile.path().join("selected");
+    fs::create_dir(&selected).unwrap();
+    let result = Command::new(BINARY)
+        .args(["--codex-home", "~/selected", "--port", "0", "--watch-stdin"])
+        .env("HOME", profile.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let first_line = String::from_utf8_lossy(&result.stdout).lines().next().unwrap().to_owned();
+    assert_eq!(serde_json::from_str::<Value>(&first_line).unwrap()["status"], "listening");
+    assert!(selected.join("monitoring").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
 fn open_option_calls_configured_browser_for_new_and_existing_service() {
     assert!(Path::new("/usr/bin/printf").is_file());
     let home = tempdir().unwrap();
@@ -1324,7 +6570,10 @@ fn bundle(path: &Path) {
         (
             "_workbench",
             vec![
-                ("workbench-ui.js", "let wbui=1"),
+                (
+                    "workbench-ui.js",
+                    "global.WorkbenchUI = Object.freeze({ version: \"0.13.0\" });",
+                ),
                 ("workbench-ui.css", ".wbui{}"),
                 ("workbench-ui.mjs", ""),
                 ("workbench-loader.js", ""),
@@ -1431,7 +6680,10 @@ fn serves_only_validated_assets_and_hashes_the_delivered_inline_content() {
         assert!(csp.contains(&format!("'sha256-{hash}'")));
     }
     assert_eq!(reply.header("cache-control"), Some("no-store"));
-    assert_eq!(service.get("/workbench-ui.js").body, b"let wbui=1");
+    assert_eq!(
+        service.get("/workbench-ui.js").body,
+        b"global.WorkbenchUI = Object.freeze({ version: \"0.13.0\" });"
+    );
     assert_eq!(service.get("/workbench-loader.js").status, 404);
     assert_eq!(service.get("/_web/manifest.json").status, 404);
     service.stop();
@@ -1449,6 +6701,152 @@ fn serves_only_validated_assets_and_hashes_the_delivered_inline_content() {
     assert!(result.stdout.is_empty());
     assert!(String::from_utf8_lossy(&result.stderr).contains("Asset checksum mismatch"));
     assert_eq!(fs::read_to_string(changed).unwrap(), "unexpected change");
+}
+
+#[test]
+fn rejects_old_workbench_version_even_with_matching_manifest() {
+    let home = tempdir().unwrap();
+    let assets = tempdir().unwrap();
+    bundle(assets.path());
+    let directory = assets.path().join("_workbench");
+    let source = "global.WorkbenchUI = Object.freeze({ version: \"0.12.9\" });";
+    fs::write(directory.join("workbench-ui.js"), source).unwrap();
+    let manifest_path = directory.join("manifest.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["sha256"]["workbench-ui.js"] =
+        json!(format!("{:x}", Sha256::digest(source.as_bytes())));
+    fs::write(manifest_path, manifest.to_string()).unwrap();
+    let result = Command::new(BINARY)
+        .args(["--port", "0", "--codex-home"])
+        .arg(home.path())
+        .arg("--assets")
+        .arg(assets.path())
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Workbench UI 0.13.0 or later"));
+}
+
+#[test]
+fn selected_workbench_development_source_is_served() {
+    let home = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let source = tempdir().unwrap();
+    let package = project.path().join("src/local_activity_monitor");
+    fs::create_dir_all(&package).unwrap();
+    bundle(&package);
+    fs::write(
+        project.path().join("workbench-ui.json"),
+        include_str!("../../../workbench-ui.json"),
+    )
+    .unwrap();
+    fs::create_dir(project.path().join(".local")).unwrap();
+    let pin: Value = serde_json::from_str(include_str!("../../../workbench-ui.json")).unwrap();
+    fs::write(project.path().join(".local/workbench-ui-development.json"), json!({"version":1,"source":source.path().canonicalize().unwrap(),"revision":pin["revision"]}).to_string()).unwrap();
+    fs::create_dir_all(source.path().join("integrations/python")).unwrap();
+    fs::write(
+        source
+            .path()
+            .join("integrations/python/workbench_assets.py"),
+        "",
+    )
+    .unwrap();
+    fs::create_dir(source.path().join("src")).unwrap();
+    let development = "global.WorkbenchUI = Object.freeze({ version: \"0.23.0\" }); // development";
+    for (name, data) in [
+        ("workbench-ui.js", development),
+        ("workbench-ui.css", ".dev{}"),
+        ("workbench-ui.mjs", ""),
+        ("workbench-loader.js", ""),
+    ] {
+        fs::write(source.path().join("src").join(name), data).unwrap();
+    }
+    let mut child = Command::new(BINARY)
+        .args(["--port", "0", "--watch-stdin", "--codex-home"])
+        .arg(home.path())
+        .arg("--assets")
+        .arg(&package)
+        .env_remove("WORKBENCH_UI_PATH")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let ready: Value = serde_json::from_str(&line).unwrap();
+    let port = ready["url"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("http://127.0.0.1:")
+        .unwrap()
+        .trim_end_matches('/')
+        .parse()
+        .unwrap();
+    let mut service = Service { child, port };
+    assert_eq!(service.get("/workbench-ui.js").body, development.as_bytes());
+    service.stop();
+    let override_source = tempdir().unwrap();
+    fs::create_dir_all(override_source.path().join("integrations/python")).unwrap();
+    fs::write(
+        override_source
+            .path()
+            .join("integrations/python/workbench_assets.py"),
+        "",
+    )
+    .unwrap();
+    fs::create_dir(override_source.path().join("src")).unwrap();
+    let overridden = "global.WorkbenchUI = Object.freeze({ version: \"0.23.0\" }); // override";
+    for (name, data) in [
+        ("workbench-ui.js", overridden),
+        ("workbench-ui.css", ".override{}"),
+        ("workbench-ui.mjs", ""),
+        ("workbench-loader.js", ""),
+    ] {
+        fs::write(override_source.path().join("src").join(name), data).unwrap();
+    }
+    let mut child = Command::new(BINARY)
+        .args(["--port", "0", "--watch-stdin", "--codex-home"])
+        .arg(home.path())
+        .arg("--assets")
+        .arg(&package)
+        .env("WORKBENCH_UI_PATH", override_source.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let ready: Value = serde_json::from_str(&line).unwrap();
+    let port = ready["url"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("http://127.0.0.1:")
+        .unwrap()
+        .trim_end_matches('/')
+        .parse()
+        .unwrap();
+    let mut service = Service { child, port };
+    assert_eq!(service.get("/workbench-ui.js").body, overridden.as_bytes());
+    service.stop();
+    let selection = project.path().join(".local/workbench-ui-development.json");
+    let invalid = json!({"version":1,"source":source.path().canonicalize().unwrap(),"revision":"a".repeat(40)}).to_string();
+    fs::write(&selection, &invalid).unwrap();
+    let failed = Command::new(BINARY)
+        .args(["--port", "0", "--codex-home"])
+        .arg(home.path())
+        .arg("--assets")
+        .arg(&package)
+        .env("WORKBENCH_UI_PATH", override_source.path())
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr)
+        .contains("Invalid Workbench UI development selection"));
+    assert_eq!(fs::read_to_string(selection).unwrap(), invalid);
 }
 
 fn snapshot_when(service: &Service, accept: impl Fn(&Value) -> bool) -> Value {
@@ -1593,9 +6991,38 @@ fn observed_schedule_name_updates_when_session_index_changes() {
     )
     .unwrap();
     let service = Service::start(home.path(), true, None);
-    snapshot_when(&service, |snapshot| {
+    let snapshot = snapshot_when(&service, |snapshot| {
         snapshot["codex"]["schedules"]["remote_activities"][0]["name"] == "First"
+            && snapshot["codex"]["metadata_sources"]
+                .as_array()
+                .is_some_and(|sources| {
+                    sources.iter().any(|source| {
+                        source["name"] == "session_index.jsonl" && source["matched_threads"] == 1
+                    })
+                })
     });
+    let report = snapshot["codex"]["metadata_sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["name"] == "session_index.jsonl")
+        .unwrap();
+    assert_eq!(report["health"], "ok");
+    assert_eq!(report["tail_bytes"], 1_048_576);
+    assert!(snapshot["sources"]["catalog"]["readers"]
+        .as_array()
+        .unwrap()
+        .contains(report));
+    let catalog = snapshot["codex"]["metadata_sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["name"] == "codex-dev.db")
+        .unwrap();
+    assert_eq!(catalog["health"], "ok");
+    assert_eq!(catalog["rows_read"], 1);
+    assert_eq!(catalog["queries"][0]["health"], "unsupported");
+    assert_eq!(catalog["queries"][1]["health"], "unsupported");
     fs::write(
         path,
         "{\"id\":\"00000000-0000-4000-8000-000000000002\",\"thread_name\":\"Second\"}\n",
@@ -1611,6 +7038,333 @@ fn event(time: &str, kind: &str, payload: Value) -> String {
         "{}\n",
         json!({"timestamp":time, "type":kind, "payload":payload})
     )
+}
+
+#[test]
+fn overflow_tool_detail_uses_verified_source_and_masks_secrets() {
+    let home = tempdir().unwrap();
+    let root = home.path().join("sessions");
+    fs::create_dir(&root).unwrap();
+    let id = "00000000-0000-4000-8000-000000000001";
+    let path = root.join(format!("rollout-{id}.jsonl"));
+    let time = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let body = [event(&time,"session_meta",json!({"id":id,"cwd":"/fixture/private-workdir"})),event(&time,"response_item",json!({"type":"function_call","name":"fixture_tool","call_id":"outside","arguments":"{\"api_key\":\"PRIVATE_VALUE\",\"message\":\"hello\"}"}))].concat();
+    fs::write(&path, body).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000)),
+        )
+        .unwrap();
+    for index in 2..=5001 {
+        let other = format!("00000000-0000-4000-8000-{index:012}");
+        fs::write(root.join(format!("rollout-{other}.jsonl")), "").unwrap();
+    }
+    let service = Service::start(home.path(), true, None);
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        let snapshot = service.get("/api/snapshot?window=all").json();
+        let ready = snapshot["codex"]["threads"].as_array().is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row["thread_id"] == id
+                    && row["tool_calls"] == 1
+                    && row["source_details_pending"].is_null()
+            })
+        });
+        if ready {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "overflow detail did not become ready"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let endpoint = format!("/api/codex/tool?thread_id={id}&call_id=outside");
+    let response = service.get(&endpoint);
+    assert_eq!(response.status, 200);
+    let detail = response.json();
+    assert_eq!(detail["tool"], "fixture_tool");
+    assert!(!detail.to_string().contains("PRIVATE_VALUE"));
+    let setting = r#"{"observations":{"metadata":false}}"#;
+    let response = service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, setting.len()), setting);
+    assert!(matches!(response.status, 200 | 202));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let snapshot = service.get("/api/snapshot?window=all").json();
+        let ready = snapshot["settings"]["observations"]["metadata"] == false
+            && snapshot["codex"]["threads"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["thread_id"] == id && row["source_details_pending"].is_null())
+            });
+        assert!(!snapshot.to_string().contains("/fixture/private-workdir"));
+        if ready {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "overflow workdir was not retained after metadata disabled"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(service.get(&endpoint).status, 200);
+    let key = checkpoint_key(Path::new(&format!("rollout-{id}.jsonl")));
+    let mut store = Store::open(&home.path().join("monitoring"), Access::ReadWrite)
+        .unwrap()
+        .unwrap();
+    let mut cursor = store.checkpoint(&key, 0).unwrap().unwrap().cursor;
+    cursor.signature = "changed-by-test".into();
+    store.save_checkpoints(&[cursor], &[], &[]).unwrap();
+    assert_eq!(service.get(&endpoint).status, 409);
+}
+
+#[test]
+fn session_discovery_reads_nested_directories_beyond_eight_levels() {
+    let home = tempdir().unwrap();
+    let mut root = home.path().join("sessions");
+    for _ in 0..12 {
+        root.push("nested");
+    }
+    fs::create_dir_all(&root).unwrap();
+    let id = "00000000-0000-4000-8000-000000000001";
+    let stamp = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    fs::write(
+        root.join(format!("rollout-{id}.jsonl")),
+        [
+            event(&stamp, "session_meta", json!({"id":id})),
+            event(&stamp, "event_msg", json!({"type":"task_started"})),
+        ]
+        .concat(),
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |snapshot| {
+        snapshot["codex"]["threads"].as_array().is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row["thread_id"] == id && row["status"] == "running")
+        })
+    });
+    assert_eq!(snapshot["codex"]["health"], "ok");
+}
+
+#[test]
+fn python_lifecycle_cache_restores_matching_session_status() {
+    let home = tempdir().unwrap();
+    let root = home.path().join("sessions");
+    fs::create_dir(&root).unwrap();
+    let id = "00000000-0000-4000-8000-000000000001";
+    let filename = format!("rollout-{id}.jsonl");
+    let stamp = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let earlier = (chrono::DateTime::parse_from_rfc3339(&stamp).unwrap()
+        - chrono::Duration::seconds(1))
+    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let body = [
+        event(&earlier, "session_meta", json!({"id":id})),
+        event(&earlier, "event_msg", json!({"type":"task_started"})),
+    ]
+    .concat();
+    fs::write(root.join(&filename), body.as_bytes()).unwrap();
+    let other_id = "00000000-0000-4000-8000-000000000002";
+    let other_filename = format!("rollout-{other_id}.jsonl");
+    let other_body = event(&stamp, "session_meta", json!({"id":other_id}));
+    fs::write(root.join(&other_filename), other_body.as_bytes()).unwrap();
+    let monitoring = home.path().join("monitoring");
+    fs::create_dir(&monitoring).unwrap();
+    fs::write(monitoring.join("thread-state.json"), json!({"version":1,"entries":{filename.clone():{"thread_id":id,"offset":body.len(),"status":"completed","task_time":stamp,"task_start":null},other_filename:{"thread_id":other_id,"offset":other_body.len()+1,"status":"completed","task_time":stamp,"task_start":null}},"skills":[]}).to_string()).unwrap();
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |snapshot| {
+        snapshot["codex"]["threads"].as_array().is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row["thread_id"] == id && row["status_source"] == "cached_lifecycle")
+        })
+    });
+    let row = snapshot["codex"]["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["thread_id"] == id)
+        .unwrap();
+    assert_eq!(row["status"], "completed");
+    assert_eq!(row["status_updated_at"], stamp);
+    let other = snapshot["codex"]["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["thread_id"] == other_id)
+        .unwrap();
+    assert_eq!(other["status"], "observed");
+    assert!(other["status_source"].is_null());
+    let later = (chrono::DateTime::parse_from_rfc3339(&stamp).unwrap()
+        + chrono::Duration::seconds(1))
+    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(root.join(&filename))
+        .unwrap()
+        .write_all(event(&later, "event_msg", json!({"type":"task_started"})).as_bytes())
+        .unwrap();
+    snapshot_when(&service, |snapshot| {
+        snapshot["codex"]["threads"].as_array().is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row["thread_id"] == id
+                    && row["status"] == "running"
+                    && row["status_source"] == "session_lifecycle"
+            })
+        })
+    });
+}
+
+#[test]
+fn session_lifecycle_writes_python_compatible_history() {
+    let home = tempdir().unwrap();
+    let root = home.path().join("sessions");
+    fs::create_dir(&root).unwrap();
+    let id = "00000000-0000-4000-8000-000000000001";
+    let filename = format!("rollout-{id}.jsonl");
+    let stamp = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let body = [
+        event(&stamp, "session_meta", json!({"id":id})),
+        event(&stamp, "event_msg", json!({"type":"task_complete"})),
+    ]
+    .concat();
+    fs::write(root.join(&filename), body.as_bytes()).unwrap();
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |snapshot| {
+        snapshot["codex"]["threads"].as_array().is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row["thread_id"] == id && row["status"] == "completed")
+        })
+    });
+    let store = Store::open(&home.path().join("monitoring"), Access::ReadOnly)
+        .unwrap()
+        .unwrap();
+    let cached = store.thread_lifecycle(&filename).unwrap().unwrap();
+    assert_eq!(cached["thread_id"], id);
+    assert_eq!(cached["status"], "completed");
+    assert_eq!(cached["offset"], body.len());
+    assert_eq!(cached["task_time"], stamp);
+}
+
+#[test]
+fn related_subagent_tail_is_projected_into_snapshot() {
+    let home = tempdir().unwrap();
+    let root = home.path().join("sessions");
+    fs::create_dir(&root).unwrap();
+    let parent = "00000000-0000-4000-8000-000000000001";
+    let child = "00000000-0000-4000-8000-000000000002";
+    let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now());
+    let started = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let completed = (now + chrono::Duration::milliseconds(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    fs::write(
+        root.join(format!("rollout-{child}-suffix.jsonl")),
+        [
+            event(&started, "session_meta", json!({"id":parent})),
+            event(&completed, "event_msg", json!({"type":"task_complete"})),
+        ]
+        .concat(),
+    )
+    .unwrap();
+    let db = rusqlite::Connection::open(home.path().join("state_1.sqlite")).unwrap();
+    db.execute_batch(&format!("CREATE TABLE threads(id TEXT,title TEXT); CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT); INSERT INTO threads VALUES('{child}','Child'); INSERT INTO thread_spawn_edges VALUES('{parent}','{child}');")).unwrap();
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |snapshot| {
+        snapshot["codex"]["threads"].as_array().is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row["thread_id"] == child && row["status_source"] == "session_lifecycle")
+        })
+    });
+    let child_row = snapshot["codex"]["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["thread_id"] == child)
+        .unwrap();
+    assert_eq!(child_row["status"], "completed");
+    assert_eq!(child_row["status_updated_at"], completed);
+    let report = snapshot["codex"]["metadata_sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["name"] == "subagent_lifecycle")
+        .unwrap();
+    assert_eq!(report["health"], "ok");
+    assert_eq!(report["pending_files"], 0);
+}
+
+#[test]
+fn disabled_model_api_reports_both_sources_in_original_order() {
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), false, None);
+    let snapshot = service.get("/api/snapshot?window=all").json();
+    let sources = snapshot["model_api"]["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[0]["source"], "codex_desktop");
+    assert_eq!(sources[1]["source"], "codex_core");
+    assert!(sources.iter().all(|source| source["health"] == "disabled"));
+}
+
+#[test]
+fn future_sql_activity_is_published_after_due_without_source_change() {
+    let home = tempdir().unwrap();
+    let root = home.path().join("sessions");
+    fs::create_dir(&root).unwrap();
+    let id = "00000000-0000-4000-8000-000000000001";
+    let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now());
+    let stamp = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let future =
+        (now + chrono::Duration::seconds(62)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    fs::write(root.join(format!("rollout-demo-{id}.jsonl")), [event(&stamp,"session_meta",json!({"id":id})), event(&future,"response_item",json!({"type":"function_call","name":"mcp__sqlite__query","call_id":"future","arguments":{"query":"SELECT 1"}}))].concat()).unwrap();
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |snapshot| {
+        snapshot["codex"]["observed_tool_calls"] == 1
+    });
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if service.get("/api/history?section=sql").json()["total"] == 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "future activity was not published"
+        );
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
+
+#[test]
+fn future_history_is_promoted_when_codex_collection_is_disabled() {
+    let home = tempdir().unwrap();
+    let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now());
+    let future =
+        (now + chrono::Duration::seconds(62)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let mut store = lam_history_store::ObservationStore::open(
+        &home.path().join("monitoring"),
+        Access::ReadWrite,
+    )
+    .unwrap()
+    .unwrap();
+    store.save_diagnostics(&[json!({"timestamp":future,"engine":"SQLite","operation":"read","statement":"SELECT","recognition":"recorded_code"})], &[], now).unwrap();
+    drop(store);
+    let service = Service::start(home.path(), false, None);
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if service.get("/api/history?section=sql").json()["total"] == 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "future activity was not promoted"
+        );
+        std::thread::sleep(Duration::from_millis(40));
+    }
 }
 
 #[test]
@@ -1882,16 +7636,64 @@ fn stream_and_http_publish_matching_window_snapshots_and_session_logs() {
     let mut service = Service::start(home.path(), true, None);
     snapshot_when(&service, |snapshot| snapshot["codex"]["health"] == "ok");
     let mut stream = EventStream::connect(&service, "?window=1h").ok().unwrap();
-    let first = stream.snapshot();
+    let matching = |stream: &mut EventStream, require_cancelled: bool| {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let frame = stream.snapshot();
+            let http = service.get("/api/snapshot?window=1h").json();
+            let has_cancelled = frame["logs"]["entries"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|row| row["code"] == "cancelled"));
+            if frame["snapshot"]["updated_at"] == http["updated_at"]
+                && (!require_cancelled || has_cancelled)
+            {
+                return (frame, http);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "matching snapshot was not published"
+            );
+        }
+    };
+    let (first, mut first_http_snapshot) = matching(&mut stream, false);
     assert_eq!(first["window"], "1h");
-    assert_eq!(
-        first["snapshot"],
-        service.get("/api/snapshot?window=1h").json()
-    );
+    let mut first_stream_snapshot = first["snapshot"].clone();
+    for snapshot in [&mut first_stream_snapshot, &mut first_http_snapshot] {
+        let monitor = snapshot["monitor"].as_object_mut().unwrap();
+        for key in [
+            "collection",
+            "requests",
+            "http_errors",
+            "snapshot_bytes",
+            "transfer_bytes",
+            "process_usage",
+            "uptime_seconds",
+            "device_checked_at",
+            "cpu_usage_percent",
+        ] {
+            monitor.remove(key);
+        }
+    }
+    assert_eq!(first_stream_snapshot, first_http_snapshot);
     assert_eq!(first["logs"], service.get("/api/logs?window=1h").json());
-    assert_eq!(first["logs"]["total"], 1);
-    assert_eq!(first["logs"]["entries"][0]["code"], "initial_failure");
-    assert_eq!(service.get("/api/logs").json()["total"], 2);
+    let session_logs = |logs: &Value| {
+        logs["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["source"] == "session")
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let first_session_logs = session_logs(&first["logs"]);
+    assert_eq!(first_session_logs.len(), 1);
+    assert_eq!(first_session_logs[0]["code"], "initial_failure");
+    assert!(first["logs"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["source"] == "monitor" && entry["code"] == "started"));
+    assert_eq!(session_logs(&service.get("/api/logs").json()).len(), 2);
 
     let line = event(
         &stamp,
@@ -1904,17 +7706,31 @@ fn stream_and_http_publish_matching_window_snapshots_and_session_logs() {
         .unwrap()
         .write_all(line.as_bytes())
         .unwrap();
-    let after = stream.snapshot();
+    let (after, mut after_http_snapshot) = matching(&mut stream, true);
     assert!(after["version"].as_u64().unwrap() > first["version"].as_u64().unwrap());
-    assert_eq!(
-        after["snapshot"],
-        service.get("/api/snapshot?window=1h").json()
-    );
+    let mut after_stream_snapshot = after["snapshot"].clone();
+    for snapshot in [&mut after_stream_snapshot, &mut after_http_snapshot] {
+        let monitor = snapshot["monitor"].as_object_mut().unwrap();
+        for key in [
+            "collection",
+            "requests",
+            "http_errors",
+            "snapshot_bytes",
+            "transfer_bytes",
+            "process_usage",
+            "uptime_seconds",
+            "device_checked_at",
+            "cpu_usage_percent",
+        ] {
+            monitor.remove(key);
+        }
+    }
+    assert_eq!(after_stream_snapshot, after_http_snapshot);
     assert_eq!(after["logs"], service.get("/api/logs?window=1h").json());
-    assert_eq!(after["logs"]["total"], 2);
+    assert_eq!(session_logs(&after["logs"]).len(), 2);
     assert_eq!(
         after["snapshot"]["errors"]["events"],
-        after["logs"]["entries"]
+        json!(session_logs(&after["logs"]))
     );
     assert_eq!(
         after["snapshot"]["errors"]["categories"],
@@ -1933,7 +7749,13 @@ fn stream_and_http_publish_matching_window_snapshots_and_session_logs() {
     assert!(!after.to_string().contains("PRIVATE_"));
 
     let mut reconnected = EventStream::connect(&service, "?window=1h").ok().unwrap();
-    assert_eq!(reconnected.snapshot(), after);
+    let reconnected_snapshot = reconnected.snapshot();
+    assert_eq!(reconnected_snapshot["version"], after["version"]);
+    assert_eq!(
+        reconnected_snapshot["snapshot"]["codex"],
+        after["snapshot"]["codex"]
+    );
+    assert_eq!(reconnected_snapshot["logs"], after["logs"]);
     assert_eq!(
         EventStream::connect(&service, "?window=bad").err(),
         Some(400)
@@ -1964,7 +7786,7 @@ fn stream_limit_releases_disconnected_clients_and_keeps_http_available() {
             Err(status) => panic!("stream permit was not released: {status}"),
         }
     };
-    assert_eq!(recovered.snapshot()["logs"]["enabled"], false);
+    assert_eq!(recovered.snapshot()["logs"]["enabled"], true);
     service.stop();
 }
 
@@ -1973,7 +7795,9 @@ fn idle_stream_heartbeats_do_not_republish_the_source() {
     let home = tempdir().unwrap();
     native_event_fixture(home.path());
     let mut service = Service::start(home.path(), true, None);
-    snapshot_when(&service, |snapshot| snapshot["codex"]["health"] == "ok");
+    snapshot_when(&service, |snapshot| {
+        snapshot["codex"]["health"] == "ok" && snapshot["monitor"]["device_ready"] == true
+    });
     let mut stream = EventStream::connect(&service, "").ok().unwrap();
     let first = stream.snapshot();
     fs::write(home.path().join("sessions/ignored.txt"), "unrelated").unwrap();
@@ -1983,7 +7807,10 @@ fn idle_stream_heartbeats_do_not_republish_the_source() {
         .set_read_timeout(Some(Duration::from_secs(18)))
         .unwrap();
     assert_eq!(stream.frame(), ": heartbeat\n\n");
-    assert_eq!(service.get("/api/snapshot").json(), first["snapshot"]);
+    assert_eq!(
+        service.get("/api/snapshot").json()["codex"],
+        first["snapshot"]["codex"]
+    );
     service.stop();
 }
 
@@ -3304,6 +9131,91 @@ fn core_sql_diagnostics_follow_the_wal_and_publish_only_metadata() {
         4
     );
     service.stop();
+}
+
+#[test]
+fn model_api_observation_switch_preserves_other_diagnostics_and_replays() {
+    let home = tempdir().unwrap();
+    native_event_fixture(home.path());
+    let stamp = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let time = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).timestamp();
+    let source = rusqlite::Connection::open(home.path().join("logs_fixture.sqlite")).unwrap();
+    source
+        .execute_batch(
+            "CREATE TABLE logs(id INTEGER PRIMARY KEY,ts REAL,level TEXT,target TEXT,message TEXT)",
+        )
+        .unwrap();
+    let request = r#"event.name="codex.api_request" endpoint="/responses" status_code=200"#;
+    source
+        .execute(
+            "INSERT INTO logs VALUES(1,?,'INFO','codex_otel.log_only',?)",
+            rusqlite::params![time, request],
+        )
+        .unwrap();
+    let directory = home.path().join("desktop-logs");
+    fs::create_dir(&directory).unwrap();
+    let desktop = directory.join("codex-desktop-fixture.log");
+    fs::write(
+        &desktop,
+        format!("{stamp} INFO [codex_otel.log_only] {request}\n"),
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| value["model_api"]["requests"] == 2);
+    let set = |value: Value| {
+        let body = value.to_string();
+        service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body)
+    };
+    let response = set(json!({"observations":{"model_api":false}}));
+    assert_eq!(response.status, 200);
+    assert_eq!(response.json()["observations"]["model_api"], false);
+    let disabled = service.get("/api/snapshot?window=all").json();
+    assert_eq!(disabled["model_api"]["enabled"], false);
+    assert_eq!(disabled["model_api"]["requests"], 0);
+    assert!(disabled["model_api"]["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|source| source["health"] == "disabled"));
+    source
+        .execute(
+            "INSERT INTO logs VALUES(2,?,'ERROR','codex_otel.log_only',?)",
+            rusqlite::params![time, request],
+        )
+        .unwrap();
+    source
+        .execute(
+            "INSERT INTO logs VALUES(3,?,'INFO','sqlx::query',?)",
+            rusqlite::params![time, "sql=\"SELECT 3\" elapsed=1ms"],
+        )
+        .unwrap();
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&desktop)
+        .unwrap()
+        .write_all(format!("{stamp} ERROR [codex_otel.log_only] {request}\n").as_bytes())
+        .unwrap();
+    let disabled = snapshot_when(&service, |value| {
+        value["codex"]["sqlite"]["total"] == 1
+            && value["errors"]["events"].as_array().is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event["source"] == "codex_core" && event["record_id"] == 2)
+                    && events.iter().any(|event| {
+                        event["source"] == "codex_desktop"
+                            && event["module"] == "codex_otel.log_only"
+                    })
+            })
+    });
+    assert_eq!(disabled["model_api"]["requests"], 0);
+    assert_eq!(
+        set(json!({"observations":{"model_api":true,"errors":true}})).status,
+        200
+    );
+    let restored = snapshot_when(&service, |value| value["model_api"]["requests"] == 4);
+    assert_eq!(restored["model_api"]["enabled"], true);
+    assert_eq!(restored["codex"]["sqlite"]["total"], 1);
 }
 
 #[test]

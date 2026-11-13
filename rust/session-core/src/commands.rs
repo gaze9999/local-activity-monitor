@@ -99,17 +99,42 @@ static FLAGS: LazyLock<Regex> =
 
 impl CommandMetadata {
     pub fn observe(&mut self, tool: &str, args: Option<&Map<String, Value>>) {
+        self.observe_selected(tool, args, true, true);
+    }
+
+    pub fn observe_selected(
+        &mut self,
+        tool: &str,
+        args: Option<&Map<String, Value>>,
+        git: bool,
+        checks: bool,
+    ) {
+        if !git && !checks {
+            return;
+        }
         if !matches!(tool, "exec_command" | "functions.exec_command") {
             return;
         }
         let Some(args) = args else { return };
-        self.observe_text(
+        self.observe_text_selected(
             args.get("cmd").and_then(Value::as_str),
             args.get("workdir").and_then(Value::as_str),
+            git,
+            checks,
         );
     }
 
     pub fn observe_text(&mut self, command: Option<&str>, workdir: Option<&str>) {
+        self.observe_text_selected(command, workdir, true, true);
+    }
+
+    fn observe_text_selected(
+        &mut self,
+        command: Option<&str>,
+        workdir: Option<&str>,
+        git_enabled: bool,
+        checks_enabled: bool,
+    ) {
         let Some(command) =
             command.filter(|value| value.chars().take(COMMAND_LIMIT + 1).count() <= COMMAND_LIMIT)
         else {
@@ -118,7 +143,7 @@ impl CommandMetadata {
         let repository = workdir.and_then(repository_label);
         let mut git = 0;
         for part in shell_parts(command) {
-            if git < GIT_PER_COMMAND {
+            if git_enabled && git < GIT_PER_COMMAND {
                 if let Some(operation) = git_operation(part) {
                     self.git.push(GitOperation {
                         operation: operation.into(),
@@ -127,7 +152,7 @@ impl CommandMetadata {
                     git += 1;
                 }
             }
-            if self.checks.len() < CHECK_LIMIT {
+            if checks_enabled && self.checks.len() < CHECK_LIMIT {
                 if let Some(check) = check_operation(part.trim()) {
                     self.checks.push(check);
                 }
@@ -220,20 +245,33 @@ pub(crate) fn shell_parts(command: &str) -> Vec<&str> {
     parts
 }
 
-fn git_operation(part: &str) -> Option<&str> {
-    // Tokenize in non-POSIX mode: quotes delimit a token only at its beginning.
-    let mut tokens = Vec::new();
-    let mut rest = part.trim_start();
-    while !rest.is_empty() {
-        let end = if rest.starts_with(['"', '\'']) {
-            let quote = rest.as_bytes()[0] as char;
-            rest[1..].find(quote)? + 2
-        } else {
-            rest.find(char::is_whitespace).unwrap_or(rest.len())
-        };
-        tokens.push(rest[..end].trim_matches(['"', '\'']));
-        rest = rest[end..].trim_start();
+/// Select recorded command segments that match an observed operation.
+pub fn matching_command_parts(
+    command: &str,
+    operation: &str,
+    checks: bool,
+) -> (Vec<String>, usize) {
+    if command.chars().take(COMMAND_LIMIT + 1).count() > COMMAND_LIMIT {
+        return (Vec::new(), 0);
     }
+    let parts = shell_parts(command);
+    let count = parts.len();
+    let selected = parts
+        .into_iter()
+        .filter(|part| {
+            if checks {
+                check_operation(part.trim()).is_some_and(|item| item.operation == operation)
+            } else {
+                git_operation(part).is_some_and(|item| item == operation)
+            }
+        })
+        .map(|part| part.trim().to_owned())
+        .collect();
+    (selected, count)
+}
+
+fn git_operation(part: &str) -> Option<&str> {
+    let tokens = crate::files::shell_tokens(part)?;
     let executable = tokens.first()?.rsplit(['/', '\\']).next()?;
     if !executable.eq_ignore_ascii_case("git") && !executable.eq_ignore_ascii_case("git.exe") {
         return None;
@@ -316,6 +354,15 @@ mod tests {
         assert!(!serde_json::to_string(&output)
             .unwrap()
             .contains("PRIVATE_PARENT"));
+    }
+
+    #[test]
+    fn git_commands_keep_non_ascii_whitespace_inside_tokens() {
+        let mut output = CommandMetadata::default();
+        output.observe_text(Some("git\u{00a0}status; git \u{00a0}status; \u{00a0}git status; git status"), None);
+        assert_eq!(output.git.len(), 1);
+        assert_eq!(output.git[0].operation, "status");
+        assert_eq!(matching_command_parts("git\u{00a0}status; git status", "status", false).0, ["git status"]);
     }
 
     #[test]

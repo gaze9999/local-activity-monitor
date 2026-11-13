@@ -53,7 +53,7 @@ const PHASES: &[&str] = &[
 ];
 
 #[cfg(unix)]
-fn process_metrics() -> Map<String, Value> {
+pub(crate) fn process_metrics() -> Map<String, Value> {
     let mut metrics = Map::new();
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
     // getrusage initializes the output on success and reads no user-provided pointer.
@@ -106,6 +106,43 @@ pub fn process_cpu_ms() -> Option<f64> {
         .and_then(Value::as_f64)
 }
 
+pub struct CollectionStatus {
+    phase: &'static str,
+    started: Instant,
+    cpu: Option<f64>,
+    revision: u64,
+}
+impl CollectionStatus {
+    pub fn new() -> Self {
+        Self {
+            phase: "waiting",
+            started: Instant::now(),
+            cpu: None,
+            revision: 0,
+        }
+    }
+    pub fn set(&mut self, phase: &'static str) {
+        self.phase = phase;
+        self.started = Instant::now();
+        self.cpu = process_cpu_ms();
+        self.revision = self.revision.wrapping_add(1);
+    }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn snapshot(&self) -> Value {
+        if ["waiting", "idle", "stopped", "error"].contains(&self.phase) {
+            return json!({"phase":self.phase,"phase_ms":0,"phase_cpu_ms":0});
+        }
+        let elapsed = (self.started.elapsed().as_secs_f64() * 100_000.0).round() / 100.0;
+        let cpu = self
+            .cpu
+            .zip(process_cpu_ms())
+            .map(|(before, after)| ((after - before).max(0.0) * 100.0).round() / 100.0);
+        json!({"phase":self.phase,"phase_ms":elapsed,"phase_cpu_ms":cpu})
+    }
+}
+
 pub struct PhaseTimer {
     began: Instant,
     cpu: Option<f64>,
@@ -150,7 +187,7 @@ pub fn combine_phases(first: Option<Value>, second: Option<Value>) -> Option<Val
 }
 
 #[cfg(windows)]
-fn process_metrics() -> Map<String, Value> {
+pub(crate) fn process_metrics() -> Map<String, Value> {
     use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::System::ProcessStatus::{
         GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
@@ -184,7 +221,7 @@ fn process_metrics() -> Map<String, Value> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn process_metrics() -> Map<String, Value> {
+pub(crate) fn process_metrics() -> Map<String, Value> {
     Map::new()
 }
 
@@ -381,8 +418,15 @@ impl PerformanceDebug {
         heartbeat: bool,
         serialization_ms: f64,
         snapshot_bytes: usize,
+        transfer_bytes: usize,
+        write_ms: f64,
+        cpu_ms: Option<f64>,
     ) -> Option<Value> {
-        self.record(if heartbeat {"heartbeat"} else {"stream_frame"}, json!({"serialization_ms":serialization_ms,"snapshot_bytes":snapshot_bytes,"active_streams":self.active_streams}));
+        let mut metrics = json!({"serialization_ms":serialization_ms,"snapshot_bytes":snapshot_bytes,"transfer_bytes":transfer_bytes,"write_ms":write_ms,"active_streams":self.active_streams});
+        if let Some(cpu_ms) = cpu_ms {
+            metrics["cpu_ms"] = json!(cpu_ms);
+        }
+        self.record(if heartbeat {"heartbeat"} else {"stream_frame"}, metrics);
         self.enabled.then(|| self.snapshot())
     }
     pub fn set_enabled(&mut self, enabled: bool) {

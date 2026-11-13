@@ -58,6 +58,7 @@ struct Operation {
     database: Option<String>,
     statement: String,
     kind: Kind,
+    sql: Option<String>,
 }
 
 impl Operation {
@@ -66,6 +67,7 @@ impl Operation {
             database: database.map(str::to_owned),
             statement: statement.into(),
             kind,
+            sql: None,
         }
     }
 }
@@ -92,36 +94,7 @@ impl SqlMetadata {
         }
         let Some(args) = args else { return };
         let sqlite = tool.to_ascii_lowercase().contains("sqlite");
-        let events = if sqlite {
-            let database = ["database", "db_path", "database_path", "path"]
-                .iter()
-                .find_map(|key| args.get(*key))
-                .and_then(Value::as_str)
-                .and_then(database_path);
-            let query = args
-                .get("query")
-                .or_else(|| args.get("sql"))
-                .and_then(Value::as_str);
-            let mut events = query.map_or_else(Vec::new, |query| statements(query, database));
-            if events.is_empty() {
-                events.push(Operation::new(
-                    database,
-                    tool.rsplit("__").next().unwrap_or(tool),
-                    Kind::Operation,
-                ));
-            }
-            events
-        } else if matches!(tool, "exec_command" | "functions.exec_command") {
-            let Some(command) = args.get("cmd").and_then(Value::as_str).filter(|command| {
-                command.chars().take(COMMAND_LIMIT + 1).count() <= COMMAND_LIMIT
-                    && command.contains("sqlite")
-            }) else {
-                return;
-            };
-            shell_operations(command)
-        } else {
-            return;
-        };
+        let events = observed_operations(tool, args);
         let workdir = args
             .get("workdir")
             .and_then(Value::as_str)
@@ -182,6 +155,54 @@ impl SqlMetadata {
                     })
             })
     }
+}
+
+fn observed_operations(tool: &str, args: &Map<String, Value>) -> Vec<Operation> {
+    let sqlite = tool.to_ascii_lowercase().contains("sqlite");
+    let events = if sqlite {
+        let database = ["database", "db_path", "database_path", "path"]
+            .iter()
+            .find_map(|key| args.get(*key))
+            .and_then(Value::as_str)
+            .and_then(database_path);
+        let query = args
+            .get("query")
+            .or_else(|| args.get("sql"))
+            .and_then(Value::as_str);
+        let mut events = query.map_or_else(Vec::new, |query| statements(query, database));
+        if events.is_empty() {
+            events.push(Operation::new(
+                database,
+                tool.rsplit("__").next().unwrap_or(tool),
+                Kind::Operation,
+            ));
+        }
+        events
+    } else if matches!(tool, "exec_command" | "functions.exec_command") {
+        let Some(command) = args.get("cmd").and_then(Value::as_str).filter(|command| {
+            command.chars().take(COMMAND_LIMIT + 1).count() <= COMMAND_LIMIT
+                && command.contains("sqlite")
+        }) else {
+            return Vec::new();
+        };
+        shell_operations(command)
+    } else {
+        return Vec::new();
+    };
+    events
+}
+
+/// Extract transient SQL details using the same classifier as stored metadata.
+pub fn sqlite_details(
+    tool: &str,
+    args: Option<&Map<String, Value>>,
+) -> Vec<(String, Option<String>)> {
+    let Some(args) = args else { return Vec::new() };
+    observed_operations(tool, args)
+        .into_iter()
+        .take(EVENT_LIMIT)
+        .map(|item| (item.statement, item.sql))
+        .collect()
 }
 
 fn shell_operations(command: &str) -> Vec<Operation> {
@@ -286,44 +307,78 @@ fn kind(statement: &str) -> Option<Kind> {
 }
 
 fn statements(sql: &str, database: Option<&str>) -> Vec<Operation> {
-    let clean = SQL_HIDDEN.replace_all(sql, " ");
+    let clean = SQL_HIDDEN.replace_all(sql, |captures: &regex::Captures<'_>| {
+        " ".repeat(captures[0].len())
+    });
+    let mut offset = 0;
     clean
         .split(';')
         .take(EVENT_LIMIT)
         .filter_map(|statement| {
+            let start = offset;
+            offset += statement.len() + 1;
+            let original = sql.get(start..start + statement.len())?.trim();
             let mut tokens = SQL_TOKEN.find_iter(statement);
             let first = tokens.next()?.as_str().to_ascii_uppercase();
-            if !matches!(first.as_str(), "WITH" | "CONNECT" | "CLOSE") {
-                return Some(Operation::new(database, &first, kind(&first)?));
-            }
-            if first != "WITH" {
-                return None;
-            }
-            let mut depth = 0_i32;
-            for token in tokens {
-                match token.as_str() {
-                    "(" => depth += 1,
-                    ")" => depth -= 1,
-                    word if depth == 0 => {
-                        let word = word.to_ascii_uppercase();
-                        if let Some(kind) =
-                            kind(&word).filter(|kind| !matches!(kind, Kind::Open | Kind::Close))
-                        {
-                            return Some(Operation::new(database, &word, kind));
-                        }
-                    }
-                    _ => {}
+            let (name, kind) = if !matches!(first.as_str(), "WITH" | "CONNECT" | "CLOSE") {
+                let kind = kind(&first)?;
+                (first, kind)
+            } else {
+                if first != "WITH" {
+                    return None;
                 }
-            }
-            None
+                let mut depth = 0_i32;
+                let mut found = None;
+                for token in tokens {
+                    match token.as_str() {
+                        "(" => depth += 1,
+                        ")" => depth -= 1,
+                        word if depth == 0 => {
+                            let word = word.to_ascii_uppercase();
+                            if let Some(kind) =
+                                kind(&word).filter(|kind| !matches!(kind, Kind::Open | Kind::Close))
+                            {
+                                found = Some((word, kind));
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                found?
+            };
+            let mut result = Operation::new(database, &name, kind);
+            result.sql = Some(original.to_owned());
+            Some(result)
         })
         .collect()
+}
+
+/// Report whether recorded text contains a recognized SQL statement.
+pub fn recognized_sql(sql: &str) -> bool {
+    !statements(sql, None).is_empty()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn transient_details_match_statement_order_without_splitting_quoted_semicolons() {
+        let args = json!({"query":"SELECT 'one;two'; UPDATE users SET password='PRIVATE'"});
+        let details = sqlite_details("mcp__sqlite__query", args.as_object());
+        assert_eq!(details.len(), 2);
+        assert_eq!(details[0].0, "SELECT");
+        assert_eq!(details[0].1.as_deref(), Some("SELECT 'one;two'"));
+        assert_eq!(details[1].0, "UPDATE");
+        assert!(details[1].1.as_deref().unwrap().contains("PRIVATE"));
+        let mut metadata = SqlMetadata::default();
+        metadata.observe("mcp__sqlite__query", args.as_object(), false);
+        assert!(!serde_json::to_string(&metadata)
+            .unwrap()
+            .contains("PRIVATE"));
+    }
 
     #[test]
     fn classifies_ctes_and_excludes_sql_values_from_metadata() {

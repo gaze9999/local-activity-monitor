@@ -23,7 +23,18 @@ struct Client {
     _permit: OwnedSemaphorePermit,
     debug: Arc<Mutex<crate::performance_debug::PerformanceDebug>>,
     opened: bool,
-    pending_debug: Option<Bytes>,
+    pending: Option<Pending>,
+    tracker: Arc<Mutex<Option<crate::sse_write::Tracker>>>,
+    traffic: Arc<Mutex<crate::server::Traffic>>,
+}
+
+struct Pending {
+    receipt: tokio::sync::oneshot::Receiver<crate::sse_write::Completion>,
+    heartbeat: bool,
+    serialization_ms: f64,
+    snapshot_bytes: usize,
+    transfer_bytes: usize,
+    cpu_started: Option<f64>,
 }
 
 impl Drop for Client {
@@ -44,7 +55,11 @@ pub fn response(
     permit: OwnedSemaphorePermit,
     shutdown: watch::Receiver<bool>,
     debug: Arc<Mutex<crate::performance_debug::PerformanceDebug>>,
+    traffic: Arc<Mutex<crate::server::Traffic>>,
+    tracker: Arc<Mutex<Option<crate::sse_write::Tracker>>>,
 ) -> Response<Body> {
+    *tracker.lock().unwrap_or_else(|error| error.into_inner()) =
+        Some(crate::sse_write::Tracker::new());
     let client = Client {
         snapshots,
         window,
@@ -53,7 +68,9 @@ pub fn response(
         _permit: permit,
         debug,
         opened: false,
-        pending_debug: None,
+        pending: None,
+        tracker,
+        traffic,
     };
     let frames = stream::unfold(client, |mut client| async move {
         if *client.shutdown.borrow() {
@@ -67,14 +84,71 @@ pub fn response(
                 .connection(true);
             client.opened = true;
         }
-        if let Some(frame) = client.pending_debug.take() {
-            return Some((Ok::<_, Infallible>(Frame::data(frame)), client));
+        if let Some(pending) = client.pending.take() {
+            let receipt = tokio::select! {
+                _ = client.shutdown.changed() => return None,
+                result = tokio::time::timeout(Duration::from_secs(15), pending.receipt) => result,
+            };
+            match receipt {
+                Ok(Ok(completion)) => {
+                    if !pending.heartbeat {
+                        let mut traffic = client
+                            .traffic
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        traffic.snapshot_bytes = pending.snapshot_bytes;
+                        traffic.transfer_bytes = pending.transfer_bytes;
+                        traffic.revision = traffic.revision.wrapping_add(1);
+                    }
+                    let debug = Arc::clone(&client.debug);
+                    let frame = tokio::task::spawn_blocking(move || {
+                        debug
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .stream_frame(
+                                pending.heartbeat,
+                                pending.serialization_ms,
+                                pending.snapshot_bytes,
+                                pending.transfer_bytes,
+                                completion.duration.as_secs_f64() * 1000.0,
+                                pending.cpu_started.zip(completion.process_cpu_ms).map(|(start, end)| (end - start).max(0.0)),
+                            )
+                            .and_then(|value| serde_json::to_string(&value).ok())
+                            .map(|value| Bytes::from(format!("event: debug\ndata: {value}\n\n")))
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    if let Some(frame) = frame {
+                        if let Some(tracker) = client
+                            .tracker
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .as_mut()
+                        {
+                            let _ = tracker.register(frame.len());
+                        }
+                        return Some((Ok::<_, Infallible>(Frame::data(frame)), client));
+                    }
+                }
+                _ => {
+                    if let Some(tracker) = client
+                        .tracker
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .as_mut()
+                    {
+                        tracker.abort();
+                    }
+                }
+            }
         }
-        let (frame, heartbeat, serialization_ms) = if client.first {
+        let (frame, heartbeat, serialization_ms, cpu_started) = if client.first {
             let began = std::time::Instant::now();
+            let cpu_started = crate::performance_debug::process_cpu_ms();
             client.first = false;
             let frame = client.snapshots.borrow_and_update().event(client.window);
-            (frame, false, began.elapsed().as_secs_f64() * 1000.0)
+            (frame, false, began.elapsed().as_secs_f64() * 1000.0, cpu_started)
         } else {
             let change = tokio::select! {
                 _ = client.shutdown.changed() => return None,
@@ -83,11 +157,12 @@ pub fn response(
             match change {
                 Ok(Ok(())) => {
                     let began = std::time::Instant::now();
+                    let cpu_started = crate::performance_debug::process_cpu_ms();
                     let frame = client.snapshots.borrow_and_update().event(client.window);
-                    (frame, false, began.elapsed().as_secs_f64() * 1000.0)
+                    (frame, false, began.elapsed().as_secs_f64() * 1000.0, cpu_started)
                 }
                 Ok(Err(_)) => return None,
-                Err(_) => (Bytes::from_static(b": heartbeat\n\n"), true, 0.0),
+                Err(_) => (Bytes::from_static(b": heartbeat\n\n"), true, 0.0, crate::performance_debug::process_cpu_ms()),
             }
         };
         let snapshot_bytes = if heartbeat {
@@ -98,18 +173,27 @@ pub fn response(
                 .position(|window| window == b"\ndata: ")
                 .map_or(0, |position| frame.len().saturating_sub(position + 7 + 2))
         };
-        let debug = Arc::clone(&client.debug);
-        client.pending_debug = tokio::task::spawn_blocking(move || {
-            debug
+        let receipt = {
+            let mut tracker = client
+                .tracker
                 .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .stream_frame(heartbeat, serialization_ms, snapshot_bytes)
-                .and_then(|value| serde_json::to_string(&value).ok())
-                .map(|value| Bytes::from(format!("event: debug\ndata: {value}\n\n")))
-        })
-        .await
-        .ok()
-        .flatten();
+                .unwrap_or_else(|error| error.into_inner());
+            match tracker.as_mut() {
+                Some(tracker) => tracker.register(frame.len()),
+                None => {
+                    let (_, receiver) = tokio::sync::oneshot::channel();
+                    receiver
+                }
+            }
+        };
+        client.pending = Some(Pending {
+            receipt,
+            heartbeat,
+            serialization_ms,
+            snapshot_bytes,
+            transfer_bytes: frame.len(),
+            cpu_started,
+        });
         Some((Ok::<_, Infallible>(Frame::data(frame)), client))
     });
     let mut response = Response::new(StreamBody::new(frames).boxed_unsync());

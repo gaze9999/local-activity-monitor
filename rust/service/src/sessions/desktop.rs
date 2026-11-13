@@ -1,10 +1,81 @@
-use std::io::{self, Read, Seek, SeekFrom};
+use sha2::{Digest, Sha256};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use super::{core_logs, file_identity, open_source, redirected};
 
 const READ_LIMIT: usize = 1024 * 1024;
+pub(super) const FILE_LIMIT: usize = 8;
 const INITIAL_TAIL: u64 = 256 * 1024;
+
+#[derive(Clone)]
+pub(crate) struct ObservedSource {
+    root: PathBuf,
+    path: PathBuf,
+    identity: (u64, u64),
+}
+
+impl ObservedSource {
+    pub(crate) fn diagnostic_body(&self, event: &serde_json::Value) -> Option<String> {
+        if event["source"] != "codex_desktop"
+            || self.path.file_name()?.to_str()? != event["file"].as_str()?
+        {
+            return None;
+        }
+        let offset = event["record_offset"].as_u64()?;
+        let hash = event["record_hash"].as_str().filter(|value| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })?;
+        let mut file = open_source(&self.root, &self.path).ok()?;
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file() || redirected(&metadata) || file_identity(&metadata) != self.identity
+        {
+            return None;
+        }
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        let mut raw = Vec::new();
+        BufReader::new((&mut file).take(65_537))
+            .read_until(b'\n', &mut raw)
+            .ok()?;
+        while raw.last() == Some(&b'\n') {
+            raw.pop();
+        }
+        let line = String::from_utf8_lossy(&raw);
+        if format!("{:x}", Sha256::digest(line.as_bytes())) != hash {
+            return None;
+        }
+        let parsed = lam_session_core::desktop_line(&line)?;
+        if parsed.module != event["module"].as_str()? {
+            return None;
+        }
+        let timestamp =
+            lam_history_store::parse_utc_stamp(parsed.timestamp).map(super::project::stamp)?;
+        if event["timestamp"].as_str()? != timestamp {
+            return None;
+        }
+        let after = file.metadata().ok()?;
+        let current = std::fs::symlink_metadata(&self.path).ok()?;
+        if redirected(&current)
+            || file_identity(&current) != self.identity
+            || file_identity(&after) != self.identity
+        {
+            return None;
+        }
+        Some(parsed.body.to_owned())
+    }
+    pub(crate) fn error_detail(
+        &self,
+        event: &serde_json::Value,
+        masked: bool,
+        full: bool,
+    ) -> Option<serde_json::Value> {
+        self.diagnostic_body(event)
+            .map(|body| super::details::diagnostic_text(&body, masked, full))
+    }
+}
 
 /// Resolve Desktop diagnostic roots for the explicitly selected Codex home.
 #[allow(dead_code)]
@@ -437,7 +508,7 @@ pub(super) fn discover(roots: &[DesktopRoot]) -> (Vec<(PathBuf, PathBuf)>, Optio
         }
     }
     found.sort_unstable_by(|a, b| b.cmp(a));
-    found.truncate(8);
+    found.truncate(FILE_LIMIT);
     (
         found
             .into_iter()
@@ -633,6 +704,10 @@ pub(super) struct DesktopCollector {
     cursor: usize,
     pending: Option<DesktopBatch>,
     bytes_read: u64,
+    observed_sources: Vec<ObservedSource>,
+    capture_errors: Option<bool>,
+    capture_sql: Option<bool>,
+    capture_api: Option<bool>,
     read_lines: u64,
     parsed_lines: u64,
     unsupported_lines: u64,
@@ -640,6 +715,7 @@ pub(super) struct DesktopCollector {
     pub logs: Vec<serde_json::Value>,
     pub errors: Vec<serde_json::Value>,
     pub api_events: Vec<serde_json::Value>,
+    pub sql: Vec<serde_json::Value>,
     pub source: serde_json::Value,
 }
 
@@ -653,15 +729,38 @@ pub(super) struct DesktopBatch {
     pub live_pending: bool,
     pub bytes_read: usize,
     pub source: serde_json::Value,
+    capture_errors: bool,
+    capture_sql: bool,
+    capture_api: bool,
 }
 
 #[allow(dead_code)]
 impl DesktopCollector {
+    pub(super) fn source_locations(&self) -> impl Iterator<Item = &Path> {
+        self.files.keys().map(PathBuf::as_path)
+    }
+
+    pub fn set_capture_errors(&mut self, enabled: bool) {
+        self.capture_errors = Some(enabled);
+    }
+    pub fn set_capture_sql(&mut self, enabled: bool) {
+        self.capture_sql = Some(enabled);
+    }
+    pub fn set_capture_api(&mut self, enabled: bool) {
+        self.capture_api = Some(enabled);
+    }
+    pub fn observed_sources(&self) -> Vec<ObservedSource> {
+        self.observed_sources.clone()
+    }
+    pub fn bytes_read(&self) -> u64 {
+        self.bytes_read
+    }
     pub fn reset_log_scan(&mut self) -> bool {
         if self.pending.is_some() {
             return false;
         }
         self.files.clear();
+        self.observed_sources.clear();
         self.cursor = 0;
         true
     }
@@ -682,6 +781,9 @@ impl DesktopCollector {
         }
         let mut batch = DesktopBatch {
             unavailable,
+            capture_errors: self.capture_errors.unwrap_or(true),
+            capture_sql: self.capture_sql.unwrap_or(true),
+            capture_api: self.capture_api.unwrap_or(true),
             ..DesktopBatch::default()
         };
         let count = selected.len();
@@ -753,6 +855,17 @@ impl DesktopCollector {
             batch.backfill_pending |= file.history_cursor > 0;
         }
         self.bytes_read = self.bytes_read.saturating_add(batch.bytes_read as u64);
+        self.observed_sources = selected
+            .iter()
+            .filter_map(|(root, path)| {
+                let identity = self.files.get(path)?.identity?;
+                Some(ObservedSource {
+                    root: root.clone(),
+                    path: path.clone(),
+                    identity,
+                })
+            })
+            .collect();
         let files: Vec<_> = selected
             .iter()
             .filter_map(|(_, path)| {
@@ -805,10 +918,10 @@ impl DesktopCollector {
         let mut sql = Vec::new();
         let mut errors = Vec::new();
         for event in batch.live.iter().chain(&batch.history) {
-            if let Some(value) = &event.sql {
+            if let Some(value) = event.sql.as_ref().filter(|_| batch.capture_sql) {
                 sql.push(value.clone());
             }
-            if let Some(severity) = event.severity {
+            if let Some(severity) = event.severity.filter(|_| batch.capture_errors) {
                 let mut value = event.log.clone();
                 value["severity"] = severity.into();
                 errors.push(value);
@@ -836,7 +949,16 @@ impl DesktopCollector {
             }
         }
         for event in batch.live.iter().chain(&batch.history) {
-            if let Some(severity) = event.severity {
+            if let Some(sql) = event.sql.as_ref().filter(|_| batch.capture_sql) {
+                if let Some(id) = lam_history_store::sql_event_id(sql) {
+                    if !self.sql.iter().any(|old| {
+                        lam_history_store::sql_event_id(old).as_deref() == Some(id.as_str())
+                    }) {
+                        self.sql.push(sql.clone());
+                    }
+                }
+            }
+            if let Some(severity) = event.severity.filter(|_| batch.capture_errors) {
                 if !self
                     .errors
                     .iter()
@@ -847,7 +969,7 @@ impl DesktopCollector {
                     self.errors.push(error);
                 }
             }
-            if let Some(api) = &event.api {
+            if let Some(api) = event.api.as_ref().filter(|_| batch.capture_api) {
                 if !self
                     .api_events
                     .iter()
@@ -863,6 +985,9 @@ impl DesktopCollector {
             });
             values.truncate(1000);
         }
+        self.sql
+            .sort_by(|a, b| b["timestamp"].as_str().cmp(&a["timestamp"].as_str()));
+        self.sql.truncate(500);
         Ok(Some(batch))
     }
 
@@ -875,7 +1000,33 @@ impl DesktopCollector {
 #[cfg(test)]
 mod tests {
     use super::DesktopFile;
+    use sha2::Digest;
     use std::io::Write;
+
+    #[test]
+    fn desktop_detail_rejects_changed_line_and_replaced_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let path = root.join("codex-desktop-fixture.log");
+        let line = "2026-11-12T01:02:03.123Z ERROR [codex] value1";
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        let identity = super::file_identity(&std::fs::symlink_metadata(&path).unwrap());
+        let source = super::ObservedSource {
+            root: root.clone(),
+            path: path.clone(),
+            identity,
+        };
+        let event = serde_json::json!({"source":"codex_desktop","file":"codex-desktop-fixture.log","record_offset":0,"record_hash":format!("{:x}", sha2::Sha256::digest(line.as_bytes())),"module":"codex","timestamp":"2026-11-12T01:02:03.123Z"});
+        assert_eq!(
+            source.error_detail(&event, true, false).unwrap()["text"],
+            "value1"
+        );
+        std::fs::write(&path, format!("{}\n", line.replace("value1", "value2"))).unwrap();
+        assert!(source.error_detail(&event, true, false).is_none());
+        std::fs::rename(&path, root.join("old.log")).unwrap();
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        assert!(source.error_detail(&event, true, false).is_none());
+    }
 
     fn source(path: &std::path::Path) -> super::DesktopRoot {
         super::DesktopRoot {
@@ -975,6 +1126,24 @@ mod tests {
             1
         );
         assert!(history.iter().all(|event| event.severity.is_none()));
+    }
+
+    #[test]
+    fn disabled_model_api_batch_does_not_capture_events_after_toggle() {
+        let folder = tempfile::tempdir().unwrap();
+        let logs = folder.path().join("logs");
+        std::fs::create_dir(&logs).unwrap();
+        std::fs::write(logs.join("codex-desktop-fixture.log"), "2026-11-12T00:00:01Z ERROR [codex_otel.log_only] event.name=\"codex.api_request\" status_code=200\n").unwrap();
+        let now = lam_history_store::parse_utc_stamp("2026-11-12T01:00:00Z").unwrap();
+        let mut collector = super::DesktopCollector::default();
+        collector.set_capture_api(false);
+        collector.refresh(&[source(&logs)], now);
+        collector.set_capture_api(true);
+        let mut checkpoints =
+            super::super::checkpoint::Checkpoints::new(folder.path().join("monitoring"), true);
+        collector.commit(&mut checkpoints, now).unwrap().unwrap();
+        assert!(collector.api_events.is_empty());
+        assert_eq!(collector.errors.len(), 1);
     }
 
     #[test]

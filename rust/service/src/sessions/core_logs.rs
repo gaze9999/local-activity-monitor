@@ -14,7 +14,7 @@ use std::time::{Duration as StdDuration, SystemTime};
 use super::{file_identity, model_api, project::stamp, redirected};
 
 const PAGE: usize = 2000;
-const LOG_LIMIT: usize = 1000;
+pub(super) const LOG_LIMIT: usize = 1000;
 const SQL_LIMIT: usize = 500;
 const HOME_LIMIT: usize = 10_000;
 const SIDECARS: [&str; 2] = ["-wal", "-journal"];
@@ -149,6 +149,73 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
 }
 
 impl Source {
+    pub(crate) fn diagnostic_body(&self, event: &Value, full: bool) -> Option<String> {
+        if event["source"] != "codex_core"
+            || self.path.file_name()?.to_str()? != event["file"].as_str()?
+        {
+            return None;
+        }
+        let id = event["record_id"].as_i64()?;
+        let expected_module = event["module"].as_str()?;
+        let expected_time = event["timestamp"].as_str()?;
+        let mut db = self.open().ok()?;
+        let tx = db.transaction().ok()?;
+        let ordinary = tx
+            .query_row("PRAGMA table_list('logs')", [], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(2)?))
+            })
+            .optional()
+            .ok()?
+            .is_some_and(|(schema, kind)| schema == "main" && kind == "table");
+        if !ordinary {
+            return None;
+        }
+        let mut statement = tx.prepare("PRAGMA table_info(logs)").ok()?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .ok()?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()
+            .ok()?;
+        drop(statement);
+        if !["id", "ts", "target"]
+            .iter()
+            .all(|name| columns.contains(*name))
+        {
+            return None;
+        }
+        let body = match (
+            columns.contains("feedback_log_body"),
+            columns.contains("message"),
+        ) {
+            (true, true) => "coalesce(nullif(feedback_log_body,''),nullif(message,''))",
+            (true, false) => "feedback_log_body",
+            (false, true) => "message",
+            _ => return None,
+        };
+        let query = format!("SELECT ts,target,substr({body},1,?1) FROM logs WHERE id=?2");
+        let mut statement = tx.prepare(&query).ok()?;
+        let limit = if full { 1_048_577_i64 } else { 65_537_i64 };
+        let mut rows = statement.query(rusqlite::params![limit, id]).ok()?;
+        let row = rows.next().ok()??;
+        if timestamp(row.get_ref(0).ok()?).map(stamp).as_deref() != Some(expected_time)
+            || row.get_ref(1).ok()?.as_str().ok()? != expected_module
+        {
+            return None;
+        }
+        let body = row.get_ref(2).ok()?.as_str().ok()?;
+        let result = body.to_owned();
+        let after = fs::symlink_metadata(&self.path).ok()?;
+        if redirected(&after) || file_identity(&after) != self.identity {
+            return None;
+        }
+        Some(result)
+    }
+
+    pub(crate) fn error_detail(&self, event: &Value, masked: bool, full: bool) -> Option<Value> {
+        self.diagnostic_body(event, full)
+            .map(|body| super::details::diagnostic_text(&body, masked, full))
+    }
+
     pub fn watches(&self) -> BTreeMap<PathBuf, (u64, u64)> {
         std::iter::once(self.path.clone())
             .chain(SIDECARS.iter().map(|suffix| sidecar(&self.path, suffix)))
@@ -214,6 +281,9 @@ pub struct Core {
     parsed: u64,
     unsupported: u64,
     pub trimmed: u64,
+    pub capture_errors: bool,
+    pub capture_sql: bool,
+    pub capture_api: bool,
     pub logs: VecDeque<Value>,
     pub errors: VecDeque<Value>,
     pub api_events: VecDeque<Value>,
@@ -225,6 +295,13 @@ pub struct Core {
 }
 
 impl Core {
+    pub(super) fn source_location(&self) -> Option<&Path> {
+        self.source.as_ref().map(|source| source.path.as_path())
+    }
+
+    pub fn observed_source(&self) -> Option<Source> {
+        self.source.clone()
+    }
     pub fn new(enabled: bool) -> Self {
         Self {
             source: None,
@@ -238,6 +315,9 @@ impl Core {
             parsed: 0,
             unsupported: 0,
             trimmed: 0,
+            capture_errors: true,
+            capture_sql: true,
+            capture_api: true,
             logs: VecDeque::new(),
             errors: VecDeque::new(),
             api_events: VecDeque::new(),
@@ -337,11 +417,13 @@ impl Core {
             }
             push(&mut self.logs, value, LOG_LIMIT);
         }
-        for value in batch.errors {
-            self.pending_errors.push(value.clone());
-            push(&mut self.errors, value, LOG_LIMIT);
+        if self.capture_errors {
+            for value in batch.errors {
+                self.pending_errors.push(value.clone());
+                push(&mut self.errors, value, LOG_LIMIT);
+            }
         }
-        for value in batch.api_events {
+        for value in batch.api_events.into_iter().filter(|_| self.capture_api) {
             if !self
                 .api_events
                 .iter()
@@ -359,9 +441,11 @@ impl Core {
                 }
             }
         }
-        for value in batch.sql {
-            push(&mut self.sql, value.clone(), SQL_LIMIT);
-            self.pending_sql.push(value);
+        if self.capture_sql {
+            for value in batch.sql {
+                push(&mut self.sql, value.clone(), SQL_LIMIT);
+                self.pending_sql.push(value);
+            }
         }
         if changed {
             self.checked_at = Some(stamp(now));
@@ -436,9 +520,19 @@ impl Core {
         } else {
             "NULL"
         };
+        let sql_targets = if self.capture_sql {
+            " OR lower(target) LIKE '%sql%' OR lower(target) LIKE '%database%' OR lower(target) LIKE '%state_db%'"
+        } else {
+            ""
+        };
+        let api_targets = if self.capture_api {
+            " OR target LIKE 'codex_api::%' OR target='codex_otel.log_only' OR target='codex_core::responses_retry'"
+        } else {
+            ""
+        };
         let fields = format!("id,ts,level,target,{thread},CASE WHEN upper(level) IN ('ERROR','FATAL','CRITICAL','WARN','WARNING')
-            OR lower(target) LIKE '%sql%' OR lower(target) LIKE '%database%' OR lower(target) LIKE '%state_db%'
-            OR target LIKE 'codex_api::%' OR target='codex_otel.log_only' OR target='codex_core::responses_retry'
+            {sql_targets}
+            {api_targets}
             THEN substr({body},1,8192) END");
         let mut batch = Batch {
             cursor,
@@ -935,6 +1029,30 @@ pub(super) fn details(body: &str) -> Map<String, Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn core_detail_rejects_changed_module_and_replaced_database() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let path = root.join("logs_fixture.sqlite");
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE logs(id INTEGER PRIMARY KEY,ts REAL,level TEXT,target TEXT,message TEXT); INSERT INTO logs VALUES(1,1700000000.0,'WARN','codex_core','Observed');").unwrap();
+        let source = super::discover(&root).unwrap().unwrap();
+        assert!(source.open().is_ok());
+        let event = serde_json::json!({"source":"codex_core","file":"logs_fixture.sqlite","record_id":1,"module":"codex_core","timestamp":"2023-11-14T22:13:20.000Z"});
+        assert_eq!(
+            source.error_detail(&event, true, false).unwrap()["text"],
+            "Observed"
+        );
+        db.execute("UPDATE logs SET target='different' WHERE id=1", [])
+            .unwrap();
+        assert!(source.error_detail(&event, true, false).is_none());
+        drop(db);
+        std::fs::rename(&path, root.join("old.sqlite")).unwrap();
+        let replacement = rusqlite::Connection::open(&path).unwrap();
+        replacement.execute_batch("CREATE TABLE logs(id INTEGER PRIMARY KEY,ts REAL,level TEXT,target TEXT,message TEXT); INSERT INTO logs VALUES(1,1700000000.0,'WARN','codex_core','Other');").unwrap();
+        assert!(source.error_detail(&event, true, false).is_none());
+    }
+
     #[test]
     fn desktop_projection_excludes_raw_body_and_credentials() {
         let line = "2026-11-12T01:02:03.123Z WARN [codex.mcp] stream disconnected request_id=sk-PRIVATE trace_id=safe-id secret=PRIVATE";

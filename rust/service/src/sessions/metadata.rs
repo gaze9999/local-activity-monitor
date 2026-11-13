@@ -53,15 +53,16 @@ fn fields(values: &Value) -> Map<String, Value> {
         {
             value = serde_json::from_str(text).unwrap_or(Value::Null);
         }
-        if let Some(value) = value
-            .as_object()
-            .and_then(|object| {
-                object.get(if key == "sandbox_mode" {
-                    "type"
-                } else {
-                    "mode"
-                })
+        let selected = if let Some(object) = value.as_object() {
+            object.get(if key == "sandbox_mode" {
+                "type"
+            } else {
+                "mode"
             })
+        } else {
+            Some(&value)
+        };
+        if let Some(value) = selected
             .and_then(Value::as_str)
             .filter(|value| MODE.is_match(value))
         {
@@ -221,4 +222,26 @@ pub(super) fn valid_checkpoint(values: &std::collections::BTreeMap<String, Value
         "context_window" => value.as_i64().is_some_and(|number| number > 0),
         _ => false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execution_preserves_plain_and_structured_modes_without_private_fields() {
+        let plain =
+            execution(&json!({"sandbox_policy":"workspace-write","collaboration_mode":"default"}));
+        assert_eq!(plain["sandbox_mode"], "workspace-write");
+        assert_eq!(plain["collaboration_mode"], "default");
+        let object = execution(
+            &json!({"sandbox_policy":{"type":"read-only","roots":["PRIVATE"]},"collaboration_mode":"{\"mode\":\"plan\",\"instructions\":\"PRIVATE\"}"}),
+        );
+        assert_eq!(object["sandbox_mode"], "read-only");
+        assert_eq!(object["collaboration_mode"], "plan");
+        assert!(!object.to_string().contains("PRIVATE"));
+        let invalid =
+            execution(&json!({"sandbox_policy":"{broken","collaboration_mode":"private value"}));
+        assert_eq!(invalid, json!({}));
+    }
 }

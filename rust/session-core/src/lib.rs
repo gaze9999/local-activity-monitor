@@ -1,14 +1,25 @@
 mod commands;
 mod database_path;
+mod files;
 mod invocations;
+#[cfg(feature = "sqlite-python")]
+mod python_literal;
+mod skills;
 #[cfg(feature = "sqlite-python")]
 mod sqlite;
 
-pub use commands::CommandMetadata;
+pub use commands::{matching_command_parts, CommandMetadata};
 pub use database_path::database_path;
-pub use invocations::{nested_invocations, Invocation, Nested, INVOCATION_LIMIT};
+pub use files::{file_operations, valid_file_operation};
+pub use invocations::{
+    invocation_expressions, nested_invocations, parse_data_literal, Invocation, Nested,
+    INVOCATION_LIMIT,
+};
 #[cfg(feature = "sqlite-python")]
-pub use sqlite::{project_diagnostic, SqlDiagnostic, SqlMetadata};
+pub use python_literal::{parse_python_literal, python_module_docstring};
+pub use skills::{skill_read_paths, skill_reads, SkillRead};
+#[cfg(feature = "sqlite-python")]
+pub use sqlite::{project_diagnostic, recognized_sql, sqlite_details, SqlDiagnostic, SqlMetadata};
 
 use std::ops::Range;
 

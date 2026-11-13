@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 const LIMIT: u64 = 64 * 1024;
 const RECORDS: usize = 1000;
+const EVENTS: usize = 200;
 
 pub(crate) fn safe(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
@@ -116,6 +117,7 @@ fn project(value: Value) -> Option<Value> {
 pub struct Journal {
     path: PathBuf,
     logs: VecDeque<Value>,
+    events: VecDeque<Value>,
     health: &'static str,
     error_type: Option<&'static str>,
     checked_at: Option<String>,
@@ -131,6 +133,7 @@ impl Journal {
         let mut journal = Self {
             path: directory.join("local-activity-monitor.jsonl"),
             logs: VecDeque::new(),
+            events: VecDeque::new(),
             health: "waiting",
             error_type: None,
             checked_at: None,
@@ -173,6 +176,16 @@ impl Journal {
         }
         self.logs.push_back(event);
     }
+    fn push_live(&mut self, event: Value) {
+        if self.events.len() == EVENTS {
+            self.events.pop_front();
+        }
+        self.events.push_back(event.clone());
+        self.push(event);
+    }
+    pub fn events(&self) -> Vec<Value> {
+        self.events.iter().cloned().collect()
+    }
     pub fn enabled(&self) -> bool {
         self.enabled
     }
@@ -211,7 +224,7 @@ impl Journal {
             .to_rfc3339_opts(SecondsFormat::Millis, true);
         let event = json!({"timestamp":now,"kind":kind,"error_type":null});
         self.last_event = Some((kind.to_owned(), None));
-        self.push(event.clone());
+        self.push_live(event.clone());
         if self.enabled {
             let result = self.append(&event);
             self.update_health(result);
@@ -255,7 +268,7 @@ impl Journal {
         }
         self.client_reports.push_back((instant, signature));
         self.last_event = Some(("frontend_error".into(), None));
-        self.push(event.clone());
+        self.push_live(event.clone());
         if self.enabled {
             let result = self.append(&event);
             self.update_health(result);
@@ -274,7 +287,7 @@ impl Journal {
             .to_rfc3339_opts(SecondsFormat::Millis, true);
         let event = json!({"timestamp":timestamp,"kind":"http_response_error","error_type":null,"http_status":status});
         self.last_event = Some(("http_response_error".into(), Some(status)));
-        self.push(event.clone());
+        self.push_live(event.clone());
         if self.enabled {
             let result = self.append(&event);
             self.update_health(result);
@@ -362,6 +375,26 @@ impl Journal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_events_are_bounded_and_exclude_reloaded_log_history() {
+        let home = tempfile::tempdir().unwrap();
+        let mut first = Journal::new(home.path());
+        first.event("started");
+        drop(first);
+        let mut restarted = Journal::new(home.path());
+        assert!(restarted.events().is_empty());
+        assert_eq!(restarted.entries().len(), 1);
+        restarted.set_enabled(false);
+        for index in 0..201 {
+            assert!(restarted.http_error(400 + index % 200));
+        }
+        let events = restarted.events();
+        assert_eq!(events.len(), 200);
+        assert_eq!(events[0]["http_status"], 401);
+        assert_eq!(events[199]["http_status"], 400);
+        assert!(restarted.entries().is_empty());
+    }
 
     #[test]
     fn frontend_reports_are_limited_to_twenty_distinct_entries() {

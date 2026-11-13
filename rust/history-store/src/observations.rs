@@ -24,6 +24,8 @@ pub struct ObservationWrite {
 pub struct ObservationBatch<'a> {
     pub rows: &'a [ObservationWrite],
     pub errors: &'a [ObservationWrite],
+    pub skills: &'a [ObservationWrite],
+    pub lifecycle: &'a [ObservationWrite],
     pub now: DateTime<Utc>,
 }
 
@@ -94,25 +96,38 @@ pub(crate) fn persist<'a>(
         let Some(timestamp) = text(event, "timestamp") else {
             continue;
         };
-        if parse_utc_stamp(timestamp).is_none_or(|time| time > ceiling) {
-            continue;
-        }
+        let Some(event_time) = parse_utc_stamp(timestamp) else { continue };
         let Some(stamp) = normalize_utc_stamp(timestamp) else {
             continue;
         };
         if cutoff.as_ref().is_some_and(|cutoff| stamp < *cutoff) {
             continue;
         }
-        let Some(projected) = activity_row(section, event, timestamp) else {
+        let Some(mut projected) = activity_row(section, event, timestamp) else {
             continue;
         };
         let key = projected_key(section, &projected)?;
+        let (_, name) = section.names();
+        let existing = tx.query_row("SELECT payload FROM history_items WHERE namespace='activity_pending' AND section=? AND item_key=?", params![name, key], |row| row.get::<_, String>(0)).optional()?;
+        if event_time > ceiling {
+            let mut combined = existing.map(|value| serde_json::from_str::<Object>(&value).map_err(|_| StoreError::InvalidLegacy)).transpose()?.unwrap_or_default();
+            merge_event(&mut combined, projected);
+            let mut payload = String::new();
+            encode_identity(&Value::Object(combined), &mut payload)?;
+            tx.execute("INSERT INTO history_items(namespace,section,item_key,ordinal,event_time,payload) VALUES('activity_pending',?,?,0,?,?) ON CONFLICT(namespace,section,item_key) DO UPDATE SET event_time=excluded.event_time,payload=excluded.payload", params![name, key, stamp, payload])?;
+            continue;
+        }
+        if let Some(existing) = existing {
+            let mut previous = serde_json::from_str::<Object>(&existing).map_err(|_| StoreError::InvalidLegacy)?;
+            merge_event(&mut previous, projected);
+            projected = previous;
+        }
+        tx.execute("DELETE FROM history_items WHERE namespace='activity_pending' AND section=? AND item_key=?", params![name, key])?;
         if let Some(&index) = indexes.get(&key) {
             let (_, _, _, item): &mut (Section, String, String, Object) = &mut rows[index];
             merge_event(item, projected);
             continue;
         }
-        let (_, name) = section.names();
         let stored = previous
             .query_row(params![name, key], |row| row.get::<_, String>(0))
             .optional()?;
@@ -302,6 +317,7 @@ pub fn combine_observations(history: &[Value], recent: impl Iterator<Item = Valu
 
 #[derive(Clone)]
 pub struct ObservationView {
+    pub retention_days: i64,
     pub events: Arc<Vec<Value>>,
     pub sql: [Arc<Aggregate>; 4],
     pub mcp: [Arc<Aggregate>; 4],
@@ -311,6 +327,7 @@ impl Default for ObservationView {
     fn default() -> Self {
         let empty = Arc::new(Aggregate::default());
         Self {
+            retention_days: 90,
             events: Arc::new(Vec::new()),
             sql: std::array::from_fn(|_| Arc::clone(&empty)),
             mcp: std::array::from_fn(|_| Arc::clone(&empty)),
@@ -331,9 +348,44 @@ pub struct ObservationStore {
     recent: Option<Cached<Vec<Value>>>,
     sql: [Option<Cached<Aggregate>>; 4],
     mcp: [Option<Cached<Aggregate>>; 4],
+    excluded_sources: Vec<String>,
 }
 
 impl ObservationStore {
+    pub fn next_pending_activity(&self) -> Result<Option<DateTime<Utc>>> {
+        check_paths(&self.directory)?;
+        let stamp: Option<String> = self.store.db.query_row("SELECT MIN(event_time) FROM history_items WHERE namespace='activity_pending'", [], |row| row.get(0))?;
+        Ok(stamp.as_deref().and_then(parse_utc_stamp).map(|time| time - Duration::minutes(1)))
+    }
+
+    pub fn process_pending_activity(&mut self, now: DateTime<Utc>) -> Result<bool> {
+        check_paths(&self.directory)?;
+        let tx = self.store.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let ceiling = (now + Duration::minutes(1)).to_rfc3339_opts(SecondsFormat::Millis, true);
+        let mut query = tx.prepare("SELECT section,item_key,payload FROM history_items WHERE namespace='activity_pending' AND event_time<=? ORDER BY event_time LIMIT 500")?;
+        let rows = query.query_map([ceiling], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(query);
+        let mut events = Vec::with_capacity(rows.len());
+        let mut ready = Vec::with_capacity(rows.len());
+        for (section, key, payload) in &rows {
+            let event = serde_json::from_str::<Value>(payload).map_err(|_| StoreError::InvalidLegacy)?;
+            let timestamp = event.get("timestamp").and_then(Value::as_str).and_then(parse_utc_stamp).ok_or(StoreError::InvalidLegacy)?;
+            if timestamp <= now + Duration::minutes(1) {
+                events.push(event);
+                ready.push((section, key));
+            }
+        }
+        let changed = persist(&tx, events.iter(), now)?;
+        for (section, key) in ready { tx.execute("DELETE FROM history_items WHERE namespace='activity_pending' AND section=? AND item_key=?", params![section,key])?; }
+        tx.commit()?;
+        if changed { self.generation = None; }
+        Ok(changed)
+    }
+
+    pub fn skill_preview(&self) -> Result<Vec<Value>> {
+        check_paths(&self.directory)?;
+        self.store.skill_preview()
+    }
     pub fn open(directory: &Path, access: Access) -> Result<Option<Self>> {
         Ok(Store::open(directory, access)?.map(|store| Self {
             directory: directory.to_path_buf(),
@@ -342,6 +394,7 @@ impl ObservationStore {
             recent: None,
             sql: Default::default(),
             mcp: Default::default(),
+            excluded_sources: Vec::new(),
         }))
     }
 
@@ -396,6 +449,27 @@ impl ObservationStore {
         now: DateTime<Utc>,
         cutoffs: &[Option<DateTime<Utc>>; 4],
     ) -> Result<ObservationView> {
+        self.read_filtered(now, cutoffs, &[])
+    }
+
+    /// Keep full recent history while excluding selected sources from MCP aggregates.
+    pub fn read_filtered(
+        &mut self,
+        now: DateTime<Utc>,
+        cutoffs: &[Option<DateTime<Utc>>; 4],
+        excluded_sources: &[&str],
+    ) -> Result<ObservationView> {
+        Filter::new(Section::Mcp, None, excluded_sources)?;
+        let mut normalized: Vec<String> = excluded_sources
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect();
+        normalized.sort();
+        normalized.dedup();
+        if self.excluded_sources != normalized {
+            self.mcp = Default::default();
+            self.excluded_sources = normalized;
+        }
         check_paths(&self.directory)?;
         let previous_generation = self.generation.take();
         let before = self
@@ -404,7 +478,8 @@ impl ObservationStore {
             .pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))?;
         let tx = self.store.db.transaction()?;
         // Retention opens the read snapshot before comparing connection-local revisions.
-        let recent_boundary = boundary(retention(&tx)?, now);
+        let retention_days = retention(&tx)?;
+        let recent_boundary = boundary(retention_days, now);
         let generation = tx.pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))?;
         if previous_generation != Some(generation) || before != generation {
             self.recent = None;
@@ -414,6 +489,7 @@ impl ObservationStore {
         let recent = cached(&tx, &mut self.recent, recent_boundary, None, recent)?;
         let mut view = ObservationView {
             events: recent,
+            retention_days,
             ..ObservationView::default()
         };
         for (index, cutoff) in cutoffs.iter().enumerate() {
@@ -430,7 +506,12 @@ impl ObservationStore {
                 &mut self.mcp[index],
                 cutoff,
                 Some(Section::Mcp),
-                |db, cutoff| Ok(aggregate(db, &Filter::new(Section::Mcp, cutoff, &[])?)?),
+                |db, cutoff| {
+                    Ok(aggregate(
+                        db,
+                        &Filter::new(Section::Mcp, cutoff, excluded_sources)?,
+                    )?)
+                },
             )?;
         }
         // An external commit during the read cannot invalidate the snapshot,

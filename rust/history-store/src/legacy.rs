@@ -648,7 +648,7 @@ fn thread_stamp(value: &str) -> bool {
     value.chars().count() <= 40 && parse_utc_stamp(value).is_some()
 }
 
-fn thread_entry(key: &str, data: &Object) -> Option<Object> {
+pub(crate) fn thread_entry(key: &str, data: &Object) -> Option<Object> {
     let source = key.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
     if !identifier(source, 180, b"_.-") {
         return None;
@@ -670,7 +670,7 @@ fn thread_entry(key: &str, data: &Object) -> Option<Object> {
     ]))
 }
 
-fn skill_entry(data: &Object) -> Option<Object> {
+pub(crate) fn skill_entry(data: &Object) -> Option<Object> {
     let thread = text(data, "thread_id").filter(|value| thread_identity(value))?;
     let call = text(data, "call_id").filter(|value| identifier(value, 160, b"_.:-"))?;
     let skill = text(data, "skill").filter(|value| {

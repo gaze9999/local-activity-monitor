@@ -799,6 +799,57 @@ static EXIT_CODE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^Process exited with code (-?[0-9]{1,6})\s*$").expect("exit code pattern")
 });
 
+/// Extract only bounded byte counts from one structured tool result.
+pub fn file_byte_counts(output: &Value) -> (Option<u64>, Option<u64>) {
+    fn one_list(items: &[Value]) -> Option<Object> {
+        if items.len() > 100 {
+            return None;
+        }
+        let mut found = items
+            .iter()
+            .filter_map(Value::as_object)
+            .filter(|block| matches!(text(block, "type"), Some("input_text" | "text")))
+            .filter_map(|block| {
+                let value = block.get("text")?;
+                let object = match value {
+                    Value::String(text) if within_output_limit(text) => {
+                        serde_json::from_str::<Object>(text).ok()?
+                    }
+                    Value::Object(object) => object.clone(),
+                    _ => return None,
+                };
+                text(&object, "status").is_some().then_some(object)
+            });
+        let result = found.next()?;
+        found.next().is_none().then_some(result)
+    }
+    let parsed;
+    let value = if let Value::String(raw) = output {
+        if !within_output_limit(raw) {
+            return (None, None);
+        }
+        parsed = match serde_json::from_str::<Value>(raw) {
+            Ok(value) => value,
+            Err(_) => return (None, None),
+        };
+        &parsed
+    } else {
+        output
+    };
+    let data = match value {
+        Value::Object(object) => Some(decoded(object)),
+        Value::Array(items) => one_list(items),
+        _ => None,
+    };
+    let count = |key: &str| {
+        data.as_ref()
+            .and_then(|data| data.get(key))
+            .and_then(Value::as_u64)
+            .filter(|value| *value <= (1_u64 << 53))
+    };
+    (count("bytes_read"), count("bytes_written"))
+}
+
 /// Whether the containing tool reported failure. No raw error text is retained.
 pub fn output_failed(output: &Value) -> bool {
     output_error(output, |_| Object::new()).is_some()

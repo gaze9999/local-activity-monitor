@@ -15,6 +15,20 @@ pub struct Nested<'a> {
     pub truncated: bool,
 }
 
+/// Parse a standalone JSON-like literal without evaluating code.
+pub fn parse_data_literal(source: &str) -> Option<Value> {
+    if source.len() > crate::LINE_LIMIT {
+        return None;
+    }
+    let mut parser = Literal::new(source);
+    let value = parser.value(0)?;
+    parser.space();
+    if !parser.rest().is_empty() || !(value.is_object() || value.is_array()) {
+        return None;
+    }
+    Some(value)
+}
+
 pub fn nested_invocations(source: &str) -> Nested<'_> {
     let mut end = source.len().min(crate::LINE_LIMIT);
     while !source.is_char_boundary(end) {
@@ -57,6 +71,56 @@ pub fn nested_invocations(source: &str) -> Nested<'_> {
         }
     }
     Nested { calls, truncated }
+}
+
+/// Extract recorded argument expressions without evaluating them.
+pub fn invocation_expressions(source: &str) -> Vec<(&str, &str)> {
+    let mut end = source.len().min(crate::LINE_LIMIT);
+    while !source.is_char_boundary(end) {
+        end -= 1;
+    }
+    let source = &source[..end];
+    let mut expressions = Vec::new();
+    let mut index = 0;
+    while index < source.len() && expressions.len() < INVOCATION_LIMIT {
+        let remaining = &source[index..];
+        if let Some(width) = comment_width(remaining) {
+            index += width;
+        } else if matches!(remaining.as_bytes()[0], b'"' | b'\'' | b'`') {
+            index += quoted_width(remaining);
+        } else if let Some((tool, start)) = tool_at(source, index) {
+            let mut cursor = start;
+            let mut depth = 1_usize;
+            while cursor < source.len() && depth > 0 {
+                let tail = &source[cursor..];
+                if let Some(width) = comment_width(tail) {
+                    cursor += width;
+                    continue;
+                }
+                if matches!(tail.as_bytes()[0], b'"' | b'\'' | b'`') {
+                    cursor += quoted_width(tail);
+                    continue;
+                }
+                let ch = tail.chars().next().expect("nonempty source");
+                if ch == '(' {
+                    depth += 1;
+                } else if ch == ')' {
+                    depth -= 1;
+                }
+                cursor += ch.len_utf8();
+            }
+            let expression_end = if depth == 0 { cursor - 1 } else { cursor };
+            expressions.push((tool, &source[start..expression_end]));
+            index = start;
+        } else {
+            index += remaining
+                .chars()
+                .next()
+                .expect("nonempty source")
+                .len_utf8();
+        }
+    }
+    expressions
 }
 
 fn comment_width(source: &str) -> Option<usize> {
@@ -324,6 +388,19 @@ impl<'a> Literal<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_expressions_preserve_nested_calls_and_ignore_comments() {
+        let source =
+            "// tools.fake(0)\nawait tools.mcp__a__run(make(')', /* ) */ tools.mcp__b__get(x)));";
+        let found = invocation_expressions(source);
+        assert_eq!(found.len(), 2);
+        assert_eq!(
+            found[0],
+            ("mcp__a__run", "make(')', /* ) */ tools.mcp__b__get(x))")
+        );
+        assert_eq!(found[1], ("mcp__b__get", "x"));
+    }
 
     #[test]
     fn skips_comments_and_strings_and_reads_literal_objects() {

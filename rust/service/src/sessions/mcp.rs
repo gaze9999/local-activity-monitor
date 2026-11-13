@@ -2,8 +2,11 @@ use chrono::{DateTime, Utc};
 use lam_history_store::{mcp, parse_utc_stamp};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
+use std::path::Path;
 
-const EVENT_LIMIT: usize = 1000;
+pub(super) const EVENT_LIMIT: usize = 1000;
+pub(super) const TOOL_LIMIT: usize = 30;
 type RecordingState<'a> = (Option<&'a str>, Value);
 const ERROR_STATES: [&str; 6] = [
     "error",
@@ -67,6 +70,156 @@ pub fn summary(events: &[Value], cutoff: Option<DateTime<Utc>>, health: &str) ->
     })
 }
 
+pub fn disabled_server(server: &str) -> Value {
+    let mut row = server_summary(server, &[]).0;
+    row["enabled"] = false.into();
+    row["connection"]["state"] = json!("paused");
+    row
+}
+
+/// Read only configured source identities and bounded descriptions.
+pub fn discover(home: &Path) -> BTreeMap<String, Option<super::source_introduction::Description>> {
+    let mut found = BTreeMap::new();
+    let path = home.join("config.toml");
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return found;
+    };
+    if file
+        .metadata()
+        .ok()
+        .is_none_or(|meta| !meta.is_file() || meta.len() > 1024 * 1024)
+    {
+        return found;
+    }
+    let mut bytes = Vec::new();
+    if (&mut file)
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() > 1024 * 1024
+    {
+        return found;
+    }
+    let Ok(content) = std::str::from_utf8(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes))
+    else {
+        return found;
+    };
+    let Ok(config) = content.parse::<toml::Value>() else {
+        return found;
+    };
+    if let Some(servers) = config.get("mcp_servers").and_then(toml::Value::as_table) {
+        for (index, (name, value)) in servers.iter().enumerate() {
+            let Some(table) = value.as_table() else {
+                continue;
+            };
+            if !(1..=80).contains(&name.len())
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+                || table
+                    .get("enabled")
+                    .is_some_and(|enabled| enabled.as_bool() != Some(true))
+            {
+                continue;
+            }
+            let description = (index < 64)
+                .then(|| table.get("description").and_then(toml::Value::as_str))
+                .flatten()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(|text| super::source_introduction::Description {
+                    text: super::details::redact_description(
+                        &text.chars().take(400).collect::<String>(),
+                    ),
+                    source: "config".into(),
+                    path: None,
+                })
+                .or_else(|| {
+                    (index < 64)
+                        .then(|| super::source_introduction::introduction(table))
+                        .flatten()
+                });
+            found.insert(name.clone(), description);
+        }
+    }
+    if let Some(plugins) = config.get("plugins").and_then(toml::Value::as_table) {
+        for (name, value) in plugins {
+            let Some(table) = value.as_table() else {
+                continue;
+            };
+            if table
+                .get("enabled")
+                .is_some_and(|enabled| enabled.as_bool() != Some(true))
+            {
+                continue;
+            }
+            let source = match name.split('@').next().unwrap_or("") {
+                "codex-app-tools" => "codex_app",
+                "code-review" => "code_review",
+                "codex-security" => "codex_security",
+                "unified-computer-use" => "cua_repl",
+                _ => continue,
+            };
+            found.entry(source.into()).or_insert(None);
+        }
+    }
+    found
+}
+
+pub fn configured_server(server: &str, enabled: bool) -> Value {
+    let mut row = server_summary(server, &[]).0;
+    row["origin"] = "configured".into();
+    row["enabled"] = enabled.into();
+    if !enabled {
+        row["connection"]["state"] = json!("paused");
+    }
+    row
+}
+
+pub fn apply_diagnostics(summary: &mut Value, diagnostics: &[Value]) {
+    let mut failures = BTreeMap::<&str, &Value>::new();
+    for event in diagnostics {
+        let (Some(server), Some(code)) = (field(event, "server"), field(event, "code")) else {
+            continue;
+        };
+        if ![
+            "network_unavailable",
+            "transport_error",
+            "connection_closed",
+            "connection_refused",
+            "authentication_failed",
+        ]
+        .contains(&code)
+        {
+            continue;
+        }
+        let timestamp = field(event, "timestamp").unwrap_or("");
+        if failures
+            .get(server)
+            .is_none_or(|previous| timestamp > field(previous, "timestamp").unwrap_or(""))
+        {
+            failures.insert(server, event);
+        }
+    }
+    for row in summary["servers"].as_array_mut().into_iter().flatten() {
+        let Some(server) = row["server"].as_str() else {
+            continue;
+        };
+        let Some(failure) = failures.get(server) else {
+            continue;
+        };
+        let timestamp = field(failure, "timestamp").unwrap_or("");
+        let prior = field(&row["connection"], "observed_at").unwrap_or("");
+        if timestamp > prior {
+            row["connection"]["observed_at"] = json!(timestamp);
+            if row["enabled"] == true {
+                row["connection"]["state"] = json!("error");
+                row["connection"]["error_code"] = failure["code"].clone();
+            }
+        }
+    }
+}
+
 fn server_summary<'a>(server: &str, events: &[&'a Value]) -> (Value, Option<RecordingState<'a>>) {
     let direct: Vec<_> = events
         .iter()
@@ -126,7 +279,7 @@ fn server_summary<'a>(server: &str, events: &[&'a Value]) -> (Value, Option<Reco
             "calls":direct.len(), "recognized":events.len()-direct.len(), "returned":returned.len(),
             "known_status":statuses.len(), "errors":statuses.iter().filter(|status| ERROR_STATES.contains(status)).count(),
             "average_ms":average, "p95_ms":p95, "p99_ms":p99, "last_at":events.iter().filter_map(|event| last(event)).max(),
-            "latest_metrics":metrics, "tools":tools.into_iter().take(30).collect::<Vec<_>>(),
+            "latest_metrics":metrics, "tools":tools.into_iter().take(TOOL_LIMIT).collect::<Vec<_>>(),
             "connection":{"state":connection,"observed_at":if connection == "pending" {pending_at} else {last_response},
                           "last_response_at":last_response,"pending_calls":pending.len(),"error_code":null,"method":"local_records"}
         }),
@@ -197,6 +350,19 @@ pub fn scoped_summary(events: &[Value], cutoff: DateTime<Utc>, health: &str, all
         };
         if let Some(&index) = indexes.get(name) {
             rows[index]["connection"] = server["connection"].clone();
+            for key in [
+                "origin",
+                "enabled",
+                "description",
+                "description_source",
+                "default_description",
+                "default_category",
+                "tags",
+            ] {
+                if let Some(value) = server.get(key) {
+                    rows[index][key] = value.clone();
+                }
+            }
         } else {
             let mut row = server.clone();
             for key in ["calls", "recognized", "returned", "known_status", "errors"] {
@@ -210,5 +376,47 @@ pub fn scoped_summary(events: &[Value], cutoff: DateTime<Utc>, health: &str, all
         }
     }
     scoped["recording_status"] = all["recording_status"].clone();
+    if let Some(configuration) = all.get("configuration") {
+        scoped["configuration"] = configuration.clone();
+    }
     scoped
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    #[test]
+    fn named_transport_failures_update_only_newer_server_evidence() {
+        let mut value = json!({"servers":[
+            {"server":"alpha","enabled":true,"connection":{"state":"response","observed_at":"2026-01-01T00:00:01Z","last_response_at":"2026-01-01T00:00:01Z","pending_calls":0,"error_code":null,"method":"local_records"}},
+            {"server":"beta","enabled":false,"connection":{"state":"paused","observed_at":null,"last_response_at":null,"pending_calls":0,"error_code":null,"method":"local_records"}}
+        ]});
+        let errors = vec![
+            json!({"server":"alpha","code":"connection_refused","timestamp":"2026-01-01T00:00:01Z"}),
+            json!({"server":"alpha","code":"unrelated","timestamp":"2026-01-01T00:00:09Z"}),
+            json!({"server":"beta","code":"transport_error","timestamp":"2026-01-01T00:00:02Z"}),
+        ];
+        apply_diagnostics(&mut value, &errors);
+        assert_eq!(value["servers"][0]["connection"]["state"], "response");
+        assert_eq!(value["servers"][1]["connection"]["state"], "paused");
+        assert_eq!(
+            value["servers"][1]["connection"]["observed_at"],
+            "2026-01-01T00:00:02Z"
+        );
+        apply_diagnostics(
+            &mut value,
+            &[
+                json!({"server":"alpha","code":"network_unavailable","timestamp":"2026-01-01T00:00:03Z"}),
+            ],
+        );
+        assert_eq!(value["servers"][0]["connection"]["state"], "error");
+        assert_eq!(
+            value["servers"][0]["connection"]["error_code"],
+            "network_unavailable"
+        );
+        assert_eq!(
+            value["servers"][0]["connection"]["last_response_at"],
+            "2026-01-01T00:00:01Z"
+        );
+    }
 }

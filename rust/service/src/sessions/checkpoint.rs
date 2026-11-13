@@ -2,21 +2,21 @@ use super::project::{now, stamp, Call, Projection};
 use super::{file_identity, redirected, storage_error_type, Session};
 use chrono::{DateTime, Utc};
 use lam_history_store::{
-    Access, Cursor, ExpectedCursor, ObservationBatch, ObservationStore, ObservationView,
-    ObservationWrite, Store, StoreError, StoredCall, FILE_NAME,
+    Access, Checkpoint, Cursor, ExpectedCursor, ObservationBatch, ObservationStore,
+    ObservationView, ObservationWrite, Store, StoreError, StoredCall, FILE_NAME,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const BYTE_LIMIT: usize = 16 * 1024 * 1024;
 const SAMPLE: u64 = 256;
-// Version 5 adds projected execution metadata, so older cursors must replay their source.
-const STATE_VERSION: u32 = 5;
+// Version 17 includes plain execution modes, so older cursors must replay their source.
+const STATE_VERSION: u32 = 17;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -24,6 +24,21 @@ pub struct Anchor {
     pub offset: u64,
     identity: (u64, u64),
     digest: [u8; 32],
+}
+
+impl Anchor {
+    pub(super) fn verify(&self, file: &mut File, identity: (u64, u64)) -> io::Result<bool> {
+        if self.identity != identity || file.metadata()?.len() < self.offset {
+            return Ok(false);
+        }
+        let size = self.offset.min(SAMPLE) as usize;
+        let mut data = [0; 2 * SAMPLE as usize];
+        file.seek(SeekFrom::Start(0))?;
+        file.read_exact(&mut data[..size])?;
+        file.seek(SeekFrom::Start(self.offset - size as u64))?;
+        file.read_exact(&mut data[size..size * 2])?;
+        Ok(<[u8; 32]>::from(Sha256::digest(&data[..size * 2])) == self.digest)
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -47,6 +62,91 @@ pub struct Restored {
     pub projection: Projection,
 }
 
+pub struct SnapshotProjection {
+    pub projection: Projection,
+    pub calls_incomplete: bool,
+    pub source_details_pending: bool,
+    pub workdir_pending: bool,
+    pub partial: bool,
+    pub source_key: String,
+    pub anchor: Anchor,
+    pub checkpoint_signature: String,
+}
+
+// Call only for a checkpoint matched against the current source-membership revision.
+// Incomplete optional features remain valid while those features are disabled; the
+// membership revision is invalidated before an observation is re-enabled.
+pub fn snapshot_projection(checkpoint: Checkpoint, calls_incomplete: bool) -> Option<SnapshotProjection> {
+    let anchor = serde_json::from_str::<VersionedAnchor>(&checkpoint.cursor.signature)
+        .map(|value| value.anchor)
+        .or_else(|_| serde_json::from_str::<Anchor>(&checkpoint.cursor.signature))
+        .ok()?;
+    if i64::try_from(anchor.offset).ok()? != checkpoint.cursor.offset {
+        return None;
+    }
+    let state: State<Projection> = serde_json::from_str(&checkpoint.cursor.payload).ok()?;
+    if state.version != STATE_VERSION {
+        return None;
+    }
+    let calls = checkpoint
+        .calls
+        .into_iter()
+        .map(|row| {
+            serde_json::from_str::<Call>(&row.payload)
+                .ok()
+                .map(|call| (row.call_id, call))
+        })
+        .collect::<Option<BTreeMap<_, _>>>()?;
+    if calls.values().any(|call| {
+        [
+            call.request_position.as_ref(),
+            call.response_position.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|position| position.offset >= anchor.offset)
+    }) {
+        return None;
+    }
+    let workdir_pending = state.projection.workdir_position.is_some();
+    let source_details_pending = calls_incomplete || workdir_pending
+        || calls
+            .values()
+            .any(|call| call.request_position.is_some() || call.response_position.is_some())
+        || state
+            .projection
+            .errors
+            .iter()
+            .any(|error| error.record_offset.is_some());
+    if state
+        .projection
+        .workdir_position
+        .as_ref()
+        .is_some_and(|position| !position.valid() || position.offset >= anchor.offset)
+        || state.projection.errors.iter().any(|error| {
+            error
+                .record_offset
+                .is_some_and(|offset| offset >= anchor.offset)
+        })
+    {
+        return None;
+    }
+    let mut projection = state.projection;
+    if !projection.restore_calls(calls) {
+        return None;
+    }
+    Some(SnapshotProjection {
+        projection,
+        calls_incomplete,
+        source_details_pending,
+        workdir_pending,
+        partial: state.discard || calls_incomplete,
+        source_key: checkpoint.cursor.source_key,
+        anchor,
+        checkpoint_signature: checkpoint.cursor.signature,
+    })
+}
+
 #[derive(Default)]
 pub struct Loaded {
     pub signature: Option<String>,
@@ -66,23 +166,48 @@ pub struct Checkpoints {
     directory: PathBuf,
     reader: Option<Store>,
     attempted: bool,
+    prefetched: BTreeMap<String, Checkpoint>,
+    prefetched_keys: BTreeSet<String>,
     observation_store: Option<((u64, u64), Access, ObservationStore)>,
     pub report: Report,
     pub error_write_error: Option<&'static str>,
 }
 
-fn key(root: &Path, path: &Path) -> Option<String> {
+pub(super) fn key(root: &Path, path: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).ok()?.to_str()?;
     Some(format!("rust:v1:{:x}", Sha256::digest(relative.as_bytes())))
 }
 
 impl Checkpoints {
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+    pub fn snapshot_reader(&self) -> lam_history_store::Result<Option<Store>> {
+        let Some(before) = self.storage_identity()? else {
+            return Ok(None);
+        };
+        let store = Store::open(&self.directory, Access::ReadOnly)?;
+        if self.storage_identity()? != Some(before) {
+            return Err(StoreError::UnsafePath);
+        }
+        Ok(store)
+    }
+    pub fn legacy_lifecycle(&self, path: &Path) -> Option<Value> {
+        let filename = path.file_name()?.to_str()?;
+        self.reader
+            .as_ref()?
+            .thread_lifecycle(filename)
+            .ok()
+            .flatten()
+    }
     pub fn new(directory: PathBuf, enabled: bool) -> Self {
         let health = if enabled { "missing" } else { "disabled" };
         Self {
             directory,
             reader: None,
             attempted: false,
+            prefetched: BTreeMap::new(),
+            prefetched_keys: BTreeSet::new(),
             observation_store: None,
             error_write_error: None,
             report: Report {
@@ -98,6 +223,43 @@ impl Checkpoints {
     pub fn begin_round(&mut self) {
         self.reader = None;
         self.attempted = false;
+        self.prefetched.clear();
+        self.prefetched_keys.clear();
+    }
+
+    pub fn prefetch(&mut self, root: &Path, paths: &[PathBuf]) {
+        self.prefetched.clear();
+        self.prefetched_keys.clear();
+        let keys: Vec<_> = paths.iter().filter_map(|path| key(root, path)).collect();
+        if keys.is_empty() {
+            return;
+        }
+        if !self.attempted {
+            self.attempted = true;
+            match Store::open(&self.directory, Access::ReadOnly) {
+                Ok(reader) => self.reader = reader,
+                Err(_) => {
+                    self.report.load_health = "unavailable";
+                    return;
+                }
+            }
+        }
+        let Some(reader) = self.reader.as_mut() else {
+            return;
+        };
+        let Ok(batch) = reader.checkpoints(&keys, 50_000) else {
+            return;
+        };
+        self.prefetched_keys.extend(keys);
+        for incomplete in batch.incomplete_sources {
+            self.prefetched_keys.remove(&incomplete);
+        }
+        for checkpoint in batch.checkpoints {
+            if self.prefetched_keys.contains(&checkpoint.cursor.source_key) {
+                self.prefetched
+                    .insert(checkpoint.cursor.source_key.clone(), checkpoint);
+            }
+        }
     }
 
     pub fn sample(
@@ -143,12 +305,20 @@ impl Checkpoints {
         let Some(reader) = self.reader.as_mut() else {
             return Loaded::default();
         };
-        let checkpoint = match reader.checkpoint(&key, call_limit) {
-            Ok(Some(value)) => value,
-            Ok(None) => return Loaded::default(),
-            Err(_) => {
-                self.report.load_health = "unavailable";
+        let checkpoint = if self.prefetched_keys.remove(&key) {
+            let Some(mut checkpoint) = self.prefetched.remove(&key) else {
                 return Loaded::default();
+            };
+            checkpoint.calls.truncate(call_limit.min(8192) as usize);
+            checkpoint
+        } else {
+            match reader.checkpoint(&key, call_limit) {
+                Ok(Some(value)) => value,
+                Ok(None) => return Loaded::default(),
+                Err(_) => {
+                    self.report.load_health = "unavailable";
+                    return Loaded::default();
+                }
             }
         };
         let restored = (|| {
@@ -165,7 +335,11 @@ impl Checkpoints {
             }
             let state: State<Projection> = serde_json::from_str(&checkpoint.cursor.payload).ok()?;
             // Older checkpoints can omit unmatched tool failures, so replay their source.
-            if state.version != STATE_VERSION {
+            if state.version != STATE_VERSION
+                || state.projection.errors_incomplete
+                || state.projection.sqlite_incomplete
+                || state.projection.commands_incomplete
+            {
                 return None;
             }
             let calls = checkpoint
@@ -177,7 +351,38 @@ impl Checkpoints {
                         .map(|value| (row.call_id, value))
                 })
                 .collect::<Option<BTreeMap<_, _>>>()?;
+            if calls.values().any(|call| {
+                call.needs_tool_replay()
+                    || [
+                        call.request_position.as_ref(),
+                        call.response_position.as_ref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .any(|position| position.offset >= anchor.offset)
+            }) {
+                return None;
+            }
             let mut projection = state.projection;
+            if projection
+                .workdir_position
+                .as_ref()
+                .is_some_and(|position| !position.valid() || position.offset >= anchor.offset)
+            {
+                return None;
+            }
+            if let Some(position) = &projection.workdir_position {
+                let record = super::details::read_record(file, position)?;
+                if record["type"] != "session_meta" {
+                    return None;
+                }
+                let cwd = record["payload"]["cwd"].as_str()?;
+                if cwd.is_empty() || cwd.chars().count() > 4096 || cwd.chars().any(char::is_control)
+                {
+                    return None;
+                }
+                projection.set_workdir(Some(cwd));
+            }
             if projection.errors.iter().any(|error| {
                 error
                     .record_offset
@@ -245,6 +450,13 @@ impl Checkpoints {
         }
     }
 
+    pub fn activity_retention(&self) -> lam_history_store::Result<i64> {
+        match Store::open(&self.directory, Access::ReadOnly)? {
+            Some(store) => store.activity_retention(),
+            None => Ok(90),
+        }
+    }
+
     pub fn save_diagnostics(
         &mut self,
         sql: &[Value],
@@ -262,6 +474,13 @@ impl Checkpoints {
     ) -> lam_history_store::Result<Vec<Value>> {
         match self.connect_observations(Access::ReadOnly)? {
             Some(store) => store.error_preview(reference),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub fn skill_preview(&mut self) -> lam_history_store::Result<Vec<Value>> {
+        match self.connect_observations(Access::ReadOnly)? {
+            Some(store) => store.skill_preview(),
             None => Ok(Vec::new()),
         }
     }
@@ -369,11 +588,12 @@ impl Checkpoints {
         &mut self,
         reference: DateTime<Utc>,
         cutoffs: &[Option<DateTime<Utc>>; 4],
+        excluded_sources: &[&str],
     ) -> lam_history_store::Result<ObservationView> {
         let result = self
             .connect_observations(Access::ReadOnly)
             .and_then(|store| match store {
-                Some(store) => store.read(reference, cutoffs),
+                Some(store) => store.read_filtered(reference, cutoffs, excluded_sources),
                 None => Ok(ObservationView::default()),
             });
         if result.is_err() {
@@ -382,13 +602,33 @@ impl Checkpoints {
         result
     }
 
+    pub fn pending_activity(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Result<(bool, Option<DateTime<Utc>>), StoreError> {
+        let next = match self.connect_observations(Access::ReadOnly)? {
+            Some(store) => store.next_pending_activity()?,
+            None => None,
+        };
+        if next.is_some_and(|due| due <= now) {
+            let Some(store) = self.connect_observations(Access::ReadWrite)? else {
+                return Ok((false, next));
+            };
+            let changed = store.process_pending_activity(now)?;
+            return Ok((changed, store.next_pending_activity()?));
+        }
+        Ok((false, next))
+    }
+
     pub fn save(&mut self, root: &Path, files: &mut BTreeMap<PathBuf, Session>) -> bool {
-        self.reader = None;
+        self.begin_round();
         let mut cursors = Vec::new();
         let mut calls = Vec::new();
         let mut retired = Vec::new();
         let mut activity = Vec::new();
         let mut errors = Vec::new();
+        let mut skills = Vec::new();
+        let mut lifecycle = Vec::new();
         let mut reset = Vec::new();
         let mut saved = Vec::new();
         let mut previous = Vec::new();
@@ -466,6 +706,23 @@ impl Checkpoints {
                     .retired_observations
                     .iter()
                     .map(|(id, call)| (id, call));
+                skills.extend(retired.chain(current).flat_map(|(id, call)| {
+                    call.skill_history(thread, id)
+                        .map(|event| ObservationWrite {
+                            source_key: key.clone(),
+                            event,
+                        })
+                }));
+                let current = session
+                    .projection
+                    .dirty_calls
+                    .iter()
+                    .filter_map(|id| session.projection.calls.get(id).map(|call| (id, call)));
+                let retired = session
+                    .projection
+                    .retired_observations
+                    .iter()
+                    .map(|(id, call)| (id, call));
                 activity.extend(retired.chain(current).flat_map(|(id, call)| {
                     call.activities(thread, id).map(|event| ObservationWrite {
                         source_key: key.clone(),
@@ -508,6 +765,16 @@ impl Checkpoints {
                     .iter()
                     .map(|id| (key.clone(), id.clone())),
             );
+            if let Some(event) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| session.projection.lifecycle_entry(name, anchor.offset))
+            {
+                lifecycle.push(ObservationWrite {
+                    source_key: key.clone(),
+                    event,
+                });
+            }
             cursors.push(Cursor {
                 source_key: key.clone(),
                 offset,
@@ -547,6 +814,8 @@ impl Checkpoints {
                         ObservationBatch {
                             rows: &activity,
                             errors: &errors,
+                            skills: &skills,
+                            lifecycle: &lifecycle,
                             now: now(),
                         },
                     )
@@ -615,7 +884,17 @@ mod tests {
                     serde_json::json!({"type":"function_call_output","call_id":id,"output":{"isError":true}}),
                 ] {
                     let line = serde_json::json!({"type":"response_item","timestamp":timestamp,"payload":payload}).to_string();
-                    assert!(session.projection.consume(line.as_bytes(), 0));
+                    assert!(session.projection.consume(
+                        line.as_bytes(),
+                        0,
+                        true,
+                        true,
+                        &BTreeMap::new(),
+                        crate::sessions::McpSwitches::default(),
+                        true,
+                        true,
+                        crate::sessions::CommandSwitches::default()
+                    ));
                 }
             }
             std::fs::write(directory.join(format!("ready-{child}")), b"ready").unwrap();
@@ -698,7 +977,17 @@ mod tests {
             serde_json::json!({"type":"function_call_output","call_id":"call","output":{"isError":true}}),
         ] {
             let line = serde_json::json!({"type":"response_item","timestamp":stamp(time),"payload":payload}).to_string();
-            assert!(session.projection.consume(line.as_bytes(), 0));
+            assert!(session.projection.consume(
+                line.as_bytes(),
+                0,
+                true,
+                true,
+                &BTreeMap::new(),
+                crate::sessions::McpSwitches::default(),
+                true,
+                true,
+                crate::sessions::CommandSwitches::default()
+            ));
         }
         let mut files = BTreeMap::from([(path.clone(), session)]);
         let mut checkpoints = Checkpoints::new(directory.path().to_path_buf(), true);
@@ -735,7 +1024,17 @@ mod tests {
             "type":"event_msg", "timestamp":stamp(time), "payload":{"type":"turn_aborted"}
         })
         .to_string();
-        assert!(session.projection.consume(line.as_bytes(), 0));
+        assert!(session.projection.consume(
+            line.as_bytes(),
+            0,
+            true,
+            true,
+            &BTreeMap::new(),
+            crate::sessions::McpSwitches::default(),
+            true,
+            true,
+            crate::sessions::CommandSwitches::default()
+        ));
         let mut files = BTreeMap::from([(path.clone(), session)]);
         let mut checkpoints = Checkpoints::new(directory.path().to_path_buf(), true);
         assert!(checkpoints.save_unanchored_errors(&mut files));

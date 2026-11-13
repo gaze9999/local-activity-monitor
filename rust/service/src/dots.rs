@@ -49,17 +49,30 @@ fn newest(slot: &mut Option<String>, time: &Value) {
     }
 }
 pub(crate) fn read_state(home: &Path) -> Option<Value> {
+    read_state_with_health(home).ok()
+}
+
+pub(crate) fn read_state_with_health(home: &Path) -> Result<Value, &'static str> {
     let path = home.join(".codex-global-state.json");
-    let metadata = fs::symlink_metadata(&path).ok()?;
+    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            "missing"
+        } else {
+            "unavailable"
+        }
+    })?;
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
         if metadata.file_attributes() & 0x400 != 0 {
-            return None;
+            return Err("unavailable");
         }
     }
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > LIMIT {
-        return None;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("unavailable");
+    }
+    if metadata.len() > LIMIT {
+        return Err("oversized");
     }
     let mut options = OpenOptions::new();
     options.read(true);
@@ -68,17 +81,23 @@ pub(crate) fn read_state(home: &Path) -> Option<Value> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
     }
-    let file = options.open(path).ok()?;
-    if !file.metadata().ok()?.is_file() {
-        return None;
+    let file = options.open(path).map_err(|_| "unavailable")?;
+    if !file.metadata().map_err(|_| "unavailable")?.is_file() {
+        return Err("unavailable");
     }
     let mut bytes = Vec::new();
-    file.take(LIMIT + 1).read_to_end(&mut bytes).ok()?;
+    file.take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "unavailable")?;
     if bytes.len() as u64 > LIMIT {
-        return None;
+        return Err("oversized");
     }
-    let value: Value = serde_json::from_slice(&bytes).ok()?;
-    value.is_object().then_some(value)
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_| "unsupported")?;
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err("unsupported")
+    }
 }
 
 pub fn read(home: &Path, window: &str, now: DateTime<Utc>) -> Value {

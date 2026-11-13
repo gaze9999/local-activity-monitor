@@ -4,6 +4,52 @@ use serde::Serialize;
 use serde_json::value::RawValue;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::LazyLock;
+
+static DECIMAL_DIGIT: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^\p{Nd}$").expect("decimal digit"));
+
+pub(crate) fn query_number(value: &str) -> Option<u32> {
+    u32::try_from(query_integer(value)?).ok()
+}
+
+pub(crate) fn decimal_digits(value: &str, max_digits: usize) -> Option<u64> {
+    if value.is_empty() || value.chars().count() > max_digits
+        || !value.chars().all(|ch| DECIMAL_DIGIT.is_match(ch.encode_utf8(&mut [0; 4]))) {
+        return None;
+    }
+    query_integer(value)
+}
+
+fn query_integer(value: &str) -> Option<u64> {
+    let value = value.trim();
+    let (negative, digits) = match value.as_bytes().first() {
+        Some(b'-') => (true, &value[1..]),
+        Some(b'+') => (false, &value[1..]),
+        _ => (false, value),
+    };
+    let mut result = 0_u64;
+    let mut saw_digit = false;
+    let mut separator = false;
+    for ch in digits.chars() {
+        if ch == '_' {
+            if !saw_digit || separator { return None; }
+            separator = true;
+            continue;
+        }
+        if !DECIMAL_DIGIT.is_match(ch.encode_utf8(&mut [0; 4])) { return None; }
+        let code = ch as u32;
+        let mut first = code;
+        while let Some(previous) = first.checked_sub(1).and_then(char::from_u32) {
+            if !DECIMAL_DIGIT.is_match(previous.encode_utf8(&mut [0; 4])) { break; }
+            first -= 1;
+        }
+        result = result.checked_mul(10)?.checked_add(u64::from((code - first) % 10))?;
+        saw_digit = true;
+        separator = false;
+    }
+    (saw_digit && !separator && (!negative || result == 0)).then_some(result)
+}
 
 pub enum HistoryError {
     Invalid,
@@ -52,9 +98,7 @@ impl Query {
             ("threads", "entries") if codex => Section::Threads,
             _ => return None,
         };
-        let number = |key, default| {
-            u32::try_from(get(key).unwrap_or(default).trim().parse::<i64>().ok()?).ok()
-        };
+        let number = |key, default| query_number(get(key).unwrap_or(default));
         let limit = number("limit", "100")?;
         let offset = number("offset", "0")?;
         if !(1..=200).contains(&limit) || offset > 1_000_000 {
@@ -100,8 +144,25 @@ fn decode_cursor(value: &str) -> Option<Position> {
     Some(Position { event_time, key })
 }
 
-pub fn read(directory: &Path, query: &str, codex: bool) -> Result<HistoryResponse, HistoryError> {
+pub fn read(
+    directory: &Path,
+    query: &str,
+    codex: bool,
+    excluded_sources: &[&str],
+    switches: crate::sessions::McpSwitches,
+    errors_enabled: bool,
+    sqlite_enabled: bool,
+    skills_enabled: bool,
+) -> Result<HistoryResponse, HistoryError> {
     let query = Query::parse(query, codex).ok_or(HistoryError::Invalid)?;
+    if (query.section == Section::Errors && !errors_enabled)
+        || (query.section == Section::Sql && !sqlite_enabled)
+        || (query.section == Section::Skills && !skills_enabled)
+        || (query.section == Section::Mcp && !switches.mcp)
+        || (query.section == Section::Web && !switches.web)
+    {
+        return Err(HistoryError::Invalid);
+    }
     let store = Store::open(directory, Access::ReadOnly).map_err(|_| HistoryError::Unavailable)?;
     let page = match store {
         Some(mut store) => store
@@ -111,7 +172,11 @@ pub fn read(directory: &Path, query: &str, codex: bool) -> Result<HistoryRespons
                 offset: query.offset,
                 since: query.since.as_deref(),
                 after: query.after.as_ref(),
-                excluded_sources: &[],
+                excluded_sources: if query.section == Section::Mcp {
+                    excluded_sources
+                } else {
+                    &[]
+                },
             })
             .map_err(|_| HistoryError::Unavailable)?,
         None => Page {

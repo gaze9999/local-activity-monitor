@@ -1,11 +1,18 @@
 mod assets;
 mod dots;
 mod events;
+mod gpu_info;
+#[cfg(windows)]
+mod gpu_windows;
 mod history;
 mod journal;
 mod performance_debug;
+mod process_usage;
+mod runtime_info;
 mod server;
 mod sessions;
+mod sse_write;
+mod system_fonts;
 
 use std::env;
 use std::error::Error;
@@ -24,7 +31,7 @@ use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
-const USAGE: &str = "local-activity-monitor [--codex-home PATH] [--port PORT] [--codex] [--open] [--assets PATH] [--watch-stdin] [--prepare]";
+const USAGE: &str = "local-activity-monitor [--codex-home PATH] [--port PORT] [--max-files COUNT] [--codex] [--open] [--assets PATH] [--watch-stdin] [--prepare] [--enable-jev | --disable-jev] [--database PATH] [--configure-only]";
 
 fn default_codex_home(
     configured: Option<std::ffi::OsString>,
@@ -48,14 +55,52 @@ fn platform_home() -> Option<PathBuf> {
     env::home_dir()
 }
 
+#[cfg(windows)]
+fn protect_children() -> io::Result<()> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    // The unnamed job handle is deliberately retained until process teardown.
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            std::mem::size_of_val(&limits) as u32,
+        ) == 0
+            || AssignProcessToJobObject(job, GetCurrentProcess()) == 0
+        {
+            let error = io::Error::last_os_error();
+            CloseHandle(job);
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 struct Options {
     home: PathBuf,
     port: u16,
+    max_files: u32,
     codex: bool,
     open: bool,
     assets: Option<PathBuf>,
     watch_stdin: bool,
     prepare: bool,
+    jev_recording: Option<bool>,
+    jev_database: Option<PathBuf>,
+    configure_only: bool,
 }
 
 impl Options {
@@ -71,30 +116,60 @@ impl Options {
         mut home: Option<PathBuf>,
     ) -> Result<Option<Self>, String> {
         let mut port = 8787;
+        let mut max_files = 20;
         let mut codex = false;
         let mut open = false;
         let mut assets = None;
         let mut watch_stdin = false;
         let mut prepare = false;
+        let mut jev_recording = None;
+        let mut jev_database = None;
+        let mut configure_only = false;
         while let Some(arg) = args.next() {
+            let inline = arg.to_str().and_then(|text| text.split_once('=')).filter(|(name, _)| {
+                matches!(*name, "--codex-home" | "--port" | "--max-files" | "--assets" | "--database")
+            });
+            let name = inline.map(|(name, _)| name).or_else(|| arg.to_str());
             let value = |args: &mut I| {
-                args.next()
+                inline.map(|(_, value)| std::ffi::OsString::from(value)).or_else(|| args.next())
                     .ok_or_else(|| format!("Missing value for {}", arg.to_string_lossy()))
             };
-            match arg.to_str() {
+            match name {
                 Some("--help" | "-h") => return Ok(None),
                 Some("--codex-home") => home = Some(value(&mut args)?.into()),
                 Some("--port") => {
                     port = value(&mut args)?
                         .to_str()
-                        .and_then(|value| value.parse().ok())
+                        .and_then(history::query_number)
+                        .and_then(|value| u16::try_from(value).ok())
                         .ok_or_else(|| String::from("Invalid port"))?;
+                }
+                Some("--max-files") => {
+                    max_files = value(&mut args)?
+                        .to_str()
+                        .and_then(history::query_number)
+                        .filter(|value| (1..=5000).contains(value))
+                        .ok_or_else(|| String::from("Invalid max-files"))?;
                 }
                 Some("--codex") => codex = true,
                 Some("--open") => open = true,
                 Some("--assets") => assets = Some(value(&mut args)?.into()),
                 Some("--watch-stdin") => watch_stdin = true,
                 Some("--prepare") => prepare = true,
+                Some("--enable-jev") => {
+                    if jev_recording == Some(false) {
+                        return Err("Conflicting Jev recording options".into());
+                    }
+                    jev_recording = Some(true);
+                }
+                Some("--disable-jev") => {
+                    if jev_recording == Some(true) {
+                        return Err("Conflicting Jev recording options".into());
+                    }
+                    jev_recording = Some(false);
+                }
+                Some("--database") => jev_database = Some(value(&mut args)?.into()),
+                Some("--configure-only") => configure_only = true,
                 _ => return Err(String::from("Unsupported argument")),
             }
         }
@@ -107,11 +182,15 @@ impl Options {
         Ok(Some(Self {
             home,
             port,
+            max_files,
             codex,
             open,
             assets,
             watch_stdin,
             prepare,
+            jev_recording,
+            jev_database,
+            configure_only,
         }))
     }
 }
@@ -199,6 +278,50 @@ fn home_identity(home: &Path) -> io::Result<String> {
         path.strip_prefix(r"\\?\").unwrap_or(path).to_lowercase()
     };
     Ok(format!("{:x}", Sha256::digest(path.as_bytes()))[..24].into())
+}
+
+fn resolve_home(path: &Path) -> io::Result<PathBuf> {
+    resolve_home_with_depth(path, 0)
+}
+
+fn resolve_home_with_depth(path: &Path, depth: u8) -> io::Result<PathBuf> {
+    if depth > 40 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Too many home path links"));
+    }
+    let absolute = if path.is_absolute() { path.to_path_buf() } else { env::current_dir()?.join(path) };
+    match absolute.canonicalize() {
+        Ok(path) => return Ok(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+        Err(error) => return Err(error),
+    }
+    let mut resolved = PathBuf::new();
+    let mut components = absolute.components();
+    while let Some(component) = components.next() {
+        match component {
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => resolved.push(component),
+            std::path::Component::CurDir => {},
+            std::path::Component::ParentDir => { resolved.pop(); },
+            std::path::Component::Normal(name) => {
+                let candidate = resolved.join(name);
+                match candidate.canonicalize() {
+                    Ok(path) => resolved = path,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        match std::fs::symlink_metadata(&candidate) {
+                            Err(missing) if missing.kind() == io::ErrorKind::NotFound => resolved = candidate,
+                            Ok(metadata) if metadata.file_type().is_symlink() => {
+                                let target = std::fs::read_link(&candidate)?;
+                                let target = if target.is_absolute() { target } else { resolved.join(target) };
+                                return resolve_home_with_depth(&target.join(components.as_path()), depth + 1);
+                            }
+                            _ => return Err(error),
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 async fn existing_instance(port: u16, home_id: &str) -> Option<String> {
@@ -354,10 +477,36 @@ fn stdin_control() -> mpsc::Receiver<Control> {
     done
 }
 
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut terminate = signal(SignalKind::terminate()).ok();
+        let mut hangup = signal(SignalKind::hangup()).ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = async { match &mut terminate { Some(signal) => { signal.recv().await; }, None => std::future::pending().await } } => {},
+            _ = async { match &mut hangup { Some(signal) => { signal.recv().await; }, None => std::future::pending().await } } => {},
+        }
+    }
+    #[cfg(windows)]
+    {
+        let mut ctrl_break = tokio::signal::windows::ctrl_break().ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = async { match &mut ctrl_break { Some(signal) => { signal.recv().await; }, None => std::future::pending().await } } => {},
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 async fn wait_control(receiver: &mut Option<mpsc::Receiver<Control>>, paused: bool) -> Control {
     loop {
         let command = tokio::select! {
-            _ = tokio::signal::ctrl_c() => Control::Stop,
+            _ = shutdown_signal() => Control::Stop,
             value = async {
                 match receiver {
                     Some(receiver) => receiver.recv().await,
@@ -398,9 +547,34 @@ fn load_assets(options: &Options) -> io::Result<Option<assets::Assets>> {
 }
 
 async fn run(options: Options) -> Result<(), Box<dyn Error>> {
-    let home = options.home.canonicalize()?;
-    if !home.is_dir() {
-        return Err("Codex home must be a directory".into());
+    let selected_home = assets::expand_development_path(options.home.clone())?;
+    if let Some(enabled) = options.jev_recording {
+        let home = if selected_home.is_absolute() {
+            selected_home.clone()
+        } else {
+            env::current_dir()?.join(&selected_home)
+        };
+        let (changed, _) = sessions::jev::configure(
+            &home.join("monitoring"),
+            enabled,
+            options.jev_database.as_deref(),
+        )
+        .map_err(|error| io::Error::other(format!("Invalid Jev configuration: {error:?}")))?;
+        println!(
+            "{}",
+            json!({"jev_recording":if !changed {"unchanged"} else if enabled {"enabled"} else {"disabled"}, "reload_existing_jev_processes":true})
+        );
+        io::stdout().flush()?;
+    }
+    if options.configure_only {
+        return Ok(());
+    }
+    let home = resolve_home(&selected_home)?;
+    match std::fs::metadata(&home) {
+        Ok(metadata) if metadata.is_dir() => {},
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+        Ok(_) => return Err("Codex home must be a directory".into()),
+        Err(error) => return Err(error.into()),
     }
     let home_id = home_identity(&home)?;
     let mut commands = options.prepare.then(stdin_control);
@@ -409,7 +583,7 @@ async fn run(options: Options) -> Result<(), Box<dyn Error>> {
         println!("{}", json!({"status":"source_ready"}));
         io::stdout().flush()?;
         let start = tokio::select! {
-            _ = tokio::signal::ctrl_c() => false,
+            _ = shutdown_signal() => false,
             command = receiver.recv() => command == Some(Control::Start),
         };
         if !start {
@@ -439,29 +613,125 @@ async fn run(options: Options) -> Result<(), Box<dyn Error>> {
     let cleanup_path = monitoring.clone();
     let cleanup_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let cleanup_flag = std::sync::Arc::clone(&cleanup_stop);
+    let (cleanup_wake, cleanup_signal) = std::sync::mpsc::sync_channel(1);
     let (monitor, snapshots) = sessions::Monitor::start(
         &home,
         options.codex,
         assets.as_ref().map(|assets| assets.revision.clone()),
+        options.max_files,
     )?;
+    let font_output = monitor.fonts();
+    let font_completion = monitor.device_completion();
+    let font_wake = monitor.refresh_sender();
+    let mut font_worker = AccountWorker(Some(tokio::spawn(async move {
+        let fonts = system_fonts::collect().await;
+        *font_output
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Some(fonts);
+        font_completion
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .fonts_finished();
+        if let Some((wake, manual)) = font_wake {
+            manual.store(true, std::sync::atomic::Ordering::Release);
+            let _ = wake.try_send(());
+        }
+    })));
+    let gpu_output = monitor.gpus();
+    let gpu_completion = monitor.device_completion();
+    let gpu_wake = monitor.refresh_sender();
+    let mut gpu_worker = AccountWorker(Some(tokio::spawn(async move {
+        let gpus = gpu_info::collect().await;
+        *gpu_output
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Some(gpus);
+        gpu_completion
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .gpus_finished();
+        if let Some((wake, manual)) = gpu_wake {
+            manual.store(true, std::sync::atomic::Ordering::Release);
+            let _ = wake.try_send(());
+        }
+    })));
+    let account = Arc::new(sessions::account::Source::new(
+        home.clone(),
+        monitor.account_shared(),
+    ));
+    let mut account_worker = AccountWorker(Some(tokio::spawn(Arc::clone(&account).run())));
+    let cloud = Arc::new(sessions::cloud::Source::new(
+        home.clone(),
+        monitor.cloud_shared(),
+    ));
+    let mut cloud_worker = AccountWorker(Some(tokio::spawn(Arc::clone(&cloud).run())));
+    let [public_openai_shared, public_codex_shared] = monitor.public_shared();
+    let public_openai = Arc::new(sessions::public_api::Source::new(
+        sessions::public_api::Kind::Openai,
+        public_openai_shared,
+    )?);
+    let public_codex = Arc::new(sessions::public_api::Source::new(
+        sessions::public_api::Kind::Codex,
+        public_codex_shared,
+    )?);
+    let mut public_openai_worker =
+        AccountWorker(Some(tokio::spawn(Arc::clone(&public_openai).run())));
+    let mut public_codex_worker =
+        AccountWorker(Some(tokio::spawn(Arc::clone(&public_codex).run())));
+    let platform_shared = monitor.platform_shared();
+    let mut platform_sources = Vec::new();
+    let mut platform_workers = Vec::new();
+    for (kind, shared) in [
+        sessions::platform::Kind::Models,
+        sessions::platform::Kind::Usage,
+        sessions::platform::Kind::Decisions,
+        sessions::platform::Kind::Costs,
+    ]
+    .into_iter()
+    .zip(platform_shared)
+    {
+        let source = Arc::new(sessions::platform::Source::new(kind, shared)?);
+        platform_workers.push(AccountWorker(Some(tokio::spawn(Arc::clone(&source).run()))));
+        platform_sources.push(source);
+    }
     let state = Arc::new(server::State {
         home_id,
         monitoring,
-        codex: options.codex,
+        codex: monitor.codex_setting(),
+        traffic: monitor.traffic(),
+        account,
+        cloud,
+        public_openai,
+        public_codex,
+        platform_sources,
         assets,
         snapshots,
         refresh: monitor.refresh_sender(),
         metadata_enabled: monitor.metadata_setting(),
+        tool_events_enabled: monitor.tool_events_setting(),
+        files_enabled: monitor.files_setting(),
+        errors_enabled: monitor.errors_setting(),
+        sqlite_enabled: monitor.sqlite_setting(),
+        model_api_enabled: monitor.model_api_setting(),
+        command_switches: monitor.command_switches_setting(),
+        mcp_sources: monitor.mcp_sources_setting(),
+        mcp_switches: monitor.mcp_switches_setting(),
+        customizations: monitor.customizations_setting(),
+        tracking: monitor.tracking_setting(),
+        cleanup_wake: cleanup_wake.clone(),
         metadata_lock: tokio::sync::Mutex::new(()),
         journal: monitor.journal(),
         debug: monitor.debug(),
+        details: monitor.detail_index(),
+        core_source: monitor.core_source(),
+        desktop_sources: monitor.desktop_sources(),
         event_clients: Arc::new(tokio::sync::Semaphore::new(events::CLIENT_LIMIT)),
     });
     let refresh = monitor.refresh_sender();
     let _cleanup = CleanupWorker {
         stop: cleanup_stop,
+        wake: cleanup_wake,
         handle: Some(std::thread::spawn(move || {
-            cleanup_history(&cleanup_path, &cleanup_flag, refresh);
+            cleanup_history(&cleanup_path, &cleanup_flag, refresh, cleanup_signal);
         })),
     };
     let address = listener.local_addr()?;
@@ -506,7 +776,38 @@ async fn run(options: Options) -> Result<(), Box<dyn Error>> {
         }
         listener = TcpListener::bind(address).await?;
     }
+    account_worker.stop().await;
+    cloud_worker.stop().await;
+    public_openai_worker.stop().await;
+    public_codex_worker.stop().await;
+    for worker in &mut platform_workers {
+        worker.stop().await;
+    }
+    font_worker.finish().await;
+    gpu_worker.finish().await;
     Ok(())
+}
+
+struct AccountWorker(Option<tokio::task::JoinHandle<()>>);
+impl AccountWorker {
+    async fn finish(&mut self) {
+        if let Some(handle) = self.0.take() {
+            let _ = handle.await;
+        }
+    }
+    async fn stop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+}
+impl Drop for AccountWorker {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
+    }
 }
 
 fn prepare_history(directory: &Path, codex: bool) {
@@ -529,12 +830,14 @@ fn prepare_history(directory: &Path, codex: bool) {
 
 struct CleanupWorker {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    wake: std::sync::mpsc::SyncSender<()>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for CleanupWorker {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Release);
+        let _ = self.wake.try_send(());
         if let Some(handle) = self.handle.take() {
             handle.thread().unpark();
             let _ = handle.join();
@@ -549,6 +852,7 @@ fn cleanup_history(
         std::sync::mpsc::SyncSender<()>,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
     )>,
+    signal: std::sync::mpsc::Receiver<()>,
 ) {
     use lam_history_store::{Access, Store};
     use std::sync::atomic::Ordering;
@@ -582,20 +886,24 @@ fn cleanup_history(
         Ok(())
     };
     while !stop.load(Ordering::Acquire) {
-        match cleanup() {
-            Ok(()) => break,
+        let delay = match cleanup() {
+            Ok(()) => Duration::from_secs(60),
             Err(lam_history_store::StoreError::Sql(rusqlite::Error::SqliteFailure(error, _)))
                 if matches!(
                     error.code,
                     rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
                 ) =>
             {
-                std::thread::park_timeout(Duration::from_secs(1));
+                Duration::from_secs(1)
             }
             Err(error) => {
                 eprintln!("History cleanup unavailable: {error}");
-                break;
+                Duration::from_secs(30)
             }
+        };
+        match signal.recv_timeout(delay) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 }
@@ -612,6 +920,11 @@ fn main() {
             std::process::exit(2);
         }
     };
+    #[cfg(windows)]
+    if let Err(error) = protect_children() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
     let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .max_blocking_threads(8)
@@ -631,6 +944,17 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_home_resolves_dangling_symlink_without_creating_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("missing-target");
+        let link = directory.path().join("dangling");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(resolve_home(&link.join("child")).unwrap(), directory.path().canonicalize().unwrap().join("missing-target/child"));
+        assert!(!target.exists());
+    }
 
     #[test]
     fn control_lines_accept_long_whitespace_and_bound_invalid_input() {
@@ -658,6 +982,22 @@ mod tests {
     }
 
     #[test]
+    fn cli_accepts_inline_values_and_python_decimal_integers() {
+        let options = Options::parse_from(
+            ["--codex-home=/fixture/a=b", "--port=１２", "--max-files=1_0", "--database=/fixture/db=1"]
+                .into_iter().map(Into::into),
+            None,
+        ).unwrap().unwrap();
+        assert_eq!(options.home, PathBuf::from("/fixture/a=b"));
+        assert_eq!(options.port, 12);
+        assert_eq!(options.max_files, 10);
+        assert_eq!(options.jev_database, Some(PathBuf::from("/fixture/db=1")));
+        for invalid in ["--port=65536", "--port=1__2", "--max-files=0", "--codex=true"] {
+            assert!(Options::parse_from([invalid].into_iter().map(Into::into), Some(PathBuf::from("/fixture"))).is_err());
+        }
+    }
+
+    #[test]
     fn cli_defaults_match_python_and_explicit_options_take_precedence() {
         let profile = PathBuf::from("/fixture/profile");
         assert_eq!(
@@ -678,6 +1018,7 @@ mod tests {
             .unwrap();
         assert_eq!(defaults.home, profile);
         assert_eq!(defaults.port, 8787);
+        assert_eq!(defaults.max_files, 20);
         assert!(!defaults.codex);
         let explicit = Options::parse_from(
             [
@@ -686,6 +1027,8 @@ mod tests {
                 "--port",
                 "0",
                 "--codex",
+                "--max-files",
+                "7",
             ]
             .into_iter()
             .map(Into::into),
@@ -696,6 +1039,14 @@ mod tests {
         assert_eq!(explicit.home, PathBuf::from("/fixture/override"));
         assert_eq!(explicit.port, 0);
         assert!(explicit.codex);
+        assert_eq!(explicit.max_files, 7);
+        for invalid in ["0", "5001", "-1", "abc"] {
+            assert!(Options::parse_from(
+                ["--max-files", invalid].into_iter().map(Into::into),
+                Some(PathBuf::from("/fixture/profile"))
+            )
+            .is_err());
+        }
         assert!(Options::parse_from(
             ["--codex-home", ""].into_iter().map(Into::into),
             Some(PathBuf::from("/fixture/profile")),

@@ -98,8 +98,19 @@ fn uuid(value: &str) -> bool {
 
 pub fn filename_identity(name: &str) -> Option<String> {
     let stem = name.strip_suffix(".jsonl")?;
-    let id = stem.get(stem.len().checked_sub(36)?..)?;
-    uuid(id).then(|| id.to_owned())
+    let bytes = stem.as_bytes();
+    let mut index = 0;
+    let mut last = None;
+    while index + 36 <= bytes.len() {
+        let candidate = std::str::from_utf8(&bytes[index..index + 36]).ok();
+        if let Some(id) = candidate.filter(|id| uuid(id)) {
+            last = Some(id.to_owned());
+            index += 36;
+        } else {
+            index += 1;
+        }
+    }
+    last
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -115,12 +126,76 @@ pub struct Call {
     nested: Option<NestedActivity>,
     #[serde(default, skip_serializing_if = "CommandMetadata::is_empty")]
     pub commands: CommandMetadata,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    jev: Vec<JevOperation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    skills: Vec<String>,
     #[serde(default, skip_serializing_if = "SqlMetadata::is_empty")]
     sqlite: SqlMetadata,
     #[serde(default)]
     sql_failed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     failure: Option<ToolFailure>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    agent_messages: Vec<super::agent::Outgoing>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    files: Vec<Value>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    files_incomplete: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    mcp_sources_incomplete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) request_position: Option<super::details::Position>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) response_position: Option<super::details::Position>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct JevOperation {
+    operation: JevKind,
+    nested: bool,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum JevKind {
+    Rank,
+    Evaluate,
+    Status,
+}
+
+fn jev_operation(tool: &str, nested: bool) -> Option<JevOperation> {
+    if let Some(operation) = match tool {
+        "jev_rank" => Some(JevKind::Rank),
+        "jev_evaluate" => Some(JevKind::Evaluate),
+        "jev_status" => Some(JevKind::Status),
+        _ => None,
+    } {
+        return Some(JevOperation { operation, nested });
+    }
+    let prefix = ["mcp__jev__", "jev.", "jev:", "jev_"]
+        .iter()
+        .find_map(|prefix| tool.strip_prefix(prefix));
+    let name = prefix.unwrap_or(tool);
+    let operation = match name {
+        "jev_rank" => JevKind::Rank,
+        "jev_evaluate" => JevKind::Evaluate,
+        "jev_status" => JevKind::Status,
+        "jevrank" if prefix.is_some() => JevKind::Rank,
+        "jevevaluate" if prefix.is_some() => JevKind::Evaluate,
+        "jevstatus" if prefix.is_some() => JevKind::Status,
+        _ => return None,
+    };
+    Some(JevOperation { operation, nested })
+}
+
+pub(super) fn jev_kind(tool: &str) -> Option<&'static str> {
+    match jev_operation(tool, false)?.operation {
+        JevKind::Rank => Some("rank"),
+        JevKind::Evaluate => Some("evaluate"),
+        JevKind::Status => Some("status"),
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -189,39 +264,118 @@ struct NestedActivity {
     events: Vec<NestedEvent>,
     isolated: bool,
     truncated: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    tool_counts_incomplete: bool,
+    #[serde(default)]
+    single_invocation: bool,
 }
 
 impl NestedActivity {
-    fn from_code(source: &str, commands: &mut CommandMetadata, sqlite: &mut SqlMetadata) -> Self {
+    fn from_code(
+        source: &str,
+        commands: &mut CommandMetadata,
+        jev: &mut Vec<JevOperation>,
+        skills: &mut Vec<String>,
+        sqlite: &mut SqlMetadata,
+        files: &mut Vec<Value>,
+        sender: Option<&str>,
+        tool_events_enabled: bool,
+        files_enabled: bool,
+        sqlite_enabled: bool,
+        command_switches: super::CommandSwitches,
+        mcp_sources: &BTreeMap<String, bool>,
+        mcp_switches: super::McpSwitches,
+        sources_incomplete: &mut bool,
+    ) -> (Self, Vec<super::agent::Outgoing>) {
         let nested = nested_invocations(source);
         let mut tools = BTreeMap::new();
+        let mut required_tools = std::collections::BTreeSet::new();
         let mut events = Vec::new();
-        for invocation in &nested.calls {
+        let mut messages = Vec::new();
+        for (invocation_index, invocation) in nested.calls.iter().enumerate() {
+            if let Some(operation) =
+                jev_operation(invocation.tool, true).filter(|_| command_switches.jev_calls)
+            {
+                jev.push(operation);
+            }
             let args = invocation.literal.as_ref().and_then(Value::as_object);
-            commands.observe(invocation.tool, args);
-            sqlite.observe(invocation.tool, args, true);
+            if command_switches.skills {
+                skills.extend(
+                    lam_session_core::skill_reads(invocation.tool, args)
+                        .into_iter()
+                        .take(40usize.saturating_sub(skills.len())),
+                );
+            }
+            if let Some(literal) = invocation.literal.as_ref().filter(|_| files_enabled) {
+                for event in lam_session_core::file_operations(invocation.tool, literal, true) {
+                    if files.len() < 100 && !files.contains(&event) {
+                        files.push(event);
+                    }
+                }
+            }
+            if let Some(message) = super::agent::Outgoing::new(
+                invocation.tool,
+                args,
+                sender,
+                true,
+                messages.len(),
+                invocation_index,
+            ) {
+                required_tools.insert(invocation.tool.to_owned());
+                messages.push(message);
+            }
+            commands.observe_selected(
+                invocation.tool,
+                args,
+                command_switches.git,
+                command_switches.checks,
+            );
+            let before_sql = sqlite.0.len();
+            if sqlite_enabled {
+                sqlite.observe(invocation.tool, args, true);
+            }
+            if sqlite.0.len() > before_sql {
+                required_tools.insert(invocation.tool.to_owned());
+            }
             if let Some(tool) = name(Some(invocation.tool)) {
                 if events.len() < OBSERVATION_LIMIT {
-                    if let Some(event) = Observed::new(
+                    if let Some(mut event) = Observed::new(
                         &tool,
                         invocation.literal.as_ref().and_then(Value::as_object),
                     ) {
-                        events.push(NestedEvent {
-                            tool: tool.clone(),
-                            event,
-                        });
+                        if !mcp_switches.allows(&event.server) {
+                            *sources_incomplete = true;
+                        } else {
+                            if mcp_sources.get(&event.server) == Some(&false) {
+                                event.metadata.clear();
+                                *sources_incomplete = true;
+                            }
+                            required_tools.insert(tool.clone());
+                            events.push(NestedEvent {
+                                tool: tool.clone(),
+                                event,
+                            });
+                        }
                     }
                 }
                 *tools.entry(tool).or_default() += 1;
             }
         }
-        let isolated = !nested.truncated && nested.calls.len() == 1 && events.len() == 1;
-        Self {
-            tools,
-            events,
-            isolated,
-            truncated: nested.truncated,
+        if !tool_events_enabled {
+            tools.retain(|tool, _| required_tools.contains(tool));
         }
+        let isolated = !nested.truncated && nested.calls.len() == 1 && events.len() == 1;
+        (
+            Self {
+                tools,
+                events,
+                isolated,
+                truncated: nested.truncated,
+                tool_counts_incomplete: !tool_events_enabled,
+                single_invocation: !nested.truncated && nested.calls.len() == 1,
+            },
+            messages,
+        )
     }
 
     fn valid(&self) -> bool {
@@ -255,6 +409,47 @@ impl NestedActivity {
 }
 
 impl Call {
+    pub(super) fn needs_tool_replay(&self) -> bool {
+        self.files_incomplete
+            || self.mcp_sources_incomplete
+            || self
+                .nested
+                .as_ref()
+                .is_some_and(|nested| nested.tool_counts_incomplete)
+    }
+    pub(super) fn tool_name(&self) -> &str {
+        &self.tool
+    }
+    fn valid_agent_messages(&self) -> bool {
+        if self.agent_messages.len() > INVOCATION_LIMIT
+            || self
+                .agent_messages
+                .windows(2)
+                .any(|pair| pair[0].invocation_index() >= pair[1].invocation_index())
+        {
+            return false;
+        }
+        let nested_call = matches!(self.tool.as_str(), "exec" | "functions.exec");
+        let mut counts = BTreeMap::<&str, usize>::new();
+        self.agent_messages
+            .iter()
+            .enumerate()
+            .all(|(index, message)| {
+                if !message.valid(index) || message.is_nested() != nested_call {
+                    return false;
+                }
+                let count = counts.entry(message.tool()).or_default();
+                *count += 1;
+                if nested_call {
+                    self.nested
+                        .as_ref()
+                        .and_then(|nested| nested.tools.get(message.tool()))
+                        .is_some_and(|limit| *count <= *limit)
+                } else {
+                    message.tool() == self.tool && *count == 1
+                }
+            })
+    }
     pub fn has_failure(&self) -> bool {
         self.failure.is_some()
     }
@@ -309,7 +504,16 @@ impl Call {
         usize::from(self.observation.is_some())
             + self.nested.as_ref().map_or(0, |nested| nested.events.len())
             + self.sqlite.0.len()
+            + self.skills.len()
             + usize::from(self.failure.is_some())
+    }
+
+    pub fn skill_history<'a>(
+        &'a self,
+        thread: &'a str,
+        call_id: &'a str,
+    ) -> impl Iterator<Item = Value> + 'a {
+        self.skills.iter().map(move |skill| json!({"thread_id":thread,"call_id":call_id,"skill":skill,"timestamp":self.time.map(stamp)}))
     }
 
     pub fn failure_event(&self, thread: &str, call_id: &str) -> Option<Value> {
@@ -365,9 +569,35 @@ impl Call {
         Some(event)
     }
 
-    fn complete(&mut self, output: Option<&JsonValue<'_>>, when: Option<Time>) {
+    fn complete(
+        &mut self,
+        output: Option<&JsonValue<'_>>,
+        when: Option<Time>,
+        files_enabled: bool,
+        mcp_sources: &BTreeMap<String, bool>,
+        mcp_switches: super::McpSwitches,
+        errors_enabled: bool,
+    ) {
         self.completed = when;
+        if !files_enabled && !self.files.is_empty() {
+            self.files_incomplete = true;
+        }
         let sqlite = !self.sqlite.is_empty();
+        let file_isolated = self
+            .nested
+            .as_ref()
+            .map_or(true, |nested| nested.single_invocation);
+        let disabled_source = self
+            .observation
+            .as_ref()
+            .or_else(|| {
+                self.nested
+                    .as_ref()
+                    .filter(|nested| nested.isolated)
+                    .and_then(|nested| nested.events.first())
+                    .map(|event| &event.event)
+            })
+            .is_some_and(|event| mcp_sources.get(&event.server) == Some(&false));
         let observed = if let Some(observed) = self.observation.as_mut() {
             Some(observed)
         } else {
@@ -379,12 +609,31 @@ impl Call {
         };
         {
             let output = output.map(json_value).unwrap_or(Value::Null);
-            self.failure = tool_failure(&output);
+            if files_enabled && file_isolated && self.files.len() == 1 {
+                let (read, written) = lam_history_store::mcp::file_byte_counts(&output);
+                if let Some(value) = read {
+                    self.files[0]["read_bytes"] = json!(value);
+                }
+                if let Some(value) = written {
+                    self.files[0]["write_bytes"] = json!(value);
+                }
+            }
+            self.failure = if !errors_enabled || disabled_source {
+                None
+            } else {
+                tool_failure(&output)
+            };
             if sqlite {
                 self.sql_failed = lam_history_store::mcp::output_failed(&output);
             }
             if let Some(observed) = observed {
-                observed.complete(&output);
+                if !mcp_switches.allows(&observed.server)
+                    || mcp_sources.get(&observed.server) == Some(&false)
+                {
+                    self.mcp_sources_incomplete = true;
+                } else {
+                    observed.complete(&output);
+                }
             }
         }
     }
@@ -465,6 +714,16 @@ fn error_identifier(value: Option<&str>) -> Option<&str> {
 #[serde(deny_unknown_fields)]
 pub struct Projection {
     pub id: Option<String>,
+    #[serde(skip)]
+    pub(super) workdir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) workdir_position: Option<super::details::Position>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub errors_incomplete: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sqlite_incomplete: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub commands_incomplete: bool,
     created: Option<Time>,
     updated: Option<Time>,
     model: Option<String>,
@@ -473,13 +732,19 @@ pub struct Projection {
     context_seen: bool,
     #[serde(default)]
     execution: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    agent_incoming: Vec<super::agent::Incoming>,
     kind: Option<ActivityKind>,
     trigger: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowance: Option<Value>,
     tokens: Option<[Option<i64>; 6]>,
     tokens_at: Option<Time>,
     token_priority: u8,
     status: Option<Status>,
     status_at: Option<Time>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    status_cached: bool,
     task_start: Option<Time>,
     intervals: BTreeMap<Time, Time>,
     #[serde(skip)]
@@ -500,6 +765,8 @@ pub struct Projection {
     pub retired_activity_count: usize,
     #[serde(skip)]
     pub observation_overflow: bool,
+    #[serde(skip)]
+    pub newly_trimmed_calls: u64,
 }
 
 impl Projection {
@@ -510,8 +777,22 @@ impl Projection {
         }
     }
 
+    pub(super) fn token_updated_at(&self) -> Option<Time> {
+        self.tokens_at
+    }
+
     pub fn updated(&self) -> Option<Time> {
         self.updated
+    }
+
+    pub(super) fn set_workdir(&mut self, value: Option<&str>) {
+        self.workdir = value
+            .filter(|value| {
+                !value.is_empty()
+                    && value.chars().count() <= 4096
+                    && !value.chars().any(char::is_control)
+            })
+            .map(str::to_owned);
     }
 
     pub fn prune_order(&mut self) {
@@ -520,7 +801,13 @@ impl Projection {
 
     pub fn restore_calls(&mut self, calls: BTreeMap<String, Call>) -> bool {
         if self.id.as_deref().is_some_and(|id| !uuid(id))
+            || self
+                .allowance
+                .as_ref()
+                .is_some_and(|value| !super::allowance::valid(value))
             || !super::metadata::valid_checkpoint(&self.execution)
+            || self.agent_incoming.len() > 100
+            || self.agent_incoming.iter().any(|message| !message.valid())
             || [&self.model, &self.effort, &self.trigger]
                 .iter()
                 .any(|value| {
@@ -561,12 +848,42 @@ impl Projection {
             || self.intervals.len() > 1024
             || calls.values().any(|call| {
                 !valid_name(&call.tool, 160, true)
+                    || !call.valid_agent_messages()
+                    || call.files.len() > 100
+                    || call
+                        .files
+                        .iter()
+                        .any(|event| !lam_session_core::valid_file_operation(event))
+                    || call
+                        .request_position
+                        .as_ref()
+                        .is_some_and(|position| !position.valid())
+                    || call
+                        .response_position
+                        .as_ref()
+                        .is_some_and(|position| !position.valid())
                     || call
                         .failure
                         .as_ref()
                         .is_some_and(|failure| !failure.valid())
                     || call.sequence >= self.next_sequence
                     || !call.commands.valid()
+                    || call.jev.len() > INVOCATION_LIMIT
+                    || call.skills.len() > 40
+                    || call.skills.iter().any(|name| {
+                        name.is_empty()
+                            || name.chars().count() > 160
+                            || name == "."
+                            || name == ".."
+                            || name
+                                .chars()
+                                .any(|ch| ch.is_control() || ch == '/' || ch == '\\')
+                    })
+                    || call.jev.iter().any(|event| {
+                        event.nested != matches!(call.tool.as_str(), "exec" | "functions.exec")
+                    })
+                    || (!matches!(call.tool.as_str(), "exec" | "functions.exec")
+                        && call.jev.len() > 1)
                     || !call.sqlite.valid()
                     || call.sql_failed && call.sqlite.is_empty()
                     || call.sqlite.0.iter().any(|event| {
@@ -608,6 +925,7 @@ impl Projection {
 
     pub fn retire_call(&mut self, id: &str) {
         if let Some(call) = self.calls.remove(id) {
+            self.newly_trimmed_calls = self.newly_trimmed_calls.saturating_add(1);
             let count = call.observation_count();
             if self.dirty_calls.remove(id) && count > 0 {
                 if self.retired_activity_count + count <= FILE_CALL_LIMIT {
@@ -621,7 +939,18 @@ impl Projection {
         }
     }
 
-    pub fn consume(&mut self, raw: &[u8], offset: u64) -> bool {
+    pub fn consume(
+        &mut self,
+        raw: &[u8],
+        offset: u64,
+        tool_events_enabled: bool,
+        files_enabled: bool,
+        mcp_sources: &BTreeMap<String, bool>,
+        mcp_switches: super::McpSwitches,
+        errors_enabled: bool,
+        sqlite_enabled: bool,
+        command_switches: super::CommandSwitches,
+    ) -> bool {
         let line = raw.strip_prefix(b"\xef\xbb\xbf").unwrap_or(raw);
         let Ok(record) = JsonValue::parse(line, false) else {
             return false;
@@ -629,11 +958,36 @@ impl Projection {
         let Some(payload @ JsonValue::Object(_)) = field(&record, "payload") else {
             return true;
         };
+        if !errors_enabled {
+            self.errors_incomplete = true;
+        }
+        if !sqlite_enabled {
+            self.sqlite_incomplete = true;
+        }
+        if !command_switches.worktrees
+            || !command_switches.git
+            || !command_switches.checks
+            || !command_switches.jev_calls
+            || !command_switches.skills
+            || !command_switches.usage
+        {
+            self.commands_incomplete = true;
+        }
         let when = timestamp(text(field(&record, "timestamp")));
         self.updated = self.updated.max(when);
         let event = text(field(payload, "type"));
         match text(field(&record, "type")) {
             Some("session_meta") => {
+                if command_switches.worktrees {
+                    if let Some(cwd) = text(field(payload, "cwd")).filter(|value| {
+                        !value.is_empty()
+                            && value.chars().count() <= 4096
+                            && !value.chars().any(char::is_control)
+                    }) {
+                        self.set_workdir(Some(cwd));
+                        self.workdir_position = Some(super::details::Position::new(offset, raw));
+                    }
+                }
                 self.execution
                     .extend(super::metadata::session(payload, true));
                 if let Some(id) = text(field(payload, "id")).filter(|id| uuid(id)) {
@@ -677,6 +1031,22 @@ impl Projection {
                     self.lifecycle(payload, when, event == Some("task_started"))
                 }
                 Some("token_count") => {
+                    if let (true, Some(when), Some(limits)) =
+                        (command_switches.usage, when, field(payload, "rate_limits"))
+                    {
+                        if self
+                            .allowance
+                            .as_ref()
+                            .and_then(|value| value["updated_at"].as_str())
+                            .is_none_or(|previous| stamp(when).as_str() >= previous)
+                        {
+                            if let Some(value) =
+                                super::allowance::project(&json_value(limits), when)
+                            {
+                                self.allowance = Some(value);
+                            }
+                        }
+                    }
                     if let Some(info) = field(payload, "info") {
                         self.usage(field(info, "total_token_usage"), when, 1);
                         if let Some(JsonValue::Int(value)) = field(info, "model_context_window") {
@@ -686,11 +1056,52 @@ impl Projection {
                         }
                     }
                 }
-                Some(reason) => self.session_error(payload, reason, when, raw, offset),
+                Some(reason) if errors_enabled => {
+                    self.session_error(payload, reason, when, raw, offset)
+                }
+                Some(_) => {}
                 None => {}
             },
             Some("token_usage_record") => self.usage(field(payload, "thread_token_usage"), when, 2),
-            Some("response_item") => self.tool_event(payload, event, when, raw, offset),
+            Some("response_item") => {
+                if event == Some("message")
+                    && text(field(&record, "channel")) != Some("analysis")
+                    && text(field(payload, "channel")) != Some("analysis")
+                    && matches!(text(field(payload, "role")), Some("user" | "assistant"))
+                {
+                    if let Some(JsonValue::Array(content)) = field(payload, "content") {
+                        for item in content.iter() {
+                            if matches!(
+                                text(field(item, "type")),
+                                Some("input_text" | "output_text" | "text")
+                            ) {
+                                if let Some(message) = text(field(item, "text"))
+                                    .and_then(|text| super::agent::Incoming::parse(text, when))
+                                {
+                                    self.agent_incoming.push(message);
+                                    if self.agent_incoming.len() > 100 {
+                                        self.agent_incoming.remove(0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                self.tool_event(
+                    payload,
+                    event,
+                    when,
+                    raw,
+                    offset,
+                    tool_events_enabled,
+                    files_enabled,
+                    mcp_sources,
+                    mcp_switches,
+                    errors_enabled,
+                    sqlite_enabled,
+                    command_switches,
+                )
+            }
             _ => {}
         }
         true
@@ -753,6 +1164,7 @@ impl Projection {
         let Some(when) = when else { return };
         let latest = Some(when) >= self.status_at;
         if latest {
+            self.status_cached = false;
             self.status_at = Some(when);
             self.status = Some(if started {
                 Status::Running
@@ -777,6 +1189,44 @@ impl Projection {
                 self.task_start = None;
             }
         }
+    }
+
+    pub(super) fn restore_cached_lifecycle(&mut self, cached: &Value) {
+        if self.id.as_deref() != cached["thread_id"].as_str() {
+            return;
+        }
+        let Some(time) = cached["task_time"]
+            .as_str()
+            .and_then(lam_history_store::parse_utc_stamp)
+        else {
+            return;
+        };
+        if self.status_at.is_some_and(|observed| observed >= time) {
+            return;
+        }
+        let status = match cached["status"].as_str() {
+            Some("running") => Status::Running,
+            Some("completed") => Status::Completed,
+            _ => return,
+        };
+        self.status = Some(status);
+        self.status_at = Some(time);
+        self.task_start = cached["task_start"]
+            .as_str()
+            .and_then(lam_history_store::parse_utc_stamp);
+        self.status_cached = true;
+    }
+
+    pub(super) fn lifecycle_entry(&self, filename: &str, offset: u64) -> Option<Value> {
+        let status = match self.status? {
+            Status::Running => "running",
+            Status::Completed => "completed",
+            _ => return None,
+        };
+        let offset = i64::try_from(offset).ok()?;
+        Some(
+            json!({"source_file":filename,"thread_id":self.id.as_ref()?,"status":status,"offset":offset,"task_time":stamp(self.status_at?),"task_start":self.task_start.map(stamp)}),
+        )
     }
 
     fn usage(&mut self, usage: Option<&JsonValue<'_>>, when: Option<Time>, priority: u8) {
@@ -804,6 +1254,13 @@ impl Projection {
         when: Option<Time>,
         raw: &[u8],
         offset: u64,
+        tool_events_enabled: bool,
+        files_enabled: bool,
+        mcp_sources: &BTreeMap<String, bool>,
+        mcp_switches: super::McpSwitches,
+        errors_enabled: bool,
+        sqlite_enabled: bool,
+        command_switches: super::CommandSwitches,
     ) {
         match event {
             Some("function_call" | "custom_tool_call") => {
@@ -816,7 +1273,13 @@ impl Projection {
                 let arguments = field(payload, "arguments").or_else(|| field(payload, "input"));
                 let shell = matches!(tool.as_str(), "exec_command" | "functions.exec_command");
                 let observed = lam_history_store::mcp::identity(&tool).is_some();
-                let args = if shell || observed || tool.to_ascii_lowercase().contains("sqlite") {
+                let is_agent =
+                    super::agent::Outgoing::new(&tool, None, None, false, 0, 0).is_some();
+                let args = if shell
+                    || observed
+                    || is_agent
+                    || tool.to_ascii_lowercase().contains("sqlite")
+                {
                     match arguments {
                         Some(JsonValue::Str(value)) => serde_json::from_str::<Value>(value).ok(),
                         Some(value @ JsonValue::Object(_)) => Some(json_value(value)),
@@ -826,30 +1289,102 @@ impl Projection {
                     None
                 };
                 let args = args.as_ref().and_then(Value::as_object);
-                let observation = observed.then(|| Observed::new(&tool, args)).flatten();
+                let mut observation = observed.then(|| Observed::new(&tool, args)).flatten();
+                let mut sources_incomplete = false;
+                if observation
+                    .as_ref()
+                    .is_some_and(|event| !mcp_switches.allows(&event.server))
+                {
+                    observation = None;
+                    sources_incomplete = true;
+                }
+                if let Some(event) = observation
+                    .as_mut()
+                    .filter(|event| mcp_sources.get(&event.server) == Some(&false))
+                {
+                    event.metadata.clear();
+                    sources_incomplete = true;
+                }
                 let mut commands = CommandMetadata::default();
-                commands.observe(&tool, args);
-                let mut sqlite = SqlMetadata::default();
-                sqlite.observe(&tool, args, false);
-                let nested = if matches!(tool.as_str(), "exec" | "functions.exec") {
-                    text(arguments)
-                        .map(|source| NestedActivity::from_code(source, &mut commands, &mut sqlite))
+                let mut skills = if command_switches.skills {
+                    lam_session_core::skill_reads(&tool, args)
                 } else {
-                    None
+                    Vec::new()
                 };
-                let (completed, sequence, sql_failed, failure) =
+                let mut jev = jev_operation(&tool, false)
+                    .filter(|_| command_switches.jev_calls)
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                commands.observe_selected(
+                    &tool,
+                    args,
+                    command_switches.git,
+                    command_switches.checks,
+                );
+                let mut sqlite = SqlMetadata::default();
+                if sqlite_enabled {
+                    sqlite.observe(&tool, args, false);
+                }
+                let mut files = Vec::new();
+                if files_enabled && !matches!(tool.as_str(), "exec" | "functions.exec") {
+                    let raw_args = arguments.map(json_value).unwrap_or(Value::Null);
+                    let decoded =
+                        if matches!(tool.as_str(), "apply_patch" | "functions.apply_patch") {
+                            raw_args
+                        } else if let Some(value) = raw_args.as_str() {
+                            serde_json::from_str(value).unwrap_or(raw_args)
+                        } else {
+                            raw_args
+                        };
+                    files = lam_session_core::file_operations(&tool, &decoded, false);
+                }
+                let (nested, agent_messages) = if matches!(tool.as_str(), "exec" | "functions.exec")
+                {
+                    text(arguments)
+                        .map(|source| {
+                            NestedActivity::from_code(
+                                source,
+                                &mut commands,
+                                &mut jev,
+                                &mut skills,
+                                &mut sqlite,
+                                &mut files,
+                                self.id.as_deref(),
+                                tool_events_enabled,
+                                files_enabled,
+                                sqlite_enabled,
+                                command_switches,
+                                mcp_sources,
+                                mcp_switches,
+                                &mut sources_incomplete,
+                            )
+                        })
+                        .map_or_else(
+                            || (None, Vec::new()),
+                            |(nested, messages)| (Some(nested), messages),
+                        )
+                } else {
+                    (
+                        None,
+                        super::agent::Outgoing::new(&tool, args, self.id.as_deref(), false, 0, 0)
+                            .into_iter()
+                            .collect(),
+                    )
+                };
+                let (completed, sequence, sql_failed, failure, response_position) =
                     if let Some(call) = self.calls.get(&id) {
                         (
                             call.completed,
                             call.sequence,
                             !sqlite.is_empty() && call.sql_failed,
                             call.failure.clone(),
+                            call.response_position.clone(),
                         )
                     } else {
                         self.call_order.push_back(id.clone());
                         let sequence = self.next_sequence;
                         self.next_sequence = self.next_sequence.saturating_add(1);
-                        (None, sequence, false, None)
+                        (None, sequence, false, None, None)
                     };
                 self.dirty_calls.insert(id.clone());
                 self.retired_calls.remove(&id);
@@ -863,9 +1398,17 @@ impl Projection {
                         observation,
                         nested,
                         commands,
+                        jev,
+                        skills,
                         sqlite,
                         sql_failed,
                         failure,
+                        agent_messages,
+                        files,
+                        files_incomplete: !files_enabled,
+                        mcp_sources_incomplete: sources_incomplete,
+                        request_position: Some(super::details::Position::new(offset, raw)),
+                        response_position,
                     },
                 );
                 if self.calls.len() > FILE_CALL_LIMIT {
@@ -879,28 +1422,54 @@ impl Projection {
                 if let Some((id, call)) =
                     id.and_then(|id| self.calls.get_mut(id).map(|call| (id, call)))
                 {
-                    call.complete(field(payload, "output"), when);
+                    call.complete(
+                        field(payload, "output"),
+                        when,
+                        files_enabled,
+                        mcp_sources,
+                        mcp_switches,
+                        errors_enabled,
+                    );
+                    call.response_position = Some(super::details::Position::new(offset, raw));
                     self.dirty_calls.insert(id.to_owned());
-                } else if let Some(failure) = tool_failure(
-                    &field(payload, "output")
-                        .map(json_value)
-                        .unwrap_or(Value::Null),
-                ) {
-                    let error = SessionError {
-                        time: when,
-                        code: failure.code.clone(),
-                        reason: String::new(),
-                        severity: Severity::Error,
-                        record_offset: Some(offset),
-                        record_hash: Some(format!("{:x}", Sha256::digest(raw))),
-                        failure: Some(failure),
-                        call_id: error_identifier(id).map(str::to_owned),
-                    };
-                    self.pending_errors.push(error.clone());
-                    self.errors.push(error);
-                    self.errors
-                        .sort_by_key(|error| std::cmp::Reverse(error.time));
-                    self.errors.truncate(50);
+                } else {
+                    // Detail lookup accepts an empty or absent call_id followed by id,
+                    // while the collector only marks a response complete by call_id.
+                    if id.is_none_or(str::is_empty) {
+                        if let Some((id, call)) = text(field(payload, "id"))
+                            .and_then(|id| self.calls.get_mut(id).map(|call| (id, call)))
+                        {
+                            call.response_position =
+                                Some(super::details::Position::new(offset, raw));
+                            self.dirty_calls.insert(id.to_owned());
+                        }
+                    }
+                    if let Some(failure) = errors_enabled
+                        .then(|| {
+                            tool_failure(
+                                &field(payload, "output")
+                                    .map(json_value)
+                                    .unwrap_or(Value::Null),
+                            )
+                        })
+                        .flatten()
+                    {
+                        let error = SessionError {
+                            time: when,
+                            code: failure.code.clone(),
+                            reason: String::new(),
+                            severity: Severity::Error,
+                            record_offset: Some(offset),
+                            record_hash: Some(format!("{:x}", Sha256::digest(raw))),
+                            failure: Some(failure),
+                            call_id: error_identifier(id).map(str::to_owned),
+                        };
+                        self.pending_errors.push(error.clone());
+                        self.errors.push(error);
+                        self.errors
+                            .sort_by_key(|error| std::cmp::Reverse(error.time));
+                        self.errors.truncate(50);
+                    }
                 }
             }
             _ => {}
@@ -908,6 +1477,8 @@ impl Projection {
     }
 
     pub fn merge(&mut self, other: &Self) {
+        self.agent_incoming
+            .extend(other.agent_incoming.iter().cloned());
         for (key, value) in &other.execution {
             self.execution
                 .entry(key.clone())
@@ -933,6 +1504,7 @@ impl Projection {
         }
         if other.status_at > self.status_at {
             self.status_at = other.status_at;
+            self.status_cached = other.status_cached;
             self.status = other.status;
             self.task_start = other.task_start;
         }
@@ -946,6 +1518,47 @@ impl Projection {
         );
     }
 
+    pub fn file_events(&self, boundary: Option<Time>, files_enabled: bool) -> Vec<Value> {
+        if !files_enabled {
+            return Vec::new();
+        }
+        let mut result = Vec::new();
+        for (id, call) in &self.calls {
+            if !boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff)) {
+                continue;
+            }
+            for file in &call.files {
+                let mut event = file.clone();
+                event["thread_id"] = json!(self.id);
+                event["thread_name"] = Value::Null;
+                event["call_id"] = json!(id);
+                event["timestamp"] = json!(call.time.map(stamp));
+                event["completed_at"] = json!(call.completed.map(stamp));
+                if event["nested"] == true {
+                    event["duration_ms"] = Value::Null;
+                    event["container_duration_ms"] = json!(call.duration_ms());
+                } else {
+                    event["duration_ms"] = json!(call.duration_ms());
+                }
+                result.push(event);
+            }
+        }
+        result.sort_by(|a, b| b["timestamp"].as_str().cmp(&a["timestamp"].as_str()));
+        result
+    }
+    pub fn skill_events(&self, boundary: Option<Time>) -> Vec<Value> {
+        let mut events = BTreeMap::new();
+        for (id, call) in &self.calls {
+            if boundary.is_some_and(|cutoff| call.time.is_none_or(|time| time < cutoff)) {
+                continue;
+            }
+            for skill in &call.skills {
+                events.insert((id, skill), json!({"thread_id":self.id,"thread_name":null,"call_id":id,"skill":skill,"tool":call.tool,"has_document":true,"timestamp":call.time.map(stamp),"completed_at":call.completed.map(stamp),"duration_ms":call.duration_ms()}));
+            }
+        }
+        events.into_values().collect()
+    }
+
     pub fn row(
         &self,
         partial: bool,
@@ -953,6 +1566,9 @@ impl Projection {
         reference: Time,
         totals: &mut BTreeMap<String, usize>,
         nested_totals: &mut BTreeMap<String, usize>,
+        tool_events_enabled: bool,
+        files_enabled: bool,
+        jev_calls_enabled: bool,
     ) -> Value {
         let mut calls = self
             .calls
@@ -967,14 +1583,14 @@ impl Projection {
         for (_, call) in &calls {
             *counts.entry(call.tool.clone()).or_default() += 1;
             *totals.entry(call.tool.clone()).or_default() += 1;
-            if let Some(nested) = &call.nested {
+            if let Some(nested) = call.nested.as_ref().filter(|_| tool_events_enabled) {
                 for (tool, count) in &nested.tools {
                     *nested_counts.entry(tool.clone()).or_default() += count;
                     *nested_totals.entry(tool.clone()).or_default() += count;
                 }
             }
         }
-        let events: Vec<_> = calls.iter().take(100).map(|(id, call)| {
+        let events: Vec<_> = calls.iter().filter(|_| tool_events_enabled).take(100).map(|(id, call)| {
             let duration = call.duration_ms();
             let nested_tools = call.nested.as_ref().map_or_else(|| json!({}), |nested| json!(nested.tools));
             let mut event = json!({"call_id":id,"tool":call.tool,"timestamp":call.time.map(stamp),
@@ -984,6 +1600,19 @@ impl Projection {
             }
             event
         }).collect();
+        let file_events = self.file_events(boundary, files_enabled);
+        let file_changes: Vec<_> = file_events
+            .iter()
+            .filter(|event| event["operation"] != "read")
+            .take(200)
+            .cloned()
+            .collect();
+        let file_reads: Vec<_> = file_events
+            .iter()
+            .filter(|event| event["operation"] == "read")
+            .take(200)
+            .cloned()
+            .collect();
         let mut durations: Vec<_> = self
             .intervals
             .iter()
@@ -997,16 +1626,40 @@ impl Projection {
         let tokens = self
             .tokens
             .map(|values| COUNTERS.into_iter().zip(values).collect::<BTreeMap<_, _>>());
+        let thread = self.id.as_deref().unwrap_or("");
+        let mut communication: Vec<Value> = self
+            .agent_incoming
+            .iter()
+            .filter(|message| {
+                boundary.is_none_or(|cutoff| message.time().is_some_and(|time| time >= cutoff))
+            })
+            .map(|message| message.render(thread))
+            .collect();
+        for (id, call) in &calls {
+            communication.extend(call.agent_messages.iter().map(|message| {
+                message.render(thread, id, call.time, call.completed, call.duration_ms())
+            }));
+        }
+        communication
+            .sort_by(|left, right| right["timestamp"].as_str().cmp(&left["timestamp"].as_str()));
+        communication.truncate(100);
+        let jev_calls: Vec<_> = calls.iter().filter(|_| jev_calls_enabled).flat_map(|(id, call)| {
+            call.jev.iter().enumerate().map(move |(index, operation)| json!({
+                "thread_id":self.id, "call_id":id, "index":index, "operation":operation.operation,
+                "nested":operation.nested, "timestamp":call.time.map(stamp), "completed_at":call.completed.map(stamp),
+            }))
+        }).take(100).collect();
         json!({
             "thread_id":self.id, "created_at":self.created.map(stamp), "updated_at":self.updated.map(stamp),
             "model":self.model, "reasoning_effort":self.effort, "context_updated_at":self.context_at.map(stamp), "execution":self.execution,
             "environment":"local", "activity_type":self.kind.unwrap_or(ActivityKind::Unknown), "trigger":self.trigger.as_deref().unwrap_or("unknown"),
             "status":self.status.unwrap_or(Status::Observed), "status_updated_at":self.status_at.map(stamp),
-            "status_source":self.status_at.map(|_| "session_lifecycle"),
+            "status_source":self.status_at.map(|_| if self.status_cached {"cached_lifecycle"} else {"session_lifecycle"}),
             "tokens":tokens.map_or_else(|| json!({}), |values| json!(values)), "token_updated_at":self.tokens_at.map(stamp),
-            "tool_calls":calls.len(), "tools":counts, "nested_tools":nested_counts, "tool_events":events, "partial_history":partial,
+            "tool_calls":calls.len(), "tools":counts, "nested_tools":nested_counts, "tool_events":events, "jev_calls":jev_calls, "partial_history":partial,
             "task_runs": (!durations.is_empty()).then_some(durations.len()),
             "task_duration_ms": (!durations.is_empty()).then(|| durations.iter().sum::<i64>()),
+            "agent_messages":communication,"file_changes":file_changes,"file_reads":file_reads,
         })
     }
 }

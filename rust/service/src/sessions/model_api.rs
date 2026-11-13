@@ -231,6 +231,7 @@ pub fn summary(
 ) -> Value {
     let mut selected: Vec<_> = events
         .iter()
+        .filter(|_| enabled)
         .filter(|event| {
             boundary.is_none_or(|cutoff| {
                 event["timestamp"]
@@ -254,9 +255,39 @@ pub fn summary(
     json!({"enabled":enabled,"events":selected,"requests":count("request"),"connections":count("connection"),"retry_events":count("retry"),"failed_requests":failed,"limit":1000,"sources":[source]})
 }
 
+pub fn merge(core: &VecDeque<Value>, desktop: &[Value]) -> VecDeque<Value> {
+    let mut unique = BTreeMap::new();
+    for event in core.iter().chain(desktop) {
+        if let Some(id) = event["observation_id"].as_str() {
+            unique.insert(id, event.clone());
+        }
+    }
+    let mut values: Vec<_> = unique.into_values().collect();
+    values.sort_by(|left, right| right["timestamp"].as_str().cmp(&left["timestamp"].as_str()));
+    values.truncate(1000);
+    values.into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merges_duplicate_observations_before_enforcing_limit() {
+        let mut core = VecDeque::new();
+        let mut desktop = Vec::new();
+        for id in 0..1000 {
+            core.push_back(json!({"observation_id":format!("core-{id}"),"timestamp":"2026-11-12T00:00:00Z","event_kind":"request","status":"returned"}));
+        }
+        for id in 0..1000 {
+            desktop.push(json!({"observation_id":format!("core-{id}"),"timestamp":"2026-11-12T00:00:01Z","event_kind":"request","status":"failed"}));
+        }
+        desktop.push(json!({"observation_id":"unique","timestamp":"2026-11-12T00:00:00Z","event_kind":"retry","status":"retrying"}));
+        let merged = merge(&core, &desktop);
+        assert_eq!(merged.len(), 1000);
+        assert!(merged.iter().all(|event| event["status"] == "failed"));
+        assert_eq!(summary(&merged, None, true, json!({}))["requests"], 1000);
+    }
 
     #[test]
     fn projects_only_valid_metadata_and_ignores_quoted_spoofs() {

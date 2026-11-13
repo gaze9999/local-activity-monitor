@@ -70,21 +70,25 @@ fn timestamp(value: ValueRef<'_>) -> Value {
     })
 }
 
-fn catalog_entries(home: &Path) -> HashMap<String, Value> {
+fn catalog_entries(home: &Path) -> (HashMap<String, Value>, Value) {
     let mut entries = HashMap::new();
+    let path = home.join("sqlite/codex-dev.db");
+    let checked = DateTime::<Utc>::from(std::time::SystemTime::now())
+        .to_rfc3339_opts(SecondsFormat::Secs, false);
+    let mut report = json!({"name":"codex-dev.db","location":path.to_string_lossy(),"health":if path.is_file(){"unavailable"}else{"missing"},"checked_at":checked,"fields":[]});
     let Ok(db) = Connection::open_with_flags(
-        home.join("sqlite/codex-dev.db"),
+        &path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ) else {
-        return entries;
+        return (entries, report);
     };
     if db.busy_timeout(Duration::from_millis(80)).is_err()
         || db.pragma_update(None, "query_only", true).is_err()
     {
-        return entries;
+        return (entries, report);
     }
     let Ok(available) = columns(&db, "local_thread_catalog") else {
-        return entries;
+        return (entries, report);
     };
     let required = [
         "host_id",
@@ -97,8 +101,26 @@ fn catalog_entries(home: &Path) -> HashMap<String, Value> {
         "project_id",
     ];
     if !required.iter().all(|key| available.contains(*key)) {
-        return entries;
+        report["health"] = json!("unsupported");
+        report["queries"] = json!([
+            {"name":"automation_runs","health":"ok","fields":["automation_runs.thread_id","automations.kind"],"rows_read":0,"selected_threads":0,"row_limit":0},
+            {"name":"automations","health":"ok","fields":["target_thread_id","status"],"rows_read":0,"selected_threads":0,"row_limit":0}
+        ]);
+        return (entries, report);
     }
+    let mut wanted = required.to_vec();
+    wanted.extend(
+        [
+            "model",
+            "reasoning_effort",
+            "model_provider",
+            "chatgpt_async_status",
+            "archived",
+        ]
+        .into_iter()
+        .filter(|key| available.contains(*key)),
+    );
+    let mut rows_read = 0usize;
     let status = if available.contains("chatgpt_async_status") {
         "chatgpt_async_status"
     } else {
@@ -112,116 +134,140 @@ fn catalog_entries(home: &Path) -> HashMap<String, Value> {
         }
     };
     let sql = format!("SELECT host_id,thread_id,display_title,source_updated_at,thread_source,{status},source_created_at,source_kind,project_id,{},{},{},{} FROM local_thread_catalog ORDER BY source_updated_at DESC LIMIT 2000", optional("model"),optional("reasoning_effort"),optional("model_provider"),optional("archived"));
-    if let Ok(mut statement) = db.prepare(&sql) {
-        if let Ok(mut rows) = statement.query([]) {
-            while let Ok(Some(row)) = rows.next() {
-                let Ok(id_value) = row.get_ref(1) else {
-                    continue;
-                };
-                let Some(id) = string(id_value).filter(|id| id.chars().count() <= 160) else {
-                    continue;
-                };
-                let host = row.get_ref(0).ok().and_then(string);
-                let environment = match host {
-                    Some("local") => "local",
-                    Some("durable") => "cloud",
-                    Some(host) if host.starts_with("chatgpt:") => "cloud",
-                    Some(host) if host.starts_with("remote-control:") => "remote",
-                    _ => "unknown",
-                };
-                let updated = match row.get_ref(3) {
-                    Ok(ValueRef::Integer(n)) => seconds_timestamp(n as f64),
-                    Ok(ValueRef::Real(n)) => seconds_timestamp(n),
-                    _ => Value::Null,
-                };
-                if entries.get(id).is_some_and(|previous: &Value| {
-                    previous["last_run_at"].as_str().unwrap_or("") >= updated.as_str().unwrap_or("")
-                }) {
-                    continue;
-                }
-                let title = row
-                    .get_ref(2)
-                    .ok()
-                    .and_then(string)
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.chars().take(512).collect::<String>());
-                let kind = row
-                    .get_ref(4)
-                    .ok()
-                    .and_then(string)
-                    .filter(|s| {
-                        matches!(
-                            *s,
-                            "dot"
-                                | "orbit"
-                                | "automation"
-                                | "schedule"
-                                | "heartbeat"
-                                | "subagent"
-                                | "guardian_review"
-                                | "user"
-                        )
-                    })
-                    .unwrap_or("unknown");
-                let state = row.get_ref(5).ok().and_then(string).filter(|s| {
-                    !s.is_empty()
-                        && s.len() <= 40
-                        && s.as_bytes()[0].is_ascii_lowercase()
-                        && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
-                });
-                let created = match row.get_ref(6) {
-                    Ok(ValueRef::Integer(n)) => seconds_timestamp(n as f64),
-                    Ok(ValueRef::Real(n)) => seconds_timestamp(n),
-                    _ => Value::Null,
-                };
-                let activity_type = match row.get_ref(7).ok().and_then(string) {
-                    Some("chatgpt") => "chat",
-                    Some("vscode" | "cli" | "exec") => "codex",
-                    _ => "unknown",
-                };
-                let project_id = row
-                    .get_ref(8)
-                    .ok()
-                    .and_then(string)
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.chars().take(160).collect::<String>());
-                let model = row
-                    .get_ref(9)
-                    .ok()
-                    .and_then(string)
-                    .filter(|s| identifier(s));
-                let effort = row
-                    .get_ref(10)
-                    .ok()
-                    .and_then(string)
-                    .filter(|s| identifier(s));
-                let provider = row
-                    .get_ref(11)
-                    .ok()
-                    .and_then(string)
-                    .filter(|s| identifier(s));
-                let archived = match row.get_ref(12) {
-                    Ok(ValueRef::Integer(0)) => Some(false),
-                    Ok(ValueRef::Integer(1)) => Some(true),
-                    _ => None,
-                };
-                let execution = provider
-                    .map(|provider| json!({"model_provider":provider}))
-                    .unwrap_or_else(|| json!({}));
-                entries.insert(id.to_owned(), json!({"thread_id":id,"name":title,"host_id":host,"environment":environment,"kind":kind,"last_run_at":updated,"status":state,"created_at":created,"activity_type":activity_type,"project_id":project_id,"project_scope":if project_id.is_some(){"project"}else{"none"},"model":model,"reasoning_effort":effort,"archived":archived,"execution":execution,"has_schedule":false}));
+    {
+        let Ok(mut statement) = db.prepare(&sql) else {
+            return (entries, report);
+        };
+        let Ok(mut rows) = statement.query([]) else {
+            return (entries, report);
+        };
+        loop {
+            let row = match rows.next() {
+                Ok(Some(row)) => row,
+                Ok(None) => break,
+                Err(_) => return (entries, report),
+            };
+            rows_read += 1;
+            let Ok(id_value) = row.get_ref(1) else {
+                continue;
+            };
+            let Some(id) = string(id_value).filter(|id| id.chars().count() <= 160) else {
+                continue;
+            };
+            let host = row.get_ref(0).ok().and_then(string);
+            let environment = match host {
+                Some("local") => "local",
+                Some("durable") => "cloud",
+                Some(host) if host.starts_with("chatgpt:") => "cloud",
+                Some(host) if host.starts_with("remote-control:") => "remote",
+                _ => "unknown",
+            };
+            let updated = match row.get_ref(3) {
+                Ok(ValueRef::Integer(n)) => seconds_timestamp(n as f64),
+                Ok(ValueRef::Real(n)) => seconds_timestamp(n),
+                _ => Value::Null,
+            };
+            if entries.get(id).is_some_and(|previous: &Value| {
+                previous["last_run_at"].as_str().unwrap_or("") >= updated.as_str().unwrap_or("")
+            }) {
+                continue;
             }
+            let title = row
+                .get_ref(2)
+                .ok()
+                .and_then(string)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.chars().take(512).collect::<String>());
+            let kind = row
+                .get_ref(4)
+                .ok()
+                .and_then(string)
+                .filter(|s| {
+                    matches!(
+                        *s,
+                        "dot"
+                            | "orbit"
+                            | "automation"
+                            | "schedule"
+                            | "heartbeat"
+                            | "subagent"
+                            | "guardian_review"
+                            | "user"
+                    )
+                })
+                .unwrap_or("unknown");
+            let state = row.get_ref(5).ok().and_then(string).filter(|s| {
+                !s.is_empty()
+                    && s.len() <= 40
+                    && s.as_bytes()[0].is_ascii_lowercase()
+                    && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+            });
+            let created = match row.get_ref(6) {
+                Ok(ValueRef::Integer(n)) => seconds_timestamp(n as f64),
+                Ok(ValueRef::Real(n)) => seconds_timestamp(n),
+                _ => Value::Null,
+            };
+            let activity_type = match row.get_ref(7).ok().and_then(string) {
+                Some("chatgpt") => "chat",
+                Some("vscode" | "cli" | "exec") => "codex",
+                _ => "unknown",
+            };
+            let project_id = row
+                .get_ref(8)
+                .ok()
+                .and_then(string)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.chars().take(160).collect::<String>());
+            let model = row
+                .get_ref(9)
+                .ok()
+                .and_then(string)
+                .filter(|s| identifier(s));
+            let effort = row
+                .get_ref(10)
+                .ok()
+                .and_then(string)
+                .filter(|s| identifier(s));
+            let provider = row
+                .get_ref(11)
+                .ok()
+                .and_then(string)
+                .filter(|s| identifier(s));
+            let archived = match row.get_ref(12) {
+                Ok(ValueRef::Integer(0)) => Some(false),
+                Ok(ValueRef::Integer(1)) => Some(true),
+                _ => None,
+            };
+            let execution = provider
+                .map(|provider| json!({"model_provider":provider}))
+                .unwrap_or_else(|| json!({}));
+            entries.insert(id.to_owned(), json!({"thread_id":id,"name":title,"host_id":host,"environment":environment,"kind":kind,"last_run_at":updated,"status":state,"created_at":created,"activity_type":activity_type,"project_id":project_id,"project_scope":if project_id.is_some(){"project"}else{"none"},"model":model,"reasoning_effort":effort,"archived":archived,"execution":execution,"has_schedule":false}));
         }
     }
     let mut ids: Vec<_> = entries.keys().cloned().collect();
     ids.sort();
+    let mut queries = [
+        json!({"name":"automation_runs","health":"ok","fields":["automation_runs.thread_id","automations.kind"],"rows_read":0,"selected_threads":ids.len(),"row_limit":ids.len()}),
+        json!({"name":"automations","health":"ok","fields":["target_thread_id","status"],"rows_read":0,"selected_threads":ids.len(),"row_limit":ids.len()}),
+    ];
     for batch in ids.chunks(400) {
         let placeholders = vec!["?"; batch.len()].join(",");
         let sql = format!("SELECT r.thread_id,MAX(CASE WHEN a.kind='heartbeat' THEN 1 ELSE 0 END) FROM automation_runs r JOIN automations a ON a.id=r.automation_id WHERE r.thread_id IN ({placeholders}) GROUP BY r.thread_id");
         if let Ok(mut statement) = db.prepare(&sql) {
             if let Ok(mut rows) = statement.query(rusqlite::params_from_iter(batch.iter())) {
-                while let Ok(Some(row)) = rows.next() {
+                loop {
+                    let row = match rows.next() {
+                        Ok(Some(row)) => row,
+                        Ok(None) => break,
+                        Err(_) => {
+                            queries[0]["health"] = json!("unsupported");
+                            break;
+                        }
+                    };
+                    queries[0]["rows_read"] =
+                        json!(queries[0]["rows_read"].as_u64().unwrap_or(0) + 1);
                     let Ok(id) = row.get::<_, String>(0) else {
                         continue;
                     };
@@ -233,22 +279,45 @@ fn catalog_entries(home: &Path) -> HashMap<String, Value> {
                         });
                     }
                 }
+            } else {
+                queries[0]["health"] = json!("unsupported");
             }
+        } else {
+            queries[0]["health"] = json!("unsupported");
         }
         let sql = format!("SELECT target_thread_id FROM automations WHERE status='ACTIVE' AND target_thread_id IN ({placeholders}) GROUP BY target_thread_id");
         if let Ok(mut statement) = db.prepare(&sql) {
             if let Ok(mut rows) = statement.query(rusqlite::params_from_iter(batch.iter())) {
-                while let Ok(Some(row)) = rows.next() {
+                loop {
+                    let row = match rows.next() {
+                        Ok(Some(row)) => row,
+                        Ok(None) => break,
+                        Err(_) => {
+                            queries[1]["health"] = json!("unsupported");
+                            break;
+                        }
+                    };
+                    queries[1]["rows_read"] =
+                        json!(queries[1]["rows_read"].as_u64().unwrap_or(0) + 1);
                     if let Ok(id) = row.get::<_, String>(0) {
                         if let Some(entry) = entries.get_mut(&id) {
                             entry["has_schedule"] = json!(true);
                         }
                     }
                 }
+            } else {
+                queries[1]["health"] = json!("unsupported");
             }
+        } else {
+            queries[1]["health"] = json!("unsupported");
         }
     }
-    entries
+    report["health"] = json!("ok");
+    report["fields"] = json!(wanted);
+    report["rows_read"] = json!(rows_read);
+    report["row_limit"] = json!(2000);
+    report["queries"] = json!(queries);
+    (entries, report)
 }
 
 pub(super) fn state_filename(name: &str) -> bool {
@@ -296,37 +365,82 @@ fn merge_state_database(
     home: &Path,
     entries: &mut HashMap<String, Value>,
     observed: &BTreeSet<String>,
-) {
+    include_workdirs: bool,
+    select_recent: bool,
+) -> Vec<Value> {
+    let mut reports = Vec::new();
     let mut selected: BTreeSet<_> = entries
         .keys()
         .cloned()
         .chain(observed.iter().cloned())
         .collect();
     for path in state_files(home) {
+        let checked = DateTime::<Utc>::from(std::time::SystemTime::now())
+            .to_rfc3339_opts(SecondsFormat::Secs, false);
+        let mut report = json!({"name":path.file_name().unwrap_or_default().to_string_lossy(),"location":path.to_string_lossy(),"health":if path.is_file(){"unavailable"}else{"missing"},"checked_at":checked,"fields":[]});
         let Ok(db) = Connection::open_with_flags(
-            path,
+            &path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ) else {
+            reports.push(report);
             continue;
         };
         if db.busy_timeout(Duration::from_millis(80)).is_err()
             || db.pragma_update(None, "query_only", true).is_err()
         {
+            reports.push(report);
             continue;
         }
         let Ok(fields) = columns(&db, "threads") else {
+            reports.push(report);
             continue;
         };
         if !fields.contains("id") || !fields.contains("title") {
+            report["health"] = json!("unsupported");
+            reports.push(report);
             continue;
         }
+        if select_recent {
+            let order = ["updated_at_ms", "updated_at", "created_at_ms", "created_at"]
+                .into_iter()
+                .find(|field| fields.contains(*field))
+                .unwrap_or("id");
+            let remaining = 2000usize.saturating_sub(selected.len());
+            if remaining > 0 {
+                let query =
+                    format!("SELECT id FROM threads ORDER BY {order} DESC LIMIT {remaining}");
+                let result = db.prepare(&query).and_then(|mut statement| {
+                    statement
+                        .query_map([], |row| {
+                            Ok(row.get_ref(0).ok().and_then(string).map(str::to_owned))
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                });
+                match result {
+                    Ok(ids) => selected.extend(ids.into_iter().flatten().filter(|id| {
+                        id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+                    })),
+                    Err(_) => {
+                        reports.push(report);
+                        continue;
+                    }
+                }
+            }
+        }
         let mut edges = std::collections::BTreeMap::new();
-        if columns(&db, "thread_spawn_edges").is_ok_and(|fields| {
+        let mut failed = false;
+        let has_edges = columns(&db, "thread_spawn_edges").is_ok_and(|fields| {
             fields.contains("parent_thread_id") && fields.contains("child_thread_id")
-        }) {
+        });
+        if has_edges {
             let mut pending = selected.clone();
             let mut visited = BTreeSet::new();
-            while !pending.is_empty() && edges.len() < 500 {
+            let edge_limit = if select_recent {
+                500.min(2000usize.saturating_sub(selected.len()))
+            } else {
+                500
+            };
+            while !pending.is_empty() && edges.len() < edge_limit {
                 let batch: Vec<_> = pending.difference(&visited).take(400).cloned().collect();
                 if batch.is_empty() {
                     break;
@@ -336,14 +450,24 @@ fn merge_state_database(
                     visited.insert(id.clone());
                 }
                 let placeholders = vec!["?"; batch.len()].join(",");
-                let sql = format!("SELECT parent_thread_id,child_thread_id FROM thread_spawn_edges WHERE parent_thread_id IN ({placeholders}) ORDER BY child_thread_id LIMIT {}", 500 - edges.len());
+                let sql = format!("SELECT parent_thread_id,child_thread_id FROM thread_spawn_edges WHERE parent_thread_id IN ({placeholders}) ORDER BY child_thread_id LIMIT {}", edge_limit - edges.len());
                 let Ok(mut statement) = db.prepare(&sql) else {
+                    failed = true;
                     break;
                 };
                 let Ok(mut rows) = statement.query(rusqlite::params_from_iter(batch.iter())) else {
+                    failed = true;
                     break;
                 };
-                while let Ok(Some(row)) = rows.next() {
+                loop {
+                    let row = match rows.next() {
+                        Ok(Some(row)) => row,
+                        Ok(None) => break,
+                        Err(_) => {
+                            failed = true;
+                            break;
+                        }
+                    };
                     let (Ok(parent), Ok(child)) =
                         (row.get::<_, String>(0), row.get::<_, String>(1))
                     else {
@@ -362,6 +486,10 @@ fn merge_state_database(
                 }
             }
             selected.extend(edges.keys().cloned());
+        }
+        if failed {
+            reports.push(report);
+            continue;
         }
         let source = if fields.contains("thread_source") {
             "thread_source"
@@ -396,11 +524,12 @@ fn merge_state_database(
             "archived",
             "created_at",
             "created_at_ms",
+            "cwd",
         ];
         let extra = extra_fields
             .iter()
             .map(|field| {
-                if fields.contains(*field) {
+                if fields.contains(*field) && (*field != "cwd" || include_workdirs) {
                     *field
                 } else {
                     "NULL"
@@ -408,7 +537,7 @@ fn merge_state_database(
             })
             .collect::<Vec<_>>()
             .join(",");
-        let mut failed = false;
+        let mut rows_read = 0usize;
         let selected_rows: Vec<_> = selected.iter().cloned().collect();
         for batch in selected_rows.chunks(400) {
             let placeholders = vec!["?"; batch.len()].join(",");
@@ -430,6 +559,7 @@ fn merge_state_database(
                         break;
                     }
                 };
+                rows_read += 1;
                 let Ok(id) = row.get::<_, String>(0) else {
                     continue;
                 };
@@ -447,7 +577,9 @@ fn merge_state_database(
                                     {
                                         values.insert((*key).into(), json!(model));
                                     }
-                                } else if value.len() <= 4096 {
+                                } else if (*key == "cwd" && value.chars().count() <= 4096)
+                                    || (*key != "cwd" && value.len() <= 4096)
+                                {
                                     values.insert((*key).into(), json!(value));
                                 }
                             }
@@ -462,6 +594,13 @@ fn merge_state_database(
                     }
                 }
                 let values = Value::Object(values);
+                if let Some(cwd) = values["cwd"].as_str().filter(|value| {
+                    !value.is_empty()
+                        && value.chars().count() <= 4096
+                        && !value.chars().any(char::is_control)
+                }) {
+                    entry["_cwd"] = json!(cwd);
+                }
                 if let Some(model) = values["model"].as_str().filter(|model| !model.is_empty()) {
                     entry["model"] = json!(model);
                 }
@@ -544,27 +683,56 @@ fn merge_state_database(
             }
         }
         if !failed {
+            let mut wanted: Vec<_> = [
+                "id",
+                "title",
+                "model",
+                "reasoning_effort",
+                "originator",
+                "thread_source",
+                "model_provider",
+                "cli_version",
+                "approval_mode",
+                "sandbox_policy",
+                "git_branch",
+                "git_sha",
+                "agent_nickname",
+                "agent_role",
+                "agent_path",
+                "source",
+                "history_mode",
+                "archived",
+                "cwd",
+                "created_at",
+                "updated_at",
+                "created_at_ms",
+                "updated_at_ms",
+            ]
+            .into_iter()
+            .filter(|field| fields.contains(*field) && (*field != "cwd" || include_workdirs))
+            .collect();
+            if has_edges {
+                wanted.extend([
+                    "thread_spawn_edges.parent_thread_id",
+                    "thread_spawn_edges.child_thread_id",
+                ]);
+            }
+            report["health"] = json!("ok");
+            report["fields"] = json!(wanted);
+            report["rows_read"] = json!(rows_read);
+            report["selected_threads"] = json!(selected.len());
+            report["subagent_rows"] = json!(edges.len());
+            report["subagent_limit"] = json!(500);
+            reports.push(report);
             break;
         }
+        reports.push(report);
     }
+    reports
 }
 
 pub(crate) fn merge_remote_state(home: &Path, entries: &mut HashMap<String, Value>) {
-    const LIMIT: u64 = 16 * 1024 * 1024;
-    let path = home.join(".codex-global-state.json");
-    let Ok(file) = std::fs::File::open(path) else {
-        return;
-    };
-    if file.metadata().map_or(true, |metadata| {
-        !metadata.is_file() || metadata.len() > LIMIT
-    }) {
-        return;
-    }
-    let mut bytes = Vec::new();
-    if file.take(LIMIT + 1).read_to_end(&mut bytes).is_err() || bytes.len() as u64 > LIMIT {
-        return;
-    }
-    let Ok(state) = serde_json::from_slice::<Value>(&bytes) else {
+    let Some(state) = crate::dots::read_state(home) else {
         return;
     };
     let Some(atoms) = state
@@ -681,27 +849,44 @@ fn merge_session_index(
     home: &Path,
     entries: &mut HashMap<String, Value>,
     observed: &BTreeSet<String>,
-) {
+) -> Value {
     const LIMIT: u64 = 1024 * 1024;
     let path = home.join("session_index.jsonl");
-    if std::fs::symlink_metadata(&path).map_or(true, |metadata| {
-        !metadata.is_file() || super::redirected(&metadata)
-    }) {
-        return;
-    }
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return;
+    let checked = DateTime::<Utc>::from(std::time::SystemTime::now())
+        .to_rfc3339_opts(SecondsFormat::Secs, false);
+    let report = |health: &str, matched: Option<usize>| {
+        let mut value = json!({"name":"session_index.jsonl","location":path.to_string_lossy(),"health":health,"checked_at":checked,"fields":if health=="ok" {vec!["id","thread_name"]} else {Vec::<&str>::new()}});
+        if let Some(count) = matched {
+            value["tail_bytes"] = json!(LIMIT);
+            value["matched_threads"] = json!(count);
+        }
+        value
     };
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && !super::redirected(&metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return report("missing", None)
+        }
+        _ => return report("unavailable", None),
+    };
+    let Ok(mut file) = super::open_source(home, &path) else {
+        return report("unavailable", None);
+    };
+    if !file.metadata().is_ok_and(|current| {
+        current.is_file() && super::file_identity(&current) == super::file_identity(&metadata)
+    }) {
+        return report("unavailable", None);
+    }
     let Ok(size) = file.seek(SeekFrom::End(0)) else {
-        return;
+        return report("unavailable", None);
     };
     let offset = size.saturating_sub(LIMIT);
     if file.seek(SeekFrom::Start(offset)).is_err() {
-        return;
+        return report("unavailable", None);
     }
     let mut bytes = Vec::new();
     if file.take(LIMIT).read_to_end(&mut bytes).is_err() {
-        return;
+        return report("unavailable", None);
     }
     let mut lines = bytes.split(|byte| *byte == b'\n');
     if offset > 0 {
@@ -729,22 +914,35 @@ fn merge_session_index(
         };
         titles.insert(id.to_owned(), title.chars().take(512).collect::<String>());
     }
+    let matched = titles.len();
     for (id, title) in titles {
-        let entry = entries.entry(id.clone()).or_insert_with(|| json!({"thread_id":id,"name":null,"host_id":null,"environment":"unknown","kind":"unknown","last_run_at":null,"status":null}));
+        let entry=entries.entry(id.clone()).or_insert_with(||json!({"thread_id":id,"name":null,"host_id":null,"environment":"unknown","kind":"unknown","last_run_at":null,"status":null}));
         if entry["name"].is_null() {
             entry["name"] = json!(title);
         }
     }
+    report("ok", Some(matched))
 }
 
 pub(crate) fn background_metadata(
     home: &Path,
     observed: &BTreeSet<String>,
-) -> HashMap<String, Value> {
-    let mut entries = catalog_entries(home);
-    merge_state_database(home, &mut entries, observed);
-    merge_session_index(home, &mut entries, observed);
-    entries
+    include_workdirs: bool,
+    select_recent: bool,
+) -> (HashMap<String, Value>, Vec<Value>) {
+    let (mut entries, catalog_report) = catalog_entries(home);
+    let state_reports = merge_state_database(
+        home,
+        &mut entries,
+        observed,
+        include_workdirs,
+        select_recent,
+    );
+    let report = merge_session_index(home, &mut entries, observed);
+    let mut reports = vec![catalog_report];
+    reports.extend(state_reports);
+    reports.push(report);
+    (entries, reports)
 }
 
 fn project_remote_activities(entries: &HashMap<String, Value>) -> Vec<Value> {
@@ -771,7 +969,7 @@ fn project_remote_activities(entries: &HashMap<String, Value>) -> Vec<Value> {
 
 #[cfg(test)]
 fn remote_activities(home: &Path, observed: &BTreeSet<String>) -> Vec<Value> {
-    let mut entries = background_metadata(home, observed);
+    let (mut entries, _) = background_metadata(home, observed, true, false);
     merge_remote_state(home, &mut entries);
     project_remote_activities(&entries)
 }
@@ -948,6 +1146,97 @@ pub(super) fn read(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn preload_selects_recent_state_threads_only_when_requested() {
+        let home = tempfile::tempdir().unwrap();
+        let db = rusqlite::Connection::open(home.path().join("state_1.sqlite")).unwrap();
+        db.execute_batch("CREATE TABLE threads(id TEXT,title TEXT,updated_at INTEGER); INSERT INTO threads VALUES('00000000-0000-4000-8000-000000000001','Old',1),('00000000-0000-4000-8000-000000000002','New',2),('invalid','Hidden',3);").unwrap();
+        let (preload, _) = super::background_metadata(
+            home.path(),
+            &std::collections::BTreeSet::new(),
+            false,
+            true,
+        );
+        assert_eq!(preload.len(), 2);
+        assert_eq!(
+            preload["00000000-0000-4000-8000-000000000002"]["name"],
+            "New"
+        );
+        let (normal, _) = super::background_metadata(
+            home.path(),
+            &std::collections::BTreeSet::new(),
+            false,
+            false,
+        );
+        assert!(normal.is_empty());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn remote_state_rejects_redirected_global_state() {
+        use std::os::unix::fs::symlink;
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        let path = outside.path().join("state.json");
+        std::fs::write(
+            &path,
+            json!({"electron-persisted-atom-state":{"orbit-outputs-v1":[{"threadId":id}]}})
+                .to_string(),
+        )
+        .unwrap();
+        symlink(&path, home.path().join(".codex-global-state.json")).unwrap();
+        let mut entries = HashMap::from([(id.to_owned(), json!({"kind":"user"}))]);
+        merge_remote_state(home.path(), &mut entries);
+        assert_eq!(entries[id]["kind"], "user");
+    }
+    #[test]
+    fn state_reports_include_failed_candidate_and_selected_rows() {
+        let home = tempfile::tempdir().unwrap();
+        let newer = rusqlite::Connection::open(home.path().join("state_6.sqlite")).unwrap();
+        newer.execute("CREATE TABLE threads(id TEXT)", []).unwrap();
+        let older = rusqlite::Connection::open(home.path().join("state_5.sqlite")).unwrap();
+        older.execute_batch("CREATE TABLE threads(id TEXT,title TEXT,cwd TEXT); INSERT INTO threads VALUES('00000000-0000-4000-8000-000000000001','Title','/private');").unwrap();
+        let observed = ["00000000-0000-4000-8000-000000000001".to_owned()]
+            .into_iter()
+            .collect();
+        let (_, reports) = super::background_metadata(home.path(), &observed, false, false);
+        let state: Vec<_> = reports
+            .iter()
+            .filter(|r| {
+                r["name"]
+                    .as_str()
+                    .is_some_and(|name| name.starts_with("state_"))
+            })
+            .collect();
+        assert_eq!(state.len(), 2);
+        assert_eq!(state[0]["health"], "unsupported");
+        assert_eq!(state[1]["health"], "ok");
+        assert_eq!(state[1]["rows_read"], 1);
+        assert_eq!(state[1]["selected_threads"], 1);
+        assert!(!state[1]["fields"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("cwd")));
+    }
+    #[test]
+    fn catalog_report_distinguishes_missing_and_unsupported() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(super::catalog_entries(home.path()).1["health"], "missing");
+        std::fs::create_dir(home.path().join("sqlite")).unwrap();
+        let db = rusqlite::Connection::open(home.path().join("sqlite/codex-dev.db")).unwrap();
+        db.execute("CREATE TABLE local_thread_catalog(thread_id TEXT)", [])
+            .unwrap();
+        let report = super::catalog_entries(home.path()).1;
+        assert_eq!(report["health"], "unsupported");
+        assert_eq!(report["queries"].as_array().unwrap().len(), 2);
+        assert!(report["queries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|query| query["health"] == "ok"
+                && query["selected_threads"] == 0
+                && query["rows_read"] == 0));
+    }
     use super::*;
 
     #[test]
@@ -960,12 +1249,44 @@ mod tests {
             ("two".to_owned(), json!({"name":null})),
         ]);
         let observed = BTreeSet::from(["one".to_owned()]);
-        merge_session_index(home.path(), &mut entries, &observed);
+        let report = merge_session_index(
+            &home.path().canonicalize().unwrap(),
+            &mut entries,
+            &observed,
+        );
+        assert_eq!(report["health"], "ok");
+        assert_eq!(report["matched_threads"], 1);
+        assert_eq!(report["fields"], json!(["id", "thread_name"]));
         assert_eq!(entries["one"]["name"], "Latest");
         assert!(entries["two"]["name"].is_null());
         entries.get_mut("one").unwrap()["name"] = json!("Catalog");
-        merge_session_index(home.path(), &mut entries, &observed);
+        merge_session_index(
+            &home.path().canonicalize().unwrap(),
+            &mut entries,
+            &observed,
+        );
         assert_eq!(entries["one"]["name"], "Catalog");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_index_reports_missing_and_refuses_links() {
+        use std::os::unix::fs::symlink;
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let mut entries = HashMap::new();
+        let observed = BTreeSet::new();
+        assert_eq!(
+            merge_session_index(&root, &mut entries, &observed)["health"],
+            "missing"
+        );
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        symlink(outside.path(), root.join("session_index.jsonl")).unwrap();
+        assert_eq!(
+            merge_session_index(&root, &mut entries, &observed)["health"],
+            "unavailable"
+        );
+        assert!(entries.is_empty());
     }
 
     #[test]

@@ -15,10 +15,11 @@ pub mod mcp;
 
 mod migration;
 mod observations;
+mod skill_history;
 mod timestamp;
 
 pub use aggregate::{Aggregate, Bucket, CallCounts};
-pub use checkpoint::{Checkpoint, Cursor, ExpectedCursor, StoredCall};
+pub use checkpoint::{CallHeader, Checkpoint, CheckpointBatch, Cursor, ExpectedCursor, StoredCall};
 pub use error_history::{sanitize_error_identifiers, ERROR_PREVIEW_HOURS, ERROR_PREVIEW_LIMIT};
 pub use history::{HistoryItem, HistoryWrite, Namespace, Page, PageQuery, Position, Section};
 pub use observations::{

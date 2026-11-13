@@ -107,22 +107,27 @@ pub(crate) fn preview(db: &Connection, now: DateTime<Utc>) -> Result<Vec<Value>>
         ceiling.to_rfc3339_opts(SecondsFormat::Millis, true),
         ERROR_PREVIEW_LIMIT as i64,
     ])?;
-    let mut remaining = BYTE_LIMIT;
+    // The Python preview limit applies to the complete compact JSON envelope.
+    let mut remaining = BYTE_LIMIT - r#"{"version":1,"events":[]}"#.len();
     let mut events = Vec::new();
     while let Some(row) = rows.next()? {
         let value = row.get_ref(0)?;
         let Ok(payload) = value.as_str() else { break };
-        let Some(available) = remaining.checked_sub(payload.len()) else {
-            break;
-        };
-        remaining = available;
         let event =
             serde_json::from_str::<Value>(payload).map_err(|_| StoreError::InvalidLegacy)?;
         if let Some(row) = event
             .as_object()
             .and_then(|event| error_row(event, Some(cutoff), ceiling))
         {
-            events.push(Value::Object(row));
+            let event = Value::Object(row);
+            let mut encoded = String::new();
+            encode_identity(&event, &mut encoded)?;
+            let size = encoded.len() + usize::from(!events.is_empty());
+            let Some(available) = remaining.checked_sub(size) else {
+                break;
+            };
+            remaining = available;
+            events.push(event);
         }
     }
     Ok(events)
