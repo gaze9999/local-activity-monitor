@@ -839,6 +839,12 @@ impl<'a> FileSummary<'a> {
     }
 }
 
+fn retain_preview<K: Ord, V>(preview: &mut BTreeMap<K, V>, rank: K, value: V, limit: usize) {
+    if limit == 0 || (preview.len() == limit && preview.last_key_value().is_some_and(|(last, _)| &rank >= last)) { return; }
+    if preview.len() == limit { preview.pop_last(); }
+    preview.insert(rank, value);
+}
+
 enum MessagePreview<'a> {
     Incoming(&'a super::agent::Incoming),
     Outgoing(&'a str, &'a Call, &'a super::agent::Outgoing),
@@ -1655,7 +1661,8 @@ impl Projection {
     }
 
     /// Match the legacy stable timestamp sort while borrowing at most 100
-    /// events. Incoming traversal precedes the already sorted call traversal.
+    /// events. Explicit tie keys preserve incoming order and sorted call order
+    /// without requiring a complete sorted call-reference array.
     /// Render metadata only after preview selection, never message contents.
     fn communication<'a>(
         &'a self,
@@ -1663,22 +1670,18 @@ impl Projection {
         boundary: Option<Time>,
     ) -> Vec<Value> {
         let mut preview = BTreeMap::new();
-        let mut ordinal = 0usize;
-        let mut retain = |time: Option<Time>, message: MessagePreview<'a>| {
-            let rank = (std::cmp::Reverse(time.map(stamp)), ordinal);
-            ordinal += 1;
-            if preview.len() == 100 && preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { return; }
-            if preview.len() == 100 { preview.pop_last(); }
-            preview.insert(rank, message);
-        };
-        for message in &self.agent_incoming {
+        for (ordinal, message) in self.agent_incoming.iter().enumerate() {
             if boundary.is_none_or(|cutoff| message.time().is_some_and(|time| time >= cutoff)) {
-                retain(message.time(), MessagePreview::Incoming(message));
+                let rank = (std::cmp::Reverse(message.time().map(stamp)), 0u8,
+                    std::cmp::Reverse(None), "", ordinal);
+                retain_preview(&mut preview, rank, MessagePreview::Incoming(message), 100);
             }
         }
         for (id, call) in calls {
-            for message in &call.agent_messages {
-                retain(call.time, MessagePreview::Outgoing(id, call, message));
+            for (ordinal, message) in call.agent_messages.iter().enumerate() {
+                let rank = (std::cmp::Reverse(call.time.map(stamp)), 1u8,
+                    std::cmp::Reverse(call.time), id.as_str(), ordinal);
+                retain_preview(&mut preview, rank, MessagePreview::Outgoing(id, call, message), 100);
             }
         }
         let thread = self.id.as_deref().unwrap_or("");
@@ -1696,17 +1699,22 @@ impl Projection {
         files_enabled: bool,
         jev_calls_enabled: bool,
     ) -> Value {
-        let mut calls = self
-            .calls
-            .iter()
-            .filter(|(_, call)| {
-                boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff))
-            })
-            .collect::<Vec<_>>();
-        calls.sort_by_key(|(_, call)| std::cmp::Reverse(call.time));
+        let eligible = |call: &Call| boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff));
+        let mut call_count = 0usize;
+        let mut tool_preview = BTreeMap::new();
+        let mut jev_preview = BTreeMap::new();
         let mut counts = BTreeMap::<String, usize>::new();
         let mut nested_counts = BTreeMap::<String, usize>::new();
-        for (_, call) in &calls {
+        for (id, call) in self.calls.iter().filter(|(_, call)| eligible(call)) {
+            call_count += 1;
+            if tool_events_enabled {
+                retain_preview(&mut tool_preview, (std::cmp::Reverse(call.time), id.as_str()), (id, call), 100);
+            }
+            if jev_calls_enabled {
+                for (index, operation) in call.jev.iter().enumerate() {
+                    retain_preview(&mut jev_preview, (std::cmp::Reverse(call.time), id.as_str(), index), (id, call, index, operation), 100);
+                }
+            }
             *counts.entry(call.tool.clone()).or_default() += 1;
             *totals.entry(call.tool.clone()).or_default() += 1;
             if let Some(nested) = call.nested.as_ref().filter(|_| tool_events_enabled) {
@@ -1716,7 +1724,7 @@ impl Projection {
                 }
             }
         }
-        let events: Vec<_> = calls.iter().filter(|_| tool_events_enabled).take(100).map(|(id, call)| {
+        let events: Vec<_> = tool_preview.into_values().map(|(id, call)| {
             let duration = call.duration_ms();
             let nested_tools = call.nested.as_ref().map_or_else(|| json!({}), |nested| json!(nested.tools));
             let mut event = json!({"call_id":id,"tool":call.tool,"timestamp":call.time.map(stamp),
@@ -1745,13 +1753,11 @@ impl Projection {
         let tokens = self
             .tokens
             .map(|values| COUNTERS.into_iter().zip(values).collect::<BTreeMap<_, _>>());
-        let communication = self.communication(calls.iter().copied(), boundary);
-        let jev_calls: Vec<_> = calls.iter().filter(|_| jev_calls_enabled).flat_map(|(id, call)| {
-            call.jev.iter().enumerate().map(move |(index, operation)| json!({
-                "thread_id":self.id, "call_id":id, "index":index, "operation":operation.operation,
-                "nested":operation.nested, "timestamp":call.time.map(stamp), "completed_at":call.completed.map(stamp),
-            }))
-        }).take(100).collect();
+        let communication = self.communication(self.calls.iter().filter(|(_, call)| eligible(call)), boundary);
+        let jev_calls: Vec<_> = jev_preview.into_values().map(|(id, call, index, operation)| json!({
+            "thread_id":self.id, "call_id":id, "index":index, "operation":operation.operation,
+            "nested":operation.nested, "timestamp":call.time.map(stamp), "completed_at":call.completed.map(stamp),
+        })).collect();
         json!({
             "thread_id":self.id, "created_at":self.created.map(stamp), "updated_at":self.updated.map(stamp),
             "model":self.model, "reasoning_effort":self.effort, "context_updated_at":self.context_at.map(stamp), "execution":self.execution,
@@ -1759,7 +1765,7 @@ impl Projection {
             "status":self.status.unwrap_or(Status::Observed), "status_updated_at":self.status_at.map(stamp),
             "status_source":self.status_at.map(|_| if self.status_cached {"cached_lifecycle"} else {"session_lifecycle"}),
             "tokens":tokens.map_or_else(|| json!({}), |values| json!(values)), "token_updated_at":self.tokens_at.map(stamp),
-            "tool_calls":calls.len(), "tools":counts, "nested_tools":nested_counts, "tool_events":events, "jev_calls":jev_calls, "partial_history":partial,
+            "tool_calls":call_count, "tools":counts, "nested_tools":nested_counts, "tool_events":events, "jev_calls":jev_calls, "partial_history":partial,
             "task_runs": (!durations.is_empty()).then_some(durations.len()),
             "task_duration_ms": (!durations.is_empty()).then(|| durations.iter().sum::<i64>()),
             "agent_messages":communication,"file_changes":file_changes,"file_reads":file_reads,
@@ -1815,6 +1821,85 @@ mod snapshot_merge_tests {
     }
 
     #[test]
+    fn snapshot_call_previews_match_sorted_winners_without_full_reference_array() {
+        let time = timestamp(Some("2026-11-13T01:00:00Z")).unwrap();
+        let mut projection = Projection::for_id(Some("fixture".into()));
+        for n in 0..1200 {
+            let mut value = call(&format!("tool-{}", n % 3), None);
+            value.time = match n % 5 {
+                0 => None,
+                1 => Some(time),
+                2 => Some(time - chrono::Duration::hours(2)),
+                3 => Some(time + chrono::Duration::hours(1)),
+                _ => Some(time + chrono::Duration::nanoseconds(999_999)),
+            };
+            value.completed = value.time.map(|time| time + chrono::Duration::seconds(3));
+            value.nested = Some(NestedActivity {
+                tools:[("nested-a".into(), n % 5),("nested-b".into(),2)].into(),
+                events:Vec::new(),isolated:false,truncated:n % 2 == 0,
+                tool_counts_incomplete:false,single_invocation:false,
+            });
+            value.jev = (0..n % 4).map(|index| JevOperation {
+                operation:match index { 0 => JevKind::Rank, 1 => JevKind::Evaluate, _ => JevKind::Status },
+                nested:index != 0,
+            }).collect();
+            projection.calls.insert(format!("call-{n:04}"), value);
+        }
+        // Later source replacement changes both counts and previews, not an
+        // additional observation of the superseded call.
+        let mut replacement = Projection::for_id(projection.id.clone());
+        replacement.calls.insert("call-0001".into(), call("winner", None));
+        projection.merge(&replacement);
+        for boundary in [None, Some(time - chrono::Duration::hours(1)), Some(time), Some(time + chrono::Duration::hours(3))] {
+            let mut calls: Vec<_> = projection.calls.iter().filter(|(_, call)|
+                boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff))).collect();
+            calls.sort_by_key(|(_, call)| std::cmp::Reverse(call.time));
+            for tools_enabled in [false, true] {
+                for jev_enabled in [false, true] {
+                    let mut expected_counts = BTreeMap::<String,usize>::new();
+                    let mut expected_nested = BTreeMap::<String,usize>::new();
+                    for (_, call) in &calls {
+                        *expected_counts.entry(call.tool.clone()).or_default() += 1;
+                        if let Some(nested) = call.nested.as_ref().filter(|_| tools_enabled) {
+                            for (tool, count) in &nested.tools { *expected_nested.entry(tool.clone()).or_default() += count; }
+                        }
+                    }
+                    let expected_tools: Vec<_> = calls.iter().filter(|_| tools_enabled).take(100).map(|(id, call)| {
+                        let mut event = json!({"call_id":id,"tool":call.tool,"timestamp":call.time.map(stamp),
+                            "completed_at":call.completed.map(stamp),"duration_ms":call.duration_ms(),
+                            "nested_tools":call.nested.as_ref().map_or_else(||json!({}),|nested|json!(nested.tools))});
+                        if call.nested.as_ref().is_some_and(|nested|nested.truncated) { event["nested_truncated"]=true.into(); }
+                        event
+                    }).collect();
+                    let thread_id = projection.id.as_deref();
+                    let expected_jev: Vec<_> = calls.iter().filter(|_|jev_enabled).flat_map(|(id,call)|
+                        call.jev.iter().enumerate().map(move |(index,operation)|json!({
+                            "thread_id":thread_id,"call_id":id,"index":index,"operation":operation.operation,
+                            "nested":operation.nested,"timestamp":call.time.map(stamp),"completed_at":call.completed.map(stamp)
+                        }))).take(100).collect();
+                    let (mut totals, mut nested_totals) = (BTreeMap::from([("seed".into(),7)]), BTreeMap::from([("seed".into(),11)]));
+                    let row = projection.row(false,boundary,time,&mut totals,&mut nested_totals,tools_enabled,false,jev_enabled);
+                    assert_eq!(row["tool_calls"],calls.len());
+                    assert_eq!(row["tools"],json!(expected_counts));
+                    assert_eq!(row["nested_tools"],json!(expected_nested));
+                    assert_eq!(row["tool_events"],json!(expected_tools));
+                    assert_eq!(row["jev_calls"],json!(expected_jev));
+                    expected_counts.insert("seed".into(),7);
+                    expected_nested.insert("seed".into(),11);
+                    assert_eq!(totals,expected_counts);
+                    assert_eq!(nested_totals,expected_nested);
+                }
+            }
+        }
+        let mut preview = BTreeMap::new();
+        for rank in (0..10_000).rev() {
+            retain_preview(&mut preview,rank,rank,100);
+            assert!(preview.len()<=100);
+        }
+        assert_eq!(preview.into_keys().collect::<Vec<_>>(),(0..100).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn snapshot_communication_matches_full_sort_and_preserves_metadata_only_previews() {
         let time = timestamp(Some("2026-11-13T01:00:00Z")).unwrap();
         let mut projection = Projection::for_id(Some("fixture-thread".into()));
@@ -1855,6 +1940,7 @@ mod snapshot_merge_tests {
             legacy.sort_by(|left, right| right["timestamp"].as_str().cmp(&left["timestamp"].as_str()));
             legacy.truncate(100);
             let actual = projection.communication(calls.iter().copied(), boundary);
+            assert_eq!(projection.communication(calls.iter().rev().copied(), boundary), actual);
             assert!(actual.len() <= 100);
             assert_eq!(actual, legacy);
             assert!(!serde_json::to_string(&actual).unwrap().contains("PRIVATE_BODY_MUST_NOT_RENDER"));
