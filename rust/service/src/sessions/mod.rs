@@ -4787,66 +4787,9 @@ impl Collector {
             if !command_switches.checks {
                 checks.clear();
             }
-            let current_skills: Vec<_> = threads
-                .values()
-                .filter(|_| command_switches.skills)
-                .flat_map(|(thread, _)| thread.skill_events(boundary))
-                .collect();
-            let mut merged_skills = BTreeMap::new();
-            if command_switches.skills {
-                for event in &self.skill_history {
-                    let (Some(thread), Some(call), Some(skill), Some(timestamp)) = (
-                        event["thread_id"].as_str(),
-                        event["call_id"].as_str(),
-                        event["skill"].as_str(),
-                        event["timestamp"].as_str(),
-                    ) else {
-                        continue;
-                    };
-                    if !thread_names.contains_key(thread)
-                        || boundary.is_some_and(|cutoff| {
-                            lam_history_store::parse_utc_stamp(timestamp)
-                                .is_none_or(|time| time < cutoff)
-                        })
-                    {
-                        continue;
-                    }
-                    merged_skills.insert(
-                        (thread.to_owned(), call.to_owned(), skill.to_owned()),
-                        event.clone(),
-                    );
-                }
-                for event in current_skills {
-                    if let (Some(thread), Some(call), Some(skill)) = (
-                        event["thread_id"].as_str(),
-                        event["call_id"].as_str(),
-                        event["skill"].as_str(),
-                    ) {
-                        merged_skills.insert(
-                            (thread.to_owned(), call.to_owned(), skill.to_owned()),
-                            event.clone(),
-                        );
-                    }
-                }
-            }
-            let mut skills: Vec<_> = merged_skills.into_values().collect();
-            for event in &mut skills {
-                if let Some(name) = event["thread_id"]
-                    .as_str()
-                    .and_then(|id| thread_names.get(id))
-                {
-                    event["thread_name"] = name.clone();
-                }
-            }
-            skills.sort_by(|a, b| b["timestamp"].as_str().cmp(&a["timestamp"].as_str()));
-            let mut skill_counts = BTreeMap::<String, usize>::new();
-            for event in &skills {
-                if let Some(skill) = event["skill"].as_str() {
-                    *skill_counts.entry(skill.to_owned()).or_default() += 1;
-                }
-            }
-            let skill_total = skills.len();
-            skills.truncate(500);
+            let (skills, skill_total, skill_counts) = project::skill_summary(
+                &threads, &self.skill_history, &thread_names, boundary, command_switches.skills,
+            );
             let outside_working_set = self
                 .discovered_file_count()
                 .saturating_sub(self.files.len());
