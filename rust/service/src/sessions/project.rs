@@ -769,6 +769,76 @@ pub struct Projection {
     pub newly_trimmed_calls: u64,
 }
 
+/// File-event reduction over already resolved call winners. Retain only
+/// borrowed preview entries; render/clone payloads after selection, not for
+/// every observed event. Valid source file fields retain their existing limits.
+pub(super) struct FileSummary<'a> {
+    limit: usize,
+    total: usize,
+    operations: BTreeMap<&'a str, usize>,
+    preview: BTreeMap<(std::cmp::Reverse<Option<String>>, usize), FilePreview<'a>>,
+}
+
+struct FilePreview<'a> {
+    thread: Option<&'a str>,
+    id: &'a str,
+    call: &'a Call,
+    file: &'a Value,
+}
+
+impl FilePreview<'_> {
+    fn render(&self) -> Value {
+        let mut event = self.file.clone();
+        event["thread_id"] = json!(self.thread);
+        event["thread_name"] = Value::Null;
+        event["call_id"] = json!(self.id);
+        event["timestamp"] = json!(self.call.time.map(stamp));
+        event["completed_at"] = json!(self.call.completed.map(stamp));
+        if event["nested"] == true {
+            event["duration_ms"] = Value::Null;
+            event["container_duration_ms"] = json!(self.call.duration_ms());
+        } else {
+            event["duration_ms"] = json!(self.call.duration_ms());
+        }
+        event
+    }
+}
+
+impl<'a> FileSummary<'a> {
+    pub(super) fn new(limit: usize) -> Self {
+        Self { limit, total: 0, operations: BTreeMap::new(), preview: BTreeMap::new() }
+    }
+
+    /// Feed projections in the original thread traversal order. Calls must
+    /// already be deduplicated by source precedence; counts are not reversible.
+    /// read_filter None includes all operations, Some(true) reads only.
+    pub(super) fn observe(&mut self, projection: &'a Projection, boundary: Option<Time>, enabled: bool, read_filter: Option<bool>) {
+        if !enabled { return; }
+        for (id, call) in &projection.calls {
+            if !boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff)) { continue; }
+            let timestamp = call.time.map(stamp);
+            for file in &call.files {
+                if read_filter.is_some_and(|read| (file["operation"] == "read") != read) { continue; }
+                let ordinal = self.total;
+                self.total += 1;
+                if let Some(operation) = file["operation"].as_str() {
+                    *self.operations.entry(operation).or_default() += 1;
+                }
+                if self.limit == 0 { continue; }
+                let rank = (std::cmp::Reverse(timestamp.clone()), ordinal);
+                if self.preview.len() == self.limit && self.preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { continue; }
+                if self.preview.len() == self.limit { self.preview.pop_last(); }
+                self.preview.insert(rank, FilePreview { thread: projection.id.as_deref(), id, call, file });
+            }
+        }
+    }
+
+    pub(super) fn finish(self) -> (Vec<Value>, usize, BTreeMap<String, usize>) {
+        (self.preview.into_values().map(|event| event.render()).collect(),
+            self.total, self.operations.into_iter().map(|(key, count)| (key.to_owned(), count)).collect())
+    }
+}
+
 impl Projection {
     pub fn for_id(id: Option<String>) -> Self {
         Self {
@@ -1528,6 +1598,7 @@ impl Projection {
             .extend(other.intervals.iter().map(|(&start, &end)| (start, end)));
     }
 
+    #[cfg(test)]
     pub fn file_events(&self, boundary: Option<Time>, files_enabled: bool) -> Vec<Value> {
         if !files_enabled {
             return Vec::new();
@@ -1610,19 +1681,12 @@ impl Projection {
             }
             event
         }).collect();
-        let file_events = self.file_events(boundary, files_enabled);
-        let file_changes: Vec<_> = file_events
-            .iter()
-            .filter(|event| event["operation"] != "read")
-            .take(200)
-            .cloned()
-            .collect();
-        let file_reads: Vec<_> = file_events
-            .iter()
-            .filter(|event| event["operation"] == "read")
-            .take(200)
-            .cloned()
-            .collect();
+        let mut changes = FileSummary::new(200);
+        let mut reads = FileSummary::new(200);
+        changes.observe(self, boundary, files_enabled, Some(false));
+        reads.observe(self, boundary, files_enabled, Some(true));
+        let file_changes = changes.finish().0;
+        let file_reads = reads.finish().0;
         let mut durations: Vec<_> = self
             .intervals
             .iter()
@@ -1717,6 +1781,70 @@ mod snapshot_merge_tests {
                     right.row(false, boundary, reference, &mut rt, &mut rn, enabled, enabled, enabled));
                 assert_eq!(lt, rt);
                 assert_eq!(ln, rn);
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_file_summary_matches_full_sort_with_bounded_previews() {
+        let time = timestamp(Some("2026-11-13T01:00:00Z")).unwrap();
+        let mut threads = BTreeMap::new();
+        for thread in ["a", "b", "c"] {
+            let mut projection = Projection::for_id(Some(thread.into()));
+            for n in 0..600 {
+                let when = match n % 4 {
+                    0 => None,
+                    1 => Some(time),
+                    2 => Some(time - chrono::Duration::hours(2)),
+                    _ => Some(time + chrono::Duration::hours(1)),
+                };
+                let mut value = call("fixture", None);
+                value.time = when;
+                value.completed = when.map(|time| time + chrono::Duration::seconds(2));
+                value.files = (0..3).map(|i| json!({
+                    "operation":if i == 0 {"read"} else {"write"},
+                    "path":format!("fixture/{thread}/{n}/{i}"),
+                    "tool":"fixture","nested": i == 2
+                })).collect();
+                projection.calls.insert(format!("call-{n:04}"), value);
+            }
+            // This replacement must be applied before reducing counts. Keeping
+            // both source versions would add extra writes and alter tie previews.
+            let mut replacement = Projection::for_id(Some(thread.into()));
+            let mut winner = call("winner", Some("2026-11-13T01:00:00Z"));
+            winner.files = vec![json!({"operation":"read","path":"winner","tool":"winner","nested":false})];
+            replacement.calls.insert("call-0001".into(), winner);
+            projection.merge(&replacement);
+            threads.insert(thread, projection);
+        }
+        for boundary in [None, Some(time - chrono::Duration::hours(1)), Some(time), Some(time + chrono::Duration::hours(3))] {
+            for enabled in [false, true] {
+                for limit in [0, 1, 200, 1000] {
+                    let mut reducer = FileSummary::new(limit);
+                    let mut legacy = Vec::new();
+                    for projection in threads.values() {
+                        reducer.observe(projection, boundary, enabled, None);
+                        assert!(reducer.preview.len() <= limit);
+                        legacy.extend(projection.file_events(boundary, enabled));
+                    }
+                    legacy.sort_by(|a, b| b["timestamp"].as_str().cmp(&a["timestamp"].as_str()));
+                    let total = legacy.len();
+                    let mut operations = BTreeMap::new();
+                    for event in &legacy {
+                        *operations.entry(event["operation"].as_str().unwrap().to_owned()).or_insert(0usize) += 1;
+                    }
+                    legacy.truncate(limit);
+                    let actual = reducer.finish();
+                    assert_eq!(actual, (legacy, total, operations));
+                }
+                for projection in threads.values() {
+                    let row = projection.row(false, boundary, time, &mut BTreeMap::new(), &mut BTreeMap::new(), true, enabled, true);
+                    let legacy = projection.file_events(boundary, enabled);
+                    let reads: Vec<_> = legacy.iter().filter(|event| event["operation"] == "read").take(200).cloned().collect();
+                    let changes: Vec<_> = legacy.iter().filter(|event| event["operation"] != "read").take(200).cloned().collect();
+                    assert_eq!(row["file_reads"], json!(reads));
+                    assert_eq!(row["file_changes"], json!(changes));
+                }
             }
         }
     }

@@ -4745,10 +4745,11 @@ impl Collector {
                     .as_str()
                     .cmp(&left["updated_at"].as_str())
             });
-            let mut file_events = threads
-                .values()
-                .flat_map(|(thread, _)| thread.file_events(boundary, files_enabled))
-                .collect::<Vec<_>>();
+            let mut file_summary = project::FileSummary::new(1000);
+            for (thread, _) in threads.values() {
+                file_summary.observe(thread, boundary, files_enabled, None);
+            }
+            let (mut file_events, file_total, file_counts) = file_summary.finish();
             let thread_names: HashMap<_, _> = rows
                 .iter()
                 .filter_map(|row| {
@@ -4766,15 +4767,6 @@ impl Collector {
                     event["thread_name"] = name.clone();
                 }
             }
-            file_events.sort_by(|a, b| b["timestamp"].as_str().cmp(&a["timestamp"].as_str()));
-            let mut file_counts = BTreeMap::<String, usize>::new();
-            for event in &file_events {
-                if let Some(operation) = event["operation"].as_str() {
-                    *file_counts.entry(operation.to_owned()).or_default() += 1;
-                }
-            }
-            let file_total = file_events.len();
-            file_events.truncate(1000);
             let mut projects: BTreeMap<String, Value> = self.project_details.iter().map(|(id,detail)| {
                 let mut value = json!({"id":id,"name":detail["name"],"icon":detail["icon"],"kind":detail["kind"],"thread_count":0});
                 for key in ["origin","created_at","updated_at"] { if let Some(field)=detail.get(key) { value[key]=field.clone(); } }
