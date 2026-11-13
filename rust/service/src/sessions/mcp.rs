@@ -296,47 +296,60 @@ fn server_summary<'a>(server: &str, events: &[&'a Value]) -> (Value, Option<Reco
 }
 
 fn measurements<'a>(events: &[&'a Value]) -> (Map<String, Value>, Option<RecordingState<'a>>) {
-    let mut ordered = events.to_vec();
-    ordered.sort_by_key(|event| last(event));
-    let mut metrics = Map::new();
-    let mut flags = Map::new();
+    // The original chronological pass admits the first 32 distinct numeric /
+    // boolean keys. Select those keys with bounded ranks, then reduce values.
+    let mut admitted = BTreeMap::<&str, (Option<&str>, usize, usize)>::new();
+    for (ordinal, event) in events.iter().enumerate() {
+        let Some(result) = event["result"].as_object() else { continue };
+        for (position, (key, value)) in result.iter().enumerate() {
+            if !(value.is_boolean() || mcp::number(value, 1 << 53)) { continue; }
+            let rank = (last(event), ordinal, position);
+            admitted.entry(key.as_str()).and_modify(|old| *old = (*old).min(rank)).or_insert(rank);
+            if admitted.len() > 32 {
+                let key = *admitted.iter().max_by_key(|(_, rank)| *rank).unwrap().0;
+                admitted.remove(key);
+            }
+        }
+    }
+    let mut latest = BTreeMap::new();
+    let mut flags = BTreeMap::new();
     let mut selected = None;
     let mut first = None;
-    for event in ordered {
-        let Some(result) = event["result"].as_object() else {
-            continue;
-        };
+    for (ordinal, event) in events.iter().enumerate() {
+        let Some(result) = event["result"].as_object() else { continue };
         let time = last(event);
-        let mut observed = Vec::new();
+        let rank = (time, ordinal);
+        let mut observed: Option<&str> = None;
         for (key, value) in result {
-            if (value.is_boolean() || mcp::number(value, 1 << 53))
-                && (metrics.len() < 32 || metrics.contains_key(key))
-            {
-                metrics.insert(key.clone(), json!({"value":value,"timestamp":time}));
+            if admitted.contains_key(key.as_str()) && (value.is_boolean() || mcp::number(value, 1 << 53)) {
+                let winner = latest.entry(key.as_str()).or_insert((rank, value));
+                if rank >= winner.0 { *winner = (rank, value); }
             }
             if value.is_boolean()
                 && (key.ends_with("recording_enabled") || key.ends_with("telemetry_enabled"))
             {
-                observed.push(key);
-                flags.insert(
-                    key.clone(),
-                    json!({"enabled":value,"health":result.get("status"),"observed_at":time}),
-                );
+                let winner = flags.entry(key.as_str()).or_insert((rank, value, result.get("status")));
+                if rank >= winner.0 { *winner = (rank, value, result.get("status")); }
+                if observed.is_none_or(|old| (!key.ends_with("recording_enabled"), key.as_str())
+                    < (!old.ends_with("recording_enabled"), old)) {
+                    observed = Some(key.as_str());
+                }
             }
         }
-        if let Some(key) = observed
-            .into_iter()
-            .min_by_key(|key| (!key.ends_with("recording_enabled"), *key))
-        {
-            first.get_or_insert(time);
-            selected = Some(key);
+        if let Some(key) = observed {
+            if first.is_none_or(|old| rank < old) { first = Some(rank); }
+            if selected.is_none_or(|(old, _)| rank > old) { selected = Some((rank, key)); }
         }
     }
-    let recording = selected.and_then(|key| {
+    let metrics = latest.into_iter().map(|(key, ((time, _), value))|
+        (key.to_owned(), json!({"value":value,"timestamp":time}))).collect();
+    let flags: Map<_, _> = flags.into_iter().map(|(key, ((time, _), value, health))|
+        (key.to_owned(), json!({"enabled":value,"health":health,"observed_at":time}))).collect();
+    let recording = selected.and_then(|(_, key)| {
         let mut current = flags.get(key)?.as_object()?.clone();
         current.insert("flags".into(), Value::Object(flags));
-        current.insert("key".into(), key.as_str().into());
-        Some((first.flatten(), Value::Object(current)))
+        current.insert("key".into(), key.into());
+        Some((first.and_then(|(time, _)| time), Value::Object(current)))
     });
     (metrics, recording)
 }
@@ -393,6 +406,93 @@ pub fn scoped_summary(events: &[Value], cutoff: DateTime<Utc>, health: &str, all
 #[cfg(test)]
 mod connection_tests {
     use super::*;
+    #[test]
+    fn snapshot_measurements_match_chronological_admission_and_flag_selection() {
+        let mut events = Vec::new();
+        for ordinal in 0..240 {
+            let mut result = Map::new();
+            result.insert(format!("metric-{:03}", ordinal % 80), json!(ordinal));
+            result.insert(format!("metric-{:03}", (ordinal + 31) % 80), json!(-0.0));
+            result.insert("invalid".into(), json!("not-numeric"));
+            result.insert("too-large".into(), json!(9007199254740993u64));
+            if ordinal % 3 == 0 {
+                result.insert(format!("flag-{}_recording_enabled",ordinal%7),json!(ordinal%2==0));
+                result.insert("a_telemetry_enabled".into(),json!(true));
+                result.insert("z_recording_enabled".into(),json!(false));
+            }
+            result.insert("status".into(),json!(if ordinal%2==0 {"ok"} else {"error"}));
+            events.push(json!({"timestamp":if ordinal%11==0 {Value::Null} else {json!(format!("{:04}",ordinal%23))},
+                "completed_at":if ordinal%5==0 {json!(format!("{:04}",30-ordinal%23))} else {json!("")},
+                "result":result}));
+        }
+        events.push(json!({"timestamp":"9999","result":{"invalid":false,"flag-0_recording_enabled":"invalid","metric-000":null}}));
+        events.push(json!({"timestamp":null,"result":null}));
+        for order in 0..4 {
+            if order==1 {events.reverse();}
+            if order==2 {events.rotate_left(79);}
+            if order==3 {events.sort_by_key(|event| last(event).map(str::to_owned));}
+            for limit in [0,1,2,31,32,33,80,events.len()] {
+                let refs: Vec<_> = events.iter().take(limit).collect();
+                let actual = measurements(&refs);
+                assert_eq!(actual,legacy_measurements(&refs),"order={order} limit={limit}");
+                assert!(actual.0.len()<=32);
+            }
+        }
+        // Unknown-time flags are first chronologically even when visited last.
+        let flags = [json!({"timestamp":"later","result":{"x_recording_enabled":true}}),
+            json!({"result":{"x_recording_enabled":false}})];
+        let refs: Vec<_> = flags.iter().collect();
+        let actual=measurements(&refs);
+        assert_eq!(actual,legacy_measurements(&refs));
+        assert_eq!(actual.1.unwrap().0,None);
+    }
+
+    fn legacy_measurements<'a>(events: &[&'a Value]) -> (Map<String, Value>, Option<RecordingState<'a>>) {
+        let mut ordered = events.to_vec();
+        ordered.sort_by_key(|event| last(event));
+        let mut metrics = Map::new();
+        let mut flags = Map::new();
+        let mut selected = None;
+        let mut first = None;
+        for event in ordered {
+            let Some(result) = event["result"].as_object() else {
+                continue;
+            };
+            let time = last(event);
+            let mut observed = Vec::new();
+            for (key, value) in result {
+                if (value.is_boolean() || mcp::number(value, 1 << 53))
+                    && (metrics.len() < 32 || metrics.contains_key(key))
+                {
+                    metrics.insert(key.clone(), json!({"value":value,"timestamp":time}));
+                }
+                if value.is_boolean()
+                    && (key.ends_with("recording_enabled") || key.ends_with("telemetry_enabled"))
+                {
+                    observed.push(key);
+                    flags.insert(
+                        key.clone(),
+                        json!({"enabled":value,"health":result.get("status"),"observed_at":time}),
+                    );
+                }
+            }
+            if let Some(key) = observed
+                .into_iter()
+                .min_by_key(|key| (!key.ends_with("recording_enabled"), *key))
+            {
+                first.get_or_insert(time);
+                selected = Some(key);
+            }
+        }
+        let recording = selected.and_then(|key| {
+            let mut current = flags.get(key)?.as_object()?.clone();
+            current.insert("flags".into(), Value::Object(flags));
+            current.insert("key".into(), key.as_str().into());
+            Some((first.flatten(), Value::Object(current)))
+        });
+        (metrics, recording)
+    }
+
     #[test]
     fn snapshot_server_scalar_summary_matches_full_vectors() {
         let mut events = Vec::new();
