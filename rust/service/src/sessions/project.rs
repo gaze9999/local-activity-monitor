@@ -839,6 +839,20 @@ impl<'a> FileSummary<'a> {
     }
 }
 
+enum MessagePreview<'a> {
+    Incoming(&'a super::agent::Incoming),
+    Outgoing(&'a str, &'a Call, &'a super::agent::Outgoing),
+}
+
+impl MessagePreview<'_> {
+    fn render(&self, thread: &str) -> Value {
+        match self {
+            Self::Incoming(message) => message.render(thread),
+            Self::Outgoing(id, call, message) => message.render(thread, id, call.time, call.completed, call.duration_ms()),
+        }
+    }
+}
+
 impl Projection {
     pub fn for_id(id: Option<String>) -> Self {
         Self {
@@ -1640,6 +1654,37 @@ impl Projection {
         events.into_values().collect()
     }
 
+    /// Match the legacy stable timestamp sort while borrowing at most 100
+    /// events. Incoming traversal precedes the already sorted call traversal.
+    /// Render metadata only after preview selection, never message contents.
+    fn communication<'a>(
+        &'a self,
+        calls: impl IntoIterator<Item = (&'a String, &'a Call)>,
+        boundary: Option<Time>,
+    ) -> Vec<Value> {
+        let mut preview = BTreeMap::new();
+        let mut ordinal = 0usize;
+        let mut retain = |time: Option<Time>, message: MessagePreview<'a>| {
+            let rank = (std::cmp::Reverse(time.map(stamp)), ordinal);
+            ordinal += 1;
+            if preview.len() == 100 && preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { return; }
+            if preview.len() == 100 { preview.pop_last(); }
+            preview.insert(rank, message);
+        };
+        for message in &self.agent_incoming {
+            if boundary.is_none_or(|cutoff| message.time().is_some_and(|time| time >= cutoff)) {
+                retain(message.time(), MessagePreview::Incoming(message));
+            }
+        }
+        for (id, call) in calls {
+            for message in &call.agent_messages {
+                retain(call.time, MessagePreview::Outgoing(id, call, message));
+            }
+        }
+        let thread = self.id.as_deref().unwrap_or("");
+        preview.into_values().map(|message| message.render(thread)).collect()
+    }
+
     pub fn row(
         &self,
         partial: bool,
@@ -1700,23 +1745,7 @@ impl Projection {
         let tokens = self
             .tokens
             .map(|values| COUNTERS.into_iter().zip(values).collect::<BTreeMap<_, _>>());
-        let thread = self.id.as_deref().unwrap_or("");
-        let mut communication: Vec<Value> = self
-            .agent_incoming
-            .iter()
-            .filter(|message| {
-                boundary.is_none_or(|cutoff| message.time().is_some_and(|time| time >= cutoff))
-            })
-            .map(|message| message.render(thread))
-            .collect();
-        for (id, call) in &calls {
-            communication.extend(call.agent_messages.iter().map(|message| {
-                message.render(thread, id, call.time, call.completed, call.duration_ms())
-            }));
-        }
-        communication
-            .sort_by(|left, right| right["timestamp"].as_str().cmp(&left["timestamp"].as_str()));
-        communication.truncate(100);
+        let communication = self.communication(calls.iter().copied(), boundary);
         let jev_calls: Vec<_> = calls.iter().filter(|_| jev_calls_enabled).flat_map(|(id, call)| {
             call.jev.iter().enumerate().map(move |(index, operation)| json!({
                 "thread_id":self.id, "call_id":id, "index":index, "operation":operation.operation,
@@ -1783,6 +1812,66 @@ mod snapshot_merge_tests {
                 assert_eq!(ln, rn);
             }
         }
+    }
+
+    #[test]
+    fn snapshot_communication_matches_full_sort_and_preserves_metadata_only_previews() {
+        let time = timestamp(Some("2026-11-13T01:00:00Z")).unwrap();
+        let mut projection = Projection::for_id(Some("fixture-thread".into()));
+        for n in 0..150 {
+            let when = match n % 3 { 0 => None, 1 => Some(time), _ => Some(time + chrono::Duration::hours(1)) };
+            projection.agent_incoming.push(super::super::agent::Incoming::parse(
+                &format!("Message Type: MESSAGE\nTask name: task-{n}\nSender: sender-{n}\nPayload:\nPRIVATE_BODY_MUST_NOT_RENDER"), when).unwrap());
+        }
+        for n in 0..600 {
+            let when = match n % 5 {
+                0 => None,
+                1 => Some(time),
+                2 => Some(time + chrono::Duration::hours(1)),
+                3 => Some(time - chrono::Duration::hours(2)),
+                _ => Some(time + chrono::Duration::nanoseconds(999_999)),
+            };
+            let mut value = call("exec", None);
+            value.time = when;
+            value.completed = when.map(|time| time + chrono::Duration::seconds(2));
+            value.agent_messages = (0..3).map(|index| {
+                super::super::agent::Outgoing::new("collaboration.send_message",
+                    json!({"target":format!("target-{n}-{index}"),"message":"PRIVATE_BODY_MUST_NOT_RENDER"}).as_object(),
+                    Some("sender"), true, index, index).unwrap()
+            }).collect();
+            projection.calls.insert(format!("call-{n:04}"), value);
+        }
+        for boundary in [None, Some(time - chrono::Duration::hours(1)), Some(time), Some(time + chrono::Duration::hours(3))] {
+            let mut calls: Vec<_> = projection.calls.iter()
+                .filter(|(_, call)| boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff))).collect();
+            calls.sort_by_key(|(_, call)| std::cmp::Reverse(call.time));
+            let thread = projection.id.as_deref().unwrap();
+            let mut legacy: Vec<_> = projection.agent_incoming.iter()
+                .filter(|message| boundary.is_none_or(|cutoff| message.time().is_some_and(|time| time >= cutoff)))
+                .map(|message| message.render(thread)).collect();
+            for (id, call) in &calls {
+                legacy.extend(call.agent_messages.iter().map(|message| message.render(thread, id, call.time, call.completed, call.duration_ms())));
+            }
+            legacy.sort_by(|left, right| right["timestamp"].as_str().cmp(&left["timestamp"].as_str()));
+            legacy.truncate(100);
+            let actual = projection.communication(calls.iter().copied(), boundary);
+            assert!(actual.len() <= 100);
+            assert_eq!(actual, legacy);
+            assert!(!serde_json::to_string(&actual).unwrap().contains("PRIVATE_BODY_MUST_NOT_RENDER"));
+            for tools_enabled in [false, true] {
+                let row = projection.row(false, boundary, time, &mut BTreeMap::new(), &mut BTreeMap::new(), tools_enabled, false, false);
+                assert_eq!(row["agent_messages"], json!(legacy));
+            }
+        }
+        // Unknown times remain all-time only, and an incoming tie precedes an
+        // outgoing tie even when later calls were visited in a different order.
+        projection.agent_incoming.truncate(1);
+        projection.calls.retain(|id, _| id == "call-0000");
+        let calls: Vec<_> = projection.calls.iter().collect();
+        let unknown = projection.communication(calls.iter().copied(), None);
+        assert_eq!(unknown.len(), 4);
+        assert_eq!(unknown[0]["direction"], "incoming");
+        assert!(projection.communication(std::iter::empty(), Some(time)).is_empty());
     }
 
     #[test]
