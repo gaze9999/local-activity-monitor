@@ -44,7 +44,101 @@ pub struct ExpectedCursor<'a> {
     pub signature: Option<&'a str>,
 }
 
+/// A bounded selected-call cursor owning one read-only SQLite snapshot.
+/// Drop it when its source selection is invalidated or processing is cancelled.
+/// Consumers must stage output until `is_complete()`; errors never mean EOF.
+pub struct SelectedCheckpointReader {
+    store: Store,
+    cursor: Cursor,
+    ids: Vec<String>,
+    next: usize,
+    emitted: bool,
+    failed: bool,
+}
+
+impl SelectedCheckpointReader {
+    pub fn cursor(&self) -> &Cursor { &self.cursor }
+
+    pub fn is_complete(&self) -> bool {
+        self.emitted && self.next == self.ids.len() && !self.failed
+    }
+
+    /// Read at most 512 calls and 16 MiB including the cursor, retaining the
+    /// same database snapshot across calls. A single oversized record is an
+    /// error, not a skipped record or an empty successful page.
+    pub fn next_page(&mut self) -> Result<Option<Checkpoint>> {
+        if self.failed { return Err(StoreError::InvalidQuery); }
+        if self.is_complete() { return Ok(None); }
+        let result = self.read_page();
+        if result.is_err() {
+            self.failed = true;
+            let _ = self.store.db.execute_batch("ROLLBACK");
+        }
+        result
+    }
+
+    fn read_page(&mut self) -> Result<Option<Checkpoint>> {
+        let header_bytes = self.cursor.source_key.len() + self.cursor.signature.len() + self.cursor.payload.len();
+        let mut bytes = header_bytes;
+        let mut calls = Vec::new();
+        {
+            let mut metadata = self.store.db.prepare("SELECT event_time,length(CAST(payload AS BLOB)) FROM session_calls WHERE source_key=? AND call_id=?")?;
+            let mut payload_query = self.store.db.prepare("SELECT payload FROM session_calls WHERE source_key=? AND call_id=?")?;
+            while self.next < self.ids.len() && calls.len() < 512 {
+                let id = &self.ids[self.next];
+                let (time, payload_bytes): (Option<String>, i64) = metadata.query_row(params![self.cursor.source_key, id], |row| {
+                    let time = match row.get_ref(0)? { rusqlite::types::ValueRef::Null => None, value => Some(value.as_str()?) };
+                    if time.is_some_and(|value| value.len() > 40) { return Err(rusqlite::Error::InvalidQuery); }
+                    Ok((time.map(str::to_owned), row.get(1)?))
+                })?;
+                let payload_bytes = usize::try_from(payload_bytes).map_err(|_| StoreError::InvalidQuery)?;
+                let size = payload_bytes.checked_add(id.len() + self.cursor.source_key.len() + time.as_ref().map_or(0, String::len))
+                    .ok_or(StoreError::InvalidQuery)?;
+                if size > CHECKPOINT_LIMIT - header_bytes { return Err(StoreError::InvalidQuery); }
+                if size > CHECKPOINT_LIMIT - bytes { break; }
+                let payload: String = payload_query.query_row(params![self.cursor.source_key, id], |row| row.get(0))?;
+                if payload.len() != payload_bytes { return Err(StoreError::InvalidQuery); }
+                calls.push(StoredCall { source_key: self.cursor.source_key.clone(), call_id: id.clone(), event_time: time, payload });
+                self.next += 1;
+                bytes += size;
+            }
+        }
+        self.emitted = true;
+        if self.next == self.ids.len() { self.store.db.execute_batch("ROLLBACK")?; }
+        Ok(Some(Checkpoint { cursor: self.cursor.clone(), calls }))
+    }
+}
+
+impl Drop for SelectedCheckpointReader {
+    fn drop(&mut self) {
+        if !self.store.db.is_autocommit() { let _ = self.store.db.execute_batch("ROLLBACK"); }
+    }
+}
+
 impl Store {
+    /// Start a resumable reader on a dedicated read-only connection. Selection
+    /// order is retained; callers must not publish partial results before EOF.
+    pub fn into_selected_checkpoint_reader(self, expected: &ExpectedCursor<'_>, call_ids: Vec<String>) -> Result<Option<SelectedCheckpointReader>> {
+        let Some(signature) = expected.signature else { return Err(StoreError::InvalidQuery) };
+        if expected.source_key.is_empty() || expected.source_key.len() > 256 || signature.len() > 512
+            || call_ids.len() > 8192 || call_ids.iter().any(|id| id.is_empty() || id.len() > 160)
+            || call_ids.iter().collect::<HashSet<_>>().len() != call_ids.len()
+            || !self.db.is_readonly("main")?
+        { return Err(StoreError::InvalidQuery); }
+        self.db.execute_batch("BEGIN")?;
+        let cursor = self.db.query_row("SELECT offset,signature,payload FROM session_cursors WHERE source_key=?", [expected.source_key], |row| {
+            let signature = row.get_ref(1)?.as_str()?;
+            let payload = row.get_ref(2)?.as_str()?;
+            if signature.len() > 512 || payload.len() > CHECKPOINT_LIMIT
+                || payload.len() + signature.len() + expected.source_key.len() > CHECKPOINT_LIMIT {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            Ok(Cursor { source_key: expected.source_key.to_owned(), offset: row.get(0)?, signature: signature.to_owned(), payload: payload.to_owned() })
+        }).optional()?;
+        let Some(cursor) = cursor.filter(|cursor| cursor.signature == signature) else { return Ok(None) };
+        Ok(Some(SelectedCheckpointReader { store: self, cursor, ids: call_ids, next: 0, emitted: false, failed: false }))
+    }
+
     /// Read selected calls and their cursor from one committed checkpoint snapshot.
     pub fn selected_checkpoint(&mut self, expected: &ExpectedCursor<'_>, call_ids: &[String]) -> Result<Option<Checkpoint>> {
         let Some(signature) = expected.signature else { return Err(StoreError::InvalidQuery) };

@@ -3,7 +3,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -45,7 +45,7 @@ pub(crate) struct DetailFile {
     guard: Option<CheckpointGuard>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct CheckpointGuard {
     pub directory: PathBuf,
     pub source_key: String,
@@ -140,7 +140,7 @@ impl DetailFile {
         Some(cwd.to_owned())
     }
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Index {
     pub files: BTreeMap<String, Vec<DetailFile>>,
 }
@@ -156,6 +156,23 @@ impl Index {
         index
     }
 
+    /// Conservative retained-position accounting, including allocation/tree
+    /// overhead, source identity, readiness keys and optional checkpoint guard.
+    /// This is a stage budget, not a claim about measured process RSS.
+    pub(super) fn projection_bytes(root: &Path, path: &Path, projection: &Projection, selected: Option<&BTreeSet<String>>) -> usize {
+        let mut bytes = 2048usize.saturating_add(root.as_os_str().len())
+            .saturating_add(path.as_os_str().len())
+            .saturating_add(projection.id.as_ref().map_or(0, |id| id.len().saturating_mul(3)));
+        for (id, call) in &projection.calls {
+            if selected.is_some_and(|ids| !ids.contains(id)) { continue; }
+            bytes = bytes.saturating_add(512).saturating_add(id.len()).saturating_add(call.tool_name().len());
+            for position in [&call.request_position, &call.response_position].into_iter().flatten() {
+                bytes = bytes.saturating_add(128).saturating_add(position.hash.len());
+            }
+        }
+        bytes
+    }
+
     pub(super) fn add_projection(
         &mut self,
         root: &Path,
@@ -164,15 +181,23 @@ impl Index {
         projection: &Projection,
         guard: Option<CheckpointGuard>,
     ) -> bool {
+        self.add_selected_projection(root, path, anchor, projection, guard, None)
+    }
+
+    pub(super) fn add_selected_projection(
+        &mut self, root: &Path, path: &Path, anchor: &Anchor, projection: &Projection,
+        guard: Option<CheckpointGuard>, selected: Option<&BTreeSet<String>>,
+    ) -> bool {
         let Some(id) = projection.id.as_ref() else {
             return false;
         };
         if !path.starts_with(root) {
             return false;
         }
-        let calls = projection
+        let calls: BTreeMap<String, CallPosition> = projection
             .calls
             .iter()
+            .filter(|(id, _)| selected.is_none_or(|ids| ids.contains(*id)))
             .map(|(id, call)| {
                 (
                     id.clone(),
@@ -184,7 +209,12 @@ impl Index {
                 )
             })
             .collect();
-        self.files.entry(id.clone()).or_default().push(DetailFile {
+        let files = self.files.entry(id.clone()).or_default();
+        if let Some(file) = files.iter_mut().find(|file| file.root == root && file.path == path && file.anchor == *anchor && file.guard == guard) {
+            file.calls.extend(calls);
+            return true;
+        }
+        files.push(DetailFile {
             root: root.to_path_buf(),
             path: path.to_path_buf(),
             anchor: anchor.clone(),

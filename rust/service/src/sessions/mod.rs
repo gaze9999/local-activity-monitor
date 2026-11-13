@@ -510,6 +510,8 @@ impl Monitor {
                 let mut was_active = false;
                 while !stop.load(Ordering::Acquire) {
                 if !codex_control.load(Ordering::Acquire) {
+                    // Release a retained read transaction when collection is disabled.
+                    *collector.selected_detail_scan.lock().unwrap_or_else(|error| error.into_inner()) = None;
                     let catalog_watcher = start_catalog_watch(&home, events.clone()).ok();
                     let _ = events.try_send(());
                     while !stop.load(Ordering::Acquire) && !codex_control.load(Ordering::Acquire) {
@@ -1857,6 +1859,19 @@ struct RecentCallScan {
     finished: bool,
 }
 
+struct SelectedDetailScan {
+    input_hash: [u8; 32],
+    after: String,
+    reader: Option<lam_history_store::SelectedCheckpointReader>,
+    index: details::Index,
+    readiness: BTreeMap<String, bool>,
+    signatures: BTreeMap<String, String>,
+    staged_bytes: usize,
+    validating: bool,
+    finished: bool,
+    valid: bool,
+}
+
 fn source_fingerprint(
     identity: (u64, u64),
     size: u64,
@@ -2364,6 +2379,7 @@ struct Collector {
     source_membership_complete: bool,
     recent_call_scan: Mutex<Option<RecentCallScan>>,
     recent_call_details_dirty: AtomicBool,
+    selected_detail_scan: Mutex<Option<SelectedDetailScan>>,
     overflow_files: BTreeMap<PathBuf, Session>,
     overflow_cursor: String,
     session_paths: BTreeMap<String, PathBuf>,
@@ -2698,6 +2714,7 @@ impl Collector {
             source_membership_complete: false,
             recent_call_scan: Mutex::new(None),
             recent_call_details_dirty: AtomicBool::new(false),
+            selected_detail_scan: Mutex::new(None),
             overflow_files: BTreeMap::new(),
             overflow_cursor: String::new(),
             session_paths: BTreeMap::new(),
@@ -3688,10 +3705,12 @@ impl Collector {
             // Drop both continuation and publication work so the service can idle.
             *self.recent_call_scan.lock().unwrap_or_else(|error| error.into_inner()) = None;
             self.recent_call_details_dirty.store(false, Ordering::Release);
+            *self.selected_detail_scan.lock().unwrap_or_else(|error| error.into_inner()) = None;
             return false;
         }
         self.discovery.is_none() && self.source_membership_complete && self.source_membership.is_some()
-            && (self.recent_call_details_dirty.load(Ordering::Acquire) || self.recent_call_scan_pending())
+            && (self.recent_call_details_dirty.load(Ordering::Acquire) || self.recent_call_scan_pending()
+                || self.selected_detail_scan.lock().unwrap_or_else(|error| error.into_inner()).as_ref().is_some_and(|scan| !scan.finished))
     }
 
     fn recent_call_scan_pending(&self) -> bool {
@@ -4037,6 +4056,141 @@ impl Collector {
         false
     }
 
+    fn selected_detail_index(&self, root: &Path, selection: &CallSelection) -> Option<(details::Index, BTreeSet<String>)> {
+        self.selected_detail_index_with_limit(root, selection, 16 * 1024 * 1024)
+    }
+
+    fn selected_detail_index_with_limit(&self, root: &Path, selection: &CallSelection, stage_limit: usize) -> Option<(details::Index, BTreeSet<String>)> {
+        if !selection.complete || self.discovery.is_some() || !self.source_membership_complete { return None; }
+        let membership = self.source_membership.as_ref()?;
+        let epoch: i64 = membership.db.query_row("SELECT value FROM selection_epoch", [], |row| row.get(0)).ok()?;
+        let mut hash = Sha256::new();
+        hash.update(membership.identity.to_le_bytes());
+        hash.update(epoch.to_le_bytes());
+        hash.update(stage_limit.to_le_bytes());
+        hash.update(membership.revision.to_le_bytes());
+        hash.update(serde_json::to_vec(&selection.calls).ok()?);
+        for (path, state) in &self.files {
+            hash.update(serde_json::to_vec(&(path, &state.anchor, &state.checkpoint_signature)).ok()?);
+            for (id, call) in &state.projection.calls {
+                hash.update(serde_json::to_vec(&(id, call.tool_name(), &call.request_position, &call.response_position)).ok()?);
+            }
+        }
+        // Workdir readiness can change independently of selected call positions.
+        hash.update(serde_json::to_vec(&self.overflow_thread_workdirs).ok()?);
+        hash.update([self.applied_command_switches.worktrees as u8]);
+        let mut metadata_workdirs: Vec<_> = self.thread_metadata.iter().filter_map(|(id, entry)| entry["_cwd"].as_str().map(|cwd| (id, cwd))).collect();
+        metadata_workdirs.sort_unstable();
+        hash.update(serde_json::to_vec(&metadata_workdirs).ok()?);
+        let input_hash = hash.finalize().into();
+        let mut cached = self.selected_detail_scan.lock().unwrap_or_else(|error| error.into_inner());
+        if cached.as_ref().is_none_or(|scan| scan.input_hash != input_hash || !scan.valid) {
+            // Drop the old reader before any fallible staging work. A new
+            // oversized active stage must not leave an obsolete pending scan.
+            *cached = None;
+            let mut index = details::Index::default();
+            let mut staged_bytes = 0usize;
+            for (path, state) in &self.files {
+                let Some(anchor) = state.anchor.as_ref() else { continue };
+                let selected = checkpoint::key(root, path).and_then(|key| selection.calls.get(&key));
+                let empty = BTreeSet::new();
+                let selected = Some(selected.unwrap_or(&empty));
+                staged_bytes = staged_bytes.saturating_add(details::Index::projection_bytes(root, path, &state.projection, selected));
+                if staged_bytes > stage_limit { return None; }
+                index.add_selected_projection(root, path, anchor, &state.projection, None, selected);
+            }
+            *cached = Some(SelectedDetailScan { input_hash, after: String::new(), reader: None, index,
+                readiness: BTreeMap::new(), signatures: BTreeMap::new(), staged_bytes, validating: false, finished: false, valid: true });
+        }
+        let scan = cached.as_mut()?;
+        let mut bytes = 0usize;
+        let mut pages = 0usize;
+        while !scan.finished && !scan.validating && pages < 16 && bytes < 16 * 1024 * 1024 {
+            if scan.reader.is_none() {
+                let page = match membership.materialized_page(&scan.after, 1) {
+                    Ok(page) => page,
+                    Err(_) => { scan.valid = false; scan.finished = true; break; }
+                };
+                let Some((key, signature)) = page.first() else { scan.validating = true; scan.after.clear(); break };
+                // Reserve source bookkeeping before retaining it; empty selections
+                // still carry cursor metadata but cannot grow the stage without bound.
+                let reserve = key.len().saturating_add(signature.len()).saturating_add(512);
+                if scan.signatures.len() >= WALK_LIMIT || reserve > stage_limit.saturating_sub(scan.staged_bytes) {
+                    scan.valid = false; scan.finished = true; break;
+                }
+                scan.staged_bytes += reserve;
+                let ids = selection.calls.get(key).into_iter().flatten().cloned().collect();
+                let reader = self.checkpoints.snapshot_reader().ok().flatten()
+                    .and_then(|store| store.into_selected_checkpoint_reader(&lam_history_store::ExpectedCursor { source_key: key, signature: Some(signature) }, ids).ok().flatten());
+                let Some(reader) = reader else { scan.valid = false; scan.finished = true; break };
+                scan.signatures.insert(key.clone(), signature.clone());
+                scan.reader = Some(reader);
+            }
+            let reader = scan.reader.as_mut().expect("current source");
+            let page = match reader.next_page() {
+                Ok(Some(page)) => page,
+                _ => { scan.valid = false; scan.finished = true; scan.reader = None; break; }
+            };
+            pages += 1;
+            bytes += page.cursor.source_key.len() + page.cursor.signature.len() + page.cursor.payload.len()
+                + page.calls.iter().map(|call| call.source_key.len() + call.call_id.len() + call.payload.len() + call.event_time.as_ref().map_or(0, String::len)).sum::<usize>();
+            let complete = reader.is_complete();
+            let Some(item) = checkpoint::snapshot_projection(page, false) else {
+                scan.valid = false; scan.finished = true; scan.reader = None; break;
+            };
+            let Some(id) = item.projection.id.as_ref() else {
+                if complete { scan.after = item.source_key; scan.reader = None; }
+                continue;
+            };
+            let Some(path) = self.overflow_path(root, &item) else {
+                scan.valid = false; scan.finished = true; scan.reader = None; break;
+            };
+            // Deliberately overcount repeated source fields on later pages. This
+            // bounds both the retained index and the final publication clone.
+            let reserve = details::Index::projection_bytes(root, path, &item.projection, None)
+                .saturating_add(self.checkpoints.directory().as_os_str().len())
+                .saturating_add(item.source_key.len()).saturating_add(item.checkpoint_signature.len());
+            if reserve > stage_limit.saturating_sub(scan.staged_bytes) {
+                scan.valid = false; scan.finished = true; scan.reader = None; break;
+            }
+            scan.staged_bytes += reserve;
+            let guard = details::CheckpointGuard { directory: self.checkpoints.directory().to_path_buf(),
+                source_key: item.source_key.clone(), signature: item.checkpoint_signature.clone() };
+            let added = self.overflow_path(root, &item).is_some_and(|path| {
+                scan.index.add_projection(root, path, &item.anchor, &item.projection, Some(guard))
+            });
+            if !added { scan.valid = false; scan.finished = true; scan.reader = None; break; }
+            if item.source_details_pending {
+                let ready = !item.workdir_pending || !self.applied_command_switches.worktrees
+                    || self.overflow_thread_workdirs.contains_key(id)
+                    || self.thread_metadata.get(id).and_then(|entry| entry["_cwd"].as_str()).is_some_and(|cwd| !cwd.is_empty());
+                scan.readiness.entry(id.clone()).and_modify(|current| *current &= ready).or_insert(ready);
+            }
+            if complete {
+                scan.after = item.source_key;
+                scan.reader = None;
+            }
+        }
+        // Earlier source snapshots may have finished several rounds ago. Recheck
+        // signatures in bounded batches before publishing their compact positions.
+        if scan.validating && !scan.finished {
+            let Some(store) = self.checkpoints.snapshot_reader().ok().flatten() else {
+                scan.valid = false; scan.finished = true; return None;
+            };
+            let batch: Vec<_> = scan.signatures.range((std::ops::Bound::Excluded(scan.after.clone()), std::ops::Bound::Unbounded))
+                .take(64).map(|(key, signature)| (key.clone(), signature.clone())).collect();
+            for (key, signature) in &batch {
+                if store.checkpoint_signature(key).ok().flatten().as_ref() != Some(signature) {
+                    scan.valid = false; scan.finished = true; return None;
+                }
+                scan.after = key.clone();
+            }
+            if batch.len() < 64 { scan.finished = true; }
+        }
+        if !scan.finished || !scan.valid { return None; }
+        Some((scan.index.clone(), scan.readiness.iter().filter_map(|(id, ready)| ready.then_some(id.clone())).collect()))
+    }
+
     fn detail_index(&self, root: &Path) -> (details::Index, BTreeSet<String>) {
         let active_calls = self
             .files
@@ -4046,22 +4200,16 @@ impl Collector {
         let selection = (self.discovered_file_count() > self.files.len())
             .then(|| self.select_recent_calls(CALL_LIMIT, 100_000)).flatten()
             .filter(|selection| selection.complete);
-        let selected_overflow = selection.as_ref().and_then(|selection| self.selected_overflow_projections(selection));
-        let selection = selection.filter(|_| selected_overflow.is_some());
-        let mut index = if let Some(selection) = &selection {
-            let mut index = details::Index::default();
-            for (path, state) in &self.files {
-                let Some(anchor) = state.anchor.as_ref() else { continue };
-                let selected = checkpoint::key(root, path).and_then(|key| selection.calls.get(&key));
-                let mut filtered = state.projection.clone();
-                filtered.calls.retain(|id, _| selected.is_some_and(|ids| ids.contains(id)));
-                index.add_projection(root, path, anchor, &filtered, None);
-            }
-            index
+        if let Some(selection) = &selection {
+            if let Some(index) = self.selected_detail_index(root, selection) { return index; }
+            // Do not restart the legacy payload scan while the resumable stage
+            // is pending or failed. Overflow details remain explicitly unready.
+            return (details::Index::build(root, &self.files), BTreeSet::new());
         } else {
-            details::Index::build(root, &self.files)
-        };
-        let overflow = selected_overflow.unwrap_or_else(|| self.overflow_projections(active_calls).0);
+            *self.selected_detail_scan.lock().unwrap_or_else(|error| error.into_inner()) = None;
+        }
+        let mut index = details::Index::build(root, &self.files);
+        let overflow = self.overflow_projections(active_calls).0;
         let mut readiness = BTreeMap::<String, bool>::new();
         for item in &overflow {
             let Some(id) = item.projection.id.as_ref() else {
@@ -5145,6 +5293,147 @@ impl Drop for Collector {
 #[cfg(test)]
 mod log_tests {
     use super::*;
+
+    #[test]
+    fn selected_details_bound_source_and_signature_work_across_rounds() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        for n in 0..65 {
+            let id = format!("00000000-0000-4000-8000-{n:012}");
+            std::fs::write(root.join(format!("rollout-{id}.jsonl")), format!("{}\n",
+                json!({"type":"session_meta","payload":{"id":id}})
+            )).unwrap();
+        }
+        let mut collector = Collector::new(root.join("monitoring"), true, None);
+        let stopped = AtomicBool::new(false);
+        for _ in 0..4 {
+            if !collector.refresh(&root, &stopped, true, false, CommandSwitches::default()).1 { break; }
+        }
+        let store = lam_history_store::Store::open(&root.join("monitoring"), lam_history_store::Access::ReadOnly).unwrap().unwrap();
+        let mut membership = SourceMembership::new().unwrap();
+        for path in collector.files.keys() {
+            let key = checkpoint::key(&root, path).unwrap();
+            membership.insert(&[MembershipRecord {key:key.clone(),fingerprint:Some("fixture".into())}]).unwrap();
+            membership.mark_verified(&[VerifiedMembership {checkpoint_signature:store.checkpoint_signature(&key).unwrap().unwrap(),
+                key,fingerprint:"fixture".into(),materialized:true,call_headers:Some(Vec::new())}]).unwrap();
+        }
+        collector.source_membership = Some(membership);
+        collector.source_membership_complete = true;
+        collector.discovered_files = Some(65);
+        collector.discovery = None;
+        collector.files.clear();
+        let selection = CallSelection {calls:BTreeMap::new(),complete:true};
+        let mut previous = 0;
+        for round in 1..=6 {
+            let result = collector.selected_detail_index(&root, &selection);
+            let scan = collector.selected_detail_scan.lock().unwrap();
+            let scan = scan.as_ref().unwrap();
+            assert!(scan.signatures.len() - previous <= 16);
+            previous = scan.signatures.len();
+            if round < 6 { assert!(result.is_none()); }
+            else {
+                let (index, _) = result.expect("source and validation cursors must reach the end");
+                assert_eq!(index.files.len(), 65);
+                assert!(scan.finished);
+            }
+        }
+        // A deliberately small compact-stage budget rejects many-source
+        // metadata without publishing a prefix or scheduling an endless retry.
+        assert!(collector.selected_detail_index_with_limit(&root, &selection, 4096).is_none());
+        {
+            let scan = collector.selected_detail_scan.lock().unwrap();
+            let scan = scan.as_ref().unwrap();
+            assert!(scan.staged_bytes <= 4096);
+            assert!(scan.finished && !scan.valid);
+            assert!(scan.signatures.len() < 65);
+            assert!(scan.reader.is_none());
+        }
+        assert!(!collector.recent_call_refresh_pending());
+        // Cancelling overflow also drops its compact staging and read cursor.
+        collector.discovered_files = Some(0);
+        assert!(!collector.recent_call_refresh_pending());
+        assert!(collector.selected_detail_scan.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn selected_details_resume_beyond_payload_budget_without_retaining_payloads() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        let path = root.join(format!("rollout-{id}.jsonl"));
+        std::fs::write(&path, format!("{}\n{}\n",
+            json!({"timestamp":"2026-11-13T01:00:00Z","type":"session_meta","payload":{"id":id}}),
+            json!({"timestamp":"2026-11-13T01:00:01Z","type":"response_item","payload":{"type":"function_call","name":"fixture_tool","call_id":"call00","arguments":"{}"}})
+        )).unwrap();
+        let mut collector = Collector::new(root.join("monitoring"), true, None);
+        let stopped = AtomicBool::new(false);
+        for _ in 0..4 {
+            let (_, pending, _) = collector.refresh(&root, &stopped, true, false, CommandSwitches::default());
+            if !pending { break; }
+        }
+        let key = checkpoint::key(&root, &path).unwrap();
+        let mut store = lam_history_store::Store::open(&root.join("monitoring"), lam_history_store::Access::ReadWrite).unwrap().unwrap();
+        let original = store.checkpoint(&key, 10).unwrap().unwrap();
+        assert_eq!(original.calls.len(), 1);
+        let calls: Vec<_> = (0..40).map(|n| {
+            let mut row = original.calls[0].clone();
+            row.call_id = format!("call{n:02}");
+            // Valid JSON padding tests the serialized payload budget independently
+            // of the compact position index retained by the service.
+            row.payload.push_str(&" ".repeat(1024 * 1024));
+            row
+        }).collect();
+        store.save_checkpoints(std::slice::from_ref(&original.cursor), &calls, &[]).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let fingerprint = source_fingerprint(file_identity(&metadata), metadata.len(), metadata.modified().ok()).unwrap();
+        let mut membership = SourceMembership::new().unwrap();
+        membership.insert(&[MembershipRecord { key:key.clone(), fingerprint:Some(fingerprint.clone()) }]).unwrap();
+        membership.mark_verified(&[VerifiedMembership { key:key.clone(), fingerprint, checkpoint_signature:original.cursor.signature.clone(),
+            materialized:true, call_headers:Some(calls.iter().map(|row| lam_history_store::CallHeader {call_id:row.call_id.clone(),event_time:row.event_time.clone()}).collect()) }]).unwrap();
+        collector.source_membership = Some(membership);
+        collector.source_membership_complete = true;
+        collector.discovered_files = Some(1);
+        collector.discovery = None;
+        collector.files.clear();
+        let selection = CallSelection { calls: [(key.clone(), calls.iter().map(|row| row.call_id.clone()).collect())].into(), complete:true };
+        assert!(collector.selected_overflow_projections(&selection).is_none());
+        assert!(collector.selected_detail_index(&root, &selection).is_none());
+        assert!(collector.recent_call_refresh_pending());
+        {
+            let scan = collector.selected_detail_scan.lock().unwrap();
+            let scan = scan.as_ref().unwrap();
+            assert!(scan.reader.is_some());
+            assert!(scan.index.files[id][0].calls.len() < 40);
+        }
+        let (index, _) = collector.selected_detail_index(&root, &selection).expect("second round completes remaining calls and validation");
+        assert_eq!(index.files[id].len(), 1, "pages coalesce into one source");
+        assert_eq!(index.files[id][0].calls.len(), 40);
+        assert!(index.files[id][0].source_signature().is_some());
+        // A changed source signature rejects both cached detail reads and a
+        // staged result whose earlier pages were already consumed.
+        *collector.selected_detail_scan.lock().unwrap() = None;
+        assert!(collector.selected_detail_index(&root, &selection).is_none());
+        let mut changed = original.cursor.clone();
+        changed.signature = "changed-after-first-page".into();
+        store.save_checkpoints(&[changed], &[], &[]).unwrap();
+        assert!(index.files[id][0].source_signature().is_none());
+        assert!(collector.selected_detail_index(&root, &selection).is_none());
+        assert!(!collector.selected_detail_scan.lock().unwrap().as_ref().unwrap().valid);
+        // Start another pending scan, then invalidate its inputs with an active
+        // projection too large for the replacement stage budget.
+        store.save_checkpoints(std::slice::from_ref(&original.cursor), &calls, &[]).unwrap();
+        assert!(collector.selected_detail_index(&root, &selection).is_none());
+        assert!(collector.selected_detail_scan.lock().unwrap().as_ref().unwrap().reader.is_some());
+        let restored = checkpoint::snapshot_projection(store.checkpoint(&key, 1).unwrap().unwrap(), false).unwrap();
+        let mut active = Session::default();
+        active.anchor = Some(restored.anchor);
+        active.projection = restored.projection;
+        collector.files.insert(path.clone(), active);
+        collector.discovered_files = Some(2);
+        assert!(collector.selected_detail_index_with_limit(&root, &selection, 1).is_none());
+        assert!(collector.selected_detail_scan.lock().unwrap().is_none());
+        assert!(!collector.recent_call_refresh_pending());
+    }
 
     #[test]
     fn overflow_workdirs_stream_cursor_metadata_beyond_snapshot_budget() {

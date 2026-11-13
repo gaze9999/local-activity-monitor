@@ -167,6 +167,86 @@ fn selected_checkpoint_stream_rejects_oversized_record_before_callback() {
 }
 
 #[test]
+fn selected_checkpoint_reader_resumes_one_snapshot_beyond_byte_budget() {
+    let directory = tempdir().unwrap();
+    let mut writer = Store::open(directory.path(), Access::ReadWrite).unwrap().unwrap();
+    let cursor = Cursor { source_key: "one".into(), offset: 10, signature: "anchor".into(), payload: "{}".into() };
+    let calls: Vec<_> = (0..20).map(|i| StoredCall { source_key: "one".into(), call_id: format!("call-{i:02}"), event_time: None, payload: "x".repeat(1024 * 1024) }).collect();
+    writer.save_checkpoints(std::slice::from_ref(&cursor), &calls, &[]).unwrap();
+    let ids: Vec<_> = calls.iter().map(|call| call.call_id.clone()).collect();
+    let expected = ExpectedCursor { source_key: "one", signature: Some("anchor") };
+    let mut reader = Store::open(directory.path(), Access::ReadOnly).unwrap().unwrap()
+        .into_selected_checkpoint_reader(&expected, ids.clone()).unwrap().unwrap();
+    let first = reader.next_page().unwrap().unwrap();
+    assert_eq!(first.calls.len(), 15);
+    assert!(!reader.is_complete());
+    let mut changed = calls[19].clone(); changed.payload = "new".into();
+    writer.save_checkpoints(&[cursor], &[changed], &[]).unwrap();
+    let second = reader.next_page().unwrap().unwrap();
+    assert_eq!(second.calls.len(), 5);
+    assert!(second.calls.iter().all(|call| call.payload.len() == 1024 * 1024));
+    assert!(reader.is_complete());
+    assert!(reader.next_page().unwrap().is_none());
+    let actual: Vec<_> = first.calls.iter().chain(&second.calls).map(|call| call.call_id.clone()).collect();
+    assert_eq!(actual, ids);
+    for page in [&first, &second] {
+        let bytes = page.cursor.source_key.len() + page.cursor.signature.len() + page.cursor.payload.len()
+            + page.calls.iter().map(|call| call.source_key.len() + call.call_id.len() + call.payload.len() + call.event_time.as_ref().map_or(0, String::len)).sum::<usize>();
+        assert!(bytes <= 16 * 1024 * 1024);
+    }
+    assert_eq!(writer.selected_checkpoint(&expected, &["call-19".into()]).unwrap().unwrap().calls[0].payload, "new");
+}
+
+#[test]
+fn selected_checkpoint_reader_bounds_rows_and_releases_cancelled_snapshot() {
+    let directory = tempdir().unwrap();
+    let mut writer = Store::open(directory.path(), Access::ReadWrite).unwrap().unwrap();
+    let cursor = Cursor { source_key: "one".into(), offset: 10, signature: "anchor".into(), payload: "{}".into() };
+    let calls: Vec<_> = (0..514).map(|i| StoredCall { source_key: "one".into(), call_id: format!("call-{i:03}"), event_time: None, payload: "old".into() }).collect();
+    writer.save_checkpoints(std::slice::from_ref(&cursor), &calls, &[]).unwrap();
+    let ids: Vec<_> = calls.iter().map(|call| call.call_id.clone()).collect();
+    let expected = ExpectedCursor { source_key: "one", signature: Some("anchor") };
+    let mut reader = Store::open(directory.path(), Access::ReadOnly).unwrap().unwrap()
+        .into_selected_checkpoint_reader(&expected, ids).unwrap().unwrap();
+    assert_eq!(reader.next_page().unwrap().unwrap().calls.len(), 512);
+    let mut changed = calls[513].clone(); changed.payload = "new".into();
+    writer.save_checkpoints(&[cursor], &[changed], &[]).unwrap();
+    let db = rusqlite::Connection::open(directory.path().join(lam_history_store::FILE_NAME)).unwrap();
+    let busy: i64 = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0)).unwrap();
+    assert_eq!(busy, 1);
+    drop(reader);
+    let busy: i64 = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0)).unwrap();
+    assert_eq!(busy, 0);
+}
+
+#[test]
+fn selected_checkpoint_reader_errors_are_not_successful_eof() {
+    let directory = tempdir().unwrap();
+    let mut writer = Store::open(directory.path(), Access::ReadWrite).unwrap().unwrap();
+    let cursor = Cursor { source_key: "one".into(), offset: 10, signature: "anchor".into(), payload: "{}".into() };
+    let call = StoredCall { source_key: "one".into(), call_id: "large".into(), event_time: None, payload: "x".repeat(16 * 1024 * 1024) };
+    writer.save_checkpoints(&[cursor], &[call], &[]).unwrap();
+    let expected = ExpectedCursor { source_key: "one", signature: Some("anchor") };
+    for id in ["large", "missing"] {
+        let mut reader = Store::open(directory.path(), Access::ReadOnly).unwrap().unwrap()
+            .into_selected_checkpoint_reader(&expected, vec![id.into()]).unwrap().unwrap();
+        assert!(reader.next_page().is_err());
+        assert!(!reader.is_complete());
+        assert!(reader.next_page().is_err());
+    }
+    assert!(Store::open(directory.path(), Access::ReadOnly).unwrap().unwrap()
+        .into_selected_checkpoint_reader(&ExpectedCursor { source_key: "one", signature: Some("stale") }, vec![]).unwrap().is_none());
+    assert!(Store::open(directory.path(), Access::ReadOnly).unwrap().unwrap()
+        .into_selected_checkpoint_reader(&expected, vec!["large".into(), "large".into()]).is_err());
+    let mut empty = Store::open(directory.path(), Access::ReadOnly).unwrap().unwrap()
+        .into_selected_checkpoint_reader(&expected, vec![]).unwrap().unwrap();
+    assert!(empty.next_page().unwrap().unwrap().calls.is_empty());
+    assert!(empty.is_complete());
+    assert!(empty.next_page().unwrap().is_none());
+    assert!(writer.into_selected_checkpoint_reader(&expected, vec![]).is_err());
+}
+
+#[test]
 fn oversized_call_does_not_hide_following_checkpoint() {
     let directory = tempdir().unwrap();
     let mut store = Store::open(directory.path(), Access::ReadWrite).unwrap().unwrap();
