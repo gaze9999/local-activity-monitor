@@ -4610,24 +4610,15 @@ impl Collector {
             }
             rows.sort_by(|a, b| a["server"].as_str().cmp(&b["server"].as_str()));
         }
-        let mut mcp_diagnostics: Vec<_> = if self.applied_errors_enabled && health != "disabled" {
-            threads
-                .iter()
-                .flat_map(|(thread, (projection, _))| {
-                    projection
-                        .calls
-                        .iter()
-                        .filter_map(move |(id, call)| call.failure_event(thread, id))
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
         if self.applied_errors_enabled && health != "disabled" {
-            mcp_diagnostics.extend(self.core.errors.iter().cloned());
-            mcp_diagnostics.extend(self.desktop.errors.iter().cloned());
+            let diagnostics = threads.iter().flat_map(|(thread, (projection, _))| {
+                projection.calls.iter()
+                    .filter_map(move |(id, call)| call.failure_event(thread, id))
+                    .map(std::borrow::Cow::Owned)
+            }).chain(self.core.errors.iter().chain(&self.desktop.errors)
+                .map(std::borrow::Cow::Borrowed));
+            mcp::apply_diagnostics(&mut all_mcp, diagnostics);
         }
-        mcp::apply_diagnostics(&mut all_mcp, &mcp_diagnostics);
         all_mcp["configuration"] = json!({"location":self.catalog_home.join("config.toml").to_string_lossy(),"configured_sources":self.mcp_catalog.len()});
         let mut session_errors: Vec<_> = self.files.iter()
             .filter(|(_, state)| state.projection.id.is_some())

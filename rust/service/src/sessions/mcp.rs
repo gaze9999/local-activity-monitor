@@ -176,9 +176,18 @@ pub fn configured_server(server: &str, enabled: bool) -> Value {
     row
 }
 
-pub fn apply_diagnostics(summary: &mut Value, diagnostics: &[Value]) {
-    let mut failures = BTreeMap::<&str, &Value>::new();
+pub fn apply_diagnostics<T: std::borrow::Borrow<Value>>(
+    summary: &mut Value,
+    diagnostics: impl IntoIterator<Item = T>,
+) {
+    // Keep only fields used by the overlay, and only for existing summary rows.
+    // A streamed call failure may be owned; Core/Desktop events remain borrowed.
+    let mut failures: BTreeMap<String, Option<(String, String)>> = summary["servers"]
+        .as_array().into_iter().flatten()
+        .filter_map(|row| row["server"].as_str().map(|server| (server.to_owned(), None)))
+        .collect();
     for event in diagnostics {
+        let event = event.borrow();
         let (Some(server), Some(code)) = (field(event, "server"), field(event, "code")) else {
             continue;
         };
@@ -193,28 +202,25 @@ pub fn apply_diagnostics(summary: &mut Value, diagnostics: &[Value]) {
         {
             continue;
         }
+        let Some(winner) = failures.get_mut(server) else { continue };
         let timestamp = field(event, "timestamp").unwrap_or("");
-        if failures
-            .get(server)
-            .is_none_or(|previous| timestamp > field(previous, "timestamp").unwrap_or(""))
-        {
-            failures.insert(server, event);
+        if winner.as_ref().is_none_or(|(previous, _)| timestamp > previous.as_str()) {
+            *winner = Some((timestamp.to_owned(), code.to_owned()));
         }
     }
     for row in summary["servers"].as_array_mut().into_iter().flatten() {
         let Some(server) = row["server"].as_str() else {
             continue;
         };
-        let Some(failure) = failures.get(server) else {
+        let Some(Some((timestamp, code))) = failures.get(server) else {
             continue;
         };
-        let timestamp = field(failure, "timestamp").unwrap_or("");
         let prior = field(&row["connection"], "observed_at").unwrap_or("");
-        if timestamp > prior {
+        if timestamp.as_str() > prior {
             row["connection"]["observed_at"] = json!(timestamp);
             if row["enabled"] == true {
                 row["connection"]["state"] = json!("error");
-                row["connection"]["error_code"] = failure["code"].clone();
+                row["connection"]["error_code"] = json!(code);
             }
         }
     }
@@ -385,6 +391,92 @@ pub fn scoped_summary(events: &[Value], cutoff: DateTime<Utc>, health: &str, all
 #[cfg(test)]
 mod connection_tests {
     use super::*;
+    #[test]
+    fn snapshot_streamed_diagnostics_match_full_collection_and_tie_precedence() {
+        let base = json!({"servers":[
+            {"server":"alpha","enabled":true,"connection":{"state":"response","observed_at":"002","last_response_at":"001"}},
+            {"server":"alpha","enabled":true,"connection":{"state":"response","observed_at":"999","last_response_at":"999"}},
+            {"server":"beta","enabled":false,"connection":{"state":"paused","observed_at":null}},
+            {"server":"empty","enabled":true,"connection":{"state":"unconfirmed","observed_at":null}},
+            {"server":null,"enabled":true,"connection":{"state":"unconfirmed"}}
+        ]});
+        let mut calls = vec![
+            json!({"server":"alpha","code":"connection_refused","timestamp":"100"}),
+            json!({"server":"beta","code":"transport_error","timestamp":"100"}),
+            json!({"server":"empty","code":"authentication_failed","timestamp":null}),
+        ];
+        for n in 0..5000 {
+            calls.push(json!({"server":format!("absent-{n}"),"code":"transport_error","timestamp":"999","extra":"metadata"}));
+        }
+        let core = vec![
+            json!({"server":"alpha","code":"authentication_failed","timestamp":"100"}),
+            json!({"server":"alpha","code":"unrelated","timestamp":"999"}),
+            json!({"server":"beta","code":"network_unavailable","timestamp":"101"}),
+            json!({"server":"alpha","code":null,"timestamp":"999"}),
+            json!({"code":"transport_error","timestamp":"999"}),
+        ];
+        let desktop = vec![json!({"server":"alpha","code":"connection_closed","timestamp":"100"})];
+        let mut expected = base.clone();
+        let full: Vec<_> = calls.iter().chain(&core).chain(&desktop).cloned().collect();
+        legacy_apply_diagnostics(&mut expected, &full);
+        let mut actual = base;
+        let mut visited = 0;
+        let streamed = calls.into_iter().map(std::borrow::Cow::Owned)
+            .chain(core.iter().chain(&desktop).map(std::borrow::Cow::Borrowed))
+            .inspect(|_| visited += 1);
+        apply_diagnostics(&mut actual, streamed);
+        assert_eq!(visited, full.len());
+        assert_eq!(actual, expected);
+        assert_eq!(actual["servers"][0]["connection"]["error_code"], "connection_refused");
+        assert_eq!(actual["servers"][1]["connection"]["observed_at"], "999");
+        assert_eq!(actual["servers"][2]["connection"]["state"], "paused");
+        assert_eq!(actual["servers"].as_array().unwrap().len(), 5);
+    }
+
+    fn legacy_apply_diagnostics(summary: &mut Value, diagnostics: &[Value]) {
+        let mut failures = BTreeMap::<&str, &Value>::new();
+        for event in diagnostics {
+            let (Some(server), Some(code)) = (field(event, "server"), field(event, "code")) else {
+                continue;
+            };
+            if ![
+                "network_unavailable",
+                "transport_error",
+                "connection_closed",
+                "connection_refused",
+                "authentication_failed",
+            ]
+            .contains(&code)
+            {
+                continue;
+            }
+            let timestamp = field(event, "timestamp").unwrap_or("");
+            if failures
+                .get(server)
+                .is_none_or(|previous| timestamp > field(previous, "timestamp").unwrap_or(""))
+            {
+                failures.insert(server, event);
+            }
+        }
+        for row in summary["servers"].as_array_mut().into_iter().flatten() {
+            let Some(server) = row["server"].as_str() else {
+                continue;
+            };
+            let Some(failure) = failures.get(server) else {
+                continue;
+            };
+            let timestamp = field(failure, "timestamp").unwrap_or("");
+            let prior = field(&row["connection"], "observed_at").unwrap_or("");
+            if timestamp > prior {
+                row["connection"]["observed_at"] = json!(timestamp);
+                if row["enabled"] == true {
+                    row["connection"]["state"] = json!("error");
+                    row["connection"]["error_code"] = failure["code"].clone();
+                }
+            }
+        }
+    }
+
     #[test]
     fn named_transport_failures_update_only_newer_server_evidence() {
         let mut value = json!({"servers":[
