@@ -1066,7 +1066,9 @@ impl Monitor {
                     let catalog_changed = catalog != collector.mcp_catalog;
                     collector.mcp_catalog = catalog;
                     let (future_changed, next_future) = collector.checkpoints.pending_activity(now()).unwrap_or((false, Some(now() + Duration::seconds(5))));
+                    let selection_pending = collector.recent_call_refresh_pending();
                     if changed
+                        || selection_pending
                         || future_changed
                         || catalog_changed
                         || errors_changed
@@ -1132,10 +1134,11 @@ impl Monitor {
                             .lock()
                             .unwrap_or_else(|error| error.into_inner())
                             .record("collection", metrics);
-                        if changed || schedule_changed || metadata_changed || previous_checkpoint != collector.checkpoints.report {
+                        if changed || selection_pending || schedule_changed || metadata_changed || previous_checkpoint != collector.checkpoints.report {
                             let (index, ready) = collector.detail_index(&root);
                             collector.overflow_details_ready = ready;
                             *detail_writer.write().unwrap_or_else(|error| error.into_inner()) = index;
+                            collector.recent_call_details_dirty.store(false, Ordering::Release);
                         }
                         version += 1;
                         collector.set_phase("projections");
@@ -1146,6 +1149,7 @@ impl Monitor {
                     collector.set_phase("idle");
                     if !rescan_ready
                         && !pending
+                        && !collector.recent_call_refresh_pending()
                         && !collector.worktrees.pending()
                         && !collector.core.backfill()
                         && (!desktop_pending || desktop_retry)
@@ -1803,6 +1807,7 @@ struct OverflowWorkdirScan {
 }
 
 struct SourceMembership {
+    identity: u64,
     db: rusqlite::Connection,
     generation: i64,
     revision: i64,
@@ -1834,9 +1839,22 @@ struct SourceCallCandidate {
     checkpoint_signature: String,
 }
 
+#[derive(Clone)]
 struct CallSelection {
     calls: BTreeMap<String, BTreeSet<String>>,
     complete: bool,
+}
+
+struct RecentCallScan {
+    identity: u64,
+    epoch: i64,
+    limit: usize,
+    scan_limit: usize,
+    input_hash: [u8; 32],
+    after: Option<SourceCallCursor>,
+    heap: std::collections::BinaryHeap<std::cmp::Reverse<(Option<chrono::DateTime<Utc>>, Arc<str>, String, String)>>,
+    valid: bool,
+    finished: bool,
 }
 
 fn source_fingerprint(
@@ -1853,7 +1871,17 @@ impl SourceMembership {
     fn new() -> rusqlite::Result<Self> {
         let db = rusqlite::Connection::open("")?;
         db.execute_batch("PRAGMA cache_size=-1024; PRAGMA foreign_keys=ON; CREATE TABLE sources(source_key TEXT PRIMARY KEY, fingerprint TEXT, checkpoint_signature TEXT, materialized INTEGER NOT NULL DEFAULT 0, verified INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL, revision INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID; CREATE TABLE working(source_key TEXT PRIMARY KEY) WITHOUT ROWID; CREATE TABLE source_calls(source_key TEXT NOT NULL,call_id TEXT NOT NULL,event_time TEXT,PRIMARY KEY(source_key,call_id),FOREIGN KEY(source_key) REFERENCES sources(source_key) ON DELETE CASCADE) WITHOUT ROWID; CREATE INDEX source_calls_recent ON source_calls(event_time DESC,source_key,call_id);")?;
+        db.execute_batch("CREATE TABLE selection_epoch(value INTEGER NOT NULL); INSERT INTO selection_epoch VALUES(0);
+            CREATE TRIGGER selection_source_insert AFTER INSERT ON sources BEGIN UPDATE selection_epoch SET value=value+1; END;
+            CREATE TRIGGER selection_source_delete AFTER DELETE ON sources BEGIN UPDATE selection_epoch SET value=value+1; END;
+            CREATE TRIGGER selection_source_update AFTER UPDATE ON sources WHEN OLD.fingerprint IS NOT NEW.fingerprint OR OLD.checkpoint_signature IS NOT NEW.checkpoint_signature OR OLD.materialized IS NOT NEW.materialized OR OLD.verified IS NOT NEW.verified OR OLD.revision IS NOT NEW.revision BEGIN UPDATE selection_epoch SET value=value+1; END;
+            CREATE TRIGGER selection_call_insert AFTER INSERT ON source_calls BEGIN UPDATE selection_epoch SET value=value+1; END;
+            CREATE TRIGGER selection_call_delete AFTER DELETE ON source_calls BEGIN UPDATE selection_epoch SET value=value+1; END;
+            CREATE TRIGGER selection_working_insert AFTER INSERT ON working BEGIN UPDATE selection_epoch SET value=value+1; END;
+            CREATE TRIGGER selection_working_delete AFTER DELETE ON working BEGIN UPDATE selection_epoch SET value=value+1; END;")?;
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Ok(Self {
+            identity: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             db,
             generation: 1,
             revision: 0,
@@ -1898,6 +1926,12 @@ impl SourceMembership {
     fn set_working(&mut self, keys: &[String]) -> rusqlite::Result<()> {
         if keys.len() > FILE_LIMIT {
             return Err(rusqlite::Error::InvalidQuery);
+        }
+        let existing: BTreeSet<String> = self.db.prepare("SELECT source_key FROM working")?
+            .query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+        if existing == keys.iter().cloned().collect() {
+            self.db.execute("UPDATE sources SET verified=0 WHERE verified=1 AND materialized=0 AND source_key NOT IN (SELECT source_key FROM working)", [])?;
+            return Ok(());
         }
         let tx = self.db.transaction()?;
         tx.execute("DELETE FROM working", [])?;
@@ -2328,6 +2362,8 @@ struct Collector {
     source_membership_root: Option<(u64, u64)>,
     session_root: Option<PathBuf>,
     source_membership_complete: bool,
+    recent_call_scan: Mutex<Option<RecentCallScan>>,
+    recent_call_details_dirty: AtomicBool,
     overflow_files: BTreeMap<PathBuf, Session>,
     overflow_cursor: String,
     session_paths: BTreeMap<String, PathBuf>,
@@ -2660,6 +2696,8 @@ impl Collector {
             source_membership_root: None,
             session_root: None,
             source_membership_complete: false,
+            recent_call_scan: Mutex::new(None),
+            recent_call_details_dirty: AtomicBool::new(false),
             overflow_files: BTreeMap::new(),
             overflow_cursor: String::new(),
             session_paths: BTreeMap::new(),
@@ -3644,7 +3682,25 @@ impl Collector {
         identities
     }
 
-    // Select ordering keys only; payloads remain in checkpoint storage.
+    fn recent_call_refresh_pending(&self) -> bool {
+        if self.discovery.is_none() && self.discovered_file_count() <= self.files.len() {
+            // Selection is no longer called by snapshot/detail in this state.
+            // Drop both continuation and publication work so the service can idle.
+            *self.recent_call_scan.lock().unwrap_or_else(|error| error.into_inner()) = None;
+            self.recent_call_details_dirty.store(false, Ordering::Release);
+            return false;
+        }
+        self.discovery.is_none() && self.source_membership_complete && self.source_membership.is_some()
+            && (self.recent_call_details_dirty.load(Ordering::Acquire) || self.recent_call_scan_pending())
+    }
+
+    fn recent_call_scan_pending(&self) -> bool {
+        self.discovery.is_none() && self.source_membership_complete && self.source_membership.is_some()
+            && self.recent_call_scan.lock().unwrap_or_else(|error| error.into_inner()).as_ref().is_some_and(|scan| !scan.finished)
+    }
+
+    // Select ordering keys only; payloads remain in checkpoint storage. Retain a
+    // bounded top-K heap and keyset cursor between rounds, never an entire scan.
     fn select_recent_calls(&self, limit: usize, scan_limit: usize) -> Option<CallSelection> {
         use std::cmp::Reverse;
         use std::collections::BinaryHeap;
@@ -3653,64 +3709,97 @@ impl Collector {
         let root = self.session_root.as_deref()?;
         let index = self.source_membership.as_ref()
             .filter(|_| self.discovery.is_none() && self.source_membership_complete)?;
-        let mut complete = index.unverified_count().ok()? == 0;
-        let mut paths = BTreeMap::<String, &str>::new();
+        let epoch: i64 = index.db.query_row("SELECT value FROM selection_epoch", [], |row| row.get(0)).ok()?;
+        let mut valid = index.unverified_count().ok()? == 0;
+        let mut paths = BTreeMap::<String, Arc<str>>::new();
         for path in self.files.keys().chain(self.session_paths.values()).chain(self.duplicate_session_paths.values()) {
             if let (Some(key), Some(text)) = (checkpoint::key(root, path), path.to_str()) {
-                paths.insert(key, text);
-            } else {
-                complete = false;
-            }
+                paths.insert(key, Arc::from(text));
+            } else { valid = false; }
         }
-        let mut heap = BinaryHeap::new();
+        // Active calls and path mappings are not owned by the SQLite index.
+        // Hash their bounded current inputs to reject stale continuation state.
+        let mut input = Sha256::new();
+        let hash_text = |hash: &mut Sha256, value: &str| {
+            hash.update((value.len() as u64).to_le_bytes());
+            hash.update(value.as_bytes());
+        };
+        input.update(index.revision.to_le_bytes());
+        input.update((paths.len() as u64).to_le_bytes());
+        for (key, path) in &paths {
+            hash_text(&mut input, key); hash_text(&mut input, path);
+        }
+        input.update((self.files.len() as u64).to_le_bytes());
         for (path, state) in &self.files {
-            let Some(key) = checkpoint::key(root, path) else { complete = false; continue };
-            let Some(path_text) = path.to_str() else { complete = false; continue };
+            hash_text(&mut input, path.to_str().unwrap_or_default());
+            input.update((state.projection.calls.len() as u64).to_le_bytes());
             for (id, call) in &state.projection.calls {
-                heap.push(Reverse((call.time, path_text, id.clone(), key.clone())));
-                if heap.len() > limit { heap.pop(); }
+                hash_text(&mut input, id);
+                hash_text(&mut input, &call.time.map(stamp).unwrap_or_default());
             }
         }
-        let mut after = None;
+        let input_hash: [u8; 32] = input.finalize().into();
+        let mut cached = self.recent_call_scan.lock().unwrap_or_else(|error| error.into_inner());
+        let reset = cached.as_ref().is_none_or(|scan| scan.identity != index.identity || scan.epoch != epoch
+            || scan.limit != limit || scan.scan_limit != scan_limit || scan.input_hash != input_hash);
+        if reset {
+            let mut heap = BinaryHeap::new();
+            for (path, state) in &self.files {
+                let Some(key) = checkpoint::key(root, path) else { valid = false; continue };
+                let Some(path_text) = paths.get(&key) else { valid = false; continue };
+                for (id, call) in &state.projection.calls {
+                    heap.push(Reverse((call.time, Arc::clone(path_text), id.clone(), key.clone())));
+                    if heap.len() > limit { heap.pop(); }
+                }
+            }
+            *cached = Some(RecentCallScan { identity: index.identity, epoch, limit, scan_limit, input_hash,
+                after: None, heap, valid, finished: false });
+        }
+        let scan = cached.as_mut()?;
+        let was_finished = scan.finished;
         let mut scanned = 0;
-        loop {
+        while !scan.finished && scanned < scan_limit {
             let page_limit = 512.min(scan_limit - scanned);
-            let (page, next) = match index.recent_call_page(after.as_ref(), page_limit) {
+            let (page, next) = match index.recent_call_page(scan.after.as_ref(), page_limit) {
                 Ok(page) => page,
-                Err(_) => { complete = false; break; }
+                Err(_) => { scan.valid = false; scan.finished = true; break; }
             };
+            scanned += page_limit;
             for row in page {
-                let Some(path) = paths.get(&row.position.source_key).copied() else { complete = false; continue };
+                let Some(path) = paths.get(&row.position.source_key) else { scan.valid = false; continue };
                 let time = match row.position.event_time.as_deref() {
                     Some(value) => match lam_history_store::parse_utc_stamp(value) {
                         Some(time) => Some(time),
-                        None => { complete = false; continue; }
+                        None => { scan.valid = false; continue; }
                     },
                     None => None,
                 };
-                heap.push(Reverse((time, path, row.position.call_id, row.position.source_key)));
-                if heap.len() > limit { heap.pop(); }
+                scan.heap.push(Reverse((time, Arc::clone(path), row.position.call_id, row.position.source_key)));
+                if scan.heap.len() > limit { scan.heap.pop(); }
             }
-            let Some(cursor) = next else { break };
-            scanned += page_limit;
-            if heap.len() == limit {
+            let Some(cursor) = next else { scan.finished = true; break };
+            if scan.heap.len() == limit {
                 let cursor_time = match cursor.event_time.as_deref() {
                     Some(value) => match lam_history_store::parse_utc_stamp(value) {
                         Some(time) => Some(Some(time)),
-                        None => { complete = false; None }
+                        None => { scan.valid = false; None }
                     },
                     None => Some(None),
                 };
-                if cursor_time.is_some_and(|cursor_time| heap.peek().is_some_and(|Reverse((time, _, _, _))| *time > cursor_time)) { break; }
+                if cursor_time.is_some_and(|cursor_time| scan.heap.peek().is_some_and(|Reverse((time, _, _, _))| *time > cursor_time)) {
+                    scan.finished = true;
+                }
             }
-            if scanned >= scan_limit { complete = false; break; }
-            after = Some(cursor);
+            scan.after = Some(cursor);
         }
         let mut calls = BTreeMap::<String, BTreeSet<String>>::new();
-        for Reverse((_, _, id, source)) in heap {
-            calls.entry(source).or_default().insert(id);
+        for Reverse((_, _, id, source)) in &scan.heap {
+            calls.entry(source.clone()).or_default().insert(id.clone());
         }
-        Some(CallSelection { calls, complete })
+        if !was_finished && scan.finished && scan.valid {
+            self.recent_call_details_dirty.store(true, Ordering::Release);
+        }
+        Some(CallSelection { calls, complete: scan.valid && scan.finished })
     }
 
     fn overflow_path<'a>(&'a self, root: &Path, item: &checkpoint::SnapshotProjection) -> Option<&'a Path> {
@@ -5166,6 +5255,102 @@ mod log_tests {
         assert!(selected.calls[&checkpoint::key(&root, &root.join("a/z.jsonl")).unwrap()].contains("outside"));
         assert!(!selected.calls.contains_key(&checkpoint::key(&root, &root.join("a-z.jsonl")).unwrap()));
         assert!(!collector.select_recent_calls(2, 1).unwrap().complete);
+    }
+
+    #[test]
+    fn recent_call_selection_clears_state_when_overflow_ends() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let mut collector = Collector::new(root.join("monitoring"), true, None);
+        collector.session_root = Some(root.clone());
+        let path = root.join("outside.jsonl");
+        let key = checkpoint::key(&root, &path).unwrap();
+        let mut membership = SourceMembership::new().unwrap();
+        membership.insert(&[MembershipRecord { key: key.clone(), fingerprint: Some("same".into()) }]).unwrap();
+        membership.mark_verified(&[VerifiedMembership { key: key.clone(), fingerprint: "same".into(),
+            checkpoint_signature: "anchor".into(), materialized: true,
+            call_headers: Some(["a", "b"].map(|id| lam_history_store::CallHeader { call_id: id.into(), event_time: None }).into()),
+        }]).unwrap();
+        collector.duplicate_session_paths.insert(key, path.clone());
+        collector.source_membership = Some(membership);
+        collector.source_membership_complete = true;
+        collector.discovered_files = Some(1);
+        assert!(!collector.select_recent_calls(1, 1).unwrap().complete);
+        assert!(collector.recent_call_refresh_pending());
+        collector.recent_call_details_dirty.store(true, Ordering::Release);
+        // The remaining source enters the working set; overflow selection is no
+        // longer invoked by either snapshot or detail assembly.
+        collector.files.insert(path, Session::default());
+        assert!(!collector.recent_call_refresh_pending());
+        assert!(collector.recent_call_scan.lock().unwrap().is_none());
+        assert!(!collector.recent_call_details_dirty.load(Ordering::Acquire));
+        assert!(!collector.recent_call_refresh_pending());
+    }
+
+    #[test]
+    fn recent_call_selection_resumes_past_100000_tied_headers() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let mut collector = Collector::new(root.join("monitoring"), true, None);
+        collector.session_root = Some(root.clone());
+        let mut membership = SourceMembership::new().unwrap();
+        let mut records = Vec::new();
+        for source in 0..14 {
+            let path = root.join(format!("source-{source:02}.jsonl"));
+            let key = checkpoint::key(&root, &path).unwrap();
+            membership.insert(&[MembershipRecord { key: key.clone(), fingerprint: Some("same".into()) }]).unwrap();
+            membership.mark_verified(&[VerifiedMembership { key: key.clone(), fingerprint: "same".into(),
+                checkpoint_signature: "anchor".into(), materialized: true,
+                call_headers: Some((0..7500).map(|i| lam_history_store::CallHeader {
+                    call_id: format!("{i:05}"), event_time: None,
+                }).collect()),
+            }]).unwrap();
+            records.push(MembershipRecord { key: key.clone(), fingerprint: Some("same".into()) });
+            collector.duplicate_session_paths.insert(key, path);
+        }
+        collector.source_membership = Some(membership);
+        collector.source_membership_complete = true;
+        collector.discovered_files = Some(14);
+        let first = collector.select_recent_calls(2, 100_000).unwrap();
+        assert!(!first.complete);
+        assert!(collector.recent_call_scan_pending());
+        let cursor = collector.recent_call_scan.lock().unwrap().as_ref().unwrap().after.clone();
+        // A generation-only discovery pass and unchanged working set must not
+        // discard progress and repeatedly starve the last 5,000 headers.
+        let index = collector.source_membership.as_mut().unwrap();
+        index.next_generation().unwrap();
+        index.insert(&records).unwrap();
+        index.set_working(&[]).unwrap();
+        let second = collector.select_recent_calls(2, 100_000).unwrap();
+        assert!(second.complete);
+        assert!(!collector.recent_call_scan_pending());
+        assert!(collector.recent_call_refresh_pending(), "completed selection still needs detail publication");
+        collector.recent_call_details_dirty.store(false, Ordering::Release);
+        assert!(!collector.recent_call_refresh_pending());
+        assert_ne!(collector.recent_call_scan.lock().unwrap().as_ref().unwrap().after, cursor);
+        let latest = checkpoint::key(&root, &root.join("source-13.jsonl")).unwrap();
+        assert_eq!(second.calls.len(), 1);
+        assert_eq!(second.calls[&latest], ["07498".to_owned(), "07499".to_owned()].into_iter().collect());
+        // A semantic source-index change must invalidate the completed result.
+        collector.source_membership.as_mut().unwrap().set_working(std::slice::from_ref(&latest)).unwrap();
+        assert!(!collector.select_recent_calls(2, 100_000).unwrap().complete);
+        let updated = collector.select_recent_calls(2, 100_000).unwrap();
+        assert!(updated.complete);
+        assert!(!updated.calls.contains_key(&latest));
+        let next = checkpoint::key(&root, &root.join("source-12.jsonl")).unwrap();
+        assert_eq!(updated.calls[&next], ["07498".to_owned(), "07499".to_owned()].into_iter().collect());
+        // Active in-memory calls are outside the index epoch and must also
+        // invalidate an otherwise completed scan.
+        let active_path = root.join("active.jsonl");
+        let mut active = Session::default();
+        active.projection.calls.insert("new-active".into(), serde_json::from_value(json!({
+            "tool":"fixture", "time":"2026-11-13T10:00:00Z", "completed":null, "sequence":1
+        })).unwrap());
+        collector.files.insert(active_path.clone(), active);
+        assert!(!collector.select_recent_calls(2, 100_000).unwrap().complete);
+        let with_active = collector.select_recent_calls(2, 100_000).unwrap();
+        assert!(with_active.complete);
+        assert!(with_active.calls[&checkpoint::key(&root, &active_path).unwrap()].contains("new-active"));
     }
 
     #[test]
