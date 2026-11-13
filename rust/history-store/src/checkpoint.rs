@@ -86,6 +86,87 @@ impl Store {
         Ok(Some(Checkpoint { cursor, calls }))
     }
 
+    /// Visit selected payloads in bounded batches from one SQLite read snapshot.
+    ///
+    /// Unlike `selected_checkpoint`, the total selection may exceed 16 MiB. Each
+    /// cursor plus batch remains bounded by that limit, and a batch contains at
+    /// most 512 calls. Selection order is preserved. Consumers must stage their
+    /// result until this method succeeds: an I/O or callback error can occur
+    /// after earlier batches have been visited. No callback runs for a missing
+    /// cursor, stale signature, missing selected call, or oversized record.
+    pub fn visit_selected_checkpoint(
+        &mut self,
+        expected: &ExpectedCursor<'_>,
+        call_ids: &[String],
+        mut visit: impl FnMut(&Cursor, &[StoredCall]) -> Result<()>,
+    ) -> Result<bool> {
+        let Some(signature) = expected.signature else { return Err(StoreError::InvalidQuery) };
+        if expected.source_key.is_empty() || expected.source_key.len() > 256 || signature.len() > 512
+            || call_ids.len() > 8192 || call_ids.iter().any(|id| id.is_empty() || id.len() > 160)
+            || call_ids.iter().collect::<HashSet<_>>().len() != call_ids.len()
+        {
+            return Err(StoreError::InvalidQuery);
+        }
+        let tx = self.db.transaction()?;
+        let cursor = tx.query_row(
+            "SELECT offset,signature,payload FROM session_cursors WHERE source_key=?",
+            [expected.source_key], |row| {
+                let signature = row.get_ref(1)?.as_str()?;
+                let payload = row.get_ref(2)?.as_str()?;
+                if signature.len() > 512 || payload.len() > CHECKPOINT_LIMIT {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+                Ok(Cursor { source_key: expected.source_key.to_owned(), offset: row.get(0)?,
+                    signature: signature.to_owned(), payload: payload.to_owned() })
+            },
+        ).optional()?;
+        let Some(cursor) = cursor.filter(|cursor| cursor.signature == signature) else {
+            return Ok(false);
+        };
+        let header_bytes = cursor.source_key.len() + cursor.signature.len() + cursor.payload.len();
+        if header_bytes > CHECKPOINT_LIMIT { return Err(StoreError::InvalidQuery); }
+        // Preflight metadata without copying payloads. The transaction keeps this
+        // validation and all subsequent payload pages on the same snapshot.
+        {
+            let mut query = tx.prepare("SELECT event_time,length(CAST(payload AS BLOB)) FROM session_calls WHERE source_key=? AND call_id=?")?;
+            for id in call_ids {
+                let size = query.query_row(params![expected.source_key, id], |row| {
+                    let time = match row.get_ref(0)? { rusqlite::types::ValueRef::Null => None, value => Some(value.as_str()?) };
+                    let payload_bytes: i64 = row.get(1)?;
+                    if time.is_some_and(|value| value.len() > 40) || payload_bytes < 0 {
+                        return Err(rusqlite::Error::InvalidQuery);
+                    }
+                    Ok(payload_bytes as u64 + id.len() as u64 + expected.source_key.len() as u64 + time.map_or(0, str::len) as u64)
+                }).optional()?;
+                let Some(size) = size else { return Ok(false) };
+                if size > (CHECKPOINT_LIMIT - header_bytes) as u64 { return Err(StoreError::InvalidQuery); }
+            }
+        }
+        {
+            let mut query = tx.prepare("SELECT event_time,payload FROM session_calls WHERE source_key=? AND call_id=?")?;
+            let mut calls = Vec::new();
+            let mut bytes = header_bytes;
+            for id in call_ids {
+                let mut rows = query.query(params![expected.source_key, id])?;
+                let row = rows.next()?.ok_or(StoreError::InvalidQuery)?;
+                let time = match row.get_ref(0)? { rusqlite::types::ValueRef::Null => None, value => Some(value.as_str().map_err(rusqlite::Error::from)?) };
+                let payload = row.get_ref(1)?.as_str().map_err(rusqlite::Error::from)?;
+                let size = id.len() + expected.source_key.len() + time.map_or(0, str::len) + payload.len();
+                if calls.len() == 512 || bytes + size > CHECKPOINT_LIMIT {
+                    visit(&cursor, &calls)?;
+                    calls.clear();
+                    bytes = header_bytes;
+                }
+                calls.push(StoredCall { source_key: expected.source_key.to_owned(), call_id: id.clone(),
+                    event_time: time.map(str::to_owned), payload: payload.to_owned() });
+                bytes += size;
+            }
+            if !calls.is_empty() || call_ids.is_empty() { visit(&cursor, &calls)?; }
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Read only ordering keys for one matching checkpoint, without loading call payloads.
     pub fn checkpoint_call_headers(
         &mut self,

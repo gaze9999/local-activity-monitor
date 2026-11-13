@@ -80,6 +80,93 @@ fn checkpoint_call_headers_page_by_time_and_validate_signature() {
 }
 
 #[test]
+fn selected_checkpoint_streams_more_than_byte_budget_in_stable_order() {
+    let directory = tempdir().unwrap();
+    let mut store = Store::open(directory.path(), Access::ReadWrite).unwrap().unwrap();
+    let cursor = Cursor { source_key: "one".into(), offset: 10, signature: "anchor".into(), payload: "{}".into() };
+    let calls: Vec<_> = (0..20).map(|i| StoredCall { source_key: "one".into(), call_id: format!("call-{i:02}"),
+        event_time: None, payload: "x".repeat(1024 * 1024) }).collect();
+    store.save_checkpoints(&[cursor], &calls, &[]).unwrap();
+    let ids: Vec<_> = calls.iter().rev().map(|call| call.call_id.clone()).collect();
+    let expected = ExpectedCursor { source_key: "one", signature: Some("anchor") };
+    assert!(store.selected_checkpoint(&expected, &ids).is_err());
+    let mut actual = Vec::new();
+    let mut pages = 0;
+    assert!(store.visit_selected_checkpoint(&expected, &ids, |cursor, batch| {
+        pages += 1;
+        let bytes = cursor.source_key.len() + cursor.signature.len() + cursor.payload.len()
+            + batch.iter().map(|call| call.source_key.len() + call.call_id.len() + call.payload.len() + call.event_time.as_ref().map_or(0, String::len)).sum::<usize>();
+        assert!(bytes <= 16 * 1024 * 1024);
+        assert!(batch.len() <= 512);
+        assert!(batch.iter().all(|call| call.payload.len() == 1024 * 1024));
+        actual.extend(batch.iter().map(|call| call.call_id.clone()));
+        Ok(())
+    }).unwrap());
+    assert_eq!(pages, 2);
+    assert_eq!(actual, ids);
+}
+
+#[test]
+fn selected_checkpoint_stream_preflights_and_stops_on_consumer_error() {
+    let directory = tempdir().unwrap();
+    let mut store = Store::open(directory.path(), Access::ReadWrite).unwrap().unwrap();
+    let cursor = Cursor { source_key: "one".into(), offset: 10, signature: "anchor".into(), payload: "{}".into() };
+    let calls: Vec<_> = (0..513).map(|i| StoredCall { source_key: "one".into(), call_id: format!("call-{i:03}"), event_time: None, payload: "{}".into() }).collect();
+    store.save_checkpoints(&[cursor], &calls, &[]).unwrap();
+    let ids: Vec<_> = calls.iter().map(|call| call.call_id.clone()).collect();
+    let expected = ExpectedCursor { source_key: "one", signature: Some("anchor") };
+    let mut lengths = Vec::new();
+    assert!(store.visit_selected_checkpoint(&expected, &ids, |_, calls| { lengths.push(calls.len()); Ok(()) }).unwrap());
+    assert_eq!(lengths, [512, 1]);
+    let mut missing = ids.clone(); missing.push("missing".into());
+    assert!(!store.visit_selected_checkpoint(&expected, &missing, |_, _| panic!("missing call must not publish a partial result")).unwrap());
+    assert!(!store.visit_selected_checkpoint(&ExpectedCursor { source_key: "one", signature: Some("stale") }, &ids, |_, _| panic!("stale cursor")).unwrap());
+    assert!(store.visit_selected_checkpoint(&expected, &[ids[0].clone(), ids[0].clone()], |_, _| panic!("duplicate id")).is_err());
+    let mut visits = 0;
+    assert!(store.visit_selected_checkpoint(&expected, &ids, |_, _| { visits += 1; Err(lam_history_store::StoreError::InvalidQuery) }).is_err());
+    assert_eq!(visits, 1);
+    assert!(store.visit_selected_checkpoint(&expected, &[], |_, batch| { assert!(batch.is_empty()); Ok(()) }).unwrap());
+}
+
+#[test]
+fn selected_checkpoint_stream_keeps_one_snapshot_during_writer_change() {
+    let directory = tempdir().unwrap();
+    let mut store = Store::open(directory.path(), Access::ReadWrite).unwrap().unwrap();
+    let mut writer = Store::open(directory.path(), Access::ReadWrite).unwrap().unwrap();
+    let cursor = Cursor { source_key: "one".into(), offset: 10, signature: "anchor".into(), payload: "{}".into() };
+    let calls: Vec<_> = (0..514).map(|i| StoredCall { source_key: "one".into(), call_id: format!("call-{i:03}"), event_time: None, payload: "old".into() }).collect();
+    store.save_checkpoints(&[cursor.clone()], &calls, &[]).unwrap();
+    let ids: Vec<_> = calls.iter().map(|call| call.call_id.clone()).collect();
+    let expected = ExpectedCursor { source_key: "one", signature: Some("anchor") };
+    let mut visits = 0;
+    assert!(store.visit_selected_checkpoint(&expected, &ids, |_, batch| {
+        visits += 1;
+        assert!(batch.iter().all(|call| call.payload == "old"));
+        if visits == 1 {
+            let mut changed = calls[513].clone(); changed.payload = "new".into();
+            // The 514th row has not been selected when the first batch callback runs.
+            // A same-signature change must not split the subsequent read view.
+            writer.save_checkpoints(&[cursor.clone()], &[changed], &[])?;
+        }
+        Ok(())
+    }).unwrap());
+    assert_eq!(visits, 2);
+    assert_eq!(store.selected_checkpoint(&expected, &[ids[513].clone()]).unwrap().unwrap().calls[0].payload, "new");
+}
+
+#[test]
+fn selected_checkpoint_stream_rejects_oversized_record_before_callback() {
+    let directory = tempdir().unwrap();
+    let mut store = Store::open(directory.path(), Access::ReadWrite).unwrap().unwrap();
+    let cursor = Cursor { source_key: "one".into(), offset: 10, signature: "anchor".into(), payload: "{}".into() };
+    let calls = [StoredCall { source_key: "one".into(), call_id: "a".into(), event_time: None, payload: "{}".into() },
+        StoredCall { source_key: "one".into(), call_id: "b".into(), event_time: None, payload: "x".repeat(16 * 1024 * 1024) }];
+    store.save_checkpoints(&[cursor], &calls, &[]).unwrap();
+    let expected = ExpectedCursor { source_key: "one", signature: Some("anchor") };
+    assert!(store.visit_selected_checkpoint(&expected, &["a".into(), "b".into()], |_, _| panic!("oversized selection")).is_err());
+}
+
+#[test]
 fn oversized_call_does_not_hide_following_checkpoint() {
     let directory = tempdir().unwrap();
     let mut store = Store::open(directory.path(), Access::ReadWrite).unwrap().unwrap();

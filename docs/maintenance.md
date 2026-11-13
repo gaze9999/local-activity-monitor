@@ -94,6 +94,8 @@ Rust 服務啟動時會檢查所選目錄的 `monitoring/activity-history.json` 
 
 ## Rust session checkpoint
 
+歷史儲存的 `visit_selected_checkpoint` 可在同一 SQLite 讀取交易內, 按選取順序分批處理合計超過 16 MiB 的 checkpoint 呼叫資料. 每批最多 512 筆, 游標與該批資料合計不超過 16 MiB, 單筆過大仍拒絕; 呼叫端須等整輪成功才發布暫存結果. 此介面尚未接入服務的 overflow snapshot / detail / workdir 組裝, 既有 100,000 header 與 16 MiB 組裝界線仍待處理
+
 以 `--codex` 啟用收集後, Rust 在所選資料目錄的 `monitoring/lam-history.sqlite3` 儲存最後完整記錄的位置、已選取的對話欄位及工具呼叫摘要, checkpoint 使用 `rust:v1:` 開頭的鍵值, 初次從 Python 切換至 Rust 時會從來源重新收集一次
 
 重啟時核對檔案識別及已讀前綴兩端的摘要, 驗證成功後從已提交的位置續讀, 前綴改寫或檔案更換時重新收集, 未完成的半行在重啟後重新讀取
