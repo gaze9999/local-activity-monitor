@@ -65,11 +65,13 @@ fn window(value: &Value) -> Option<Value> {
     }
     Some(result)
 }
-fn limits(payload: &Value) -> Map<String, Value> {
+fn limits(payload: &Value, order: Option<&[String]>) -> Map<String, Value> {
     let mut entries = Vec::new();
     if let Some(values) = payload["rateLimitsByLimitId"].as_object() {
-        for (key, value) in values.iter().take(32) {
-            entries.push((key.clone(), value));
+        for key in order.unwrap_or_default() {
+            if let Some(value) = values.get(key) {
+                entries.push((key.clone(), value));
+            }
         }
     } else if payload["rateLimits"].is_object() {
         entries.push((
@@ -146,6 +148,56 @@ pub(crate) fn empty(status: &str) -> Value {
     json!({"health":status,"updated_at":null,"limits":{},"limit_id":null,"credits":null,"plan_type":null,"account_usage":null,"methods":methods})
 }
 
+// Read only the final matching member, preserving JSON duplicate-key last-wins semantics.
+fn raw_member<'a>(raw: &'a str, name: &str) -> Result<Option<&'a serde_json::value::RawValue>, serde_json::Error> {
+    struct Member<'a>(&'a str);
+    impl<'de> serde::de::Visitor<'de> for Member<'_> {
+        type Value = Option<&'de serde_json::value::RawValue>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("an object")
+        }
+        fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+            let mut result = None;
+            while let Some(key) = map.next_key::<String>()? {
+                if key == self.0 {
+                    result = Some(map.next_value()?);
+                } else {
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                }
+            }
+            Ok(result)
+        }
+    }
+    serde::Deserializer::deserialize_map(&mut serde_json::Deserializer::from_str(raw), Member(name))
+}
+
+fn limit_order(line: &[u8]) -> Result<Option<Vec<String>>, serde_json::Error> {
+    struct Keys;
+    impl<'de> serde::de::Visitor<'de> for Keys {
+        type Value = Vec<String>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("an object")
+        }
+        fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+            let mut keys = Vec::new();
+            while let Some(key) = map.next_key::<String>()? {
+                if keys.len() < 32 && !keys.contains(&key) {
+                    keys.push(key);
+                }
+                map.next_value::<serde::de::IgnoredAny>()?;
+            }
+            Ok(keys)
+        }
+    }
+    let raw: &serde_json::value::RawValue = serde_json::from_slice(line)?;
+    let Some(result) = raw_member(raw.get(), "result")? else { return Ok(None) };
+    let Some(mapped) = raw_member(result.get(), "rateLimitsByLimitId")? else { return Ok(None) };
+    if !mapped.get().starts_with('{') {
+        return Ok(None);
+    }
+    serde::Deserializer::deserialize_map(&mut serde_json::Deserializer::from_str(mapped.get()), Keys).map(Some)
+}
+
 #[derive(Debug)]
 enum RpcError {
     Protocol,
@@ -174,7 +226,7 @@ impl Rpc {
             .map_err(|_| RpcError::Protocol)?
             .map_err(|_| RpcError::Protocol)
     }
-    async fn request(&mut self, method: &str, params: Value, id: i64) -> Result<Value, RpcError> {
+    async fn request(&mut self, method: &str, params: Value, id: i64) -> Result<(Value, Option<Vec<String>>), RpcError> {
         self.send(method, params, Some(id)).await?;
         loop {
             let mut line = Vec::new();
@@ -202,11 +254,14 @@ impl Rpc {
             if let Some(error) = value.get("error") {
                 return Err(RpcError::Remote(error["code"].as_i64()));
             }
-            return value
-                .get("result")
-                .filter(|value| value.is_object())
-                .cloned()
-                .ok_or(RpcError::Protocol);
+            let payload = value.get("result").filter(|value| value.is_object())
+                .cloned().ok_or(RpcError::Protocol)?;
+            let order = if method == "account/rateLimits/read" {
+                limit_order(&line).map_err(|_| RpcError::Protocol)?
+            } else {
+                None
+            };
+            return Ok((payload, order));
         }
     }
 }
@@ -260,14 +315,17 @@ async fn read_from(executable: &Path, home: &Path, deadline: Duration) -> Value 
                 )
                 .await
             {
-                Ok(payload) => {
+                Ok((payload, order)) => {
                     match *method {
                         "account/read" => {
                             result["plan_type"] = json!(label(&payload["account"]["planType"]))
                         }
                         "account/rateLimits/read" => {
-                            let values = limits(&payload);
-                            let preferred = values.get("codex").or_else(|| values.values().next());
+                            let values = limits(&payload, order.as_deref());
+                            let preferred = values.get("codex").or_else(|| {
+                                order.as_ref().and_then(|keys| keys.iter().find_map(|key| values.get(key)))
+                                    .or_else(|| values.values().next())
+                            });
                             if let Some(bucket) = preferred {
                                 result["limit_id"] = bucket["limit_id"].clone();
                                 result["credits"] = bucket["credits"].clone();
@@ -577,6 +635,23 @@ done"#;
         assert!(!value.to_string().contains("PRIVATE"));
     }
     #[tokio::test]
+    async fn raw_rpc_order_selects_primary_account_bucket() {
+        let script = r#"while IFS= read -r line; do
+case "$line" in
+*'"id":0'*) printf '%s\n' '{"id":0,"result":{}}' ;;
+*'"id":1'*) printf '%s\n' '{"id":1,"result":{"account":{}}}' ;;
+*'"id":2'*) printf '%s\n' '{"id":2,"result":{"rateLimitsByLimitId":{"zulu":{"planType":"pro","credits":{"balance":"9"}},"alpha":{"planType":"free","credits":{"balance":"1"}},"zulu":{"planType":"team","credits":{"balance":"7"}}}}}' ;;
+*'"id":3'*) printf '%s\n' '{"id":3,"result":{}}' ;;
+esac
+done"#;
+        let (home, path) = fake(script);
+        let result = read_from(&path, home.path(), Duration::from_secs(3)).await;
+        assert_eq!(result["health"], "ok");
+        assert_eq!(result["limit_id"], "zulu");
+        assert_eq!(result["credits"]["balance"], "7");
+        assert_eq!(result["plan_type"], "team");
+    }
+    #[tokio::test]
     async fn disabled_never_runs_and_timeout_cleans_child() {
         let (home, path) = fake("exec sleep 10");
         let source = Source::new(home.path().to_path_buf(), Arc::new(Shared::new()));
@@ -667,5 +742,52 @@ done"#;
             let expected = if accepted { json!([{"start_date":date,"tokens":0}]) } else { json!([]) };
             assert_eq!(result["daily_usage_buckets"], expected, "{date}");
         }
+    }
+}
+
+#[cfg(test)]
+mod limit_order_tests {
+    use super::*;
+    fn project_line(raw: &str) -> (Map<String, Value>, Option<String>) {
+        let response: Value = serde_json::from_str(raw).unwrap();
+        let order = limit_order(raw.as_bytes()).unwrap();
+        let values = limits(&response["result"], order.as_deref());
+        let preferred = values.get("codex").or_else(|| {
+            order.as_ref().and_then(|keys| keys.iter().find_map(|key| values.get(key)))
+                .or_else(|| values.values().next())
+        }).and_then(|value| value["limit_id"].as_str()).map(str::to_owned);
+        (values, preferred)
+    }
+    #[test]
+    fn source_order_selects_bucket_and_preserves_duplicate_values() {
+        let (values, preferred) = project_line(r#"{"result":{"rateLimitsByLimitId":{"zulu":{"credits":{"balance":"9"}},"alpha":{},"zulu":{"credits":{"balance":"7"}}}}}"#);
+        assert_eq!(preferred.as_deref(), Some("zulu"));
+        assert_eq!(values["zulu"]["credits"]["balance"], "7");
+        let (_, preferred) = project_line(r#"{"result":{"rateLimitsByLimitId":{"zulu":{},"codex":{},"alpha":{}}}}"#);
+        assert_eq!(preferred.as_deref(), Some("codex"));
+        let (_, preferred) = project_line(r#"{"result":{"rateLimitsByLimitId":{"bad!":{},"missing":null,"zulu":{},"alpha":{}}}}"#);
+        assert_eq!(preferred.as_deref(), Some("zulu"));
+    }
+    #[test]
+    fn cap_uses_first_unique_keys_before_validation() {
+        let rows = (0..32).map(|n| format!("\"a{n:02}\":{{}}")).collect::<Vec<_>>().join(",");
+        let (values, preferred) = project_line(&format!("{{\"result\":{{\"rateLimitsByLimitId\":{{\"zulu\":{{}},{rows}}}}}}}"));
+        assert_eq!(values.len(), 32);
+        assert!(values.contains_key("zulu"));
+        assert!(!values.contains_key("a31"));
+        assert_eq!(preferred.as_deref(), Some("zulu"));
+        let (values, _) = project_line(&format!("{{\"result\":{{\"rateLimitsByLimitId\":{{\"bad!\":{{}},{rows}}}}}}}"));
+        assert_eq!(values.len(), 31);
+        assert!(!values.contains_key("a31"));
+    }
+    #[test]
+    fn duplicate_containers_and_legacy_keep_last_member() {
+        let (_, preferred) = project_line(r#"{"result":{"rateLimitsByLimitId":{"old":{}}},"result":{"rateLimitsByLimitId":{"wrong":{}},"rateLimitsByLimitId":{"zulu":{},"alpha":{}}}}"#);
+        assert_eq!(preferred.as_deref(), Some("zulu"));
+        let (_, preferred) = project_line(r#"{"result":{"rateLimitsByLimitId":null,"rateLimits":{"limitId":"legacy"}}}"#);
+        assert_eq!(preferred.as_deref(), Some("legacy"));
+        let (values, preferred) = project_line(r#"{"result":{"rateLimitsByLimitId":{},"rateLimits":{"limitId":"legacy"}}}"#);
+        assert!(values.is_empty());
+        assert_eq!(preferred, None);
     }
 }

@@ -288,7 +288,8 @@ impl Collector {
             queries += 1;
             match query(root, remaining) {
                 Ok(records) => {
-                    let previous_ids=self.root_items.remove(root).unwrap_or_default();
+                    let previous_ids=self.root_items.get(root).cloned().unwrap_or_default();
+                    self.root_items.retain(|_, ids| ids.is_empty() || *ids != previous_ids);
                     let still_used:BTreeSet<_>=self.root_items.values().flatten().cloned().collect();
                     for id in previous_ids.difference(&still_used) { self.items.remove(id); self.paths.remove(id); }
                     let aliases:BTreeSet<_>=records.iter().map(|item|item.path.clone()).collect();
@@ -783,5 +784,52 @@ mod record_boundary_tests {
         assert_eq!(items.len(), 2);
         assert!(items[0].locked);
         assert!(!items[1].locked);
+    }
+}
+
+#[cfg(test)]
+mod alias_removal_tests {
+    use super::*;
+    #[test]
+    fn refreshing_aliases_drops_removed_worktree_from_all_views() {
+        let temporary = tempfile::tempdir().unwrap();
+        let home = temporary.path().canonicalize().unwrap();
+        let a = home.join("a");
+        let b = home.join("b");
+        let removed = home.join("removed");
+        for path in [&a, &b, &removed] {
+            std::fs::create_dir_all(path.join(".git")).unwrap();
+        }
+        let projects = BTreeMap::from([("project".to_owned(), json!({"_folders":[a,b]}))]);
+        let workdirs = BTreeMap::from([("thread".to_owned(), removed.to_string_lossy().into_owned())]);
+        let mut collector = Collector::new(home);
+        let mut queries = 0;
+        for paths in [vec![a.clone(), b.clone(), removed.clone()], vec![a.clone(), b.clone()]] {
+            collector.refresh_with(&projects, &workdirs,
+                super::super::projects::RootStatus::default(), true, true,
+                Duration::from_secs(1), |_, _| {
+                    queries += 1;
+                    Ok(paths.iter().map(|path| Worktree { path:path.clone(), ..Worktree::default() }).collect())
+                });
+        }
+        assert_eq!(queries, 2);
+        assert_eq!(collector.snapshot()["observed_total"], 2);
+        assert_eq!(collector.snapshot()["items"].as_array().unwrap().len(), 2);
+        assert!(!collector.items.contains_key(&hash(&removed)));
+        assert!(!collector.paths.contains_key(&hash(&removed)));
+        assert!(!collector.details().contains_key(&hash(&removed)));
+        assert!(collector.root_items.values().all(|ids| !ids.contains(&hash(&removed))));
+        collector.refresh_with(&projects, &workdirs,
+            super::super::projects::RootStatus::default(), true, true,
+            Duration::from_secs(1), |_, _| Err(QueryError { reason:"synthetic_failure", exit_code:Some(1) }));
+        assert_eq!(collector.snapshot()["observed_total"], 2);
+        assert_eq!(collector.snapshot()["count_complete"], false);
+        assert_eq!(collector.details().len(), 2);
+        collector.refresh_with(&projects, &workdirs,
+            super::super::projects::RootStatus::default(), true, true,
+            Duration::from_secs(1), |_, _| Ok(Vec::new()));
+        assert_eq!(collector.snapshot()["observed_total"], 0);
+        assert!(collector.details().is_empty());
+        assert!(collector.paths.is_empty());
     }
 }

@@ -1,5 +1,5 @@
 //! Explicit, bounded Codex Cloud metadata reads.
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::{
@@ -30,18 +30,18 @@ fn text(value: &Value, limit: usize) -> Option<String> {
     (!value.is_empty()).then(|| value.chars().take(limit).collect())
 }
 fn timestamp(value: &Value) -> Option<String> {
-    let time = if let Some(s) = value.as_str() {
+    if let Some(s) = value.as_str() {
         if s.len() > 64 || !s.contains('T') {
             return None;
         }
-        DateTime::parse_from_rfc3339(s).ok()?.with_timezone(&Utc)
+        lam_history_store::parse_utc_stamp(s).map(super::project::stamp)
     } else {
-        return super::schedules::seconds_timestamp(value.as_f64()?)
+        super::schedules::seconds_timestamp(value.as_f64()?)
             .as_str()
-            .map(str::to_owned);
-    };
-    Some(time.to_rfc3339_opts(SecondsFormat::Millis, true))
+            .map(str::to_owned)
+    }
 }
+
 fn project(value: &Value) -> Option<Value> {
     let rows = value.get("tasks")?.as_array()?;
     if rows.len() > 20 {
@@ -121,6 +121,8 @@ pub struct Source {
     home: PathBuf,
     cache: Mutex<VecDeque<(Option<String>, Instant, Value)>>,
     shared: Arc<super::account::Shared>,
+    #[cfg(test)]
+    deny_cache_miss: bool,
 }
 impl Source {
     pub fn new(home: PathBuf, shared: Arc<super::account::Shared>) -> Self {
@@ -128,6 +130,8 @@ impl Source {
             home,
             shared,
             cache: Mutex::new(VecDeque::new()),
+            #[cfg(test)]
+            deny_cache_miss: false,
         }
     }
     pub fn settings(&self) -> super::account::Settings {
@@ -146,6 +150,8 @@ impl Source {
             }
             return v.clone();
         }
+        #[cfg(test)]
+        assert!(!self.deny_cache_miss, "offline cache test must not query an executable");
         let mut result = json!({"health":"unavailable","items":[],"cursor":null,"checked_at":DateTime::<Utc>::from(std::time::SystemTime::now()).to_rfc3339()});
         if let Some(executable) = super::account::executable() {
             if let Some(value) =
@@ -279,6 +285,103 @@ mod integer_zero_tests {
             let number: Value = serde_json::from_str(raw).unwrap();
             let result = project(&json!({"tasks":[{"id":"t","attempt_total":number}]})).unwrap();
             assert_eq!(result["items"][0].get("attempt_total").and_then(Value::as_i64), expected, "{raw}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod cache_publication_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cached_cloud_pages_preserve_first_page_publication_and_disabled_results() {
+        let home = tempfile::tempdir().unwrap();
+        let shared = Arc::new(super::super::account::Shared::new());
+        let mut source = Source::new(home.path().to_path_buf(), shared.clone());
+        source.deny_cache_miss = true;
+        let first = json!({"health":"ok","items":[{"id":"first"}],"cursor":"next","checked_at":"2026-01-01T00:00:00Z"});
+        let next = json!({"health":"ok","items":[{"id":"second"}],"cursor":null,"checked_at":"2026-01-01T00:00:01Z"});
+        {
+            let mut cache = source.cache.lock().await;
+            cache.push_back((None, Instant::now(), first.clone()));
+            cache.push_back((Some("next".into()), Instant::now(), next.clone()));
+        }
+        assert_eq!(source.query(Some("next")).await, next);
+        assert!(shared.result().is_none());
+        assert!(shared.completed.read().unwrap().is_none());
+        let initial_version = shared.version();
+        assert_eq!(source.query(None).await, first);
+        assert_eq!(shared.result(), Some(first.clone()));
+        assert!(shared.completed.read().unwrap().is_some());
+        assert!(shared.version() > initial_version);
+        let version = shared.version();
+        let completed = *shared.completed.read().unwrap();
+        assert_eq!(source.query(Some("next")).await, next);
+        assert_eq!(shared.result(), Some(first.clone()));
+        assert_eq!(shared.version(), version);
+        assert_eq!(*shared.completed.read().unwrap(), completed);
+        source.configure(super::super::account::Settings { enabled: true, interval: 300 });
+        source.configure(super::super::account::Settings { enabled: false, interval: 300 });
+        assert_eq!(shared.result(), Some(first.clone()));
+        assert_eq!(source.query(None).await, first);
+        assert_eq!(shared.result(), Some(first));
+        assert_eq!(source.cache.lock().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cached_cloud_error_first_page_publishes_but_cursor_error_does_not() {
+        let home = tempfile::tempdir().unwrap();
+        let shared = Arc::new(super::super::account::Shared::new());
+        let mut source = Source::new(home.path().to_path_buf(), shared.clone());
+        source.deny_cache_miss = true;
+        let first = json!({"health":"error","items":[],"cursor":null,"checked_at":"2026-01-01T00:00:00Z"});
+        let next = json!({"health":"unavailable","items":[],"cursor":null,"checked_at":"2026-01-01T00:00:01Z"});
+        {
+            let mut cache = source.cache.lock().await;
+            cache.push_back((None, Instant::now(), first.clone()));
+            cache.push_back((Some("next".into()), Instant::now(), next.clone()));
+        }
+        assert_eq!(source.query(None).await, first);
+        let version = shared.version();
+        assert_eq!(source.query(Some("next")).await, next);
+        assert_eq!(shared.result(), Some(first));
+        assert_eq!(shared.version(), version);
+    }
+    #[tokio::test]
+    #[should_panic(expected = "offline cache test must not query an executable")]
+    async fn offline_cache_guard_rejects_expired_entry_before_executable_lookup() {
+        let home = tempfile::tempdir().unwrap();
+        let shared = Arc::new(super::super::account::Shared::new());
+        let mut source = Source::new(home.path().to_path_buf(), shared);
+        source.deny_cache_miss = true;
+        source.cache.lock().await.push_back((None, Instant::now() - Duration::from_secs(61), json!({"health":"ok"})));
+        source.query(None).await;
+    }
+
+}
+
+#[cfg(test)]
+mod cloud_iso_projection_tests {
+    use super::*;
+    #[test]
+    fn cloud_task_time_matches_python_iso_forms() {
+        for (input, expected) in [
+            ("2026-10-10T10.5+08", Some("2026-10-10T02:00:00.500Z")),
+            ("20261010T103000+0800", Some("2026-10-10T02:30:00.000Z")),
+            ("2026-W41-6T10:30:00+08:00", Some("2026-10-10T02:30:00.000Z")),
+            ("2026-10-10T10:30:00,123456+08:00", Some("2026-10-10T02:30:00.123Z")),
+            ("2026-10-10T10:30:00+08:00:30", Some("2026-10-10T02:29:30.000Z")),
+            ("2026-10-10T10:30:00Z", Some("2026-10-10T10:30:00.000Z")),
+            ("2026-10-10T10:30:00", None),
+            ("2026-10-10 10:30:00+08:00", None),
+            ("0000-01-01T00:00:00Z", None),
+            ("2016-12-31T23:59:60Z", None),
+            ("2026-10-10T10:30:00+24:00", None),
+            ("2026-10-10T10:30:00.11111111111111111111111111111111111111111111111111Z", None),
+        ] {
+            assert_eq!(timestamp(&json!(input)).as_deref(), expected, "{input}");
+            let projected = project(&json!({"tasks":[{"id":"fixture", "updated_at":input}]})).unwrap();
+            assert_eq!(projected["items"][0]["updated_at"], json!(expected), "{input}");
         }
     }
 }

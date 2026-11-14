@@ -121,6 +121,8 @@ async fn read(client: &Client, kind: Kind, url: &str) -> Option<Value> {
 }
 pub struct Source {
     kind: Kind,
+    #[cfg(test)]
+    deny_cache_miss: bool,
     client: Client,
     cache: Mutex<Option<(Instant, Value)>>,
     shared: Arc<Shared>,
@@ -129,6 +131,8 @@ impl Source {
     pub fn new(kind: Kind, shared: Arc<Shared>) -> Result<Self, reqwest::Error> {
         Ok(Self {
             kind,
+            #[cfg(test)]
+            deny_cache_miss: false,
             shared,
             cache: Mutex::new(None),
             client: Client::builder()
@@ -151,6 +155,8 @@ impl Source {
                 return value.clone();
             }
         }
+        #[cfg(test)]
+        assert!(!self.deny_cache_miss, "offline cache test must not query HTTP");
         let mut value = json!({"source":self.kind.key(),"name":self.kind.name(),"url":self.kind.url(),"checked_at":DateTime::<Utc>::from(std::time::SystemTime::now()).to_rfc3339(),"health":"error"});
         if let Some(result) = read(&self.client, self.kind, self.kind.url()).await {
             if let (Some(target), Some(data)) = (value.as_object_mut(), result.as_object()) {
@@ -225,7 +231,9 @@ mod tests {
     #[tokio::test]
     async fn enabled_source_publishes_cached_result_without_network() {
         let shared = Arc::new(Shared::new());
-        let source = Arc::new(Source::new(Kind::Openai, Arc::clone(&shared)).unwrap());
+        let mut source = Source::new(Kind::Openai, Arc::clone(&shared)).unwrap();
+        source.deny_cache_miss = true;
+        let source = Arc::new(source);
         *source.cache.lock().await =
             Some((Instant::now(), json!({"health":"ok","indicator":"none"})));
         shared.configure(Settings {
@@ -243,6 +251,18 @@ mod tests {
         assert_eq!(shared.result().unwrap()["indicator"], "none");
         worker.abort();
         let _ = worker.await;
+    }
+    #[tokio::test]
+    #[should_panic(expected = "offline cache test must not query HTTP")]
+    async fn expired_offline_cache_stops_before_http() {
+        let shared = Arc::new(Shared::new());
+        let mut source = Source::new(Kind::Openai, shared).unwrap();
+        source.deny_cache_miss = true;
+        *source.cache.lock().await = Some((
+            Instant::now() - Duration::from_secs(61),
+            json!({"health":"ok","indicator":"none"}),
+        ));
+        source.query().await;
     }
     #[test]
     fn validates_status_and_release_projections() {
