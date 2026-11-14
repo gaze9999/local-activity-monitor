@@ -3,17 +3,58 @@ use serde_json::{json, Value};
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
-use super::project::{stamp, Projection};
+use super::project::{stamp, Call, Projection};
 
 pub const GIT_EVENT_LIMIT: usize = 500;
 pub const CHECK_EVENT_LIMIT: usize = 500;
 
 pub struct Calls<'a>(&'a BTreeMap<&'a str, (Projection, bool)>);
 
-fn retain_preview<K: Ord, V>(preview: &mut BTreeMap<K, V>, rank: K, value: V, limit: usize) {
+fn retain_preview<K: Ord, V>(preview: &mut BTreeMap<K, V>, rank: K, render: impl FnOnce() -> V, limit: usize) {
     if preview.len() == limit && preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { return; }
     if preview.len() == limit { preview.pop_last(); }
-    preview.insert(rank, value);
+    preview.insert(rank, render());
+}
+
+/// Feed one resolved call winner per (thread, call). Preview ownership permits
+/// releasing each call after observation; full operation counts remain exact.
+struct WindowSummary {
+    boundary: Option<DateTime<Utc>>,
+    git: BTreeMap<(Reverse<Option<DateTime<Utc>>>, String, String, usize), Value>,
+    checks: BTreeMap<(Reverse<Option<DateTime<Utc>>>, String, String, usize), Value>,
+    operations: BTreeMap<String, usize>,
+    total: usize,
+}
+
+impl WindowSummary {
+    fn new(boundary: Option<DateTime<Utc>>) -> Self {
+        Self { boundary, git: BTreeMap::new(), checks: BTreeMap::new(), operations: BTreeMap::new(), total: 0 }
+    }
+
+    fn observe(&mut self, thread: &str, id: &str, call: &Call) {
+        if call.commands.is_empty() || self.boundary.is_some_and(|cutoff| call.time.is_none_or(|time| time < cutoff)) { return; }
+        self.total += call.commands.git.len();
+        for (index, event) in call.commands.git.iter().enumerate() {
+            *self.operations.entry(event.operation.clone()).or_default() += 1;
+            retain_preview(&mut self.git, (Reverse(call.time), thread.to_owned(), id.to_owned(), index), || json!({
+                "thread_id":thread, "thread_name":null, "call_id":id, "index":index,
+                "timestamp":call.time.map(stamp), "completed_at":call.completed_at().map(stamp), "duration_ms":call.duration_ms(),
+                "operation":event.operation, "repository":event.repository,
+            }), GIT_EVENT_LIMIT);
+        }
+        for (index, event) in call.commands.checks.iter().enumerate() {
+            retain_preview(&mut self.checks, (Reverse(call.time), thread.to_owned(), id.to_owned(), index), || json!({
+                "thread_id":thread, "thread_name":null, "call_id":id,
+                "timestamp":call.time.map(stamp), "completed_at":call.completed_at().map(stamp), "duration_ms":call.duration_ms(),
+                "operation":event.operation, "category":event.category,
+            }), CHECK_EVENT_LIMIT);
+        }
+    }
+
+    fn finish(self) -> (Value, Vec<Value>) {
+        let git: Vec<_> = self.git.into_values().collect();
+        (json!({"events":git,"operations":self.operations,"total":self.total}), self.checks.into_values().collect())
+    }
 }
 
 impl<'a> Calls<'a> {
@@ -21,40 +62,13 @@ impl<'a> Calls<'a> {
         Self(threads)
     }
 
-    /// Read already resolved call winners without building a full sorted
-    /// reference array. Stable thread/call/index ties reproduce the legacy
-    /// traversal, and only selected borrowed previews become JSON.
+    /// Consume already resolved winners once, preserving timestamp/thread/call/index ties.
     pub fn window(&self, boundary: Option<DateTime<Utc>>) -> (Value, Vec<Value>) {
-        let mut git = BTreeMap::new();
-        let mut checks = BTreeMap::new();
-        let mut operations = BTreeMap::<&str, usize>::new();
-        let mut total = 0;
+        let mut summary = WindowSummary::new(boundary);
         for (&thread, (projection, _)) in self.0 {
-            for (id, call) in &projection.calls {
-                if call.commands.is_empty() || boundary.is_some_and(|cutoff| call.time.is_none_or(|time| time < cutoff)) { continue; }
-                total += call.commands.git.len();
-                for (index, event) in call.commands.git.iter().enumerate() {
-                    *operations.entry(&event.operation).or_default() += 1;
-                    retain_preview(&mut git, (Reverse(call.time), thread, id.as_str(), index),
-                        (thread, id, call, index, event), GIT_EVENT_LIMIT);
-                }
-                for (index, event) in call.commands.checks.iter().enumerate() {
-                    retain_preview(&mut checks, (Reverse(call.time), thread, id.as_str(), index),
-                        (thread, id, call, event), CHECK_EVENT_LIMIT);
-                }
-            }
+            for (id, call) in &projection.calls { summary.observe(thread, id, call); }
         }
-        let git: Vec<_> = git.into_values().map(|(thread, id, call, index, event)| json!({
-            "thread_id":thread, "thread_name":null, "call_id":id, "index":index,
-            "timestamp":call.time.map(stamp), "completed_at":call.completed_at().map(stamp), "duration_ms":call.duration_ms(),
-            "operation":event.operation, "repository":event.repository,
-        })).collect();
-        let checks = checks.into_values().map(|(thread, id, call, event)| json!({
-            "thread_id":thread, "thread_name":null, "call_id":id,
-            "timestamp":call.time.map(stamp), "completed_at":call.completed_at().map(stamp), "duration_ms":call.duration_ms(),
-            "operation":event.operation, "category":event.category,
-        })).collect();
-        (json!({"events":git,"operations":operations,"total":total}), checks)
+        summary.finish()
     }
 }
 
@@ -100,13 +114,23 @@ mod tests {
         for boundary in [None,Some(time-chrono::Duration::hours(1)),Some(time),Some(time+chrono::Duration::hours(3))] {
             let actual = Calls::new(&threads).window(boundary);
             assert_eq!(actual,legacy_window(&threads,boundary));
+            let mut streamed = WindowSummary::new(boundary);
+            for (&thread, (projection, _)) in threads.iter().rev() {
+                for (id, call) in projection.calls.iter().rev() {
+                    let temporary = call.clone();
+                    streamed.observe(thread, id, &temporary);
+                    assert!(streamed.git.len() <= GIT_EVENT_LIMIT);
+                    assert!(streamed.checks.len() <= CHECK_EVENT_LIMIT);
+                }
+            }
+            assert_eq!(streamed.finish(), actual);
             assert!(actual.0["events"].as_array().unwrap().len()<=GIT_EVENT_LIMIT);
             assert!(actual.1.len()<=CHECK_EVENT_LIMIT);
             if boundary.is_none() { assert!(actual.0["total"].as_u64().unwrap()>GIT_EVENT_LIMIT as u64); }
         }
         let mut preview = BTreeMap::new();
         for rank in (0..10_000).rev() {
-            retain_preview(&mut preview,rank,rank,GIT_EVENT_LIMIT);
+            retain_preview(&mut preview,rank,|| rank,GIT_EVENT_LIMIT);
             assert!(preview.len()<=GIT_EVENT_LIMIT);
         }
         assert_eq!(preview.into_keys().collect::<Vec<_>>(),(0..GIT_EVENT_LIMIT).collect::<Vec<_>>());

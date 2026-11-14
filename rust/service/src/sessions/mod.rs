@@ -4306,6 +4306,11 @@ impl Collector {
                 validating: false, finished: false, valid: true });
         }
         let scan = cached.as_mut()?;
+        if scan.finished && scan.valid {
+            scan.after.clear();
+            scan.validating = true;
+            scan.finished = false;
+        }
         let mut pages = 0;
         let mut bytes = 0usize;
         while !scan.finished && !scan.validating && pages < page_limit && bytes < 16 * 1024 * 1024 {
@@ -5380,6 +5385,13 @@ mod log_tests {
         assert_eq!(serde_json::to_value(&complete[0].projection).unwrap(),serde_json::to_value(&expected.projection).unwrap());
         assert_eq!(serde_json::to_value(&complete[0].projection.calls).unwrap(),serde_json::to_value(&expected.projection.calls).unwrap());
         assert_eq!(serde_json::to_value(&complete[0].projection).unwrap()["agent_incoming"].as_array().unwrap().len(),1);
+        assert_eq!(collector.selected_overflow_projections(&selection).unwrap().len(), 1);
+        let mut replaced = original.cursor.clone();
+        replaced.signature = "changed-after-completion".into();
+        store.save_checkpoints(&[replaced], &[], &[]).unwrap();
+        assert!(collector.selected_overflow_projections(&selection).is_none());
+        assert!(collector.selected_snapshot_scan.lock().unwrap().as_ref().unwrap().projections.is_empty());
+        store.save_checkpoints(std::slice::from_ref(&original.cursor), &calls, &[]).unwrap();
         collector.source_membership.as_ref().unwrap().db.execute("UPDATE selection_epoch SET value=value+1", []).unwrap();
         assert!(collector.selected_overflow_projections_with_limits(&selection,1,16*1024*1024).is_none());
         assert!(collector.selected_snapshot_scan.lock().unwrap().as_ref().unwrap().reader.is_some());
@@ -5444,6 +5456,31 @@ mod log_tests {
                 assert!(scan.finished && scan.valid);
                 assert!(scan.reader.is_none());
             }
+        }
+        for _ in 0..2 {
+            assert!(collector.selected_overflow_projections(&selection).is_none());
+            {
+                let scan = collector.selected_snapshot_scan.lock().unwrap();
+                let scan = scan.as_ref().unwrap();
+                assert!(!scan.finished && scan.validating && scan.valid);
+                assert_eq!(scan.signatures.range(..=scan.after.clone()).count(), 64);
+                assert_eq!(scan.projections.len(), 65);
+                assert!(scan.reader.is_none());
+            }
+            assert!(collector.recent_call_refresh_pending());
+            assert_eq!(collector.selected_overflow_projections(&selection).unwrap().len(), 65);
+        }
+        assert!(collector.selected_overflow_projections(&selection).is_none());
+        let last = collector.selected_snapshot_scan.lock().unwrap().as_ref().unwrap().signatures.last_key_value().unwrap().0.clone();
+        let mut writer = lam_history_store::Store::open(&root.join("monitoring"), lam_history_store::Access::ReadWrite).unwrap().unwrap();
+        let mut changed = writer.checkpoint(&last, 1).unwrap().unwrap().cursor;
+        changed.signature = "changed-during-revalidation".into();
+        writer.save_checkpoints(&[changed], &[], &[]).unwrap();
+        assert!(collector.selected_overflow_projections(&selection).is_none());
+        {
+            let scan = collector.selected_snapshot_scan.lock().unwrap();
+            let scan = scan.as_ref().unwrap();
+            assert!(scan.finished && !scan.valid && scan.projections.is_empty());
         }
         assert!(collector.selected_overflow_projections_with_limits(&selection,16,4096).is_none());
         {

@@ -259,6 +259,57 @@ pub fn merge(core: &VecDeque<Value>, desktop: &[Value]) -> VecDeque<Value> {
     let mut unique = BTreeMap::new();
     for event in core.iter().chain(desktop) {
         if let Some(id) = event["observation_id"].as_str() {
+            unique.insert(id, event);
+        }
+    }
+    let mut preview = BTreeMap::new();
+    for (id, event) in unique {
+        preview.insert((std::cmp::Reverse(event["timestamp"].as_str()), id), event);
+        if preview.len() > 1000 { preview.pop_last(); }
+    }
+    preview.into_values().cloned().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_merge_preview_matches_full_clone_sort() {
+        let mut core = VecDeque::new();
+        let mut desktop = Vec::new();
+        for index in 0..2403 {
+            let event = json!({"observation_id":format!("id-{index:04}"),
+                "timestamp":match index % 5 { 0 => Value::Null, 1 => json!(17),
+                    2 => json!(""), _ => json!(format!("2026-11-{:02}", index % 20 + 1)) },
+                "source":"core","value":index});
+            core.push_back(event);
+            if index % 2 == 0 {
+                desktop.push(json!({"observation_id":format!("id-{index:04}"),
+                    "timestamp":"older","source":"desktop","value":index}));
+            }
+        }
+        core.push_back(json!({"observation_id":"","timestamp":""}));
+        desktop.push(json!({"observation_id":null,"timestamp":"latest"}));
+        desktop.push(json!({"observation_id":17}));
+        desktop.push(json!({"observation_id":"id-0000","timestamp":null,"value":"last winner"}));
+        for reverse in [false,true] {
+            if reverse { core.make_contiguous().reverse(); desktop.reverse(); }
+            for limit in [0,1,999,1000,1001,core.len()] {
+                let input = core.iter().take(limit).cloned().collect();
+                for rows in [&[][..], desktop.as_slice()] {
+                    let actual = merge(&input, rows);
+                    assert_eq!(actual, legacy_merge(&input, rows));
+                    assert!(actual.len() <= 1000);
+                }
+            }
+        }
+    }
+
+fn legacy_merge(core: &VecDeque<Value>, desktop: &[Value]) -> VecDeque<Value> {
+    let mut unique = BTreeMap::new();
+    for event in core.iter().chain(desktop) {
+        if let Some(id) = event["observation_id"].as_str() {
             unique.insert(id, event.clone());
         }
     }
@@ -267,10 +318,6 @@ pub fn merge(core: &VecDeque<Value>, desktop: &[Value]) -> VecDeque<Value> {
     values.truncate(1000);
     values.into()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 
     #[test]
     fn merges_duplicate_observations_before_enforcing_limit() {

@@ -770,13 +770,13 @@ pub struct Projection {
 }
 
 /// File-event reduction over already resolved call winners. Retain only
-/// borrowed preview entries; render/clone payloads after selection, not for
-/// every observed event. Valid source file fields retain their existing limits.
-pub(super) struct FileSummary<'a> {
+/// owned previews, rendering only on admission so inputs can be released.
+/// Valid source file fields retain their existing limits.
+pub(super) struct FileSummary {
     limit: usize,
     total: usize,
-    operations: BTreeMap<&'a str, usize>,
-    preview: BTreeMap<(std::cmp::Reverse<Option<String>>, usize), FilePreview<'a>>,
+    operations: BTreeMap<String, usize>,
+    preview: BTreeMap<(std::cmp::Reverse<Option<String>>, usize), Value>,
 }
 
 struct FilePreview<'a> {
@@ -804,7 +804,7 @@ impl FilePreview<'_> {
     }
 }
 
-impl<'a> FileSummary<'a> {
+impl FileSummary {
     pub(super) fn new(limit: usize) -> Self {
         Self { limit, total: 0, operations: BTreeMap::new(), preview: BTreeMap::new() }
     }
@@ -812,7 +812,7 @@ impl<'a> FileSummary<'a> {
     /// Feed projections in the original thread traversal order. Calls must
     /// already be deduplicated by source precedence; counts are not reversible.
     /// read_filter None includes all operations, Some(true) reads only.
-    pub(super) fn observe(&mut self, projection: &'a Projection, boundary: Option<Time>, enabled: bool, read_filter: Option<bool>) {
+    pub(super) fn observe(&mut self, projection: &Projection, boundary: Option<Time>, enabled: bool, read_filter: Option<bool>) {
         if !enabled { return; }
         for (id, call) in &projection.calls {
             if !boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff)) { continue; }
@@ -822,20 +822,19 @@ impl<'a> FileSummary<'a> {
                 let ordinal = self.total;
                 self.total += 1;
                 if let Some(operation) = file["operation"].as_str() {
-                    *self.operations.entry(operation).or_default() += 1;
+                    *self.operations.entry(operation.to_owned()).or_default() += 1;
                 }
                 if self.limit == 0 { continue; }
                 let rank = (std::cmp::Reverse(timestamp.clone()), ordinal);
                 if self.preview.len() == self.limit && self.preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { continue; }
                 if self.preview.len() == self.limit { self.preview.pop_last(); }
-                self.preview.insert(rank, FilePreview { thread: projection.id.as_deref(), id, call, file });
+                self.preview.insert(rank, FilePreview { thread: projection.id.as_deref(), id, call, file }.render());
             }
         }
     }
 
     pub(super) fn finish(self) -> (Vec<Value>, usize, BTreeMap<String, usize>) {
-        (self.preview.into_values().map(|event| event.render()).collect(),
-            self.total, self.operations.into_iter().map(|(key, count)| (key.to_owned(), count)).collect())
+        (self.preview.into_values().collect(), self.total, self.operations)
     }
 }
 
@@ -845,90 +844,176 @@ fn retain_preview<K: Ord, V>(preview: &mut BTreeMap<K, V>, rank: K, value: V, li
     preview.insert(rank, value);
 }
 
-enum SkillPreview<'a> {
-    Historical(&'a Value),
-    Current(&'a str, &'a str, &'a Call, &'a str),
+/// Current call inputs are resolved winners with lookup keys matching their
+/// projection IDs, as constructed by Collector::snapshots. The history index borrows the
+/// existing retained history, whose production query is limited to 500 rows.
+struct SkillSummary<'a> {
+    historical: BTreeMap<(&'a str, &'a str, &'a str), (&'a str, &'a Value)>,
+    preview: BTreeMap<(std::cmp::Reverse<Option<String>>, String, String, String), Value>,
+    counts: BTreeMap<String, usize>,
+    total: usize,
+    boundary: Option<Time>,
+    enabled: bool,
 }
 
-impl SkillPreview<'_> {
-    fn render(self) -> Value {
-        match self {
-            Self::Historical(event) => event.clone(),
-            Self::Current(thread, id, call, skill) => json!({
+impl<'a> SkillSummary<'a> {
+    fn new(history: &'a [Value], names: &std::collections::HashMap<String, Value>, boundary: Option<Time>, enabled: bool) -> Self {
+        let mut historical = BTreeMap::new();
+        if enabled {
+            for event in history {
+                let (Some(thread), Some(id), Some(skill), Some(time)) = (
+                    event["thread_id"].as_str(), event["call_id"].as_str(), event["skill"].as_str(), event["timestamp"].as_str(),
+                ) else { continue; };
+                if !names.contains_key(thread) || boundary.is_some_and(|cutoff|
+                    lam_history_store::parse_utc_stamp(time).is_none_or(|time| time < cutoff)) { continue; }
+                historical.insert((thread, id, skill), (time, event));
+            }
+        }
+        Self { historical, preview: BTreeMap::new(), counts: BTreeMap::new(), total: 0, boundary, enabled }
+    }
+
+    fn admit(&mut self, thread: &str, id: &str, skill: &str, time: Option<String>, render: impl FnOnce() -> Value) {
+        self.total += 1;
+        *self.counts.entry(skill.to_owned()).or_default() += 1;
+        let rank = (std::cmp::Reverse(time), thread.to_owned(), id.to_owned(), skill.to_owned());
+        if self.preview.len() == 500 && self.preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { return; }
+        if self.preview.len() == 500 { self.preview.pop_last(); }
+        self.preview.insert(rank, render());
+    }
+
+    fn observe(&mut self, lookup_thread: &str, thread: Option<&str>, id: &str, call: &Call) {
+        if !self.enabled || !self.boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff)) { return; }
+        // Source validation limits this per-call set to 40 skill names.
+        for skill in call.skills.iter().map(String::as_str).collect::<BTreeSet<_>>() {
+            if let Some(key) = self.historical.keys().find(|(t, i, s)| *t == lookup_thread && *i == id && *s == skill).copied() {
+                self.historical.remove(&key);
+            }
+            let Some(thread) = thread else { continue; };
+            self.admit(thread, id, skill, call.time.map(stamp), || json!({
                 "thread_id":thread,"thread_name":null,"call_id":id,"skill":skill,"tool":call.tool,
                 "has_document":true,"timestamp":call.time.map(stamp),"completed_at":call.completed.map(stamp),
                 "duration_ms":call.duration_ms()
-            }),
+            }));
         }
+    }
+
+    fn finish(mut self, names: &std::collections::HashMap<String, Value>) -> (Vec<Value>, usize, BTreeMap<String, usize>) {
+        for ((thread, id, skill), (time, event)) in std::mem::take(&mut self.historical) {
+            self.admit(thread, id, skill, Some(time.to_owned()), || event.clone());
+        }
+        let events = self.preview.into_values().map(|mut event| {
+            if let Some(name) = event["thread_id"].as_str().and_then(|id| names.get(id)) {
+                event["thread_name"] = name.clone();
+            }
+            event
+        }).collect();
+        (events, self.total, self.counts)
     }
 }
 
-/// Reduce current winners and retained history without materializing every skill
-/// event. The history winner index borrows its input; it is not a new history
-/// capacity bound. Distinct-skill counts remain exact, previews are capped.
-pub(super) fn skill_summary<'a>(
-    threads: &'a BTreeMap<&str, (Projection, bool)>,
-    history: &'a [Value],
+pub(super) fn skill_summary(
+    threads: &BTreeMap<&str, (Projection, bool)>,
+    history: &[Value],
     thread_names: &std::collections::HashMap<String, Value>,
     boundary: Option<Time>,
     enabled: bool,
 ) -> (Vec<Value>, usize, BTreeMap<String, usize>) {
     if !enabled { return (Vec::new(), 0, BTreeMap::new()); }
-    let eligible = |call: &Call| boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff));
-    let mut historical = BTreeMap::new();
-    for event in history {
-        let (Some(thread), Some(id), Some(skill), Some(time)) = (
-            event["thread_id"].as_str(),event["call_id"].as_str(),event["skill"].as_str(),event["timestamp"].as_str(),
-        ) else { continue; };
-        if !thread_names.contains_key(thread) || boundary.is_some_and(|cutoff|
-            lam_history_store::parse_utc_stamp(time).is_none_or(|time| time < cutoff)) { continue; }
-        historical.insert((thread,id,skill),(time,event));
+    let mut summary = SkillSummary::new(history, thread_names, boundary, enabled);
+    for (lookup_thread, (projection, _)) in threads {
+        for (id, call) in &projection.calls { summary.observe(lookup_thread, projection.id.as_deref(), id, call); }
     }
-    let mut preview = BTreeMap::new();
-    let mut counts = BTreeMap::<&str,usize>::new();
-    let mut total = 0usize;
-    for ((thread,id,skill),(time,event)) in historical {
-        let current_wins = threads.get(thread).and_then(|(projection,_)| projection.calls.get(id))
-            .is_some_and(|call| eligible(call) && call.skills.iter().any(|name| name == skill));
-        if current_wins { continue; }
-        total += 1;
-        *counts.entry(skill).or_default() += 1;
-        retain_preview(&mut preview,(std::cmp::Reverse(Some(time.to_owned())),thread,id,skill),SkillPreview::Historical(event),500);
-    }
-    for (projection,_) in threads.values() {
-        let Some(thread) = projection.id.as_deref() else { continue; };
-        for (id,call) in projection.calls.iter().filter(|(_,call)|eligible(call)) {
-            // Source validation limits this per-call set to 40 skill names.
-            for skill in call.skills.iter().map(String::as_str).collect::<BTreeSet<_>>() {
-                total += 1;
-                *counts.entry(skill).or_default() += 1;
-                retain_preview(&mut preview,(std::cmp::Reverse(call.time.map(stamp)),thread,id.as_str(),skill),
-                    SkillPreview::Current(thread,id,call,skill),500);
+    summary.finish(thread_names)
+}
+
+/// Observe each resolved winner once; retain no call borrow after admission.
+#[derive(Default)]
+struct RowTools {
+    count: usize,
+    counts: BTreeMap<String, usize>,
+    nested: BTreeMap<String, usize>,
+    preview: BTreeMap<(std::cmp::Reverse<Option<Time>>, String), Value>,
+}
+
+impl RowTools {
+    fn observe(&mut self, id: &str, call: &Call, enabled: bool,
+        totals: &mut BTreeMap<String, usize>, nested_totals: &mut BTreeMap<String, usize>) {
+        self.count += 1;
+        *self.counts.entry(call.tool.clone()).or_default() += 1;
+        *totals.entry(call.tool.clone()).or_default() += 1;
+        if let Some(nested) = call.nested.as_ref().filter(|_| enabled) {
+            for (tool, count) in &nested.tools {
+                *self.nested.entry(tool.clone()).or_default() += count;
+                *nested_totals.entry(tool.clone()).or_default() += count;
             }
         }
+        if !enabled { return; }
+        let rank = (std::cmp::Reverse(call.time), id.to_owned());
+        if self.preview.len() == 100 && self.preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { return; }
+        if self.preview.len() == 100 { self.preview.pop_last(); }
+        let event = {
+            let duration = call.duration_ms();
+            let nested_tools = call.nested.as_ref().map_or_else(|| json!({}), |nested| json!(nested.tools));
+            let mut event = json!({"call_id":id,"tool":call.tool,"timestamp":call.time.map(stamp),
+                   "completed_at":call.completed.map(stamp),"duration_ms":duration,"nested_tools":nested_tools});
+            if call.nested.as_ref().is_some_and(|nested| nested.truncated) {
+                event["nested_truncated"] = true.into();
+            }
+            event
+        };
+        self.preview.insert(rank, event);
     }
-    let events = preview.into_values().map(|event| {
-        let mut event = event.render();
-        if let Some(name) = event["thread_id"].as_str().and_then(|id|thread_names.get(id)) {
-            event["thread_name"] = name.clone();
-        }
-        event
-    }).collect();
-    (events,total,counts.into_iter().map(|(name,count)|(name.to_owned(),count)).collect())
 }
 
-enum MessagePreview<'a> {
-    Incoming(&'a super::agent::Incoming),
-    Outgoing(&'a str, &'a Call, &'a super::agent::Outgoing),
+/// Feed resolved calls for one row; preserve operation indices in tie order.
+#[derive(Default)]
+struct RowJev {
+    preview: BTreeMap<(std::cmp::Reverse<Option<Time>>, String, usize), Value>,
 }
 
-impl MessagePreview<'_> {
-    fn render(&self, thread: &str) -> Value {
-        match self {
-            Self::Incoming(message) => message.render(thread),
-            Self::Outgoing(id, call, message) => message.render(thread, id, call.time, call.completed, call.duration_ms()),
+impl RowJev {
+    fn observe(&mut self, thread: Option<&str>, id: &str, call: &Call, enabled: bool) {
+        if !enabled { return; }
+        for (index, operation) in call.jev.iter().enumerate() {
+            let rank = (std::cmp::Reverse(call.time), id.to_owned(), index);
+            if self.preview.len() == 100 && self.preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { continue; }
+            if self.preview.len() == 100 { self.preview.pop_last(); }
+            self.preview.insert(rank, json!({
+                "thread_id":thread, "call_id":id, "index":index, "operation":operation.operation,
+                "nested":operation.nested, "timestamp":call.time.map(stamp), "completed_at":call.completed.map(stamp),
+            }));
         }
     }
+}
+
+/// Metadata-only preview for one thread, after outgoing call winner resolution.
+#[derive(Default)]
+struct CommunicationSummary {
+    preview: BTreeMap<(std::cmp::Reverse<Option<String>>, u8,
+        std::cmp::Reverse<Option<Time>>, String, usize), Value>,
+}
+
+impl CommunicationSummary {
+    fn incoming(&mut self, thread: &str, ordinal: usize, message: &super::agent::Incoming, boundary: Option<Time>) {
+        if !boundary.is_none_or(|cutoff| message.time().is_some_and(|time| time >= cutoff)) { return; }
+        let rank = (std::cmp::Reverse(message.time().map(stamp)), 0u8,
+            std::cmp::Reverse(None), String::new(), ordinal);
+        if self.preview.len() == 100 && self.preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { return; }
+        if self.preview.len() == 100 { self.preview.pop_last(); }
+        self.preview.insert(rank, message.render(thread));
+    }
+
+    fn outgoing(&mut self, thread: &str, id: &str, call: &Call) {
+        for (ordinal, message) in call.agent_messages.iter().enumerate() {
+            let rank = (std::cmp::Reverse(call.time.map(stamp)), 1u8,
+                std::cmp::Reverse(call.time), id.to_owned(), ordinal);
+            if self.preview.len() == 100 && self.preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { continue; }
+            if self.preview.len() == 100 { self.preview.pop_last(); }
+            self.preview.insert(rank, message.render(thread, id, call.time, call.completed, call.duration_ms()));
+        }
+    }
+
+    fn finish(self) -> Vec<Value> { self.preview.into_values().collect() }
 }
 
 impl Projection {
@@ -1771,32 +1856,24 @@ impl Projection {
         events.into_values().collect()
     }
 
-    /// Match the legacy stable timestamp sort while borrowing at most 100
+    /// Match the legacy stable timestamp sort while owning at most 100
     /// events. Explicit tie keys preserve incoming order and sorted call order
     /// without requiring a complete sorted call-reference array.
-    /// Render metadata only after preview selection, never message contents.
+    /// Render metadata only on preview admission, never message contents.
     fn communication<'a>(
         &'a self,
         calls: impl IntoIterator<Item = (&'a String, &'a Call)>,
         boundary: Option<Time>,
     ) -> Vec<Value> {
-        let mut preview = BTreeMap::new();
+        let mut summary = CommunicationSummary::default();
+        let thread = self.id.as_deref().unwrap_or("");
         for (ordinal, message) in self.agent_incoming.iter().enumerate() {
-            if boundary.is_none_or(|cutoff| message.time().is_some_and(|time| time >= cutoff)) {
-                let rank = (std::cmp::Reverse(message.time().map(stamp)), 0u8,
-                    std::cmp::Reverse(None), "", ordinal);
-                retain_preview(&mut preview, rank, MessagePreview::Incoming(message), 100);
-            }
+            summary.incoming(thread, ordinal, message, boundary);
         }
         for (id, call) in calls {
-            for (ordinal, message) in call.agent_messages.iter().enumerate() {
-                let rank = (std::cmp::Reverse(call.time.map(stamp)), 1u8,
-                    std::cmp::Reverse(call.time), id.as_str(), ordinal);
-                retain_preview(&mut preview, rank, MessagePreview::Outgoing(id, call, message), 100);
-            }
+            summary.outgoing(thread, id, call);
         }
-        let thread = self.id.as_deref().unwrap_or("");
-        preview.into_values().map(|message| message.render(thread)).collect()
+        summary.finish()
     }
 
     pub fn row(
@@ -1811,64 +1888,32 @@ impl Projection {
         jev_calls_enabled: bool,
     ) -> Value {
         let eligible = |call: &Call| boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff));
-        let mut call_count = 0usize;
-        let mut tool_preview = BTreeMap::new();
-        let mut jev_preview = BTreeMap::new();
-        let mut counts = BTreeMap::<String, usize>::new();
-        let mut nested_counts = BTreeMap::<String, usize>::new();
+        let mut tools = RowTools::default();
+        let mut jev = RowJev::default();
         for (id, call) in self.calls.iter().filter(|(_, call)| eligible(call)) {
-            call_count += 1;
-            if tool_events_enabled {
-                retain_preview(&mut tool_preview, (std::cmp::Reverse(call.time), id.as_str()), (id, call), 100);
-            }
-            if jev_calls_enabled {
-                for (index, operation) in call.jev.iter().enumerate() {
-                    retain_preview(&mut jev_preview, (std::cmp::Reverse(call.time), id.as_str(), index), (id, call, index, operation), 100);
-                }
-            }
-            *counts.entry(call.tool.clone()).or_default() += 1;
-            *totals.entry(call.tool.clone()).or_default() += 1;
-            if let Some(nested) = call.nested.as_ref().filter(|_| tool_events_enabled) {
-                for (tool, count) in &nested.tools {
-                    *nested_counts.entry(tool.clone()).or_default() += count;
-                    *nested_totals.entry(tool.clone()).or_default() += count;
-                }
-            }
+            tools.observe(id, call, tool_events_enabled, totals, nested_totals);
+            jev.observe(self.id.as_deref(), id, call, jev_calls_enabled);
         }
-        let events: Vec<_> = tool_preview.into_values().map(|(id, call)| {
-            let duration = call.duration_ms();
-            let nested_tools = call.nested.as_ref().map_or_else(|| json!({}), |nested| json!(nested.tools));
-            let mut event = json!({"call_id":id,"tool":call.tool,"timestamp":call.time.map(stamp),
-                   "completed_at":call.completed.map(stamp),"duration_ms":duration,"nested_tools":nested_tools});
-            if call.nested.as_ref().is_some_and(|nested| nested.truncated) {
-                event["nested_truncated"] = true.into();
-            }
-            event
-        }).collect();
+        let RowTools { count: call_count, counts, nested: nested_counts, preview } = tools;
+        let events: Vec<_> = preview.into_values().collect();
         let mut changes = FileSummary::new(200);
         let mut reads = FileSummary::new(200);
         changes.observe(self, boundary, files_enabled, Some(false));
         reads.observe(self, boundary, files_enabled, Some(true));
         let file_changes = changes.finish().0;
         let file_reads = reads.finish().0;
-        let mut durations: Vec<_> = self
-            .intervals
-            .iter()
-            .map(|(start, end)| (*end - *start).num_milliseconds().max(0))
-            .collect();
-        if let Some(start) = self.task_start.filter(|start| {
+        let durations = self.intervals.iter()
+            .map(|(start, end)| (*end - *start).num_milliseconds().max(0));
+        let running_duration = self.task_start.filter(|start| {
             self.status == Some(Status::Running) && !self.intervals.contains_key(start)
-        }) {
-            durations.push((reference - start).num_milliseconds().max(0));
-        }
+        }).map(|start| (reference - start).num_milliseconds().max(0));
+        let (task_runs, task_duration_ms) = durations.chain(running_duration)
+            .fold((0usize, 0i64), |(count, total), duration| (count + 1, total + duration));
         let tokens = self
             .tokens
             .map(|values| COUNTERS.into_iter().zip(values).collect::<BTreeMap<_, _>>());
         let communication = self.communication(self.calls.iter().filter(|(_, call)| eligible(call)), boundary);
-        let jev_calls: Vec<_> = jev_preview.into_values().map(|(id, call, index, operation)| json!({
-            "thread_id":self.id, "call_id":id, "index":index, "operation":operation.operation,
-            "nested":operation.nested, "timestamp":call.time.map(stamp), "completed_at":call.completed.map(stamp),
-        })).collect();
+        let jev_calls: Vec<_> = jev.preview.into_values().collect();
         json!({
             "thread_id":self.id, "created_at":self.created.map(stamp), "updated_at":self.updated.map(stamp),
             "model":self.model, "reasoning_effort":self.effort, "context_updated_at":self.context_at.map(stamp), "execution":self.execution,
@@ -1877,8 +1922,8 @@ impl Projection {
             "status_source":self.status_at.map(|_| if self.status_cached {"cached_lifecycle"} else {"session_lifecycle"}),
             "tokens":tokens.map_or_else(|| json!({}), |values| json!(values)), "token_updated_at":self.tokens_at.map(stamp),
             "tool_calls":call_count, "tools":counts, "nested_tools":nested_counts, "tool_events":events, "jev_calls":jev_calls, "partial_history":partial,
-            "task_runs": (!durations.is_empty()).then_some(durations.len()),
-            "task_duration_ms": (!durations.is_empty()).then(|| durations.iter().sum::<i64>()),
+            "task_runs": (task_runs > 0).then_some(task_runs),
+            "task_duration_ms": (task_runs > 0).then_some(task_duration_ms),
             "agent_messages":communication,"file_changes":file_changes,"file_reads":file_reads,
         })
     }
@@ -1887,6 +1932,41 @@ impl Projection {
 #[cfg(test)]
 mod snapshot_merge_tests {
     use super::*;
+
+    #[test]
+    fn snapshot_task_duration_matches_full_vector() {
+        let reference = lam_history_store::parse_utc_stamp("2026-11-14T00:00:00Z").unwrap();
+        for count in [0, 1, 100, 2400] {
+            for status in [None, Some(Status::Observed), Some(Status::Running), Some(Status::Completed)] {
+                for start_kind in 0..4 {
+                    let mut projection = Projection::for_id(None);
+                    projection.status = status;
+                    for index in 0..count {
+                        let start = reference - chrono::Duration::milliseconds(index * 10);
+                        let end = start + chrono::Duration::milliseconds(if index % 2 == 0 { 7 } else { -3 });
+                        projection.intervals.insert(start, end);
+                    }
+                    projection.task_start = match start_kind {
+                        0 => None,
+                        1 => Some(reference),
+                        2 => Some(reference - chrono::Duration::milliseconds(99999)),
+                        _ => Some(reference + chrono::Duration::milliseconds(5)),
+                    };
+                    let mut durations: Vec<_> = projection.intervals.iter()
+                        .map(|(start, end)| (*end - *start).num_milliseconds().max(0)).collect();
+                    if let Some(start) = projection.task_start.filter(|start| {
+                        projection.status == Some(Status::Running) && !projection.intervals.contains_key(start)
+                    }) {
+                        durations.push((reference - start).num_milliseconds().max(0));
+                    }
+                    let row = projection.row(false, None, reference, &mut BTreeMap::new(),
+                        &mut BTreeMap::new(), false, false, false);
+                    assert_eq!(row["task_runs"], json!((!durations.is_empty()).then_some(durations.len())));
+                    assert_eq!(row["task_duration_ms"], json!((!durations.is_empty()).then(|| durations.iter().sum::<i64>())));
+                }
+            }
+        }
+    }
 
     fn call(tool: &str, time: Option<&str>) -> Call {
         serde_json::from_value(json!({"tool":tool,"time":time,"completed":null,"sequence":1})).unwrap()
@@ -1967,6 +2047,15 @@ mod snapshot_merge_tests {
             for enabled in [false,true] {
                 let actual = skill_summary(&threads,&history,&names,boundary,enabled);
                 assert_eq!(actual,legacy_skill_summary(&threads,&history,&names,boundary,enabled));
+                let mut streamed = SkillSummary::new(&history, &names, boundary, enabled);
+                for (lookup_thread, (projection, _)) in threads.iter().rev() {
+                    for (id, call) in projection.calls.iter().rev() {
+                        let temporary = call.clone();
+                        streamed.observe(lookup_thread, projection.id.as_deref(), id, &temporary);
+                        assert!(streamed.preview.len() <= 500);
+                    }
+                }
+                assert_eq!(streamed.finish(&names), actual);
                 assert!(actual.0.len()<=500);
                 if enabled && boundary.is_none() { assert!(actual.1>500); }
             }
@@ -2109,12 +2198,33 @@ mod snapshot_merge_tests {
                         if call.nested.as_ref().is_some_and(|nested|nested.truncated) { event["nested_truncated"]=true.into(); }
                         event
                     }).collect();
+                    let mut streamed = RowTools::default();
+                    let (mut streamed_totals, mut streamed_nested) = Default::default();
+                    for (id, call) in calls.iter().rev() {
+                        let temporary = (*call).clone();
+                        streamed.observe(id, &temporary, tools_enabled, &mut streamed_totals, &mut streamed_nested);
+                        assert!(streamed.preview.len() <= 100);
+                    }
+                    assert_eq!(streamed.count, calls.len());
+                    assert_eq!(streamed.counts, expected_counts);
+                    assert_eq!(streamed.nested, expected_nested);
+                    assert_eq!(streamed_totals, expected_counts);
+                    assert_eq!(streamed_nested, expected_nested);
+                    assert_eq!(streamed.preview.into_values().collect::<Vec<_>>(), expected_tools);
                     let thread_id = projection.id.as_deref();
                     let expected_jev: Vec<_> = calls.iter().filter(|_|jev_enabled).flat_map(|(id,call)|
                         call.jev.iter().enumerate().map(move |(index,operation)|json!({
                             "thread_id":thread_id,"call_id":id,"index":index,"operation":operation.operation,
                             "nested":operation.nested,"timestamp":call.time.map(stamp),"completed_at":call.completed.map(stamp)
                         }))).take(100).collect();
+                    let mut streamed_jev = RowJev::default();
+                    for (id, call) in calls.iter().rev() {
+                        let temporary = (*call).clone();
+                        streamed_jev.observe(thread_id, id, &temporary, jev_enabled);
+                        assert!(streamed_jev.preview.len() <= 100);
+                    }
+                    assert_eq!(streamed_jev.preview.into_values().collect::<Vec<_>>(), expected_jev);
+
                     let (mut totals, mut nested_totals) = (BTreeMap::from([("seed".into(),7)]), BTreeMap::from([("seed".into(),11)]));
                     let row = projection.row(false,boundary,time,&mut totals,&mut nested_totals,tools_enabled,false,jev_enabled);
                     assert_eq!(row["tool_calls"],calls.len());
@@ -2181,6 +2291,19 @@ mod snapshot_merge_tests {
             assert_eq!(projection.communication(calls.iter().rev().copied(), boundary), actual);
             assert!(actual.len() <= 100);
             assert_eq!(actual, legacy);
+            let mut streamed = CommunicationSummary::default();
+            for (ordinal, message) in projection.agent_incoming.iter().enumerate() {
+                let temporary = message.clone();
+                streamed.incoming(thread, ordinal, &temporary, boundary);
+                assert!(streamed.preview.len() <= 100);
+            }
+            for (id, call) in calls.iter().rev() {
+                let temporary = (*call).clone();
+                streamed.outgoing(thread, id, &temporary);
+                assert!(streamed.preview.len() <= 100);
+            }
+            assert_eq!(streamed.finish(), legacy);
+
             assert!(!serde_json::to_string(&actual).unwrap().contains("PRIVATE_BODY_MUST_NOT_RENDER"));
             for tools_enabled in [false, true] {
                 let row = projection.row(false, boundary, time, &mut BTreeMap::new(), &mut BTreeMap::new(), tools_enabled, false, false);
@@ -2236,7 +2359,10 @@ mod snapshot_merge_tests {
                     let mut reducer = FileSummary::new(limit);
                     let mut legacy = Vec::new();
                     for projection in threads.values() {
-                        reducer.observe(projection, boundary, enabled, None);
+                        {
+                            let temporary = projection.clone();
+                            reducer.observe(&temporary, boundary, enabled, None);
+                        }
                         assert!(reducer.preview.len() <= limit);
                         legacy.extend(projection.file_events(boundary, enabled));
                     }

@@ -394,7 +394,13 @@ pub(super) fn scan(home: &Path) -> (Value, Value, Vec<PathBuf>) {
                         .filter(|name| VERSION.is_match(name))
                         .map(|name| (name, path))
                 })
-                .max_by(|(a, _), (b, _)| cmp_version(a, b))
+                .reduce(|best, candidate| {
+                    if cmp_version(candidate.0, best.0).is_gt() {
+                        candidate
+                    } else {
+                        best
+                    }
+                })
                 .map(|(_, path)| path)
                 .or_else(|| {
                     versions
@@ -467,6 +473,20 @@ pub(super) fn scan(home: &Path) -> (Value, Value, Vec<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scans_first_observed_equal_numeric_version() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("plugins/cache/provider/fixture");
+        for version in ["1.0-a", "1.0-b"] {
+            fs::create_dir_all(root.join(version)).unwrap();
+            fs::write(root.join(version).join("plugin.json"),
+                format!(r#"{{"version":"{version}"}}"#)).unwrap();
+        }
+        let first = fs::read_dir(&root).unwrap().next().unwrap().unwrap()
+            .file_name().to_str().unwrap().to_owned();
+        let (result, _, _) = scan(&home.path().canonicalize().unwrap());
+        assert_eq!(result["items"][0]["version"], first);
+    }
     #[test]
     fn scans_latest_plugin_metadata_without_runtime_arguments() {
         let home = tempfile::tempdir().unwrap();

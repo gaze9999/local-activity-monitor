@@ -29,7 +29,7 @@ fn last(event: &Value) -> Option<&str> {
 }
 
 pub fn summary(events: &[Value], cutoff: Option<DateTime<Utc>>, health: &str) -> Value {
-    let visible: Vec<_> = events
+    let visible = events
         .iter()
         .filter(|event| {
             cutoff.is_none_or(|cutoff| {
@@ -37,10 +37,15 @@ pub fn summary(events: &[Value], cutoff: Option<DateTime<Utc>>, health: &str) ->
                     .and_then(parse_utc_stamp)
                     .is_some_and(|time| time >= cutoff)
             })
-        })
-        .collect();
+        });
     let mut grouped = BTreeMap::<&str, Vec<&Value>>::new();
-    for event in &visible {
+    let mut preview = Vec::new();
+    let mut total = 0usize;
+    for event in visible {
+        total += 1;
+        if preview.len() < EVENT_LIMIT {
+            preview.push(event);
+        }
         if let Some(server) = field(event, "server") {
             grouped.entry(server).or_default().push(event);
         }
@@ -60,8 +65,8 @@ pub fn summary(events: &[Value], cutoff: Option<DateTime<Utc>>, health: &str) ->
         .map(|(_, server, state)| (server.into(), state))
         .collect();
     json!({
-        "servers":servers, "events":visible.iter().take(EVENT_LIMIT).collect::<Vec<_>>(),
-        "total_events":visible.len(), "history_health":health, "recording_status":recording,
+        "servers":servers, "events":preview,
+        "total_events":total, "history_health":health, "recording_status":recording,
         "categories":{
             "documents":"文件 / OCR", "workspace":"環境 / 驗證", "runtime":"Runtime / 瀏覽器",
             "workflow":"Codex 工作流程", "review":"Review / Security", "deployment":"部署",
@@ -406,6 +411,76 @@ pub fn scoped_summary(events: &[Value], cutoff: DateTime<Utc>, health: &str, all
 #[cfg(test)]
 mod connection_tests {
     use super::*;
+    #[test]
+    fn snapshot_event_preview_matches_full_collection() {
+        let time = parse_utc_stamp("2026-11-13T01:00:00Z").unwrap();
+        let mut events = Vec::new();
+        for n in 0..2403 {
+            events.push(json!({
+                "id":n,
+                "server":match n % 5 { 0 => Value::Null, 1 => json!(""), 2 => json!("a"), _ => json!("b") },
+                "timestamp":match n % 4 { 0 => Value::Null, 1 => json!("invalid"), 2 => json!("2026-11-13T01:00:00Z"), _ => json!("2026-11-12T01:00:00Z") },
+                "completed_at":if n % 3 == 0 { json!("2026-11-13T02:00:00Z") } else { Value::Null },
+                "tool":format!("tool-{}",n % 40), "nested":n % 7 == 0,
+                "duration_ms":n % 200,
+                "result":{"status":if n % 2 == 0 {"ok"} else {"error"},"metric":n,"recording_enabled":n % 2 == 0}
+            }));
+        }
+        for reverse in [false, true] {
+            if reverse { events.reverse(); }
+            for limit in [0, 1, EVENT_LIMIT - 1, EVENT_LIMIT, EVENT_LIMIT + 1, events.len()] {
+                for cutoff in [None, Some(time), Some(time + chrono::Duration::hours(3))] {
+                    let actual = summary(&events[..limit], cutoff, "fixture");
+                    let expected = legacy_summary(&events[..limit], cutoff, "fixture");
+                    assert_eq!(actual, expected, "reverse={reverse} limit={limit} cutoff={cutoff:?}");
+                    assert!(actual["events"].as_array().unwrap().len() <= EVENT_LIMIT);
+                }
+            }
+        }
+    }
+
+    fn legacy_summary(events: &[Value], cutoff: Option<DateTime<Utc>>, health: &str) -> Value {
+        let visible: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                cutoff.is_none_or(|cutoff| {
+                    field(event, "timestamp")
+                        .and_then(parse_utc_stamp)
+                        .is_some_and(|time| time >= cutoff)
+                })
+            })
+            .collect();
+        let mut grouped = BTreeMap::<&str, Vec<&Value>>::new();
+        for event in &visible {
+            if let Some(server) = field(event, "server") {
+                grouped.entry(server).or_default().push(event);
+            }
+        }
+        let mut servers = Vec::new();
+        let mut recording = Vec::new();
+        for (server, events) in grouped {
+            let (row, state) = server_summary(server, &events);
+            servers.push(row);
+            if let Some((time, state)) = state {
+                recording.push((time, server, state));
+            }
+        }
+        recording.sort_by_key(|(time, server, _)| (*time, *server));
+        let recording: Map<_, _> = recording
+            .into_iter()
+            .map(|(_, server, state)| (server.into(), state))
+            .collect();
+        json!({
+            "servers":servers, "events":visible.iter().take(EVENT_LIMIT).collect::<Vec<_>>(),
+            "total_events":visible.len(), "history_health":health, "recording_status":recording,
+            "categories":{
+                "documents":"文件 / OCR", "workspace":"環境 / 驗證", "runtime":"Runtime / 瀏覽器",
+                "workflow":"Codex 工作流程", "review":"Review / Security", "deployment":"部署",
+                "apps":"App / 成果", "jev":"Jev", "web":"網路參考", "other":"其他 MCP"
+            }
+        })
+    }
+
     #[test]
     fn snapshot_measurements_match_chronological_admission_and_flag_selection() {
         let mut events = Vec::new();
