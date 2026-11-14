@@ -434,4 +434,81 @@ mod tests {
         assert_eq!(journal.source()["health"], "unavailable");
         assert_eq!(fs::read(target).unwrap(), b"preserve");
     }
+    #[test]
+    fn frontend_report_matches_python_validation_boundaries() {
+        // Expected acceptance comes from Python monitor_state.frontend_report
+        // (43 synthetic cases, source hash recorded in reconstruction evidence).
+        let base = json!({
+            "phase": "script", "error_type": "TypeError", "frontend_revision": null,
+            "frames": [{"file": "app.js", "function": "run", "line": 0, "column": 0}]
+        });
+        let mut cases = vec![(base.clone(), true)];
+        for (pointer, value, accepted) in [
+            ("/phase", json!("render"), true),
+            ("/phase", json!("promise"), true),
+            ("/phase", json!("unknown"), false),
+            ("/phase", json!(null), false),
+            ("/error_type", json!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), true),
+            ("/error_type", json!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), false),
+            ("/error_type", json!("_Error"), false),
+            ("/error_type", json!("Error\n"), false),
+            ("/error_type", json!(null), false),
+            ("/frontend_revision", json!("a0a0a0a0a0a0"), true),
+            ("/frontend_revision", json!("A0A0A0A0A0A0"), false),
+            ("/frontend_revision", json!("aaaaaaaaaaa"), false),
+            ("/frontend_revision", json!(42), false),
+            ("/frames", json!([]), true),
+            ("/frames", json!([{"file":"app.js","function":"run","line":0,"column":0},{"file":"app.js","function":"run","line":0,"column":0},{"file":"app.js","function":"run","line":0,"column":0},{"file":"app.js","function":"run","line":0,"column":0},{"file":"app.js","function":"run","line":0,"column":0},{"file":"app.js","function":"run","line":0,"column":0},{"file":"app.js","function":"run","line":0,"column":0},{"file":"app.js","function":"run","line":0,"column":0}]), true),
+            ("/frames", json!([{"file":"app.js","function":"run","line":0,"column":0},{"file":"app.js","function":"run","line":0,"column":0},{"file":"app.js","function":"run","line":0,"column":0},{"file":"app.js","function":"run","line":0,"column":0},{"file":"app.js","function":"run","line":0,"column":0},{"file":"app.js","function":"run","line":0,"column":0},{"file":"app.js","function":"run","line":0,"column":0},{"file":"app.js","function":"run","line":0,"column":0},{"file":"app.js","function":"run","line":0,"column":0}]), false),
+            ("/frames", json!({}), false),
+            ("/frames/0/file", json!("index.html"), true),
+            ("/frames/0/file", json!("workbench-ui.js"), true),
+            ("/frames/0/file", json!("https://example.invalid/app.js"), false),
+            ("/frames/0/file", json!("/private/app.js"), false),
+            ("/frames/0/function", json!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), true),
+            ("/frames/0/function", json!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), false),
+            ("/frames/0/function", json!("<anonymous>"), true),
+            ("/frames/0/function", json!("bad name"), false),
+            ("/frames/0/function", json!(""), false),
+            ("/frames/0/line", json!(-1), false),
+            ("/frames/0/line", json!(10000000), true),
+            ("/frames/0/line", json!(10000001), false),
+            ("/frames/0/line", json!(true), false),
+            ("/frames/0/line", json!(1.0), false),
+            ("/frames/0/line", json!("1"), false),
+            ("/frames/0/column", json!(false), false),
+            ("/frames/0/column", json!(null), false),
+        ] {
+            let mut value_case = base.clone();
+            *value_case.pointer_mut(pointer).unwrap() = value;
+            cases.push((value_case, accepted));
+        }
+        for key in ["phase", "error_type", "frames", "frontend_revision"] {
+            let mut missing = base.clone();
+            missing.as_object_mut().unwrap().remove(key);
+            cases.push((missing, false));
+        }
+        let mut extra_message = base.clone();
+        extra_message["message"] = json!("not allowed");
+        cases.push((extra_message, false));
+        let mut extra_url = base.clone();
+        extra_url["frames"][0]["url"] = json!("not allowed");
+        cases.push((extra_url, false));
+        cases.extend([(Value::Null, false), (json!([]), false)]);
+        assert_eq!(cases.len(), 43);
+        for (index, (input, accepted)) in cases.into_iter().enumerate() {
+            let home = tempfile::tempdir().unwrap();
+            let mut journal = Journal::new(home.path());
+            journal.set_enabled(false);
+            let result = journal.frontend_failed(input.clone());
+            assert_eq!(result.is_ok(), accepted, "case {index}");
+            if result.is_ok() {
+                assert_eq!(result, Ok(true));
+                assert_eq!(journal.frontend_failed(input.clone()), Ok(false));
+            } else {
+                assert!(journal.events().is_empty());
+            }
+        }
+    }
+
 }

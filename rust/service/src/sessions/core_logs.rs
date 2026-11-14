@@ -50,7 +50,7 @@ static HEADING: LazyLock<Regex> =
 static QUOTED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#""(?:\\.|[^"\\])*""#).expect("quoted text"));
 static HTTP: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bHTTP(?:[/ ][0-9]\.[0-9])?[ :]+([0-9]{3})\b").expect("HTTP status")
+    Regex::new(r"(?i)\bHTTP(?:[/ ]\d\.\d)?[ :]+(\d{3})\b").expect("HTTP status")
 });
 static CAUSES: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
     [
@@ -960,6 +960,25 @@ fn diagnostic_id(time: &str, module: &str, file: &str, id: i64) -> String {
     format!("{:x}", Sha256::digest(identity.as_bytes()))
 }
 
+static STATUS_FIELD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[1-5]\d{2}$").expect("status field"));
+static STATUS_DIGIT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\d$").expect("status decimal digit"));
+
+fn decimal_status(value: &str) -> Option<u16> {
+    let ascii: String = value.chars().map(|digit| {
+        if digit.is_ascii() { return digit; }
+        let code = digit as u32;
+        let mut first = code;
+        while let Some(previous) = first.checked_sub(1).and_then(char::from_u32) {
+            if !STATUS_DIGIT.is_match(previous.encode_utf8(&mut [0; 4])) { break; }
+            first -= 1;
+        }
+        char::from(b'0' + ((code - first) % 10) as u8)
+    }).collect();
+    ascii.parse().ok().filter(|status| (100..=599).contains(status))
+}
+
 pub(super) fn details(body: &str) -> Map<String, Value> {
     // Match the Python diagnostic limit in Unicode characters.
     let bounded: String;
@@ -1001,20 +1020,14 @@ pub(super) fn details(body: &str) -> Map<String, Value> {
         .find(body)
         .map_or(body, |part| &body[..part.start()]);
     let heading = QUOTED.replace_all(heading, "");
-    let status = |value: &str| -> Option<u16> {
-        (value.len() == 3)
-            .then(|| value.parse::<u16>().ok())
-            .flatten()
-            .filter(|status| (100..=599).contains(status))
-    };
     if let Some(status) = HTTP
         .captures(&heading)
-        .and_then(|capture| status(&capture[1]))
+        .and_then(|capture| decimal_status(&capture[1]))
     {
         result.insert("http_status".into(), status.into());
     }
     for key in ["http_status", "status_code", "status"] {
-        if let Some(status) = fields.get(key).and_then(|value| status(value)) {
+        if let Some(status) = fields.get(key).filter(|value| STATUS_FIELD.is_match(value)).and_then(|value| decimal_status(value)) {
             result.insert("http_status".into(), status.into());
         }
     }
@@ -1029,6 +1042,24 @@ pub(super) fn details(body: &str) -> Map<String, Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn diagnostic_status_matches_python_unicode_decimals() {
+        for (body, expected) in [
+            ("HTTP/１.１ ４２９", Some(429)),
+            ("HTTP ٦٠٠", None),
+            ("status=4２٩", Some(429)),
+            ("status=４２９", None),
+            ("HTTP ４０４ status=2０１", Some(201)),
+            ("HTTP ４０４ status=５００", Some(404)),
+            ("HTTP ²00", None),
+            ("secret=\"HTTP ４２９\" request_id=sk-PRIVATE", None),
+        ] {
+            let value = super::details(body);
+            assert_eq!(value.get("http_status").and_then(serde_json::Value::as_u64), expected, "{body}");
+            assert!(!serde_json::to_string(&value).unwrap().contains("PRIVATE"));
+        }
+    }
+
     #[test]
     fn core_detail_rejects_changed_module_and_replaced_database() {
         let home = tempfile::tempdir().unwrap();

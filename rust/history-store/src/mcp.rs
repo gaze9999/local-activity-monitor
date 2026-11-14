@@ -796,8 +796,25 @@ fn output_object(output: &Value) -> Option<std::borrow::Cow<'_, Object>> {
 }
 
 static EXIT_CODE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^Process exited with code (-?[0-9]{1,6})\s*$").expect("exit code pattern")
+    Regex::new(r"(?m)^Process exited with code (-?\d{1,6})\s*$").expect("exit code pattern")
 });
+
+static DECIMAL_DIGIT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\d$").expect("decimal digit"));
+
+fn decimal_exit_code(value: &str) -> Option<i32> {
+    let ascii: String = value.chars().map(|digit| {
+        if digit.is_ascii() { return digit; }
+        let code = digit as u32;
+        let mut first = code;
+        while let Some(previous) = first.checked_sub(1).and_then(char::from_u32) {
+            if !DECIMAL_DIGIT.is_match(previous.encode_utf8(&mut [0; 4])) { break; }
+            first -= 1;
+        }
+        char::from(b'0' + ((code - first) % 10) as u8)
+    }).collect();
+    ascii.parse().ok()
+}
 
 /// Extract only bounded byte counts from one structured tool result.
 pub fn file_byte_counts(output: &Value) -> (Option<u64>, Option<u64>) {
@@ -870,7 +887,7 @@ pub fn output_error(output: &Value, details: impl FnOnce(&str) -> Object) -> Opt
                     .map_or(raw.len(), |(index, _)| index);
                 EXIT_CODE.captures(&raw[..end])
             })
-            .and_then(|captures| captures[1].parse::<i32>().ok())
+            .and_then(|captures| decimal_exit_code(&captures[1]))
     } else {
         value
             .get("exit_code")
@@ -1053,5 +1070,25 @@ fn valid_result(server: &str, key: &str, value: &Value) -> bool {
                         .any(|part| matches!(part, "tokens" | "credits"));
             has_unit && number(value, NUMBER_LIMIT) || FLAG.is_match(key) && value.is_boolean()
         }
+    }
+}
+
+#[cfg(test)]
+mod exit_decimal_tests {
+    use super::*;
+
+    #[test]
+    fn process_exit_matches_python_unicode_decimals() {
+        for (digits, expected) in [
+            ("７", Some(7)), ("-٣", Some(-3)), ("१२३", Some(123)),
+            ("００００００", None), ("１２３４５６７", None), ("²", None),
+        ] {
+            let output = Value::String(format!("Process exited with code {digits}\n"));
+            let actual = output_error(&output, |_| Object::new());
+            assert_eq!(actual.as_ref().and_then(|value| value.get("exit_code")).and_then(Value::as_i64), expected, "{digits}");
+            if let Some(value) = actual { assert_eq!(value["code"], "process_exit"); }
+        }
+        let late = Value::String(format!("{}\nProcess exited with code ７\n", "x".repeat(OUTPUT_CHARACTER_LIMIT)));
+        assert!(!output_failed(&late));
     }
 }

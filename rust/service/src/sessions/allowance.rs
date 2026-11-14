@@ -5,8 +5,32 @@ use serde_json::{json, Map, Value};
 use std::sync::LazyLock;
 static LABEL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_.:-]{1,80}$").unwrap());
 static BALANCE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[0-9]{1,16}(?:\.[0-9]{1,16})?$").unwrap());
+    LazyLock::new(|| Regex::new(r"^\d{1,16}(?:\.\d{1,16})?$").unwrap());
+static DIGIT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\p{Nd}$").unwrap());
+fn decimal_ascii(value: &str) -> String {
+    value
+        .chars()
+        .map(|digit| {
+            if digit.is_ascii() {
+                return digit;
+            }
+            let code = digit as u32;
+            let mut first = code;
+            while let Some(previous) = first.checked_sub(1).and_then(char::from_u32) {
+                if !DIGIT.is_match(previous.encode_utf8(&mut [0; 4])) {
+                    break;
+                }
+                first -= 1;
+            }
+            char::from(b'0' + ((code - first) % 10) as u8)
+        })
+        .collect()
+}
+
 fn number(value: &Value, max: f64) -> Option<f64> {
+    if value.as_u64().is_some_and(|integer| integer > max as u64) {
+        return None;
+    }
     let value = value.as_f64()?;
     (value.is_finite() && value >= 0.0 && value <= max).then_some(value)
 }
@@ -64,7 +88,7 @@ pub fn project(value: &Value, when: DateTime<Utc>) -> Option<Value> {
         let balance = credits.get("balance");
         let balance = balance.and_then(|value| {
             if let Some(s) = value.as_str().filter(|s| BALANCE.is_match(s)) {
-                s.parse::<f64>()
+                decimal_ascii(s).parse::<f64>()
                     .ok()
                     .filter(|v| v.is_finite() && *v >= 0.0 && *v <= 9007199254740992.0)
                     .map(|v| json!(v))
@@ -161,5 +185,65 @@ mod tests {
         assert_eq!(value["credits"]["balance"], 1.25);
         assert!(!value.to_string().contains("private"));
         assert!(project(&json!({"primary":{"used_percent":101}}), now).is_none());
+    }
+    #[test]
+    fn balance_matches_python_unicode_decimal_boundaries() {
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        for (balance, expected) in [
+            ("１２.５０", Some(12.5)),
+            ("٣.٢٥", Some(3.25)),
+            ("१२३", Some(123.0)),
+            ("𝟡.𝟘", Some(9.0)),
+            ("0.0000000000000001", Some(1e-16)),
+            ("²", None),
+            ("1e2", None),
+            ("12345678901234567", None),
+            ("1.12345678901234567", None),
+            ("9007199254740994", None),
+            ("９００７１９９２５４７４０９９２", Some(9007199254740992.0)),
+        ] {
+            let projected = project(&json!({"credits":{"balance":balance}}), now);
+            assert_eq!(projected.as_ref().and_then(|value| value["credits"]["balance"].as_f64()), expected, "{balance}");
+            if let Some(value) = projected {
+                assert!(valid(&value), "{balance}");
+            }
+        }
+        let projected = project(&json!({"credits":{"balance":"²","has_credits":false,"secret":"private"}}), now).unwrap();
+        assert_eq!(projected["credits"], json!({"has_credits":false}));
+    }
+
+    #[test]
+    fn exact_integer_limits_preserve_float_and_string_behavior() {
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        for max in [100_u64, 525600, 253402300799, 9007199254740992] {
+            assert_eq!(number(&json!(max - 1), max as f64), Some((max - 1) as f64));
+            assert_eq!(number(&json!(max), max as f64), Some(max as f64));
+            assert_eq!(number(&json!(max + 1), max as f64), None);
+            assert_eq!(number(&json!(u64::MAX), max as f64), None);
+            assert_eq!(number(&json!(-1), max as f64), None);
+            assert_eq!(number(&json!(true), max as f64), None);
+        }
+        for (balance, expected) in [
+            (json!(9007199254740991_u64), Some(json!(9007199254740991_u64))),
+            (json!(9007199254740992_u64), Some(json!(9007199254740992_u64))),
+            (json!(9007199254740993_u64), None),
+            (json!(9007199254740994_u64), None),
+            (json!(9007199254740992.0), Some(json!(9007199254740992.0))),
+            (json!(9007199254740994.0), None),
+            (json!("9007199254740993"), Some(json!(9007199254740992.0))),
+            (json!("９００７１９９２５４７４０９９３"), Some(json!(9007199254740992.0))),
+            (json!("9007199254740994"), None),
+        ] {
+            let result = project(&json!({"credits":{"balance":balance}}), now);
+            assert_eq!(result.as_ref().and_then(|value| value["credits"].get("balance")).cloned(), expected, "{balance}");
+            if let Some(value) = result {
+                assert!(valid(&value), "{balance}");
+            }
+        }
+        assert!(!valid(&json!({"updated_at":"1970-01-01T00:00:00.000Z","limits":[],"credits":{"balance":9007199254740993_u64}})));
+        for (key, maximum) in [("used_percent", 100_u64), ("window_minutes", 525600), ("resets_at", 253402300799)] {
+            assert!(project(&json!({"primary":{key:maximum}}), now).is_some(), "{key}");
+            assert!(project(&json!({"primary":{key:maximum + 1}}), now).is_none(), "{key}");
+        }
     }
 }

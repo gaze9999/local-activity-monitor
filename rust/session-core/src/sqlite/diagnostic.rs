@@ -27,16 +27,16 @@ static STATEMENT: LazyLock<Regex> = LazyLock::new(|| {
 static QUOTED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#""(?:\\.|[^"\\])*"|'(?:''|[^'])*'"#).expect("quoted values"));
 static SECONDS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\belapsed_secs=([0-9]+(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?)\b")
+    Regex::new(r"(?i)\belapsed_secs=(\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b")
         .expect("duration seconds")
 });
 static DURATION: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(?:elapsed|duration)=([0-9]+(?:\.[0-9]+)?)(ns|us|µs|ms|s)\b").expect("duration")
+    Regex::new(r"\b(?:elapsed|duration)=(\d+(?:\.\d+)?)(ns|us|µs|ms|s)\b").expect("duration")
 });
 static ROWS_AFFECTED: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\brows_affected=([0-9]{1,19})\b").expect("rows affected"));
+    LazyLock::new(|| Regex::new(r"\brows_affected=(\d{1,19})\b").expect("rows affected"));
 static ROWS_RETURNED: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\brows_returned=([0-9]{1,19})\b").expect("rows returned"));
+    LazyLock::new(|| Regex::new(r"\brows_returned=(\d{1,19})\b").expect("rows returned"));
 
 pub fn project_diagnostic(module: &str, body: &str) -> Option<SqlDiagnostic> {
     if !MODULE.is_match(module) {
@@ -61,7 +61,7 @@ pub fn project_diagnostic(module: &str, body: &str) -> Option<SqlDiagnostic> {
     let rows = |pattern: &Regex| {
         pattern
             .captures(&clean)
-            .and_then(|capture| capture[1].parse::<i64>().ok())
+            .and_then(|capture| decimal_ascii(&capture[1]).parse::<i64>().ok())
     };
     Some(SqlDiagnostic {
         statement,
@@ -77,9 +77,24 @@ pub fn project_diagnostic(module: &str, body: &str) -> Option<SqlDiagnostic> {
     })
 }
 
+static DIGIT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d$").expect("decimal digit"));
+
+fn decimal_ascii(value: &str) -> String {
+    value.chars().map(|digit| {
+        if digit.is_ascii() { return digit; }
+        let code = digit as u32;
+        let mut first = code;
+        while let Some(previous) = first.checked_sub(1).and_then(char::from_u32) {
+            if !DIGIT.is_match(previous.encode_utf8(&mut [0; 4])) { break; }
+            first -= 1;
+        }
+        char::from(b'0' + ((code - first) % 10) as u8)
+    }).collect()
+}
+
 fn duration(text: &str) -> Option<f64> {
     let value = if let Some(seconds) = SECONDS.captures(text) {
-        seconds[1].parse::<f64>().ok()? * 1000.0
+        decimal_ascii(&seconds[1]).parse::<f64>().ok()? * 1000.0
     } else {
         let elapsed = DURATION.captures(text)?;
         let unit = match &elapsed[2] {
@@ -89,11 +104,13 @@ fn duration(text: &str) -> Option<f64> {
             "s" => 1000.0,
             _ => return None,
         };
-        elapsed[1].parse::<f64>().ok()? * unit
+        decimal_ascii(&elapsed[1]).parse::<f64>().ok()? * unit
     };
-    (0.0..=86_400_000.0)
-        .contains(&value)
-        .then(|| (value * 1_000_000.0).round_ties_even() / 1_000_000.0)
+    if !(0.0..=86_400_000.0).contains(&value) {
+        return None;
+    }
+    // Round the original float, without an intermediate multiplication tie.
+    format!("{value:.6}").parse().ok()
 }
 
 #[cfg(test)]
@@ -132,4 +149,33 @@ mod tests {
             None
         );
     }
+    #[test]
+    fn diagnostic_matches_python_unicode_decimal_fields() {
+        for (body, duration, affected, returned) in [
+            ("elapsed=１２.５ms rows_affected=٣ rows_returned=９", Some(12.5), Some(3), Some(9)),
+            ("elapsed_secs=١.٢٥e-٣ rows_affected=１２ rows_returned=४", Some(1.25), Some(12), Some(4)),
+            ("duration=²ms rows_affected=²", None, None, None),
+            ("duration=８６４０１s rows_returned=９９９９９９９９９９９９９９９９９９９", None, None, None),
+            ("duration=1ms secret=\"rows_affected=１２ duration=９９s\"", Some(1.0), None, None),
+        ] {
+            let value = project_diagnostic("sqlite", body).unwrap();
+            assert_eq!(value.duration_ms, duration, "{body}");
+            assert_eq!(value.rows_affected, affected, "{body}");
+            assert_eq!(value.rows_returned, returned, "{body}");
+        }
+    }
+
+    #[test]
+    fn diagnostic_duration_rounds_original_float_like_python() {
+        for (input, expected) in [
+            ("0.0000025", 0.000003), ("0.0000035", 0.000003),
+            ("1.2345645", 1.234565), ("1.2345655", 1.234565),
+            ("0.0078125", 0.007812), ("0.0234375", 0.023438),
+            ("0", 0.0), ("86400000", 86400000.0),
+        ] {
+            let body = format!("duration={input}ms");
+            assert_eq!(project_diagnostic("sqlite", &body).unwrap().duration_ms, Some(expected), "{input}");
+        }
+    }
+
 }
