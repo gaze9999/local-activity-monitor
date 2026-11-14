@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -36,12 +36,123 @@ pub(crate) struct CallPosition {
     pub request: Option<Position>,
     pub response: Option<Position>,
 }
+#[derive(Clone, Copy)]
+struct TextRange { start: usize, len: usize }
+
+#[derive(Clone, Copy)]
+enum PositionHash { Digest([u8; 32]), Raw(TextRange) }
+
+#[derive(Clone, Copy)]
+struct CompactPosition { offset: u64, hash: PositionHash }
+
+struct PositionRecord {
+    id: TextRange,
+    tool: TextRange,
+    request: Option<CompactPosition>,
+    response: Option<CompactPosition>,
+}
+
+struct PositionPage {
+    records: Vec<PositionRecord>,
+    text: String,
+}
+
+impl PositionPage {
+    fn text(&self, range: TextRange) -> &str { &self.text[range.start..range.start + range.len] }
+
+    fn position(&self, value: CompactPosition) -> Position {
+        let hash = match value.hash {
+            PositionHash::Digest(hash) => hash.iter().map(|byte| format!("{byte:02x}")).collect(),
+            PositionHash::Raw(range) => self.text(range).to_owned(),
+        };
+        Position { offset: value.offset, hash }
+    }
+
+    fn get(&self, id: &str) -> Option<CallPosition> {
+        let index = self.records.binary_search_by(|row| self.text(row.id).cmp(id)).ok()?;
+        let row = &self.records[index];
+        Some(CallPosition { tool: self.text(row.tool).to_owned(),
+            request: row.request.map(|value| self.position(value)),
+            response: row.response.map(|value| self.position(value)) })
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct SharedCalls { pages: Vec<Arc<PositionPage>>, allowed: Vec<Option<Arc<Vec<bool>>>> }
+
+impl SharedCalls {
+    fn contains_key(&self, id: &str) -> bool {
+        self.get(id).is_some()
+    }
+
+    fn get(&self, id: &str) -> Option<CallPosition> {
+        self.pages.iter().enumerate().rev().find_map(|(page_index, page)| {
+            let index = page.records.binary_search_by(|row| page.text(row.id).cmp(id)).ok()?;
+            if self.allowed[page_index].as_ref().is_some_and(|mask| !mask[index]) { return None; }
+            page.get(id)
+        })
+    }
+
+    pub(super) fn len(&self) -> usize {
+        let mut ids = BTreeSet::new();
+        for (i,page) in self.pages.iter().enumerate() { for (j,row) in page.records.iter().enumerate() { if self.allowed[i].as_ref().is_none_or(|mask| mask[j]) { ids.insert(page.text(row.id)); } } }
+        ids.len()
+    }
+
+    fn retain_selected(&mut self, selected: &BTreeSet<String>) {
+        let mut pages = Vec::new();
+        let mut allowed = Vec::new();
+        for (i, page) in self.pages.iter().enumerate() {
+            let mask: Vec<bool> = page.records.iter().enumerate().map(|(j,row)| {
+                selected.contains(page.text(row.id)) && self.allowed[i].as_ref().is_none_or(|mask| mask[j])
+            }).collect();
+            if mask.iter().any(|value| *value) {
+                pages.push(Arc::clone(page)); allowed.push(Some(Arc::new(mask)));
+            }
+        }
+        self.pages = pages; self.allowed = allowed;
+    }
+
+    fn append(&mut self, calls: impl Clone + Iterator<Item = (String, CallPosition)>) {
+        let count = calls.clone().count();
+        let bytes = calls.clone().fold(0usize, |bytes, (id, call)| bytes.saturating_add(id.len())
+            .saturating_add(call.tool.len()).saturating_add(call.request.as_ref().filter(|p| !p.valid()).map_or(0, |p| p.hash.len()))
+            .saturating_add(call.response.as_ref().filter(|p| !p.valid()).map_or(0, |p| p.hash.len())));
+        let mut text = String::with_capacity(bytes);
+        let mut records = Vec::with_capacity(count);
+        fn put(text: &mut String, value: &str) -> TextRange {
+            let range = TextRange { start: text.len(), len: value.len() }; text.push_str(value); range
+        }
+        fn position(text: &mut String, value: Position) -> CompactPosition {
+            let hash = if value.valid() {
+                let mut hash = [0u8; 32];
+                for (i, byte) in hash.iter_mut().enumerate() { *byte = u8::from_str_radix(&value.hash[i*2..i*2+2], 16).expect("validated lowercase hex"); }
+                PositionHash::Digest(hash)
+            } else { PositionHash::Raw(put(text, &value.hash)) };
+            CompactPosition { offset: value.offset, hash }
+        }
+        for (id, call) in calls {
+            records.push(PositionRecord { id: put(&mut text, &id), tool: put(&mut text, &call.tool),
+                request: call.request.map(|value| position(&mut text, value)),
+                response: call.response.map(|value| position(&mut text, value)) });
+        }
+        self.pages.push(Arc::new(PositionPage { records, text }));
+        self.allowed.push(None);
+    }
+}
+
+impl From<BTreeMap<String, CallPosition>> for SharedCalls {
+    fn from(calls: BTreeMap<String, CallPosition>) -> Self {
+        let mut result = Self::default(); result.append(calls.iter().map(|(id, call)| (id.clone(), call.clone()))); result
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct DetailFile {
     pub root: PathBuf,
     pub path: PathBuf,
     pub anchor: Anchor,
-    pub calls: BTreeMap<String, CallPosition>,
+    pub calls: SharedCalls,
     guard: Option<CheckpointGuard>,
 }
 
@@ -145,6 +256,19 @@ pub(crate) struct Index {
     pub files: BTreeMap<String, Vec<DetailFile>>,
 }
 impl Index {
+    pub(super) fn retain_previous_overflow(&mut self, previous: &Self, selection: &BTreeMap<String, BTreeSet<String>>) {
+        for (thread, files) in &previous.files {
+            for file in files {
+                let Some(guard) = file.guard.as_ref() else { continue };
+                let Some(selected) = selection.get(&guard.source_key) else { continue };
+                let mut retained = file.clone();
+                retained.calls.retain_selected(selected);
+                if retained.calls.pages.is_empty() { continue; }
+                self.files.entry(thread.clone()).or_default().push(retained);
+            }
+        }
+    }
+
     pub(super) fn build(root: &Path, files: &BTreeMap<PathBuf, Session>) -> Self {
         let mut index = Self::default();
         for (path, state) in files {
@@ -160,14 +284,19 @@ impl Index {
     /// overhead, source identity, readiness keys and optional checkpoint guard.
     /// This is a stage budget, not a claim about measured process RSS.
     pub(super) fn projection_bytes(root: &Path, path: &Path, projection: &Projection, selected: Option<&BTreeSet<String>>) -> usize {
-        let mut bytes = 2048usize.saturating_add(root.as_os_str().len())
+        // Charge descriptor Vec growth, both page-handle vectors, Arc/page
+        // headers and conservative tree/allocation overhead per source.
+        let source_bytes = 2 * std::mem::size_of::<DetailFile>()
+            + std::mem::size_of::<PositionPage>() + 16 * std::mem::size_of::<usize>()
+            + 256;
+        let mut bytes = source_bytes.saturating_add(root.as_os_str().len())
             .saturating_add(path.as_os_str().len())
             .saturating_add(projection.id.as_ref().map_or(0, |id| id.len().saturating_mul(3)));
         for (id, call) in &projection.calls {
             if selected.is_some_and(|ids| !ids.contains(id)) { continue; }
-            bytes = bytes.saturating_add(512).saturating_add(id.len()).saturating_add(call.tool_name().len());
+            bytes = bytes.saturating_add(std::mem::size_of::<PositionRecord>() + 1).saturating_add(id.len()).saturating_add(call.tool_name().len());
             for position in [&call.request_position, &call.response_position].into_iter().flatten() {
-                bytes = bytes.saturating_add(128).saturating_add(position.hash.len());
+                if !position.valid() { bytes = bytes.saturating_add(position.hash.len()); }
             }
         }
         bytes
@@ -194,7 +323,7 @@ impl Index {
         if !path.starts_with(root) {
             return false;
         }
-        let calls: BTreeMap<String, CallPosition> = projection
+        let calls = projection
             .calls
             .iter()
             .filter(|(id, _)| selected.is_none_or(|ids| ids.contains(*id)))
@@ -208,17 +337,17 @@ impl Index {
                     },
                 )
             })
-            .collect();
-        let files = self.files.entry(id.clone()).or_default();
+            ;
+        let files = self.files.entry(id.clone()).or_insert_with(|| Vec::with_capacity(1));
         if let Some(file) = files.iter_mut().find(|file| file.root == root && file.path == path && file.anchor == *anchor && file.guard == guard) {
-            file.calls.extend(calls);
+            file.calls.append(calls);
             return true;
         }
         files.push(DetailFile {
             root: root.to_path_buf(),
             path: path.to_path_buf(),
             anchor: anchor.clone(),
-            calls,
+            calls: { let mut shared = SharedCalls::default(); shared.append(calls); shared },
             guard,
         });
         true
@@ -1569,8 +1698,9 @@ impl DetailFile {
             return None;
         }
         let selected = self;
-        let position = if let Some(call) = call {
-            match selected.calls.get(call)?.request.as_ref() {
+        let call_position = call.and_then(|call| selected.calls.get(call));
+        let position = if call.is_some() {
+            match call_position.as_ref()?.request.as_ref() {
                 Some(position) => Some(position),
                 None => {
                     return Some(
@@ -1707,7 +1837,7 @@ mod tests {
                     request: Some(Position::new(prefix.len() as u64, request.as_bytes())),
                     response: None,
                 },
-            )]),
+            )]).into(),
         };
         assert!(selected.context(Some("send1"), true).is_some());
         let altered = request.replace("send1", "send2");
@@ -1752,7 +1882,7 @@ mod tests {
                         response.as_bytes(),
                     )),
                 },
-            )]),
+            )]).into(),
         };
         assert!(selected.agent_message("send1", 0, true).is_some());
         assert!(selected.tool("send1", true, false).is_some());
@@ -1787,7 +1917,7 @@ mod tests {
             path: path.clone(),
             anchor,
             guard: None,
-            calls: BTreeMap::new(),
+            calls: SharedCalls::default(),
         };
         let event = json!({"source":"session","reason":"turn_failed","timestamp":null,"record_offset":prefix.len(),"record_hash":format!("{:x}", Sha256::digest(record.as_bytes()))});
         assert!(selected.error(&event, true, false).is_some());
@@ -1838,5 +1968,62 @@ mod tests {
             "type":"function_call","name":"fixture","call_id":"other","id":"send1"
         }});
         assert!(valid_record(&record, "send1", false, "fixture").is_none());
+    }
+}
+
+#[cfg(test)]
+mod shared_position_tests {
+    use super::*;
+
+    #[test]
+    fn compact_pages_preserve_lookup_and_sharing() {
+        let mut expected = BTreeMap::new();
+        for (id, tool, hash) in [("a", "fixture", "a".repeat(64)), ("日本語", "工具", "INVALID".into()), ("z", "", "".into())] {
+            expected.insert(id.to_owned(), CallPosition { tool: tool.into(), request: Some(Position { offset: 7, hash }), response: None });
+        }
+        let mut calls = SharedCalls::from(expected.clone());
+        let published = calls.clone();
+        assert!(Arc::ptr_eq(&calls.pages[0], &published.pages[0]));
+        for (id, value) in &expected {
+            let actual = calls.get(id).unwrap();
+            assert_eq!(actual.tool, value.tool);
+            assert_eq!(actual.request.as_ref().unwrap().hash, value.request.as_ref().unwrap().hash);
+            assert_eq!(actual.request.as_ref().unwrap().offset, 7);
+            assert!(actual.response.is_none());
+        }
+        let later: BTreeMap<String, CallPosition> = [("a".into(), CallPosition { tool: "replacement".into(), request: None, response: Some(Position::new(8,b"response")) })].into();
+        calls.append(later.iter().map(|(id, call)| (id.clone(), call.clone())));
+        assert_eq!(calls.get("a").unwrap().tool, "replacement");
+        assert_eq!(published.get("a").unwrap().tool, "fixture");
+        assert_eq!(calls.len(), 3);
+        assert!(calls.get("missing").is_none());
+        let mut retained = calls.clone();
+        retained.retain_selected(&["a".to_owned()].into());
+        assert!(Arc::ptr_eq(&retained.pages[0], &calls.pages[0]));
+        assert_eq!(retained.get("a").unwrap().tool,"replacement");
+        assert!(retained.get("日本語").is_none());
+        assert_eq!(retained.len(),1);
+        assert_eq!(published.len(),3);
+    }
+
+    #[test]
+    fn compact_fifty_thousand_positions_fit_charged_capacity() {
+        let values: BTreeMap<_, _> = (0..50_000).map(|n| (format!("fixture-{n:05}"), CallPosition {
+            tool: "fixture_tool".into(), request: Some(Position::new(n,b"request")), response: Some(Position::new(n+1,b"response"))
+        })).collect();
+        let calls = SharedCalls::from(values.clone());
+        let page = &calls.pages[0];
+        let actual_capacity = page.records.capacity()*std::mem::size_of::<PositionRecord>() + page.text.capacity()
+            + std::mem::size_of::<PositionPage>() + 2*std::mem::size_of::<usize>()
+            + calls.pages.capacity()*std::mem::size_of::<Arc<PositionPage>>()
+            + calls.allowed.capacity()*std::mem::size_of::<Option<Arc<Vec<bool>>>>();
+        let charge = 2048 + values.iter().map(|(id,call)| std::mem::size_of::<PositionRecord>()+1+id.len()+call.tool.len()).sum::<usize>();
+        assert!(actual_capacity <= charge, "actual {actual_capacity}, charged {charge}");
+        assert!(charge <= 16*1024*1024, "charged {charge}");
+        eprintln!("50k page backing capacity: {actual_capacity}; charged: {charge}; record size: {}", std::mem::size_of::<PositionRecord>());
+        assert_eq!(calls.len(), 50_000);
+        assert_eq!(calls.get("fixture-49999").unwrap().request.unwrap().offset, 49999);
+        let copy=calls.clone();
+        assert!(Arc::ptr_eq(&calls.pages[0],&copy.pages[0]));
     }
 }

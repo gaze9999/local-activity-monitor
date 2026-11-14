@@ -2393,6 +2393,7 @@ struct Collector {
     recent_call_scan: Mutex<Option<RecentCallScan>>,
     recent_call_details_dirty: AtomicBool,
     selected_detail_scan: Mutex<Option<SelectedDetailScan>>,
+    completed_detail_index: Mutex<Option<details::Index>>,
     selected_snapshot_scan: Mutex<Option<SelectedSnapshotScan>>,
     overflow_files: BTreeMap<PathBuf, Session>,
     overflow_cursor: String,
@@ -2729,6 +2730,7 @@ impl Collector {
             recent_call_scan: Mutex::new(None),
             recent_call_details_dirty: AtomicBool::new(false),
             selected_detail_scan: Mutex::new(None),
+            completed_detail_index: Mutex::new(None),
             selected_snapshot_scan: Mutex::new(None),
             overflow_files: BTreeMap::new(),
             overflow_cursor: String::new(),
@@ -3720,6 +3722,7 @@ impl Collector {
             // Drop both continuation and publication work so the service can idle.
             *self.recent_call_scan.lock().unwrap_or_else(|error| error.into_inner()) = None;
             self.recent_call_details_dirty.store(false, Ordering::Release);
+            *self.completed_detail_index.lock().unwrap_or_else(|error| error.into_inner()) = None;
             *self.selected_detail_scan.lock().unwrap_or_else(|error| error.into_inner()) = None;
             *self.selected_snapshot_scan.lock().unwrap_or_else(|error| error.into_inner()) = None;
             return false;
@@ -4106,7 +4109,9 @@ impl Collector {
             // oversized active stage must not leave an obsolete pending scan.
             *cached = None;
             let mut index = details::Index::default();
-            let mut staged_bytes = 0usize;
+            // Root tree node/slack is charged once, source allocations below.
+            let mut staged_bytes = 1024usize;
+            if staged_bytes > stage_limit { return None; }
             for (path, state) in &self.files {
                 let Some(anchor) = state.anchor.as_ref() else { continue };
                 let selected = checkpoint::key(root, path).and_then(|key| selection.calls.get(&key));
@@ -4218,12 +4223,20 @@ impl Collector {
             .then(|| self.select_recent_calls(CALL_LIMIT, 100_000)).flatten()
             .filter(|selection| selection.complete);
         if let Some(selection) = &selection {
-            if let Some(index) = self.selected_detail_index(root, selection) { return index; }
-            // Do not restart the legacy payload scan while the resumable stage
-            // is pending or failed. Overflow details remain explicitly unready.
-            return (details::Index::build(root, &self.files), BTreeSet::new());
+            if let Some(index) = self.selected_detail_index(root, selection) {
+                *self.completed_detail_index.lock().unwrap_or_else(|error| error.into_inner()) = Some(index.0.clone());
+                return index;
+            }
+            // Retain still-selected prior positions without marking overflow ready.
+            // Checkpoint and source guards remain checked by every detail read.
+            let mut index = details::Index::build(root, &self.files);
+            if let Some(previous) = self.completed_detail_index.lock().unwrap_or_else(|error| error.into_inner()).as_ref() {
+                index.retain_previous_overflow(previous, &selection.calls);
+            }
+            return (index, BTreeSet::new());
         } else {
             *self.selected_detail_scan.lock().unwrap_or_else(|error| error.into_inner()) = None;
+            *self.completed_detail_index.lock().unwrap_or_else(|error| error.into_inner()) = None;
         }
         let mut index = details::Index::build(root, &self.files);
         let overflow = self.overflow_projections(active_calls).0;
@@ -5613,6 +5626,31 @@ mod log_tests {
         assert_eq!(index.files[id].len(), 1, "pages coalesce into one source");
         assert_eq!(index.files[id][0].calls.len(), 40);
         assert!(index.files[id][0].source_signature().is_some());
+        *collector.completed_detail_index.lock().unwrap() = Some(index.clone());
+        *collector.selected_detail_scan.lock().unwrap() = None;
+        let (pending_index, pending_ready) = collector.detail_index(&root);
+        assert!(pending_ready.is_empty());
+        assert!(pending_index.select_call(id, "call00").is_some());
+        assert_eq!(pending_index.files[id][0].calls.len(), 40);
+        // The production publication owner clears this scheduling flag.
+        collector.recent_call_details_dirty.store(false, Ordering::Release);
+        let mut retained = details::Index::default();
+        retained.retain_previous_overflow(&index, &[(key.clone(), ["call00".to_owned()].into())].into());
+        assert_eq!(retained.files[id][0].calls.len(), 1);
+        assert!(retained.select_call(id, "call00").is_some());
+        assert!(retained.select_call(id, "call01").is_none());
+        assert_eq!(index.files[id][0].calls.len(), 40, "selection masks do not mutate the previous publication");
+        assert!(index.select_call(id, "call01").is_some());
+        for current_selection in [
+            BTreeMap::new(),
+            [(key.clone(), BTreeSet::new())].into(),
+            [(key.clone(), ["not-selected-before".to_owned()].into())].into(),
+            [("different-source".to_owned(), ["call00".to_owned()].into())].into(),
+        ] {
+            let mut excluded = details::Index::default();
+            excluded.retain_previous_overflow(&index, &current_selection);
+            assert!(excluded.files.is_empty(), "removed sources or calls must not survive retention");
+        }
         // A changed source signature rejects both cached detail reads and a
         // staged result whose earlier pages were already consumed.
         *collector.selected_detail_scan.lock().unwrap() = None;
@@ -5621,6 +5659,7 @@ mod log_tests {
         changed.signature = "changed-after-first-page".into();
         store.save_checkpoints(&[changed], &[], &[]).unwrap();
         assert!(index.files[id][0].source_signature().is_none());
+        assert!(retained.select_call(id, "call00").is_none());
         assert!(collector.selected_detail_index(&root, &selection).is_none());
         assert!(!collector.selected_detail_scan.lock().unwrap().as_ref().unwrap().valid);
         // Start another pending scan, then invalidate its inputs with an active
@@ -5637,6 +5676,11 @@ mod log_tests {
         assert!(collector.selected_detail_index_with_limit(&root, &selection, 1).is_none());
         assert!(collector.selected_detail_scan.lock().unwrap().is_none());
         assert!(!collector.recent_call_refresh_pending());
+        std::fs::remove_file(&path).unwrap();
+        let removed = retained.select_call(id, "call00").expect("selection returns a guarded handle, not source contents");
+        assert!(removed.source_signature().is_none());
+        assert!(removed.tool("call00", true, false).is_none(), "removed source rejects retained detail reads");
+        assert_eq!(index.files[id][0].calls.len(), 40, "read rejection does not mutate shared backing");
     }
 
     #[test]
@@ -6470,6 +6514,10 @@ mod log_tests {
         assert!(row["tool_events"].as_array().unwrap().iter().any(|event| event["call_id"] == "new-overflow"));
         let (ranked_details, _) = collector.detail_index(&root);
         assert!(ranked_details.select_call(&id, "new-overflow").is_some());
+        let scan = collector.selected_detail_scan.lock().unwrap();
+        let scan = scan.as_ref().unwrap();
+        assert!(scan.staged_bytes <= 16 * 1024 * 1024);
+        eprintln!("50k selected detail stage charge: {} bytes", scan.staged_bytes);
     }
 
     #[test]
