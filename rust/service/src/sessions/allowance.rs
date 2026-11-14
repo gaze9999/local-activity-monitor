@@ -66,9 +66,10 @@ pub fn project(value: &Value, when: DateTime<Utc>) -> Option<Value> {
         }
         if let Some(reset) = number(&item["resets_at"], 253402300799.0) {
             let seconds = reset.floor() as i64;
+            let micros = ((reset - seconds as f64) * 1_000_000.0).round_ties_even() as u32;
             if let Some(time) = DateTime::<Utc>::from_timestamp(
-                seconds,
-                ((reset - seconds as f64) * 1_000_000_000.0) as u32,
+                seconds + i64::from(micros / 1_000_000),
+                (micros % 1_000_000) * 1000,
             ) {
                 window["resets_at"] = json!(time.to_rfc3339_opts(SecondsFormat::Millis, true));
             }
@@ -244,6 +245,29 @@ mod tests {
         for (key, maximum) in [("used_percent", 100_u64), ("window_minutes", 525600), ("resets_at", 253402300799)] {
             assert!(project(&json!({"primary":{key:maximum}}), now).is_some(), "{key}");
             assert!(project(&json!({"primary":{key:maximum + 1}}), now).is_none(), "{key}");
+        }
+    }
+    #[test]
+    fn reset_time_matches_python_microsecond_rounding() {
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        for (reset, expected) in [
+            (0.0009994, "1970-01-01T00:00:00.000Z"),
+            (0.0009995, "1970-01-01T00:00:00.001Z"),
+            (0.0009999, "1970-01-01T00:00:00.001Z"),
+            (0.9999999, "1970-01-01T00:00:01.000Z"),
+            (1.0009999, "1970-01-01T00:00:01.001Z"),
+            (1.0 / 128.0, "1970-01-01T00:00:00.007Z"),
+            (3.0 / 128.0, "1970-01-01T00:00:00.023Z"),
+            (-0.0, "1970-01-01T00:00:00.000Z"),
+            (0.0, "1970-01-01T00:00:00.000Z"),
+            (253402300799.0, "9999-12-31T23:59:59.000Z"),
+        ] {
+            let value = project(&json!({"primary":{"resets_at":reset}}), now).unwrap();
+            assert_eq!(value["limits"][0]["resets_at"], expected, "{reset}");
+            assert!(valid(&value));
+        }
+        for reset in [-1.0, f64::from_bits(253402300799.0_f64.to_bits() + 1)] {
+            assert!(project(&json!({"primary":{"resets_at":reset}}), now).is_none(), "{reset}");
         }
     }
 }

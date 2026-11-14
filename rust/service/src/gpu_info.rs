@@ -3,14 +3,21 @@ use regex::Regex;
 use serde_json::{json, Value};
 use std::sync::LazyLock;
 static VRAM: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(\d+(?:\.\d+)?)\s*(MB|GB|MiB|GiB)$").unwrap());
+    LazyLock::new(|| Regex::new(r"^(\d+(?:\.\d+)?)[\s\x1c-\x1f]*(MB|GB|MiB|GiB)$").unwrap());
 static APPLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Apple M\d").unwrap());
 fn mac_projection(value: &Value) -> Vec<Value> {
     let Some(items) = value.get("SPDisplaysDataType").and_then(Value::as_array) else {
         return Vec::new();
     };
     items.iter().take(16).filter_map(|item|{
-        let name=item.get("sppci_model").and_then(Value::as_str).filter(|name|!name.is_empty()).or_else(||item.get("_name").and_then(Value::as_str))?;
+        let name=item.get("sppci_model").filter(|value| match value {
+            Value::Null => false,
+            Value::Bool(value) => *value,
+            Value::Number(value) => value.as_f64() != Some(0.0),
+            Value::String(value) => !value.is_empty(),
+            Value::Array(value) => !value.is_empty(),
+            Value::Object(value) => !value.is_empty(),
+        }).or_else(||item.get("_name")).and_then(Value::as_str)?;
         let capacity=item.get("spdisplays_vram").and_then(Value::as_str).and_then(|memory|VRAM.captures(memory)).and_then(|parts|{
             let number=parts[1].parse::<f64>().ok()?;
             let multiplier=if matches!(&parts[2],"MB"|"MiB"){1024f64.powi(2)}else{1024f64.powi(3)};
@@ -81,6 +88,15 @@ async fn native() -> Vec<Value> {
         .unwrap_or_default()
 }
 #[cfg(any(target_os = "linux", test))]
+fn integer_capacity(value: &str) -> Option<u64> {
+    let digits = value.strip_prefix(['+', '-']).unwrap_or(value);
+    if !digits.split('_').all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())) {
+        return None;
+    }
+    value.replace('_', "").parse::<i64>().ok().filter(|value| *value >= 0).map(|value| value as u64)
+}
+
+#[cfg(any(target_os = "linux", test))]
 fn nvidia_projection(output: &str) -> (Vec<Value>, std::collections::BTreeSet<String>) {
     let mut result = Vec::new();
     let mut slots = std::collections::BTreeSet::new();
@@ -88,16 +104,26 @@ fn nvidia_projection(output: &str) -> (Vec<Value>, std::collections::BTreeSet<St
         .has_headers(false)
         .flexible(true)
         .from_reader(output.as_bytes());
-    for row in reader.records().take(16).flatten() {
+    let mut blank_records = 0;
+    for (index, row) in reader.records().take(16).enumerate() {
+        let Ok(row) = row else { continue };
+        let mut offset = row.position().map_or(0, |position| position.byte() as usize);
+        let bytes = output.as_bytes();
+        // csv can leave the LF half of the preceding CRLF unconsumed.
+        if offset > 0 && bytes.get(offset - 1) == Some(&b'\r') && bytes.get(offset) == Some(&b'\n') {
+            offset += 1;
+        }
+        while let Some(byte @ (b'\r' | b'\n')) = bytes.get(offset) {
+            blank_records += 1;
+            offset += 1;
+            if *byte == b'\r' && bytes.get(offset) == Some(&b'\n') { offset += 1; }
+        }
+        if index + blank_records >= 16 { break; }
         if row.len() != 4 {
             continue;
         }
         let name = row[0].trim();
-        let capacity = row[1]
-            .trim()
-            .parse::<u64>()
-            .ok()
-            .filter(|value| *value < i64::MAX as u64 + 1)
+        let capacity = integer_capacity(row[1].trim())
             .map(|value| u128::from(value) * 1024 * 1024);
         let driver = row[2].trim();
         let slot = row[3].trim().to_lowercase();
@@ -198,8 +224,7 @@ async fn native() -> Vec<Value> {
             })
             .filter(|value| !value.is_empty());
         let capacity = read_small(&device.join("mem_info_vram_total"))
-            .and_then(|value| value.parse::<u64>().ok())
-            .filter(|value| *value < i64::MAX as u64 + 1);
+            .and_then(|value| integer_capacity(&value));
         gpus.push(json!({"name":name,"dedicated_memory_bytes":capacity,"shared_memory_bytes":null,"driver_version":version}));
         if gpus.len() >= 16 {
             break;
@@ -311,5 +336,99 @@ mod tests {
         let mut fallback = AdapterFilter::default();
         assert!(fallback.accept(0, (0, 0), id, None));
         assert!(fallback.accept(0, (0, 0), id, None));
+    }
+}
+
+#[cfg(test)]
+mod name_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn mac_name_fallback_preserves_source_truthiness_before_type_check() {
+        for primary in [Value::Null, json!(false), json!(0), json!(-0.0), json!(""), json!([]), json!({})] {
+            let value = json!({"SPDisplaysDataType":[{"sppci_model":primary,"_name":"Fallback"}]});
+            assert_eq!(mac_projection(&value)[0]["name"], "Fallback");
+        }
+        for primary in [json!(true), json!(1), json!(-1), json!(["model"]), json!({"name":"model"})] {
+            let value = json!({"SPDisplaysDataType":[{"sppci_model":primary,"_name":"Fallback"}]});
+            assert!(mac_projection(&value).is_empty());
+        }
+        let value = json!({"SPDisplaysDataType":[{"sppci_model":"Primary","_name":"Fallback"}]});
+        assert_eq!(mac_projection(&value)[0]["name"], "Primary");
+    }
+}
+
+#[cfg(test)]
+mod capacity_zero_tests {
+    use super::*;
+
+    #[test]
+    fn integer_capacity_accepts_signed_zero_and_preserves_limits() {
+        for (text, expected) in [
+            ("-0", Some(0)), ("-00", Some(0)), ("+0", Some(0)), ("0", Some(0)),
+            ("-1", None), ("9223372036854775807", Some(i64::MAX as u64)),
+            ("9223372036854775808", None), ("0.0", None), ("bad", None),
+        ] {
+            assert_eq!(integer_capacity(text), expected, "{text}");
+            let output = format!("Example,{text},N/A,0000:01:00.0\n");
+            let (rows, _) = nvidia_projection(&output);
+            assert_eq!(rows[0]["dedicated_memory_bytes"], json!(expected.map(|value| u128::from(value) * 1024 * 1024)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod capacity_separator_tests {
+    use super::*;
+    #[test]
+    fn ascii_integer_separators_match_python_capacity() {
+        for (text, expected) in [
+            ("1_024", Some(1024)), ("+1_024", Some(1024)), ("-0_0", Some(0)),
+            ("9_223_372_036_854_775_807", Some(i64::MAX as u64)),
+            ("9_223_372_036_854_775_808", None), ("-1_024", None),
+            ("_1", None), ("1_", None), ("1__0", None), ("+_1", None),
+            ("1.0", None), ("", None), ("0_0_1", Some(1)),
+        ] {
+            assert_eq!(integer_capacity(text), expected, "{text}");
+        }
+        let (rows, _) = nvidia_projection("GPU,1_024,driver,0000:01:00.0");
+        assert_eq!(rows[0]["dedicated_memory_bytes"], 1073741824_u64);
+    }
+}
+
+#[cfg(test)]
+mod csv_budget_tests {
+    use super::*;
+    #[test]
+    fn blank_records_consume_budget_without_splitting_quoted_records() {
+        for separator in ["\n", "\r", "\r\n"] {
+            for blanks in [0, 14, 15, 16] {
+                let input = separator.repeat(blanks) + "GPU,1,d,s";
+                assert_eq!(nvidia_projection(&input).0.len(), usize::from(blanks < 16));
+                let input = format!("GPU,1,d,s{separator}{}Other,2,d,t", separator.repeat(blanks));
+                assert_eq!(nvidia_projection(&input).0.len(), if blanks < 15 {2} else {1});
+            }
+        }
+        let input = "\n".repeat(15) + "\"GPU\n\nname\",1,d,s\nOther,2,d,t";
+        let rows = nvidia_projection(&input).0;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], "GPU\n\nname");
+        assert_eq!(nvidia_projection(&("bad\n".repeat(16)+"GPU,1,d,s")).0.len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod vram_whitespace_tests {
+    use super::*;
+    #[test]
+    fn python_separator_whitespace_in_memory_unit() {
+        for separator in ['\x1c','\x1d','\x1e','\x1f','\t','\n','\u{85}','\u{a0}'] {
+            let rows = mac_projection(&json!({"SPDisplaysDataType":[{"sppci_model":"GPU","spdisplays_vram":format!("1{separator}GB")}]}));
+            assert_eq!(rows[0]["dedicated_memory_bytes"], 1073741824_u64);
+        }
+        for text in ["1 GB\n", "1 GB\r\n", "1\u{200b}GB", "+1 GB"] {
+            let rows = mac_projection(&json!({"SPDisplaysDataType":[{"sppci_model":"GPU","spdisplays_vram":text}]}));
+            assert!(rows[0]["dedicated_memory_bytes"].is_null(), "{text:?}");
+        }
     }
 }

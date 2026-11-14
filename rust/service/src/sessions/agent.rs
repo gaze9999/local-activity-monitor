@@ -145,3 +145,38 @@ impl Incoming {
         json!({"action":"receive_message","message_type":self.message_type,"target":self.target,"sender":self.sender,"task_name":self.target,"direction":"incoming","nested":false,"index":0,"invocation_index":null,"recognition":"recorded_message_header","timestamp":self.timestamp.map(super::project::stamp),"thread_id":thread})
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incoming_envelope_matches_python_boundaries_without_payload() {
+        for kind in ["MESSAGE", "NEW_TASK", "FINAL_ANSWER"] {
+            for newline in ["\n", "\r\n"] {
+                let envelope = format!("Message Type: {kind}{newline}Task name: /root/task{newline}Sender: /root{newline}Payload:{newline}private message body");
+                let incoming = Incoming::parse(&envelope, None).unwrap();
+                assert!(incoming.valid());
+                let value = incoming.render("thread");
+                assert_eq!(value["message_type"], kind);
+                assert_eq!(value["target"], "/root/task");
+                assert_eq!(value["sender"], "/root");
+                assert_eq!(value["recognition"], "recorded_message_header");
+                assert!(!value.to_string().contains("private message body"));
+            }
+        }
+        let valid = "Message Type: MESSAGE\nTask name: /root/task\nSender: /root\nPayload:\n";
+        for invalid in [
+            format!(" {valid}"),
+            valid.replace("MESSAGE", "message"),
+            valid.replace("/root/task", ""),
+            valid.replace("/root/task", "任務"),
+            valid.replace("/root/task", &"a".repeat(257)),
+            valid.replace("Payload:\n", "Payload:"),
+            valid.replace("\n", "\r"),
+        ] {
+            assert!(Incoming::parse(&invalid, None).is_none());
+        }
+        assert!(Incoming::parse(&valid.replace("/root/task", &"a".repeat(256)), None).is_some());
+    }
+}

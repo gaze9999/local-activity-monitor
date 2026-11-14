@@ -36,15 +36,9 @@ fn timestamp(value: &Value) -> Option<String> {
         }
         DateTime::parse_from_rfc3339(s).ok()?.with_timezone(&Utc)
     } else {
-        let n = value.as_f64()?;
-        if !n.is_finite() {
-            return None;
-        }
-        let sec = n.floor();
-        if sec < i64::MIN as f64 || sec >= i64::MAX as f64 {
-            return None;
-        }
-        DateTime::<Utc>::from_timestamp(sec as i64, ((n - sec) * 1_000_000_000.0) as u32)?
+        return super::schedules::seconds_timestamp(value.as_f64()?)
+            .as_str()
+            .map(str::to_owned);
     };
     Some(time.to_rfc3339_opts(SecondsFormat::Millis, true))
 }
@@ -60,7 +54,7 @@ fn project(value: &Value) -> Option<Value> {
         if let Some(v) = row["is_review"].as_bool() {
             item["is_review"] = json!(v)
         }
-        if let Some(v) = row["attempt_total"].as_u64().filter(|v| *v <= 1_000_000) {
+        if let Some(v) = row["attempt_total"].as_i64().filter(|v| (0..=1_000_000).contains(v)) {
             item["attempt_total"] = json!(v)
         }
         items.push(item);
@@ -245,5 +239,46 @@ mod tests {
         assert!(project(&json!({"tasks":[{"id":"bad/id"}]})).is_none());
         assert!(project(&json!({"tasks":[],"cursor":"bad cursor"})).is_none());
         assert!(project(&json!({"tasks":vec![json!({"id":"x"});21]})).is_none());
+    }
+}
+
+#[cfg(test)]
+mod numeric_time_tests {
+    use super::*;
+
+    #[test]
+    fn numeric_cloud_times_use_python_seconds_and_microsecond_rounding() {
+        for (number, expected) in [
+            (0.0009995, Some("1970-01-01T00:00:00.001Z")),
+            (-0.0010005, Some("1969-12-31T23:59:59.998Z")),
+            (-5.000000000000001e-07, Some("1969-12-31T23:59:59.999Z")),
+            (0.9999999, Some("1970-01-01T00:00:01.000Z")),
+            (0.0078125, Some("1970-01-01T00:00:00.007Z")),
+            (0.0234375, Some("1970-01-01T00:00:00.023Z")),
+            (-62135596800.0, Some("0001-01-01T00:00:00.000Z")),
+            (253402300799.0, Some("9999-12-31T23:59:59.000Z")),
+            (253402300800.0, None),
+            (1000000000000.0, None),
+            (0.0, Some("1970-01-01T00:00:00.000Z")),
+        ] {
+            assert_eq!(timestamp(&json!(number)).as_deref(), expected, "{number}");
+        }
+        for value in [Value::Null, json!(true), json!("1700000000")] {
+            assert_eq!(timestamp(&value), None);
+        }
+        assert_eq!(timestamp(&json!("2026-10-02T03:04:05+08:00")).as_deref(), Some("2026-10-01T19:04:05.000Z"));
+    }
+}
+
+#[cfg(test)]
+mod integer_zero_tests {
+    use super::*;
+    #[test]
+    fn attempt_counts_accept_integer_negative_zero_only() {
+        for (raw, expected) in [("-0", Some(0)), ("0", Some(0)), ("1000000", Some(1000000)), ("-1", None), ("1000001", None), ("-0.0", None), ("1e0", None), ("true", None)] {
+            let number: Value = serde_json::from_str(raw).unwrap();
+            let result = project(&json!({"tasks":[{"id":"t","attempt_total":number}]})).unwrap();
+            assert_eq!(result["items"][0].get("attempt_total").and_then(Value::as_i64), expected, "{raw}");
+        }
     }
 }

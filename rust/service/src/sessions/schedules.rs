@@ -48,11 +48,15 @@ fn identifier(value: &str) -> bool {
 }
 
 pub(super) fn seconds_timestamp(seconds: f64) -> Value {
-    let millis = (seconds * 1000.0).floor();
-    if !millis.is_finite() || millis < i64::MIN as f64 || millis >= i64::MAX as f64 {
+    if !seconds.is_finite() || !(-62_135_596_800.0..253_402_300_800.0).contains(&seconds) {
         return Value::Null;
     }
-    DateTime::<Utc>::from_timestamp_millis(millis as i64)
+    let whole = seconds.trunc() as i64;
+    let micros = (seconds.fract() * 1_000_000.0).round_ties_even() as i64;
+    DateTime::<Utc>::from_timestamp(
+        whole + micros.div_euclid(1_000_000),
+        (micros.rem_euclid(1_000_000) as u32) * 1000,
+    )
         .map(|date| Value::String(date.to_rfc3339_opts(SecondsFormat::Millis, true)))
         .unwrap_or(Value::Null)
 }
@@ -1347,5 +1351,36 @@ mod tests {
         assert_eq!(report["rows_read"], 2);
         assert_eq!(report["runs_read"], 1);
         assert!(!result.to_string().contains("secret"));
+    }
+}
+
+#[cfg(test)]
+mod timestamp_parity_tests {
+    use super::*;
+
+    #[test]
+    fn seconds_match_python_calendar_and_microsecond_boundaries() {
+        for (seconds, expected) in [
+            (0.0009999, "1970-01-01T00:00:00.001Z"),
+            (0.9999999, "1970-01-01T00:00:01.000Z"),
+            (-0.0000001, "1970-01-01T00:00:00.000Z"),
+            (-0.0009999, "1969-12-31T23:59:59.999Z"),
+            (-0.0010005, "1969-12-31T23:59:59.998Z"),
+            (-5.000000000000001e-7, "1969-12-31T23:59:59.999Z"),
+            (-1.0000001, "1969-12-31T23:59:59.000Z"),
+            (1.0 / 128.0, "1970-01-01T00:00:00.007Z"),
+            (3.0 / 128.0, "1970-01-01T00:00:00.023Z"),
+            (-62_135_596_800.0, "0001-01-01T00:00:00.000Z"),
+            (253_402_300_799.0, "9999-12-31T23:59:59.000Z"),
+        ] {
+            assert_eq!(seconds_timestamp(seconds), expected, "{seconds}");
+        }
+        for seconds in [-62_135_596_801.0, 253_402_300_800.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(seconds_timestamp(seconds).is_null());
+        }
+        assert!(seconds_timestamp(f64::from_bits((-62_135_596_800.0_f64).to_bits() + 1)).is_null());
+        assert!(seconds_timestamp(f64::from_bits(253_402_300_800.0_f64.to_bits() + 1)).is_null());
+        assert_eq!(seconds_timestamp(f64::from_bits(253_402_300_800.0_f64.to_bits() - 1)), "9999-12-31T23:59:59.999Z");
+        assert_eq!(timestamp(ValueRef::Real(1_700_000_000_000.0)), seconds_timestamp(1_700_000_000.0));
     }
 }

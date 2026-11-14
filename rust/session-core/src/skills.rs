@@ -50,7 +50,10 @@ pub fn skill_read_paths(tool: &str, args: Option<&Map<String, Value>>) -> Vec<Sk
             let Some((directory, _)) = path.rsplit_once(['/', '\\']) else {
                 continue;
             };
-            let name = directory.rsplit(['/', '\\']).next().unwrap_or("");
+            let name = directory
+                .rsplit(['/', '\\'])
+                .find(|part| !part.is_empty() && *part != ".")
+                .unwrap_or("");
             if (1..=160).contains(&name.chars().count())
                 && !name
                     .chars()
@@ -87,5 +90,29 @@ mod tests {
             ["alpha", "beta"]
         );
         assert!(skill_reads("other", value.as_object()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod parent_label_tests {
+    use super::*;
+    #[test]
+    fn normalized_parent_components_preserve_observed_skill_paths() {
+        for (command, expected) in [
+            ("cat /skills/alpha//SKILL.md", vec!["alpha"]),
+            ("cat /skills/alpha/./SKILL.md", vec!["alpha"]),
+            ("cat C:\\skills\\beta\\\\SKILL.md", vec!["beta"]),
+            ("cat /skills/alpha/SKILL.md /skills/alpha//SKILL.md", vec!["alpha","alpha"]),
+            ("echo /skills/alpha//SKILL.md", vec![]),
+            ("cat /SKILL.md", vec![]),
+        ] {
+            let args = serde_json::json!({"cmd":command});
+            assert_eq!(skill_reads("exec_command", args.as_object()), expected, "{command}");
+            for item in skill_read_paths("exec_command", args.as_object()) {
+                assert!(command.contains(&item.path));
+            }
+        }
+        let args = serde_json::json!({"cmd":"cat /skills/alpha/../SKILL.md"});
+        assert!(skill_reads("exec_command", args.as_object()).is_empty());
     }
 }

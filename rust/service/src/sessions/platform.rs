@@ -1,6 +1,6 @@
 //! Read-only Platform responses and environment credential availability.
-use bigdecimal::BigDecimal;
-use chrono::{DateTime, SecondsFormat, Utc};
+use bigdecimal::{BigDecimal, RoundingMode};
+use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde_json::{json, Map, Value};
 use std::{collections::BTreeMap, str::FromStr, sync::LazyLock};
@@ -64,19 +64,20 @@ pub fn credentials() -> Value {
     json!({"mode":if available["decisions"]==true {"with_key"} else {"no_key"},"available":available})
 }
 fn date(value: &Value) -> Option<String> {
-    let number = value.as_f64()?;
-    if !number.is_finite() {
-        return None;
-    }
-    let secs = number.floor();
-    if secs < i64::MIN as f64 || secs >= i64::MAX as f64 {
-        return None;
-    }
-    Some(
-        DateTime::<Utc>::from_timestamp(secs as i64, ((number - secs) * 1_000_000_000.0) as u32)?
-            .to_rfc3339_opts(SecondsFormat::Millis, true),
-    )
+    let seconds = value.as_i64()?;
+    super::schedules::seconds_timestamp(seconds as f64)
+        .as_str()
+        .map(str::to_owned)
 }
+
+fn round_cost(mut value: BigDecimal) -> BigDecimal {
+    while value.digits() > 28 {
+        let scale = value.as_bigint_and_exponent().1 - (value.digits() - 28) as i64;
+        value = value.with_scale_round(scale, RoundingMode::HalfEven);
+    }
+    value
+}
+
 pub fn project(kind: Kind, value: &Value) -> Option<Value> {
     let rows = value.get("data")?.as_array()?;
     if rows.len() > if matches!(kind, Kind::Models) { 500 } else { 7 } {
@@ -119,9 +120,9 @@ pub fn project(kind: Kind, value: &Value) -> Option<Value> {
                     entries.iter().try_fold(0u128, |sum, entry| {
                         entry
                             .get(field)?
-                            .as_u64()
-                            .filter(|n| *n <= i64::MAX as u64)
-                            .map(|n| sum + u128::from(n))
+                            .as_i64()
+                            .filter(|n| *n >= 0)
+                            .map(|n| sum + n as u128)
                     })
                 };
                 item[field] = sum
@@ -139,10 +140,12 @@ pub fn project(kind: Kind, value: &Value) -> Option<Value> {
                     .filter(|v| CURRENCY.is_match(v))?;
                 let value = BigDecimal::from_str(&number.to_string()).ok()?;
                 let (coefficient, scale) = value.as_bigint_and_exponent();
-                if scale > 18
-                    || (scale < -12 && coefficient != 0.into())
-                    || value > BigDecimal::from(1_000_000_000_000i64)
-                    || value < BigDecimal::from(-1_000_000_000_000i64)
+                if scale > 18 || (scale < -12 && coefficient != 0.into()) {
+                    return None;
+                }
+                let bounded = round_cost(value.clone());
+                if bounded > BigDecimal::from(1_000_000_000_000i64)
+                    || bounded < BigDecimal::from(-1_000_000_000_000i64)
                 {
                     return None;
                 }
@@ -151,7 +154,8 @@ pub fn project(kind: Kind, value: &Value) -> Option<Value> {
                 } else {
                     value
                 };
-                *amounts.entry(currency.into()).or_default() += value;
+                let total = amounts.entry(currency.into()).or_default();
+                *total = round_cost(&*total + value);
             }
             item["amounts"] = json!(amounts
                 .into_iter()
@@ -377,5 +381,118 @@ mod tests {
             project(Kind::Costs, &make("0e1000000")).unwrap()["items"][0]["amounts"]["usd"],
             "0"
         );
+    }
+}
+
+#[cfg(test)]
+mod date_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn platform_dates_preserve_integer_wire_type_and_python_calendar_bounds() {
+        for (raw, expected) in [
+            ("0", Some("1970-01-01T00:00:00.000Z")),
+            ("-62135596800", Some("0001-01-01T00:00:00.000Z")),
+            ("253402300799", Some("9999-12-31T23:59:59.000Z")),
+            ("-62135596801", None),
+            ("253402300800", None),
+            ("-0", Some("1970-01-01T00:00:00.000Z")),
+            ("-0.0", None),
+            ("0.0", None),
+            ("1e3", None),
+            ("true", None),
+            ("null", None),
+            ("18446744073709551615", None),
+        ] {
+            let value: Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(date(&value).as_deref(), expected, "{raw}");
+            let projected = project(Kind::Models, &json!({"data":[{"id":"test", "created":value}]})).unwrap();
+            assert_eq!(projected["items"][0]["created_at"], json!(expected), "{raw}");
+        }
+        assert!(project(Kind::Usage, &serde_json::from_str(r#"{"has_more":false,"data":[{"start_time":0.0,"end_time":1,"results":[]}]}"#).unwrap()).is_none());
+        assert!(project(Kind::Usage, &json!({"has_more":false,"data":[{"start_time":0,"end_time":1,"results":[]}]})).is_some());
+    }
+}
+
+#[cfg(test)]
+mod cost_context_tests {
+    use super::*;
+    #[test]
+    fn costs_round_each_ordered_addition_with_python_decimal_context() {
+        let cases: &[(&[&str], Option<&str>)] = &[
+            (&["999999999999","1.000000000000000001"], Some("1000000000000.000000000000000")),
+            (&["999999999999","1.000000000000000001","-1000000000000"], Some("0.000000000000000")),
+            (&["999999999999","-1000000000000","1.000000000000000001"], Some("0.000000000000000001")),
+            (&["999999999999.999999999999999999"], Some("1000000000000.000000000000000")),
+            (&["1.2345678901234565","999999999999"], Some("1000000000000.234567890123456")),
+            (&["1.2345678901234575","999999999999"], Some("1000000000000.234567890123458")),
+            (&["-1.2345678901234565","-999999999999"], Some("-1000000000000.234567890123456")),
+            (&["-0.00"], Some("0.00")),
+            (&["1.00","-1.00"], Some("0.00")),
+            (&["0e10"], Some("0")),
+            (&["0e-18"], Some("0.000000000000000000")),
+            (&["1000000000000.000000000000000001"], Some("1000000000000.000000000000000")),
+            (&["1000000000000.000000000000001"], None),
+            (&["-1000000000000.000000000000000001"], Some("-1000000000000.000000000000000")),
+            (&["-1000000000000.000000000000001"], None),
+            (&["1e13"], None),
+            (&["1e-19"], None),
+            (&vec!["1e12"; 1000], Some("1000000000000000")),
+        ];
+        for (amounts, expected) in cases {
+            let entries: Vec<Value> = amounts.iter().map(|number| {
+                json!({"amount":{"value":serde_json::from_str::<Value>(number).unwrap(),"currency":"usd"}})
+            }).collect();
+            let result = project(Kind::Costs, &json!({"has_more":false,"data":[{"start_time":0,"end_time":1,"results":entries}]}));
+            let actual = result.as_ref().and_then(|value| value["items"][0]["amounts"]["usd"].as_str());
+            assert_eq!(actual, *expected, "{} amounts, first {:?}", amounts.len(), amounts.first());
+        }
+    }
+}
+
+#[cfg(test)]
+mod mixed_cost_tests {
+    use super::*;
+    #[test]
+    fn currencies_keep_independent_ordered_decimal_contexts() {
+        let entries: Vec<Value> = [
+            ("usd", "999999999999"), ("jpy", "0.25"),
+            ("usd", "1.000000000000000001"), ("jpy", "0.75"),
+            ("usd", "-1000000000000"),
+        ].into_iter().map(|(currency, number)| json!({"amount":{"currency":currency,"value":serde_json::from_str::<Value>(number).unwrap()}})).collect();
+        let result = project(Kind::Costs, &json!({"has_more":false,"data":[{"start_time":0,"end_time":1,"results":entries}]})).unwrap();
+        assert_eq!(result["items"][0]["amounts"], json!({"usd":"0.000000000000000","jpy":"1.00"}));
+    }
+}
+
+#[cfg(test)]
+mod integer_zero_tests {
+    use super::*;
+    #[test]
+    fn usage_counts_accept_integer_negative_zero_only() {
+        for (raw, expected) in [("-0", Some(0)), ("0", Some(0)), ("9223372036854775807", Some(i64::MAX)), ("-1", None), ("9223372036854775808", None), ("-0.0", None), ("1e0", None), ("true", None)] {
+            let number: Value = serde_json::from_str(raw).unwrap();
+            for kind in [Kind::Usage, Kind::Decisions] {
+                let result = project(kind, &json!({"has_more":false,"data":[{"start_time":0,"end_time":1,"results":[{"input_tokens":number,"input_cached_tokens":number,"output_tokens":number,"num_model_requests":number}]}]})).unwrap();
+                for field in ["input_tokens", "input_cached_tokens", "output_tokens", "num_model_requests"] {
+                    assert_eq!(result["items"][0][field].as_i64(), expected, "{raw}: {field}");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod aggregate_count_tests {
+    use super::*;
+    #[test]
+    fn thousand_maximum_counts_preserve_wide_exact_aggregate() {
+        let row = json!({"input_tokens":i64::MAX,"input_cached_tokens":i64::MAX,"output_tokens":i64::MAX,"num_model_requests":i64::MAX});
+        for kind in [Kind::Usage, Kind::Decisions] {
+            let result = project(kind, &json!({"has_more":false,"data":[{"start_time":0,"end_time":1,"results":vec![row.clone();1000]}]})).unwrap();
+            for field in ["input_tokens", "input_cached_tokens", "output_tokens", "num_model_requests"] {
+                assert_eq!(result["items"][0][field].to_string(), "9223372036854775807000");
+            }
+        }
     }
 }

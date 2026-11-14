@@ -506,3 +506,38 @@ mod tests {
         assert_eq!(read(&[child])["documents"].as_array().unwrap().len(), 1);
     }
 }
+
+#[cfg(test)]
+mod read_parity_tests {
+    use super::*;
+
+    #[test]
+    fn instruction_read_budget_and_override_match_source() {
+        let home = tempfile::tempdir().unwrap();
+        let roots: Vec<_> = (0..5).map(|index| home.path().join(index.to_string())).collect();
+        let body = format!("{}中", "x".repeat(READ_LIMIT - 1));
+        for root in &roots {
+            fs::create_dir(root).unwrap();
+            fs::write(root.join("AGENTS.md"), &body).unwrap();
+        }
+        let result = read(&roots);
+        let documents = result["documents"].as_array().unwrap();
+        assert_eq!(documents.len(), 4);
+        let expected = format!("{}\u{fffd}", "x".repeat(READ_LIMIT - 1));
+        for document in documents {
+            assert_eq!(document["read_bytes"], READ_LIMIT);
+            assert_eq!(document["truncated"], true);
+            assert_eq!(document["text"], expected);
+        }
+        fs::write(roots[0].join("AGENTS.md"), "base").unwrap();
+        fs::write(roots[0].join("AGENTS.override.md"), "").unwrap();
+        let fallback = read(&roots[..1]);
+        assert_eq!(fallback["documents"][0]["filename"], "AGENTS.md");
+        assert_eq!(fallback["documents"][0]["text"], "base");
+        fs::write(roots[0].join("AGENTS.override.md"), "override").unwrap();
+        let selected = read(&[roots[0].clone(), roots[0].clone()]);
+        assert_eq!(selected["documents"].as_array().unwrap().len(), 1);
+        assert_eq!(selected["documents"][0]["filename"], "AGENTS.override.md");
+        assert_eq!(selected["documents"][0]["text"], "override");
+    }
+}

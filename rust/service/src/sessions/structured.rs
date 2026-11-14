@@ -8,6 +8,8 @@ const LINES: usize = 20_000;
 static NUMBER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$").unwrap());
 static COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+#").unwrap());
+static YAML_PAIR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[^:{}\[\],]+:(?:\s|$)").unwrap());
 static TOML_START: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:\[[^\n]+\]|[A-Za-z_]\w*\s*=)").unwrap());
 
@@ -37,12 +39,16 @@ pub(super) fn parse(source: &str) -> Option<Value> {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .collect();
-    if lines.len() > 1
-        && lines
+    let json_lines: Vec<_> = source
+        .split(['\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}'])
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if json_lines.len() > 1
+        && json_lines
             .iter()
             .all(|line| line.trim_start().starts_with(['{', '[']))
     {
-        if let Some(values) = lines
+        if let Some(values) = json_lines
             .iter()
             .map(|line| serde_json::from_str::<Value>(line).ok())
             .collect::<Option<Vec<_>>>()
@@ -109,12 +115,19 @@ pub(super) fn parse_document(source: &str, format: &str) -> Option<(Value, &'sta
     if lines.len() > LINES {
         return None;
     }
-    if lines.len() > 1
-        && lines
+    let json_lines: Vec<_> = source
+        .split(['\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}'])
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if json_lines.len() > 1
+        && json_lines
             .iter()
             .all(|line| line.trim_start().starts_with(['{', '[']))
     {
-        if let Some(values) = lines
+        if json_lines.len() > LINES {
+            return None;
+        }
+        if let Some(values) = json_lines
             .iter()
             .map(|line| serde_json::from_str::<Value>(line).ok())
             .collect::<Option<Vec<_>>>()
@@ -192,8 +205,14 @@ fn xml_element(node: roxmltree::Node<'_, '_>, depth: usize) -> Value {
     if !attributes.is_empty() {
         item.insert("attributes".into(), Value::Object(attributes));
     }
-    if let Some(text) = node.text().map(str::trim).filter(|text| !text.is_empty()) {
-        item.insert("text".into(), json!(text));
+    let text: String = node
+        .children()
+        .take_while(|child| !child.is_element())
+        .filter(|child| child.is_text())
+        .filter_map(|child| child.text())
+        .collect();
+    if !text.trim().is_empty() {
+        item.insert("text".into(), json!(text.trim()));
     }
     let children: Vec<_> = node
         .children()
@@ -412,6 +431,7 @@ fn scalar(input: &str) -> Option<Value> {
         return serde_json::from_str::<Value>(value)
             .ok()
             .filter(|value| value.is_object() || value.is_array())
+            .or_else(|| lam_session_core::parse_python_literal(value))
             .or_else(|| lam_session_core::parse_data_literal(value));
     }
     if value.starts_with('"') {
@@ -465,7 +485,19 @@ fn pair(body: &str) -> Option<(String, &str)> {
                 "False".into()
             }
         }
-        Value::Number(value) => value.to_string(),
+        Value::Number(value) => {
+            if value.is_f64() {
+                let text = format!("{:?}", value.as_f64()?);
+                if let Some((base, exponent)) = text.split_once('e') {
+                    let exponent = exponent.parse::<i32>().ok()?;
+                    format!("{base}e{}{magnitude:02}", if exponent >= 0 { '+' } else { '-' }, magnitude = exponent.unsigned_abs())
+                } else {
+                    text
+                }
+            } else {
+                value.to_string()
+            }
+        },
         _ => return None,
     };
     if key == "<<" {
@@ -501,7 +533,8 @@ impl Yaml<'_> {
                     } else {
                         Value::Null
                     }
-                } else if let Some((key, value)) = pair(content) {
+                } else if YAML_PAIR.is_match(content) {
+                    let (key, value) = pair(content)?;
                     let mut item = Map::new();
                     let value = if !value.is_empty() {
                         scalar(value)?
@@ -659,5 +692,145 @@ mod tests {
             Some(json!({"columns":["a","b"],"rows":[{"a":"x\"y","b":"z"}]}))
         );
         assert!(parse("name,count\nexample,2,extra").is_none());
+    }
+}
+
+#[cfg(test)]
+mod yaml_key_tests {
+    use super::*;
+
+    #[test]
+    fn numeric_keys_match_python_string_labels() {
+        for (source, expected) in [
+            ("1e20: large", "1e+20"),
+            ("1e-5: small", "1e-05"),
+            ("1e-4: fraction", "0.0001"),
+            ("1.0: integral", "1.0"),
+            ("-0.0: zero", "-0.0"),
+            ("42: integer", "42"),
+            ("true: flag", "True"),
+            ("1e15: boundary", "1000000000000000.0"),
+            ("1e16: boundary", "1e+16"),
+            ("5e-324: boundary", "5e-324"),
+            ("1.7976931348623157e308: boundary", "1.7976931348623157e+308"),
+            ("42.0: boundary", "42.0"),
+            ("1000000000000000: boundary", "1000000000000000"),
+            ("10000000000000000: boundary", "10000000000000000"),
+        ] {
+            let value = yaml(source).unwrap();
+            assert!(value.as_object().unwrap().contains_key(expected), "{source}: {value}");
+        }
+        assert!(yaml("1e20: first\n'1e+20': second").is_none());
+        assert!(yaml("1e-5: first\n'1e-05': second").is_none());
+    }
+}
+
+#[cfg(test)]
+mod xml_text_tests {
+    use super::*;
+
+    #[test]
+    fn leading_text_ignores_comments_and_processing_instructions() {
+        for (source, expected) in [
+            ("<r> &amp;<!--x-->&lt;&#65;&#x42; </r>", json!({"r": {"text": "&<AB"}})),
+            ("<r>  <!--x--> \n <?p x?>\t </r>", json!({"r": {}})),
+            ("<r> left <!--x--> right </r>", json!({"r": {"text": "left  right"}})),
+            ("<r>before<c/> &amp;<!--x-->tail</r>", json!({"r": {"text": "before", "children": [{"c": {}}]}})),
+            ("<r><!--hidden-->alpha</r>", json!({"r": {"text": "alpha"}})),
+            ("<r>alpha<!--hidden-->beta</r>", json!({"r": {"text": "alphabeta"}})),
+            ("<r><?p hidden?>alpha</r>", json!({"r": {"text": "alpha"}})),
+            ("<r>alpha<?p hidden?>beta</r>", json!({"r": {"text": "alphabeta"}})),
+            ("<r> alpha<![CDATA[ + beta]]> </r>", json!({"r": {"text": "alpha + beta"}})),
+            ("<r>alpha<c/>tail</r>", json!({"r": {"text": "alpha", "children": [{"c": {}}]}})),
+            ("<r><c/>tail</r>", json!({"r": {"children": [{"c": {}}]}})),
+            ("<r><!--hidden--><?p hidden?></r>", json!({"r": {}})),
+            ("<r><!--hidden--> <c>inner<!--hidden-->text</c>tail</r>", json!({"r": {"children": [{"c": {"text": "innertext"}}]}})),
+        ] {
+            assert_eq!(parse(source), Some(expected.clone()), "{source}");
+            assert_eq!(parse_document(source, "xml"), Some((expected, "XML")), "{source}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod yaml_sequence_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_mapping_keys_do_not_fall_back_to_sequence_strings() {
+        for source in ["- null:\tvalue", "- <<:\tvalue", "- null:\u{a0}value", "- null: value"] {
+            assert_eq!(yaml(source), None, "{source}");
+        }
+        assert_eq!(yaml("- name:\tvalue"), Some(json!([{"name":"value"}])));
+        assert_eq!(yaml("- name:\u{a0}value"), Some(json!([{"name":"value"}])));
+        assert_eq!(yaml("- null:value"), Some(json!(["null:value"])));
+        assert_eq!(yaml("- plain text"), Some(json!(["plain text"])));
+    }
+}
+
+#[cfg(test)]
+mod yaml_inline_tests {
+    use super::*;
+
+    #[test]
+    fn inline_collections_preserve_python_literals_without_evaluation() {
+        for (source, expected) in [
+            ("value: {'tuple': (1, 2), 'none': None, 'flag': True}", Some(json!({"value": {"tuple": [1, 2], "none": null, "flag": true}}))),
+            ("value: [None, True, (1, 2)]", Some(json!({"value": [null, true, [1, 2]]}))),
+            ("value: {\"a\": 1}", Some(json!({"value": {"a": 1}}))),
+            ("value: {a: true}", Some(json!({"value": {"a": true}}))),
+            ("value: [run()]", None),
+            ("value: {'x': variable}", None),
+            ("value: {'x': {1, 2}}", None),
+        ] {
+            assert_eq!(yaml(source), expected, "{source}");
+        }
+        for (depth, accepted) in [(64, true), (65, false)] {
+            let source = format!("value: {}None{}", "[".repeat(depth), "]".repeat(depth));
+            assert_eq!(yaml(&source).is_some(), accepted, "depth {depth}");
+        }
+        for (items, accepted) in [(19_997, true), (19_998, false)] {
+            let source = format!("value: [{}]", vec!["None"; items].join(","));
+            let result = yaml(&source);
+            assert_eq!(result.is_some(), accepted, "items {items}");
+            if let Some(value) = result {
+                assert_eq!(value["value"].as_array().unwrap().len(), items);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod jsonl_line_tests {
+    use super::*;
+
+    #[test]
+    fn jsonl_line_boundaries_match_source_splitlines() {
+        for separator in ["\n", "\r", "\r\n", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\u{85}", "\u{2028}", "\u{2029}"] {
+            let source = format!("{{\"a\":1}}{separator}{{\"a\":2}}");
+            let expected = json!([{"a":1},{"a":2}]);
+            assert_eq!(parse(&source), Some(expected.clone()), "{separator:?}");
+            assert_eq!(parse_document(&source, "jsonl"), Some((expected, "JSONL")), "{separator:?}");
+        }
+        let source = "{\"text\":\"a\u{2028}b\"}";
+        assert_eq!(parse_document(source, "jsonl"), Some((json!({"text":"a\u{2028}b"}), "JSON")));
+        assert!(parse_document("{\"a\":1}\rnot-json", "jsonl").is_none());
+        let bounded = vec!["{}"; LINES].join("\r");
+        assert_eq!(parse_document(&bounded, "jsonl").unwrap().0.as_array().unwrap().len(), LINES);
+        assert!(parse_document(&format!("{bounded}\r{{}}"), "jsonl").is_none());
+    }
+}
+
+#[cfg(test)]
+mod csv_line_review_tests {
+    use super::*;
+    #[test]
+    fn cr_only_csv_classification_remains_unrecognized() {
+        for separator in ["\n", "\r", "\r\n", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\u{85}", "\u{2028}", "\u{2029}"] {
+            let source = format!("a,b{separator}c,d");
+            let recognized = matches!(separator, "\n" | "\r\n");
+            assert_eq!(parse(&source).is_some(), recognized, "{separator:?}");
+            assert_eq!(parse_document(&source, "csv").map(|(_, format)| format), recognized.then_some("CSV"), "{separator:?}");
+        }
     }
 }

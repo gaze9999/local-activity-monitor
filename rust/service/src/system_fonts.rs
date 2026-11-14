@@ -1,5 +1,10 @@
 //! Bounded font-family enumeration, excluding font paths.
 use std::collections::BTreeSet;
+use std::sync::LazyLock;
+
+static FAMILY: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"^[\p{L}\p{N}_\s\x1c-\x1f' .-]+$").unwrap()
+});
 
 fn clean(families: impl IntoIterator<Item = String>) -> Vec<String> {
     families
@@ -7,9 +12,7 @@ fn clean(families: impl IntoIterator<Item = String>) -> Vec<String> {
         .filter(|value| {
             !value.is_empty()
                 && value.chars().count() <= 160
-                && value.chars().all(|ch| {
-                    ch.is_alphanumeric() || ch == '_' || ch.is_whitespace() || "' .-".contains(ch)
-                })
+                && FAMILY.is_match(value)
         })
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -167,7 +170,8 @@ fn fontconfig_output(bytes: &[u8]) -> Vec<String> {
         .chars()
         .take(262144)
         .collect::<String>()
-        .lines()
+        .split(['\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}'])
+        .filter(|line| !line.is_empty())
         .flat_map(|line| {
             line.split(',')
                 .map(|name| name.trim().to_owned())
@@ -270,5 +274,36 @@ mod tests {
         assert!(values
             .iter()
             .all(|value| !value.contains('/') && value.chars().count() <= 160));
+    }
+}
+
+#[cfg(test)]
+mod python_family_tests {
+    use super::*;
+    #[test]
+    fn font_family_character_filter_matches_python() {
+        for name in ["Family\u{345}", "Family\u{5b0}", "Family\u{93e}", "Family\u{301}", "Family\u{200d}", "path/name"] {
+            assert!(clean([name.to_owned()]).is_empty(), "{name:?}");
+        }
+        for name in ["Family²", "FamilyⅣ", "字型１２", "Family_name", "Family\x1cName", "Family\x1fName", "Family\u{a0}Name"] {
+            assert_eq!(clean([name.to_owned()]), vec![name]);
+        }
+        assert_eq!(clean(["z".to_owned(), "a".to_owned(), "a".to_owned()]), vec!["a", "z"]);
+        assert!(clean(["a".repeat(161)]).is_empty());
+        assert_eq!(clean((0..501).map(|n|format!("Family{n:03}"))).len(),500);
+    }
+}
+
+#[cfg(test)]
+mod font_line_tests {
+    use super::*;
+    #[test]
+    fn fontconfig_source_line_boundaries_match_python() {
+        for separator in ["\n", "\r", "\r\n", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\u{85}", "\u{2028}", "\u{2029}"] {
+            let text = format!("First,Alias{separator}{separator}Second{separator}");
+            assert_eq!(clean(fontconfig_output(text.as_bytes())), vec!["Alias", "First", "Second"], "{separator:?}");
+        }
+        assert_eq!(clean(fontconfig_output(b"First\x1fSecond")), vec!["First\x1fSecond"]);
+        assert_eq!(clean(fontconfig_output(b"First,\xffBad\nSecond")), vec!["First", "Second"]);
     }
 }

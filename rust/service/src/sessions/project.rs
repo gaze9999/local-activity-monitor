@@ -19,7 +19,141 @@ const COUNTERS: [&str; 6] = [
     "total_tokens",
 ];
 
+mod statistics;
+pub(super) use statistics::ToolStatistics;
+
 type Time = DateTime<Utc>;
+
+/// Counts over resolved call winners, independent of the per-thread event preview.
+pub(super) struct ActivitySeries<'a> {
+    minutes: BTreeMap<i64, usize>,
+    tools: BTreeMap<(i64, &'a str), usize>,
+}
+
+impl<'a> ActivitySeries<'a> {
+    pub(super) fn new() -> Self {
+        Self { minutes: BTreeMap::new(), tools: BTreeMap::new() }
+    }
+
+    pub(super) fn observe(&mut self, projection: &'a Projection, boundary: Option<Time>) {
+        for call in projection.calls.values() {
+            let Some(time) = call.time.filter(|time| boundary.is_none_or(|cutoff| *time >= cutoff)) else { continue; };
+            let minute = time.timestamp().div_euclid(60);
+            Self::increment(&mut self.minutes, minute, 10_080);
+            Self::increment(&mut self.tools, (minute, call.tool.as_str()), 20_000);
+        }
+    }
+
+    fn increment<K: Ord>(counts: &mut BTreeMap<K, usize>, key: K, limit: usize) {
+        if let Some(count) = counts.get_mut(&key) {
+            *count += 1;
+            return;
+        }
+        if counts.len() == limit {
+            if counts.first_key_value().is_some_and(|(first, _)| key <= *first) { return; }
+            counts.pop_first();
+        }
+        counts.insert(key, 1);
+    }
+
+    #[cfg(test)]
+    pub(super) fn finish(self) -> (Vec<Value>, Vec<Value>) {
+        let minute_stamp = |minute| DateTime::<Utc>::from_timestamp(minute * 60, 0)
+            .expect("minute from a valid call timestamp")
+            .format("%Y-%m-%dT%H:%M:00Z").to_string();
+        let activity = self.minutes.into_iter()
+            .map(|(minute, calls)| json!({"time":minute_stamp(minute),"calls":calls})).collect();
+        let tools = self.tools.into_iter()
+            .map(|((minute, tool), calls)| json!({"time":minute_stamp(minute),"tool":tool,"calls":calls})).collect();
+        (activity, tools)
+    }
+}
+
+impl ActivitySeries<'_> {
+    /// Inject the bounded series only at final encoding, after source augmentation.
+    pub(super) fn snapshot_json(&self, snapshot: &Value, statistics: Option<&ToolStatistics<'_>>) -> String {
+        let Some(root) = snapshot.as_object() else { return snapshot.to_string(); };
+        let Some(codex) = root.get("codex").and_then(Value::as_object) else { return snapshot.to_string(); };
+        serde_json::to_string(&SnapshotWithSeries { root, codex, series: self, statistics })
+            .unwrap_or_else(|_| snapshot.to_string())
+    }
+}
+
+struct SnapshotWithSeries<'a> {
+    root: &'a serde_json::Map<String, Value>,
+    codex: &'a serde_json::Map<String, Value>,
+    series: &'a ActivitySeries<'a>,
+    statistics: Option<&'a ToolStatistics<'a>>,
+}
+
+impl Serialize for SnapshotWithSeries<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.root.len()))?;
+        for (key, value) in self.root {
+            if key == "codex" {
+                map.serialize_entry(key, &CodexWithSeries { fields: self.codex, series: self.series, statistics: self.statistics })?;
+            } else { map.serialize_entry(key, value)?; }
+        }
+        map.end()
+    }
+}
+
+struct CodexWithSeries<'a> {
+    fields: &'a serde_json::Map<String, Value>,
+    series: &'a ActivitySeries<'a>,
+    statistics: Option<&'a ToolStatistics<'a>>,
+}
+
+impl Serialize for CodexWithSeries<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let replaced = |key: &str| key == "activity_series" || key == "tool_series" || (self.statistics.is_some() && key == "tool_statistics");
+        let old_series = self.fields.keys().filter(|key| replaced(key)).count();
+        let mut map = serializer.serialize_map(Some(self.fields.len() - old_series + 2 + usize::from(self.statistics.is_some())))?;
+        for (key, value) in self.fields {
+            if !replaced(key) { map.serialize_entry(key, value)?; }
+        }
+        map.serialize_entry("activity_series", &MinuteSeries(&self.series.minutes))?;
+        map.serialize_entry("tool_series", &ToolSeries(&self.series.tools))?;
+        if let Some(statistics) = self.statistics { map.serialize_entry("tool_statistics", statistics)?; }
+        map.end()
+    }
+}
+
+struct Minute(i64);
+impl Serialize for Minute {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let time = DateTime::<Utc>::from_timestamp(self.0 * 60, 0)
+            .expect("minute from a valid call timestamp");
+        serializer.collect_str(&time.format("%Y-%m-%dT%H:%M:00Z"))
+    }
+}
+
+#[derive(Serialize)]
+struct ActivityPoint { time: Minute, calls: usize }
+#[derive(Serialize)]
+struct ToolPoint<'a> { time: Minute, tool: &'a str, calls: usize }
+struct MinuteSeries<'a>(&'a BTreeMap<i64, usize>);
+struct ToolSeries<'a>(&'a BTreeMap<(i64, &'a str), usize>);
+
+impl Serialize for MinuteSeries<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for (&minute, &calls) in self.0 { sequence.serialize_element(&ActivityPoint { time: Minute(minute), calls })?; }
+        sequence.end()
+    }
+}
+
+impl Serialize for ToolSeries<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for (&(minute, tool), &calls) in self.0 { sequence.serialize_element(&ToolPoint { time: Minute(minute), tool, calls })?; }
+        sequence.end()
+    }
+}
 
 pub fn now() -> Time {
     SystemTime::now().into()
@@ -1970,6 +2104,119 @@ mod snapshot_merge_tests {
 
     fn call(tool: &str, time: Option<&str>) -> Call {
         serde_json::from_value(json!({"tool":tool,"time":time,"completed":null,"sequence":1})).unwrap()
+    }
+
+    #[test]
+    fn snapshot_series_matches_uncapped_source_then_global_tail() {
+        let reference = timestamp(Some("2026-11-13T01:00:00Z")).unwrap();
+        let mut sources = Vec::new();
+        for source_index in 0..3 {
+            let mut projection = Projection::for_id(Some(format!("thread-{source_index}")));
+            for n in 0..21_003 {
+                let mut value = call(&format!("tool-{:05}", (n * 71) % 21_003), None);
+                value.time = Some(reference - chrono::Duration::minutes(((n * 103) % 21_003) as i64));
+                projection.calls.insert(format!("call-{n}"), value);
+            }
+            projection.calls.insert("unknown".into(), call("unknown", None));
+            sources.push(projection);
+        }
+        for boundary in [None, Some(reference - chrono::Duration::minutes(10_080)), Some(reference), Some(reference + chrono::Duration::milliseconds(1))] {
+            let mut actual = ActivitySeries::new();
+            let mut minutes = BTreeMap::new();
+            let mut tools = BTreeMap::new();
+            for source in &sources {
+                actual.observe(source, boundary);
+                assert!(actual.minutes.len() <= 10_080);
+                assert!(actual.tools.len() <= 20_000);
+                for call in source.calls.values() {
+                    if let Some(time) = call.time.filter(|time| boundary.is_none_or(|cutoff| *time >= cutoff)) {
+                        let minute = format!("{}:00Z", &stamp(time)[..16]);
+                        *minutes.entry(minute.clone()).or_insert(0usize) += 1;
+                        *tools.entry((minute, call.tool.clone())).or_insert(0usize) += 1;
+                    }
+                }
+            }
+            while minutes.len() > 10_080 { minutes.pop_first(); }
+            while tools.len() > 20_000 { tools.pop_first(); }
+            let expected_minutes: Vec<_> = minutes.into_iter().map(|(time,calls)| json!({"time":time,"calls":calls})).collect();
+            let expected_tools: Vec<_> = tools.into_iter().map(|((time,tool),calls)| json!({"time":time,"tool":tool,"calls":calls})).collect();
+            assert_eq!(actual.finish(), (expected_minutes,expected_tools));
+        }
+    }
+
+    #[test]
+    fn snapshot_series_streaming_preserves_fields_and_single_keys() {
+        fn unique(value: &JsonValue<'_>) {
+            match value {
+                JsonValue::Object(entries) => {
+                    let names: BTreeSet<_> = entries.iter().map(|(key,_)|key.as_ref()).collect();
+                    assert_eq!(names.len(),entries.len(),"duplicate JSON key");
+                    for (_,value) in entries.iter() { unique(value); }
+                }
+                JsonValue::Array(values) => for value in values.iter() { unique(value); },
+                _ => {}
+            }
+        }
+        let mut projection=Projection::for_id(Some("fixture".into()));
+        projection.calls.insert("first".into(),call("quoted\"\\tool",Some("2026-11-13T01:00:01Z")));
+        projection.calls.insert("second".into(),call("plain",Some("2026-11-13T01:01:00Z")));
+        let mut series=ActivitySeries::new();series.observe(&projection,None);
+        let mut expected=json!({"version":7,"monitor":{"keep":true},"activity_series":"root untouched","codex":{"health":"partly_unavailable","read_state":{"overflow_snapshot_incomplete":true},"unknown":[null,17,"keep"],"activity_series":"old replaced","tool_series":["old"]},"later":"keep"});
+        let encoded=series.snapshot_json(&expected, None);
+        unique(&JsonValue::parse(encoded.as_bytes(),false).unwrap());
+        let (activity,tools)=series.finish();
+        expected["codex"]["activity_series"]=Value::Array(activity);
+        expected["codex"]["tool_series"]=Value::Array(tools);
+        assert_eq!(serde_json::from_str::<Value>(&encoded).unwrap(),expected);
+        for original in [Value::Null,json!([]),json!({"keep":1}),json!({"codex":null,"keep":1})] {
+            assert_eq!(ActivitySeries::new().snapshot_json(&original, None),original.to_string());
+        }
+    }
+
+    #[test]
+    fn snapshot_series_exact_global_caps_and_repeated_evicted_keys() {
+        for limit in [10_080,20_000] {
+            let mut counts = BTreeMap::new();
+            for key in (0..limit).rev() { ActivitySeries::increment(&mut counts,key,limit); }
+            assert_eq!(counts.len(),limit);
+            ActivitySeries::increment(&mut counts,limit,limit);
+            assert_eq!(counts.len(),limit);
+            assert!(!counts.contains_key(&0));
+            ActivitySeries::increment(&mut counts,0,limit);
+            ActivitySeries::increment(&mut counts,1,limit);
+            assert_eq!(counts.len(),limit);
+            assert!(!counts.contains_key(&0));
+            assert_eq!(counts[&1],2);
+        }
+    }
+
+    #[test]
+    fn snapshot_series_uses_winners_not_preview_or_tool_event_switch() {
+        let reference = timestamp(Some("2026-11-13T01:00:00Z")).unwrap();
+        let mut first = Projection::for_id(Some("same-thread".into()));
+        let mut second = Projection::for_id(first.id.clone());
+        for n in 0..131 { first.calls.insert(format!("call-{n}"), call("old",Some("2026-11-13T01:00:00.999Z"))); }
+        second.calls.insert("call-0".into(), call("new",Some("2026-11-13T01:01:00Z")));
+        second.calls.insert("unknown".into(),call("unknown",None));
+        let selected = ["call-0".to_string(),"unknown".to_string()].into();
+        let mut merged = Projection::for_id(first.id.clone());
+        merged.merge_snapshot(&first,None,&[None;4]);
+        merged.merge_snapshot(&second,Some(&selected),&[None;4]);
+        for enabled in [false,true] {
+            let row = merged.row(false,None,reference,&mut BTreeMap::new(),&mut BTreeMap::new(),enabled,false,false);
+            assert_eq!(row["tool_events"].as_array().unwrap().len(),if enabled {100} else {0});
+            let mut series = ActivitySeries::new(); series.observe(&merged,None);
+            let (activity,tools) = series.finish();
+            assert_eq!(activity,json!([{"time":"2026-11-13T01:00:00Z","calls":130},{"time":"2026-11-13T01:01:00Z","calls":1}]).as_array().unwrap().clone());
+            assert_eq!(tools.len(),2);
+            assert_eq!(tools[0]["tool"],"old"); assert_eq!(tools[0]["calls"],130);
+            assert_eq!(tools[1]["tool"],"new");
+        }
+        assert_eq!(ActivitySeries::new().finish(),(vec![],vec![]));
+        let mut pre_epoch=Projection::for_id(Some("epoch".into()));
+        pre_epoch.calls.insert("pre".into(),call("tool",Some("1969-12-31T23:59:59.999Z")));
+        let mut series=ActivitySeries::new();series.observe(&pre_epoch,None);
+        assert_eq!(series.finish().0[0]["time"],"1969-12-31T23:59:00Z");
     }
 
     fn source(tag: &str, time: Option<Time>) -> Projection {

@@ -61,6 +61,14 @@ fn storage(directory: &Path) -> (Option<u64>, Option<u64>, &'static str) {
     (Some(bytes), Some(files), "ok")
 }
 
+fn cpu_percent(used: f64, elapsed: f64) -> Option<f64> {
+    if !(elapsed > 0.0 && used >= 0.0) {
+        return None;
+    }
+    let percent = used / elapsed * 100.0;
+    format!("{percent:.1}").parse().ok()
+}
+
 pub struct Sampler {
     directory: PathBuf,
     previous: Instant,
@@ -91,7 +99,7 @@ impl Sampler {
         let cpu = metrics.get("process_cpu_ms").and_then(Value::as_f64);
         let percent = cpu.zip(self.cpu).and_then(|(current, previous)| {
             let used = current - previous;
-            (elapsed > 0.0 && used >= 0.0).then_some((used / elapsed * 1000.0).round() / 10.0)
+            cpu_percent(used, elapsed)
         });
         let (disk, files, health) = storage(&self.directory);
         self.value = json!({"pid":std::process::id(),"cpu_percent":percent,"rss_bytes":metrics.get("rss_bytes"),"peak_rss_bytes":metrics.get("peak_rss_bytes"),"disk_bytes":disk,"storage_files":files,"storage_health":health,"checked_at":DateTime::<Utc>::from(SystemTime::now()).to_rfc3339_opts(SecondsFormat::Secs,false)});
@@ -142,5 +150,26 @@ mod tests {
         assert!(!updated
             .to_string()
             .contains(&home.path().to_string_lossy().to_string()));
+    }
+}
+
+#[cfg(test)]
+mod rounding_tests {
+    use super::*;
+
+    #[test]
+    fn process_cpu_percentage_matches_source_rounding_without_capping() {
+        for (used, elapsed, expected) in [
+            (13.0, 16.0, 81.2), (15.0, 16.0, 93.8),
+            (9.0, 16.0, 56.2), (7.0, 16.0, 43.8),
+            (0.0, 16.0, 0.0), (16.0, 16.0, 100.0),
+            (32.0, 16.0, 200.0), (13_000.0, 16_000.0, 81.2),
+        ] {
+            assert_eq!(cpu_percent(used, elapsed), Some(expected));
+        }
+        assert_eq!(cpu_percent(-1.0, 16.0), None);
+        assert_eq!(cpu_percent(1.0, 0.0), None);
+        assert_eq!(cpu_percent(1.0, -1.0), None);
+        assert_eq!(cpu_percent(f64::NAN, 16.0), None);
     }
 }

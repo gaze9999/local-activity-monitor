@@ -253,10 +253,17 @@ fn processor_name() -> Option<String> {
         .take(16384)
         .read_to_string(&mut data)
         .ok()?;
+    linux_processor_label(&data)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_processor_label(data: &str) -> Option<String> {
     data.lines()
         .find(|line| line.starts_with("model name"))
-        .and_then(|line| line.split_once(':'))
-        .and_then(|(_, value)| limited_name(value))
+        .map(|line| {
+            limited_name(line.split_once(':').map_or("", |(_, value)| value))
+                .unwrap_or_default()
+        })
 }
 #[cfg(windows)]
 fn processor_name() -> Option<String> {
@@ -298,7 +305,7 @@ fn parse_meminfo(data: &str) -> (Option<u64>, Option<u64>) {
     let field = |key: &str| {
         data.lines()
             .filter_map(|line| line.split_once(':'))
-            .find(|(name, _)| *name == key)
+            .rfind(|(name, _)| *name == key)
             .and_then(|(_, value)| value.split_ascii_whitespace().next())?
             .parse::<u64>()
             .ok()?
@@ -504,5 +511,58 @@ fn cpu_percent(previous: Option<(u64, u64)>, current: Option<(u64, u64)>) -> Opt
     if delta_total == 0 || delta_idle > delta_total {
         return None;
     }
-    Some(((1.0 - delta_idle as f64 / delta_total as f64) * 1000.0).round() / 10.0)
+    let percent = (1.0 - delta_idle as f64 / delta_total as f64) * 100.0;
+    format!("{percent:.1}").parse().ok()
+}
+
+#[cfg(test)]
+mod cpu_rounding_tests {
+    use super::*;
+
+    #[test]
+    fn cpu_percentage_preserves_source_decimal_rounding() {
+        for (idle, total, expected) in [
+            (3, 16, 81.2), (1, 16, 93.8), (7, 16, 56.2),
+            (9, 16, 43.8), (11, 16, 31.2), (13, 16, 18.8),
+            (0, 10, 100.0), (10, 10, 0.0), (39, 40, 2.5),
+        ] {
+            assert_eq!(cpu_percent(Some((50, 100)), Some((50 + idle, 100 + total))), Some(expected));
+        }
+        assert_eq!(cpu_percent(Some((50, 100)), Some((49, 110))), None);
+        assert_eq!(cpu_percent(Some((50, 100)), Some((51, 100))), None);
+        assert_eq!(cpu_percent(Some((50, 100)), Some((61, 110))), None);
+        assert_eq!(cpu_percent(None, Some((51, 110))), None);
+    }
+}
+
+#[cfg(test)]
+mod memory_duplicate_tests {
+    use super::*;
+    #[test]
+    fn last_meminfo_field_matches_python_dictionary() {
+        assert_eq!(parse_meminfo("MemTotal: 1 kB\nMemAvailable: 2 kB\nMemTotal: 3 kB\nMemAvailable: 4 kB\n"), (Some(3072), Some(4096)));
+        assert_eq!(parse_meminfo("MemTotal: 1 kB\nMemTotal: bad\n"), (None, None));
+        assert_eq!(parse_meminfo("MemTotal: bad\nMemTotal: 5 kB\n"), (Some(5120), None));
+        assert_eq!(parse_meminfo("MemTotal: 1 kB\nOther: 9 kB\nMemTotalExtra: 8 kB\n"), (Some(1024), None));
+    }
+}
+
+#[cfg(test)]
+mod processor_label_tests {
+    use super::*;
+    #[test]
+    fn linux_matching_processor_line_preserves_empty_label() {
+        for (input, expected) in [
+            ("model name : CPU\n", Some("CPU")),
+            ("model name : \n", Some("")),
+            ("model name\n", Some("")),
+            ("model name extra : Extra\n", Some("Extra")),
+            ("model name : first:tail\nmodel name : second", Some("first:tail")),
+            ("model name\nmodel name : second", Some("")),
+            ("other : CPU\n", None),
+        ] {
+            assert_eq!(linux_processor_label(input).as_deref(), expected, "{input}");
+        }
+        assert_eq!(linux_processor_label(&format!("model name : {}", "界".repeat(161))).unwrap().chars().count(),160);
+    }
 }

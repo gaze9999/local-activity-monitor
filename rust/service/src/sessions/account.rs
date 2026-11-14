@@ -126,7 +126,9 @@ fn usage(payload: &Value) -> Value {
             .filter_map(|row| {
                 let date = row["startDate"].as_str()?;
                 let parsed = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
-                if parsed.format("%Y-%m-%d").to_string() != date {
+                if !(1..=9999).contains(&parsed.year())
+                    || parsed.format("%Y-%m-%d").to_string() != date
+                {
                     return None;
                 }
                 let tokens = integer(&row["tokens"])?;
@@ -647,5 +649,23 @@ done"#;
             )["daily_usage_buckets"],
             json!([])
         );
+    }
+    #[test]
+    fn daily_usage_dates_match_python_calendar_bounds() {
+        for (date, accepted) in [
+            ("0000-01-01", false),
+            ("-0001-01-01", false),
+            ("+10000-01-01", false),
+            ("0001-01-01", true),
+            ("9999-12-31", true),
+            ("2024-02-29", true),
+            ("2025-02-29", false),
+            ("20260101", false),
+            ("2026-1-01", false),
+        ] {
+            let result = usage(&json!({"dailyUsageBuckets":[{"startDate":date,"tokens":0}]}));
+            let expected = if accepted { json!([{"start_date":date,"tokens":0}]) } else { json!([]) };
+            assert_eq!(result["daily_usage_buckets"], expected, "{date}");
+        }
     }
 }

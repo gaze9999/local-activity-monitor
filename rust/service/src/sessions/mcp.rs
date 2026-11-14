@@ -383,6 +383,7 @@ pub fn scoped_summary(events: &[Value], cutoff: DateTime<Utc>, health: &str, all
                 "description_source",
                 "default_description",
                 "default_category",
+                "category",
                 "tags",
             ] {
                 if let Some(value) = server.get(key) {
@@ -596,6 +597,37 @@ mod connection_tests {
                 assert_eq!(actual,expected);
                 assert!(actual.0["tools"].as_array().unwrap().len()<=TOOL_LIMIT);
             }
+        }
+    }
+
+    #[test]
+    fn scoped_server_category_retains_complete_classification_and_overrides() {
+        let events = vec![
+            json!({"server":"demo","tool":"read","timestamp":"2026-01-01T12:00:00Z","nested":false,"result":{}}),
+            json!({"server":"older","tool":"read","timestamp":"2026-01-01T09:00:00Z","nested":false,"result":{}}),
+        ];
+        let cutoff = parse_utc_stamp("2026-01-01T11:00:00Z").unwrap();
+        for category in ["documents", "review", "other"] {
+            let mut all = summary(&events, None, "ok");
+            for row in all["servers"].as_array_mut().unwrap() {
+                row["category"] = json!(category);
+                row["default_category"] = json!("documents");
+            }
+            all["servers"].as_array_mut().unwrap().push(disabled_server("disabled"));
+            let scoped = scoped_summary(&events, cutoff, "ok", &all);
+            let rows = scoped["servers"].as_array().unwrap();
+            let recent = rows.iter().find(|row| row["server"] == "demo").unwrap();
+            let older = rows.iter().find(|row| row["server"] == "older").unwrap();
+            assert_eq!(recent["category"], category);
+            assert_eq!(older["category"], category);
+            assert_eq!(recent["default_category"], "documents");
+            assert_eq!(recent["calls"], 1);
+            assert_eq!(older["calls"], 0);
+            assert_eq!(scoped["events"].as_array().unwrap().len(), 1);
+            let disabled = rows.iter().find(|row| row["server"] == "disabled").unwrap();
+            assert_eq!(disabled["enabled"], false);
+            assert_eq!(disabled["connection"]["state"], "paused");
+            assert_eq!(recent["connection"], all["servers"][0]["connection"]);
         }
     }
 

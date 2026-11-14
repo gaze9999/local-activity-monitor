@@ -26,6 +26,7 @@ pub(crate) mod schedules;
 pub(crate) mod skill_detail;
 mod source_introduction;
 mod source_registry;
+mod snapshot_json;
 mod sqlite;
 mod structured;
 mod worktree_watch;
@@ -162,7 +163,7 @@ pub struct Snapshots {
     memory: Arc<Mutex<crate::runtime_info::Memory>>,
     collection: Arc<Mutex<crate::performance_debug::CollectionStatus>>,
     process_usage: Arc<Mutex<crate::process_usage::Sampler>>,
-    rendered: Mutex<[Option<(u64, u64, u64, Bytes, Bytes)>; 4]>,
+    rendered: Mutex<[Option<(u64, u64, u64, Bytes, Option<Bytes>)>; 4]>,
 }
 
 impl Snapshots {
@@ -203,7 +204,7 @@ impl Snapshots {
         Some(window.unwrap_or(default))
     }
 
-    fn render(&self, window: usize) -> (Bytes, Bytes) {
+    fn render(&self, window: usize, event_requested: bool) -> (Bytes, Option<Bytes>) {
         let seconds = self.started_instant.elapsed().as_secs_f64().round() as u64;
         let traffic = *self
             .traffic
@@ -220,14 +221,16 @@ impl Snapshots {
             .rendered
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some((cached, requests, revision, snapshot, event)) = &cache[window] {
+        if let Some((cached, requests, revision, snapshot, event)) = &mut cache[window] {
             if *cached == seconds
                 && *requests == traffic.revision
                 && *revision == collection_revision
             {
+                if event_requested && event.is_none() { *event = Some(self.snapshot_frame(window, snapshot)); }
                 return (snapshot.clone(), event.clone());
             }
         }
+        cache[window] = None;
         let original = &self.windows[window];
         let (memory, cpu_checked_at) = {
             let mut memory = self
@@ -242,10 +245,7 @@ impl Snapshots {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .sample();
-        let snapshot = serde_json::from_slice::<Value>(original)
-            .ok()
-            .and_then(|mut snapshot| {
-                let monitor = snapshot.get_mut("monitor")?.as_object_mut()?;
+        let snapshot = snapshot_json::patch_monitor(original, |monitor| {
                 monitor.insert("uptime_seconds".into(), json!(seconds));
                 monitor.insert("requests".into(), json!(traffic.requests));
                 monitor.insert("http_errors".into(), json!(traffic.http_errors));
@@ -263,17 +263,10 @@ impl Snapshots {
                         monitor.insert("device_checked_at".into(), json!(sample));
                     }
                 }
-                serde_json::to_vec(&snapshot).ok().map(Bytes::from)
             })
+            .map(|bytes| Bytes::from(bytes.into_boxed_slice()))
             .unwrap_or_else(|| original.clone());
-        let version = self.version;
-        let name = WINDOWS[window];
-        let mut frame = format!("id: {version}\nevent: snapshot\ndata: {{\"version\":{version},\"window\":\"{name}\",\"snapshot\":").into_bytes();
-        frame.extend_from_slice(&snapshot);
-        frame.extend_from_slice(b",\"logs\":");
-        frame.extend_from_slice(&self.logs[window]);
-        frame.extend_from_slice(b"}\n\n");
-        let event = Bytes::from(frame);
+        let event = event_requested.then(|| self.snapshot_frame(window, &snapshot));
         cache[window] = Some((
             seconds,
             traffic.revision,
@@ -283,11 +276,27 @@ impl Snapshots {
         ));
         (snapshot, event)
     }
+    fn snapshot_frame(&self, window: usize, snapshot: &Bytes) -> Bytes {
+        let version = self.version;
+        let name = WINDOWS[window];
+        let prefix = format!("id: {version}\nevent: snapshot\ndata: {{\"version\":{version},\"window\":\"{name}\",\"snapshot\":");
+        let middle = b",\"logs\":";
+        let suffix = b"}\n\n";
+        let length = [snapshot.len(), middle.len(), self.logs[window].len(), suffix.len()]
+            .into_iter().try_fold(prefix.len(), usize::checked_add).expect("representable SSE frame length");
+        let mut frame = Vec::with_capacity(length);
+        frame.extend_from_slice(prefix.as_bytes());
+        frame.extend_from_slice(snapshot);
+        frame.extend_from_slice(middle);
+        frame.extend_from_slice(&self.logs[window]);
+        frame.extend_from_slice(suffix);
+        Bytes::from(frame.into_boxed_slice())
+    }
     pub fn window_bytes(&self, window: usize) -> Bytes {
-        self.render(window).0
+        self.render(window, false).0
     }
     pub fn event(&self, window: usize) -> Bytes {
-        self.render(window).1
+        self.render(window, true).1.expect("requested SSE frame")
     }
 }
 
@@ -1634,13 +1643,34 @@ fn open_source(root: &Path, path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-fn visible_logs<'a>(
-    records: impl Iterator<Item = &'a Value>,
-    boundary: Option<chrono::DateTime<Utc>>,
-) -> Vec<&'a Value> {
-    let mut positions = BTreeMap::<String, usize>::new();
-    let mut visible = Vec::new();
-    for event in records {
+const LIVE_ERROR_NULL_FIELDS: [&str; 3] = ["server", "exit_code", "thread_id"];
+fn live_error_nulls(event: &Value) -> u8 {
+    LIVE_ERROR_NULL_FIELDS.iter().enumerate().fold(0, |mask, (index, key)| {
+        mask | if event.get(*key).is_some_and(Value::is_null) { 1 << index } else { 0 }
+    })
+}
+
+struct NamedError<'a> { event: &'a Value, name: Option<&'a Value>, nulls: u8 }
+impl serde::Serialize for NamedError<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let Some(fields) = self.event.as_object() else {
+            return serde::Serialize::serialize(self.event, serializer);
+        };
+        let missing = LIVE_ERROR_NULL_FIELDS.iter().enumerate()
+            .filter(|(index, key)| self.nulls & (1 << index) != 0 && !fields.contains_key(**key))
+            .map(|(_, key)| *key);
+        let mut map = serializer.serialize_map(Some(fields.len() + missing.clone().count() + usize::from(self.name.is_some() && !fields.contains_key("thread_name"))))?;
+        for (key, value) in fields {
+            if key != "thread_name" || self.name.is_none() { map.serialize_entry(key, value)?; }
+        }
+        if let Some(name) = self.name { map.serialize_entry("thread_name", name)?; }
+        for key in missing { map.serialize_entry(key, &Value::Null)?; }
+        map.end()
+    }
+}
+
+fn log_identity(event: &Value) -> String {
         let timestamp = event["timestamp"]
             .as_str()
             .and_then(lam_history_store::parse_utc_stamp)
@@ -1658,11 +1688,21 @@ fn visible_logs<'a>(
             "index",
             "record_id",
         ];
-        let identity = serde_json::to_string(&(
+        serde_json::to_string(&(
             timestamp,
             keys.iter().map(|key| &event[*key]).collect::<Vec<_>>(),
         ))
-        .expect("projected identity");
+        .expect("projected identity")
+}
+
+fn visible_logs<'a>(
+    records: impl Iterator<Item = &'a Value>,
+    boundary: Option<chrono::DateTime<Utc>>,
+) -> Vec<&'a Value> {
+    let mut positions = BTreeMap::<String, usize>::new();
+    let mut visible = Vec::new();
+    for event in records {
+        let identity = log_identity(event);
         if let Some(position) = positions.get(&identity) {
             visible[*position] = event;
         } else {
@@ -3617,30 +3657,16 @@ impl Collector {
         std::array::from_fn(|index| {
             let boundary = HOURS[index].map(|hours| reference - Duration::hours(hours));
             let mut errors = visible_logs(
-                session
-                    .iter()
-                    .filter(|_| health != "disabled")
-                    .filter(|event| event["record_hash"].is_string())
+                self.error_history.iter()
+                    .chain(session.iter().filter(|_| health != "disabled"))
                     .chain(
-                        tool_errors
-                            .iter()
-                            .filter(|_| health != "disabled")
-                            .filter(|(start, _)| {
-                                boundary
-                                    .is_none_or(|cutoff| start.is_some_and(|time| time >= cutoff))
-                            })
+                        tool_errors.iter().filter(|_| health != "disabled")
+                            .filter(|(start, _)| boundary.is_none_or(|cutoff| start.is_some_and(|time| time >= cutoff)))
                             .map(|(_, event)| event),
                     )
                     .chain(self.core.errors.iter().filter(|_| health != "disabled"))
                     .chain(self.desktop.errors.iter().filter(|_| health != "disabled"))
                     .chain(&self.jev_errors)
-                    .chain(&self.error_history)
-                    .chain(
-                        session
-                            .iter()
-                            .filter(|_| health != "disabled")
-                            .filter(|event| event["record_hash"].is_null()),
-                    )
                     .filter(|event| {
                         event["source"] != "tool_result"
                             || event["server"]
@@ -3681,6 +3707,40 @@ impl Collector {
             let enabled = errors_enabled;
             errors.truncate(ERROR_LIMIT);
             logs.truncate(2000);
+            // Index only retained presentation rows, never clone all live errors.
+            let mut names: BTreeMap<String, (Option<&Value>, u8)> = errors.iter().chain(&logs)
+                .map(|event| (log_identity(event), (None, 0))).collect();
+            if health != "disabled" && errors_enabled {
+                for event in session.iter().chain(tool_errors.iter()
+                    .filter(|(start, _)| boundary.is_none_or(|cutoff| start.is_some_and(|time| time >= cutoff)))
+                    .map(|(_, event)| event)) {
+                    if boundary.is_some_and(|cutoff| event["timestamp"].as_str()
+                        .and_then(lam_history_store::parse_utc_stamp).is_none_or(|time| time < cutoff)) { continue; }
+                    if event["source"] == "tool_result" && event["server"].as_str()
+                        .is_some_and(|server| sources.get(server) == Some(&false)) { continue; }
+                    if let Some(name) = names.get_mut(&log_identity(event)) {
+                        name.1 = live_error_nulls(event);
+                        name.0 = Some(event["thread_id"].as_str().and_then(|id| self.thread_metadata.get(id))
+                            .map_or(&Value::Null, |metadata| &metadata["name"]));
+                    }
+                }
+            }
+            if errors_enabled {
+                for event in self.core.errors.iter().chain(&self.desktop.errors)
+                    .filter(|_| health != "disabled").chain(&self.jev_errors) {
+                    if boundary.is_some_and(|cutoff| event["timestamp"].as_str()
+                        .and_then(lam_history_store::parse_utc_stamp).is_none_or(|time| time < cutoff)) { continue; }
+                    if event["source"] == "tool_result" && event["server"].as_str()
+                        .is_some_and(|server| sources.get(server) == Some(&false)) { continue; }
+                    if let Some(value) = names.get_mut(&log_identity(event)) { value.1 = live_error_nulls(event); }
+                }
+            }
+            let present = |event| {
+                let (name, nulls) = names.get(&log_identity(event)).copied().unwrap_or((None, 0));
+                NamedError { event, name, nulls }
+            };
+            let errors: Vec<_> = errors.into_iter().map(present).collect();
+            let logs: Vec<_> = logs.into_iter().map(present).collect();
             let mut log_core = core_source.clone();
             let mut log_desktop = desktop_source.clone();
             if !self.logs_enabled {
@@ -4786,6 +4846,18 @@ impl Collector {
             .map(Path::to_path_buf)
             .collect();
         let journal_source = self.journal.lock().unwrap_or_else(|error| error.into_inner()).source();
+        let mut log_desktop = self.desktop.source.clone();
+        let mut log_core = self.core.source();
+        if !self.logs_enabled || health == "disabled" {
+            log_desktop["health"] = json!("disabled");
+            log_core["health"] = json!("disabled");
+        }
+        let logs_overview = json!({
+            "enabled":self.logs_enabled,
+            "sources":[log_desktop,log_core,journal_source],
+            "retained":self.desktop.logs.len() as u64 + self.core.logs.len() as u64
+                + journal_source["retained"].as_u64().expect("journal retained count")
+        });
         let windows: [Bytes; 4] = std::array::from_fn(|index| {
             let boundary = HOURS[index].map(|hours| reference - Duration::hours(hours));
             let mut totals = BTreeMap::new();
@@ -4894,6 +4966,11 @@ impl Collector {
             }
             let observed = totals.values().sum::<usize>();
             let (mut git, mut checks) = command_calls.window(boundary);
+            for event in git["events"].as_array_mut().into_iter().flatten().chain(checks.iter_mut()) {
+                if let Some(name) = event["thread_id"].as_str().and_then(|id| thread_names.get(id)) {
+                    event["thread_name"] = name.clone();
+                }
+            }
             if !command_switches.git {
                 git = json!({"events":[],"operations":{},"total":0});
             }
@@ -4923,11 +5000,21 @@ impl Collector {
                     mcp::scoped_summary(&mcp_events, cutoff, self.activity_history_health, &all_mcp)
                 },
             );
+            for event in mcp["events"].as_array_mut().into_iter().flatten() {
+                if let Some(name) = event["thread_id"].as_str().and_then(|id| thread_names.get(id)) {
+                    event["thread_name"] = name.clone();
+                }
+            }
             let mut sqlite = sqlite::window(
                 if sqlite_enabled { &sql_events } else { &[] },
                 boundary,
                 self.activity_history_health,
             );
+            for event in sqlite["events"].as_array_mut().into_iter().flatten() {
+                if let Some(name) = event["thread_id"].as_str().and_then(|id| thread_names.get(id)) {
+                    event["thread_name"] = name.clone();
+                }
+            }
             if let Some(view) = &self.activity_view {
                 if switches.mcp {
                     mcp["history_aggregate"] =
@@ -4957,6 +5044,8 @@ impl Collector {
                 }
                 sources.insert(0, desktop_source);
             }
+            let mut series = project::ActivitySeries::new();
+            for (projection, _) in threads.values() { series.observe(projection, boundary); }
             let settings = json!({"debug_mode":debug["enabled"],"observations":{"metadata":self.metadata_enabled,"logs":self.logs_enabled,"tool_events":tool_events_enabled,"files":files_enabled}});
             let mut snapshot = json!({
                 "version":1,"label":"本機觀察統計","started_at":stamp(self.started),"updated_at":self.updated.map(stamp),
@@ -4984,6 +5073,7 @@ impl Collector {
                                   "checkpoint":self.checkpoints.report}
                 }
             });
+            snapshot["logs"] = logs_overview.clone();
             if let Some(read_state) = snapshot["codex"]["read_state"].as_object_mut() {
                 read_state.extend(json!({"initial_pending_files":initial_pending,"history_pending_files":0,"history_pending_bytes":0,"error_pending_files":0,"error_pending_bytes":0,"working_file_limit":FILE_LIMIT,"working_files":self.files.len(),"outside_working_set":outside_working_set,"discovery_pending":self.discovery.is_some(),"source_index_ready":source_index_ready,"source_index_unverified":source_index_unverified,"source_index_materialized":source_index_materialized,"overflow_snapshot_sources":overflow.len(),"overflow_snapshot_incomplete":overflow_incomplete,"overflow_details_pending":overflow_details_pending.len()}).as_object().expect("read state fields").clone());
             }
@@ -5264,16 +5354,14 @@ impl Collector {
                 &self.runtime,
                 &journal_source,
             );
-            snapshot.to_string().into()
+            let statistics = project::ToolStatistics::new(&threads, boundary, tool_events_enabled && health != "disabled");
+            Bytes::from(series.snapshot_json(&snapshot, Some(&statistics)).into_bytes().into_boxed_slice())
         });
         let logs = std::array::from_fn(|index| {
             let mut logs =
                 serde_json::from_slice::<Value>(&errors[index].1).unwrap_or_else(|_| json!({}));
             if let Some(sources) = logs["sources"].as_array_mut() {
-                let jev = serde_json::from_slice::<Value>(&windows[index])
-                    .ok()
-                    .map(|value| value["jev"].clone())
-                    .unwrap_or(Value::Null);
+                let jev = snapshot_json::field(&windows[index], "jev").unwrap_or(Value::Null);
                 sources.push(json!({"source":"jev_telemetry","health":jev["health"],"files":[],"checked_at":jev["reader"]["checked_at"]}));
             }
             logs.to_string().into()
@@ -6031,6 +6119,406 @@ mod log_tests {
         assert_eq!(membership.unverified_count().unwrap(), 0);
         membership.invalidate().unwrap();
         assert_eq!(membership.unverified_page("", 64).unwrap(), ["a", "b"]);
+    }
+
+    #[test]
+    fn snapshot_response_lazy_event_retains_cache_and_old_bytes() {
+        let directory=tempfile::tempdir().unwrap();
+        let collector=Collector::new(directory.path().to_path_buf(),false,None);
+        let snapshots=collector.snapshots("disabled","ok",9);
+        let first=snapshots.window_bytes(3);
+        assert!(snapshots.rendered.lock().unwrap()[3].as_ref().unwrap().4.is_none());
+        let retained=first.clone();
+        let event=snapshots.event(3);
+        let frame=std::str::from_utf8(&event).unwrap();
+        assert!(frame.starts_with("id: 9\nevent: snapshot\ndata: "));
+        assert!(frame.ends_with("\n\n"));
+        let value:Value=serde_json::from_str(frame.split_once("\ndata: ").unwrap().1.trim_end()).unwrap();
+        assert_eq!(value["snapshot"],serde_json::from_slice::<Value>(&first).unwrap());
+        assert_eq!(value["logs"],serde_json::from_slice::<Value>(&snapshots.logs[3]).unwrap());
+        assert_eq!(snapshots.event(3),event);
+        snapshots.traffic.lock().unwrap().revision+=1;
+        snapshots.traffic.lock().unwrap().requests+=1;
+        let second=snapshots.window_bytes(3);
+        assert!(snapshots.rendered.lock().unwrap()[3].as_ref().unwrap().4.is_none());
+        assert_eq!(retained,first);
+        assert_eq!(serde_json::from_slice::<Value>(&second).unwrap()["monitor"]["requests"],1);
+        let second_event=snapshots.event(3);
+        assert_ne!(second_event,event);
+        assert_eq!(std::str::from_utf8(&event).unwrap(),frame);
+    }
+
+    #[test]
+    fn snapshot_response_invalid_json_preserves_original_fallback() {
+        let directory=tempfile::tempdir().unwrap();
+        let collector=Collector::new(directory.path().to_path_buf(),false,None);
+        for original in [b"invalid".as_slice(),b"null",b"{\"monitor\":null}",b"{\"other\":1}"] {
+            let mut snapshots=collector.snapshots("disabled","ok",9);
+            snapshots.windows[3]=Bytes::copy_from_slice(original);
+            assert_eq!(snapshots.window_bytes(3).as_ref(),original);
+            assert!(snapshots.rendered.lock().unwrap()[3].as_ref().unwrap().4.is_none());
+        }
+    }
+
+    #[test]
+    fn snapshot_logs_overview_counts_actual_buffers_not_window_events() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut collector = Collector::new(directory.path().to_path_buf(), true, None);
+        let old = stamp(now() - Duration::days(8));
+        for index in 0..1000 {
+            collector.core.logs.push_back(json!({"timestamp":old,"source":"codex_core","record_id":index}));
+            collector.desktop.logs.push(json!({"timestamp":old,"source":"codex_desktop","record_id":index}));
+        }
+        collector.core.trimmed = 7;
+        collector.journal.lock().unwrap().event("fixture");
+        let journal = collector.journal.lock().unwrap().source();
+        let retained = 2000 + journal["retained"].as_u64().unwrap();
+        collector.jev_errors.push(json!({"timestamp":stamp(now()),"source":"jev_telemetry","category":"runtime","code":"fixture"}));
+        let snapshots = collector.snapshots("ok", "ok", 1);
+        let mut previous = None;
+        for index in 0..4 {
+            let value: Value = serde_json::from_slice(&snapshots.window_bytes(index)).unwrap();
+            let overview = &value["logs"];
+            assert_eq!(overview["retained"], retained);
+            assert_eq!(overview["enabled"], true);
+            assert_eq!(overview["sources"][0]["source"], "codex_desktop");
+            assert_eq!(overview["sources"][1]["source"], "codex_core");
+            assert_eq!(overview["sources"][2], journal);
+            for absent in ["entries", "total", "trimmed", "limit"] { assert!(overview.get(absent).is_none()); }
+            if let Some(old) = previous { assert_eq!(*overview, old); }
+            previous = Some(overview.clone());
+        }
+        let recent: Value = serde_json::from_slice(&snapshots.logs[0]).unwrap();
+        assert!(recent["total"].as_u64().unwrap() < retained);
+        assert_eq!(recent["trimmed"], 7);
+    }
+
+    #[test]
+    fn snapshot_logs_overview_disabled_health_keeps_actual_monitor_retention() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut collector = Collector::new(directory.path().to_path_buf(), false, None);
+        collector.journal.lock().unwrap().event("fixture");
+        for (logs_enabled, health) in [(true,"disabled"),(false,"ok")] {
+            collector.logs_enabled = logs_enabled;
+            collector.journal.lock().unwrap().set_enabled(logs_enabled);
+            let journal = collector.journal.lock().unwrap().source();
+            let snapshots = collector.snapshots(health, "ok", 1);
+            let value: Value = serde_json::from_slice(&snapshots.window_bytes(3)).unwrap();
+            let overview = &value["logs"];
+            assert_eq!(overview["enabled"], logs_enabled);
+            assert_eq!(overview["retained"], journal["retained"]);
+            assert_eq!(overview["sources"][0]["health"], "disabled");
+            assert_eq!(overview["sources"][1]["health"], "disabled");
+            assert_eq!(overview["sources"][2], journal);
+        }
+    }
+
+    #[test]
+    fn error_source_order_preserves_legacy_session_location_in_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Checkpoints::new(directory.path().join("monitoring"), true);
+        let reference = now();
+        let located = json!({"timestamp":stamp(reference),"source":"session","category":"conversation","severity":"error","code":"fixture","thread_id":"live","record_offset":12,"record_hash":"a".repeat(64),"content_id":"b".repeat(64)});
+        store.save_diagnostics(&[], &[located.clone()], reference).unwrap();
+        let mut legacy = located.clone();
+        for key in ["record_offset","record_hash","content_id"] { legacy.as_object_mut().unwrap().remove(key); }
+        store.save_diagnostics(&[], &[legacy], reference).unwrap();
+        let preview = store.error_preview(reference).unwrap();
+        assert_eq!(preview.len(),1);
+        assert_eq!(preview[0]["record_offset"],12);
+        assert_eq!(preview[0]["record_hash"],"a".repeat(64));
+        assert_eq!(preview[0]["content_id"],"b".repeat(64));
+    }
+
+    #[test]
+    fn error_source_order_summary_and_detail_keep_separate_python_winners() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        let records = [
+            json!({"type":"session_meta","timestamp":"2026-11-13T00:00:00Z","payload":{"id":id}}),
+            json!({"type":"response_item","timestamp":"2026-11-13T01:20:00Z","payload":{"type":"function_call","name":"exec_command","call_id":"a","arguments":"{}"}}),
+            json!({"type":"response_item","timestamp":"2026-11-13T01:30:00Z","payload":{"type":"function_call_output","call_id":"a","output":{"exit_code":2,"output":"fixture failure"}}}),
+        ];
+        std::fs::write(root.join(format!("rollout-{id}.jsonl")), records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")+"\n").unwrap();
+        let mut collector = Collector::new(root.join("monitoring"), true, None);
+        for _ in 0..4 { collector.refresh(&root,&AtomicBool::new(false),true,true,CommandSwitches::default()); }
+        let live = collector.files.values().find_map(|state|state.projection.calls.get("a")).unwrap().failure_event(id,"a").unwrap();
+        assert_eq!(live["exit_code"],2);
+        let mut history = live.clone(); history["exit_code"] = json!(1);
+        let content_id = live["content_id"].as_str().unwrap().to_owned();
+        collector.error_history = vec![history];
+        collector.error_history_read_error = Some("SqliteError");
+        collector.updated = Some(chrono::DateTime::parse_from_rfc3339("2026-11-13T02:00:00Z").unwrap().with_timezone(&Utc));
+        let snapshots = collector.snapshots("ok","ok",1);
+        for window in 0..4 {
+            let value: Value = serde_json::from_slice(&snapshots.window_bytes(window)).unwrap();
+            let event = value["errors"]["events"].as_array().unwrap().iter().find(|event|event["call_id"]=="a").unwrap();
+            assert_eq!(event["exit_code"],2);
+            assert_eq!(event["content_id"],content_id);
+            let logs: Value = serde_json::from_slice(&snapshots.logs[window]).unwrap();
+            assert_eq!(logs["entries"].as_array().unwrap().iter().find(|event|event["call_id"]=="a").unwrap()["exit_code"],2);
+        }
+        assert_eq!(snapshots.error_details[&content_id]["exit_code"],1);
+    }
+
+    #[test]
+    fn error_live_null_fields_preserve_history_only_and_use_live_winners() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut collector = Collector::new(directory.path().to_path_buf(), true, None);
+        collector.applied_errors_enabled = true;
+        collector.logs_enabled = true;
+        let reference = chrono::DateTime::parse_from_rfc3339("2026-11-13T02:00:00Z").unwrap().with_timezone(&Utc);
+        let tool = json!({"timestamp":"2026-11-13T01:30:00Z","thread_id":"live","source":"tool_result","category":"tool","severity":"error","code":"failed","server":null,"exit_code":null,"record_hash":"fixture"});
+        let diagnostic = json!({"timestamp":"2026-11-13T01:30:00Z","thread_id":null,"source":"codex_core","category":"codex","severity":"error","code":"diagnostic"});
+        let mut saved_tool = tool.clone(); saved_tool.as_object_mut().unwrap().remove("server"); saved_tool.as_object_mut().unwrap().remove("exit_code");
+        let mut saved_diagnostic = diagnostic.clone(); saved_diagnostic.as_object_mut().unwrap().remove("thread_id");
+        collector.error_history = vec![saved_tool.clone(), saved_diagnostic.clone()];
+        collector.core.errors.push_back(diagnostic);
+        let windows = collector.error_windows("ok", reference, &BTreeMap::new(), &[tool.clone()]);
+        for (summary, bytes) in windows {
+            let logs: Value = serde_json::from_slice(&bytes).unwrap();
+            for rows in [&summary["events"], &logs["entries"]] {
+                let rows = rows.as_array().unwrap();
+                let event = rows.iter().find(|row| row["source"] == "tool_result").unwrap();
+                assert_eq!(event.get("server"), Some(&Value::Null));
+                assert_eq!(event.get("exit_code"), Some(&Value::Null));
+                let diagnostic = rows.iter().find(|row| row["source"] == "codex_core").unwrap();
+                assert_eq!(diagnostic.get("thread_id"), Some(&Value::Null));
+                assert!(diagnostic.get("thread_name").is_none());
+            }
+        }
+        collector.core.errors.clear();
+        let windows = collector.error_windows("ok", reference, &BTreeMap::new(), &[]);
+        assert!(windows[3].0["events"].as_array().unwrap().iter().all(|row| row.get("server").is_none() && row.get("exit_code").is_none()));
+        assert!(windows[3].0["events"].as_array().unwrap().iter().find(|row| row["source"]=="codex_core").unwrap().get("thread_id").is_none());
+        saved_tool["server"] = json!("retained"); saved_tool["exit_code"] = json!(7);
+        collector.error_history = vec![saved_tool];
+        let windows = collector.error_windows("ok", reference, &BTreeMap::new(), &[tool]);
+        assert_eq!(windows[3].0["events"][0]["server"], Value::Null);
+        assert_eq!(windows[3].0["events"][0]["exit_code"], Value::Null);
+    }
+
+    #[test]
+    fn error_names_share_log_presentation_without_enriching_history_or_diagnostics() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut collector = Collector::new(directory.path().to_path_buf(), true, None);
+        collector.applied_errors_enabled = true;
+        collector.logs_enabled = true;
+        let reference = chrono::DateTime::parse_from_rfc3339("2026-11-13T02:00:00Z").unwrap().with_timezone(&Utc);
+        let live = json!({"timestamp":"2026-11-13T01:30:00Z","thread_id":"live","source":"session","category":"conversation","severity":"error","code":"fixture","record_hash":"abc","marker":"live"});
+        let mut historical = live.clone(); historical["marker"] = json!("history-winner");
+        let orphan = json!({"timestamp":"2026-11-13T01:30:00Z","thread_id":"live","source":"session","category":"conversation","severity":"error","code":"history-only"});
+        let diagnostic = json!({"timestamp":"2026-11-13T01:30:00Z","thread_id":"live","source":"codex_core","category":"diagnostic","severity":"error","code":"fixture"});
+        collector.error_history = vec![historical, orphan, diagnostic];
+        for title in [json!("標題"), json!("renamed"), json!(""), Value::Null] {
+            collector.thread_metadata.insert("live".into(), json!({"name":title}));
+            let windows = collector.error_windows("ok", reference, &BTreeMap::new(), &[live.clone()]);
+            for (summary, bytes) in windows {
+                let logs: Value = serde_json::from_slice(&bytes).unwrap();
+                for rows in [&summary["events"], &logs["entries"]] {
+                    let rows = rows.as_array().unwrap();
+                    let enriched = rows.iter().find(|e| e["record_hash"] == "abc").unwrap();
+                    assert_eq!(enriched["thread_name"], title);
+                    assert_eq!(enriched["marker"], "live");
+                    assert_eq!(log_identity(enriched), log_identity(&live));
+                    for event in rows.iter().filter(|e| e["record_hash"] != "abc") {
+                        assert!(event.get("thread_name").is_none());
+                    }
+                }
+            }
+        }
+        for (health, enabled) in [("disabled", true), ("ok", false)] {
+            collector.applied_errors_enabled = enabled;
+            let windows = collector.error_windows(health, reference, &BTreeMap::new(), &[live.clone()]);
+            for (summary, logs) in windows {
+                assert!(!summary.to_string().contains("thread_name"));
+                assert!(!std::str::from_utf8(&logs).unwrap().contains("thread_name"));
+            }
+        }
+    }
+
+    #[test]
+    fn error_names_follow_tool_start_window_and_source_switch() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut collector = Collector::new(directory.path().to_path_buf(), true, None);
+        collector.applied_errors_enabled = true;
+        collector.logs_enabled = true;
+        collector.thread_metadata.insert("live".into(), json!({"name":"title"}));
+        let reference = chrono::DateTime::parse_from_rfc3339("2026-11-13T02:00:00Z").unwrap().with_timezone(&Utc);
+        let call: project::Call = serde_json::from_value(json!({"tool":"exec","time":"2026-11-13T00:00:00Z","completed":"2026-11-13T01:30:00Z","sequence":0,"failure":{"code":"failed","exit_code":1}})).unwrap();
+        let history = call.failure_event("live", "a").unwrap();
+        let mut projection = Projection::for_id(Some("live".into())); projection.calls.insert("a".into(), call);
+        let threads = BTreeMap::from([("live", (projection, false))]);
+        collector.error_history = vec![history];
+        let windows = collector.error_windows("ok", reference, &threads, &[]);
+        assert!(windows[0].0["events"][0]["thread_name"].is_null());
+        assert_eq!(windows[3].0["events"][0]["thread_name"], "title");
+        let disabled = json!({"timestamp":"2026-11-13T01:30:00Z","thread_id":"live","source":"tool_result","server":"blocked","category":"tool","severity":"error","code":"blocked"});
+        collector.mcp_sources.write().unwrap().insert("blocked".into(), false);
+        collector.error_history = vec![disabled.clone()];
+        let windows = collector.error_windows("ok", reference, &BTreeMap::new(), &[disabled]);
+        assert_eq!(windows[3].0["events"], json!([]));
+        assert!(serde_json::from_slice::<Value>(&windows[3].1).unwrap()["entries"].as_array().unwrap().iter().all(|event| event["source"] == "monitor" && event.get("thread_name").is_none()));
+    }
+
+    #[test]
+    fn snapshot_mcp_events_use_current_selected_thread_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        let records = [
+            json!({"type":"session_meta","timestamp":"2026-11-13T00:00:00Z","payload":{"id":id}}),
+            json!({"type":"response_item","timestamp":"2026-11-13T00:30:00Z","payload":{"type":"function_call","name":"mcp__demo_docs__inspect_document","call_id":"a","arguments":"{\"cmd\":\"sqlite3 demo.db SELECT\"}"}}),
+        ];
+        std::fs::write(root.join(format!("rollout-{id}.jsonl")), records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")+"\n").unwrap();
+        let mut collector = Collector::new(root.join("monitoring"), true, None);
+        for _ in 0..4 { collector.refresh(&root, &AtomicBool::new(false), true, true, CommandSwitches::default()); }
+        collector.updated = Some(chrono::DateTime::parse_from_rfc3339("2026-11-13T01:00:00Z").unwrap().with_timezone(&Utc));
+        for name in [Value::Null, json!("標題 A"), json!(""), json!("renamed")] {
+            collector.thread_metadata.insert(id.into(), json!({"name":name}));
+            let snapshot = collector.snapshots("ok", "ok", 1);
+            for index in 0..4 {
+                let value: Value = serde_json::from_slice(&snapshot.window_bytes(index)).unwrap();
+                assert_eq!(value["mcp"]["events"].as_array().unwrap().len(), 1);
+                for event in value["mcp"]["events"].as_array().unwrap() { assert_eq!(event["thread_name"], name); }
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_sql_events_use_current_selected_thread_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        let records = [
+            json!({"type":"session_meta","timestamp":"2026-11-13T00:00:00Z","payload":{"id":id}}),
+            json!({"type":"response_item","timestamp":"2026-11-13T00:30:00Z","payload":{"type":"function_call","name":"exec_command","call_id":"a","arguments":"{\"cmd\":\"sqlite3 demo.db SELECT\"}"}}),
+        ];
+        std::fs::write(root.join(format!("rollout-{id}.jsonl")), records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")+"\n").unwrap();
+        let mut collector = Collector::new(root.join("monitoring"), true, None);
+        for _ in 0..4 { collector.refresh(&root, &AtomicBool::new(false), true, true, CommandSwitches::default()); }
+        collector.updated = Some(chrono::DateTime::parse_from_rfc3339("2026-11-13T01:00:00Z").unwrap().with_timezone(&Utc));
+        for name in [Value::Null, json!("標題 A"), json!(""), json!("renamed")] {
+            collector.thread_metadata.insert(id.into(), json!({"name":name}));
+            let snapshot = collector.snapshots("ok", "ok", 1);
+            for index in 0..4 {
+                let value: Value = serde_json::from_slice(&snapshot.window_bytes(index)).unwrap();
+                assert_eq!(value["codex"]["sqlite"]["events"].as_array().unwrap().len(), 2);
+                for event in value["codex"]["sqlite"]["events"].as_array().unwrap() { assert_eq!(event["thread_name"], name); }
+                assert_eq!(value["codex"]["sqlite"]["total"], 2);
+                assert_eq!(value["codex"]["sqlite"]["operations"], json!({"open":1,"read":1}));
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_commands_use_current_selected_thread_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        let records = [
+            json!({"type":"session_meta","timestamp":"2026-11-13T00:00:00Z","payload":{"id":id}}),
+            json!({"type":"response_item","timestamp":"2026-11-13T00:30:00Z","payload":{"type":"function_call","name":"exec_command","call_id":"a","arguments":"{\"cmd\":\"git status; python -m pytest\"}"}}),
+        ];
+        std::fs::write(root.join(format!("rollout-{id}.jsonl")), records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")+"\n").unwrap();
+        let mut collector = Collector::new(root.join("monitoring"), true, None);
+        for _ in 0..4 { collector.refresh(&root, &AtomicBool::new(false), true, true, CommandSwitches::default()); }
+        collector.updated = Some(chrono::DateTime::parse_from_rfc3339("2026-11-13T01:00:00Z").unwrap().with_timezone(&Utc));
+        for name in [Value::Null, json!("標題 A"), json!(""), json!("renamed")] {
+            collector.thread_metadata.insert(id.into(), json!({"name":name}));
+            let snapshot = collector.snapshots("ok", "ok", 1);
+            for index in 0..4 {
+                let value: Value = serde_json::from_slice(&snapshot.window_bytes(index)).unwrap();
+                assert_eq!(value["codex"]["git"]["events"].as_array().unwrap().len(), 1);
+                assert_eq!(value["codex"]["checks"].as_array().unwrap().len(), 1);
+                assert_eq!(value["codex"]["git"]["events"][0]["thread_name"], name);
+                assert_eq!(value["codex"]["checks"][0]["thread_name"], name);
+                assert_eq!(value["codex"]["git"]["total"], 1);
+            }
+        }
+    }
+
+    #[test]
+    fn tool_statistics_collector_checkpoint_roundtrip_preserves_source_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let id="00000000-0000-4000-8000-000000000001";
+        let path=root.join(format!("rollout-{id}.jsonl"));
+        let records=[
+            json!({"type":"session_meta","timestamp":"2026-11-13T00:00:00Z","payload":{"id":id}}),
+            json!({"type":"response_item","timestamp":"2026-11-13T00:30:00.0009Z","payload":{"type":"function_call","name":"exec","call_id":"a","arguments":"await tools.same({}); await tools.same({});"}}),
+            json!({"type":"response_item","timestamp":"2026-11-13T00:30:01.0001Z","payload":{"type":"function_call_output","call_id":"a","output":"PRIVATE_RESULT"}}),
+            json!({"type":"response_item","timestamp":"2026-11-13T01:30:00Z","payload":{"type":"function_call","name":"exec","call_id":"b","arguments":"{}"}}),
+        ];
+        std::fs::write(&path,records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")+"\n").unwrap();
+        let stopped=AtomicBool::new(false);
+        let expected=json!([
+            {"tool":"exec","nested":false,"calls":2,"thread_count":1,"returned":1,"known_duration_count":1,"average_ms":1000.0,"p99_ms":1000.0,"last_at":"2026-11-13T01:30:00.000Z","last_response_at":"2026-11-13T00:30:01.000Z"},
+            {"tool":"same","nested":true,"calls":2,"thread_count":1,"returned":null,"known_duration_count":null,"average_ms":null,"p99_ms":null,"last_at":"2026-11-13T00:30:01.000Z","last_response_at":null}
+        ]);
+        for restart in [false,true] {
+            let mut collector=Collector::new(root.join("monitoring"),true,None);
+            collector.tool_events_enabled.store(true,Ordering::Release);
+            for _ in 0..4 { collector.refresh(&root,&stopped,true,true,CommandSwitches::default()); }
+            collector.updated=Some(chrono::DateTime::parse_from_rfc3339("2026-11-13T02:00:00Z").unwrap().with_timezone(&Utc));
+            let snapshots=collector.snapshots("ok","ok",1);
+            let all:Value=serde_json::from_slice(&snapshots.window_bytes(3)).unwrap();
+            assert_eq!(all["codex"]["tool_statistics"],expected);
+            assert!(!all["codex"]["tool_statistics"].to_string().contains("PRIVATE_RESULT"));
+            let hour:Value=serde_json::from_slice(&snapshots.window_bytes(0)).unwrap();
+            assert_eq!(hour["codex"]["tool_statistics"].as_array().unwrap().len(),1);
+            assert_eq!(hour["codex"]["tool_statistics"][0]["calls"],1);
+            assert_eq!(hour["codex"]["tool_statistics"][0]["returned"],0);
+            assert!(hour["codex"]["tool_statistics"][0]["average_ms"].is_null());
+            if restart { assert!(all["codex"]["read_state"]["checkpoint"]["restored"].as_u64().unwrap()>0); }
+        }
+    }
+
+    #[test]
+    fn snapshot_series_fields_preserve_window_and_incomplete_scope() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut collector = Collector::new(directory.path().to_path_buf(), true, None);
+        let empty = collector.snapshots("ok","ok",1);
+        for index in 0..4 {
+            let value: Value = serde_json::from_slice(&empty.window_bytes(index)).unwrap();
+            assert_eq!(value["codex"]["activity_series"],json!([]));
+            assert_eq!(value["codex"]["tool_series"],json!([]));
+        }
+        let disabled = collector.snapshots("disabled","ok",1);
+        let disabled: Value = serde_json::from_slice(&disabled.window_bytes(3)).unwrap();
+        assert_eq!(disabled["codex"]["activity_series"],json!([]));
+        assert_eq!(disabled["codex"]["tool_series"],json!([]));
+        assert_eq!(disabled["codex"]["tool_statistics"],json!([]));
+        let path = directory.path().join("rollout-00000000-0000-4000-8000-000000000001.jsonl");
+        let mut session = Session::new(&path);
+        session.projection.id = Some("00000000-0000-4000-8000-000000000001".into());
+        for (offset, timestamp) in [Some("2026-11-13T01:00:01.234Z"),None].into_iter().enumerate() {
+            let line = json!({"timestamp":timestamp,"type":"response_item","payload":{"type":"function_call","name":"fixture","call_id":format!("call-{offset}")}}).to_string();
+            assert!(session.projection.consume(line.as_bytes(),offset as u64,true,true,&BTreeMap::new(),McpSwitches::default(),true,true,CommandSwitches::default()));
+        }
+        collector.files.insert(path,session);
+        collector.discovered_files = Some(5001);
+        collector.updated = Some(chrono::DateTime::parse_from_rfc3339("2026-11-13T02:00:00Z").unwrap().with_timezone(&Utc));
+        for enabled in [false,true] {
+            collector.tool_events_enabled.store(enabled,Ordering::Release);
+            let snapshot = collector.snapshots("partly_unavailable","ok",1);
+            for index in 0..4 {
+                let value: Value = serde_json::from_slice(&snapshot.window_bytes(index)).unwrap();
+                assert_eq!(value["codex"]["activity_series"],json!([{"time":"2026-11-13T01:00:00Z","calls":1}]));
+                assert_eq!(value["codex"]["tool_series"],json!([{"time":"2026-11-13T01:00:00Z","tool":"fixture","calls":1}]));
+                assert_eq!(value["codex"]["read_state"]["outside_working_set"],5000);
+                assert_eq!(value["codex"]["read_state"]["overflow_snapshot_incomplete"],true);
+                assert_eq!(value["codex"]["tools"]["fixture"],if index==3 {2} else {1});
+                if enabled {
+                    let statistics=&value["codex"]["tool_statistics"];
+                    assert_eq!(statistics.as_array().unwrap().len(),1);
+                    assert_eq!(statistics[0]["calls"],if index==3 {2} else {1});
+                    assert_eq!(statistics[0]["thread_count"],1);
+                    assert_eq!(statistics[0]["known_duration_count"],0);
+                } else { assert_eq!(value["codex"]["tool_statistics"],json!([])); }
+            }
+        }
     }
 
     #[test]

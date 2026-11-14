@@ -12,7 +12,8 @@ pub fn parse_utc_stamp(value: &str) -> Option<DateTime<Utc>> {
         value if value.starts_with(['+', '-']) => {
             let (hours, minutes, seconds, micros) = clock_parts(&value[1..])?;
             let magnitude =
-                i64::from(hours * 3600 + minutes * 60 + seconds) * 1_000_000 + i64::from(micros);
+                i64::from(hours * 3600 + minutes * 60 + seconds) * 1_000_000
+                    + if hours == 0 && minutes == 0 && seconds == 0 { 0 } else { i64::from(micros) };
             if magnitude >= 86_400_000_000 {
                 return None;
             }
@@ -72,8 +73,8 @@ fn clock_parts(value: &str) -> Option<(u32, u32, u32, u32)> {
         None => (value.as_bytes(), None),
     };
     let (hours, minutes, seconds) = match clock {
-        [h, i] if fraction.is_none() => (pair(*h, *i)?, 0, 0),
-        [h, i, m, n] | [h, i, b':', m, n] if fraction.is_none() => {
+        [h, i] => (pair(*h, *i)?, 0, 0),
+        [h, i, m, n] | [h, i, b':', m, n] => {
             (pair(*h, *i)?, pair(*m, *n)?, 0)
         }
         [h, i, m, n, s, t] | [h, i, b':', m, n, b':', s, t] => {

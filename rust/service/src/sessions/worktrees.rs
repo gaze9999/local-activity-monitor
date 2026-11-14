@@ -468,6 +468,7 @@ pub(super) fn parse(output: &[u8]) -> Vec<Worktree> {
             if !item.path.as_os_str().is_empty() {
                 result.push(std::mem::take(&mut item));
             }
+            item = Worktree::default();
             continue;
         }
         let (key, value) = field.split_once(' ').unwrap_or((field, ""));
@@ -756,5 +757,31 @@ mod tests {
         let error = git_list_with(&executable, &path, Duration::from_millis(50)).unwrap_err();
         assert_eq!(error.reason, "timeout");
         assert!(began.elapsed() < Duration::from_secs(3));
+    }
+}
+
+#[cfg(test)]
+mod record_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn pathless_records_do_not_leak_metadata_into_next_worktree() {
+        let orphan_records = [
+            "locked private\0",
+            "HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0branch refs/heads/stale\0",
+            "bare\0prunable reason\0detached\0",
+        ];
+        for orphan in orphan_records {
+            let raw = format!("{orphan}\0\0worktree /tmp/repo\0");
+            let items = parse(raw.as_bytes());
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].path, PathBuf::from("/tmp/repo"));
+            assert!(items[0].commit.is_none() && items[0].branch.is_none());
+            assert!(!items[0].locked && !items[0].prunable && !items[0].bare && !items[0].detached);
+        }
+        let items = parse(b"worktree /tmp/first\0locked reason\0\0worktree /tmp/second\0\0");
+        assert_eq!(items.len(), 2);
+        assert!(items[0].locked);
+        assert!(!items[1].locked);
     }
 }

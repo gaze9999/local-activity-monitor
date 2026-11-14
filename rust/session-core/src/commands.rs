@@ -193,21 +193,22 @@ fn valid_label(value: &str) -> bool {
 fn repository_label(value: &str) -> Option<String> {
     let windows = value.contains('\\');
     let name = if windows {
-        let value = if value.as_bytes().get(1) == Some(&b':') {
+        let has_drive = value.as_bytes().get(1) == Some(&b':');
+        let value = if has_drive {
             &value[2..]
         } else {
             value
         };
-        if value.starts_with("\\\\") {
-            let parts = value
-                .trim_start_matches('\\')
-                .split(['\\', '/'])
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>();
-            if parts.len() <= 2 {
-                return None;
-            }
-        }
+        let value = if !has_drive && value.as_bytes().get(..2).is_some_and(|prefix| {
+            prefix.iter().all(|byte| matches!(byte, b'/' | b'\\'))
+        }) {
+            let mut parts = value[2..].splitn(3, ['\\', '/']);
+            parts.next()?;
+            parts.next()?;
+            parts.next()?
+        } else {
+            value
+        };
         value
             .rsplit(['/', '\\'])
             .find(|part| !part.is_empty() && *part != ".")
@@ -402,5 +403,33 @@ mod tests {
         );
         assert_eq!(output.git.len(), GIT_PER_COMMAND);
         assert_eq!(output.checks.len(), CHECK_LIMIT);
+    }
+}
+
+#[cfg(test)]
+mod unc_label_tests {
+    use super::*;
+    #[test]
+    fn ordinary_unc_roots_do_not_become_repository_names() {
+        for (path, expected) in [
+            ("C://repo\\sub", Some("sub")),
+            ("C:/\\server/share", Some("share")),
+            ("C:\\\\repo\\sub", Some("sub")),
+            ("C:relative\\sub", Some("sub")),
+            ("C:\\", None),
+            ("C:/", Some("C:")),
+            ("//server/share\\", None),
+            ("/\\server/share", None),
+            ("\\/server/share", None),
+            ("\\\\server\\share", None),
+            ("//server/share\\repo", Some("repo")),
+            ("/\\server/share/repo", Some("repo")),
+            ("///server/share\\", Some("share")),
+            ("\\\\\\server\\share", Some("share")),
+            ("C:\\repo\\.", Some("repo")),
+            ("/home/repo", Some("repo")),
+        ] {
+            assert_eq!(repository_label(path).as_deref(), expected, "{path}");
+        }
     }
 }

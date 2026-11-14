@@ -80,7 +80,7 @@ static FLAG: LazyLock<Regex> =
 static STATUS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-z][a-z_]{0,39}$").expect("status pattern"));
 static DECIMAL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[0-9]{1,16}(?:\.[0-9]{1,16})?$").expect("credit decimal"));
+    LazyLock::new(|| Regex::new(r"^\d{1,16}(?:\.\d{1,16})?$").expect("credit decimal"));
 static BLOCKED: &[&str] = &[
     "secret",
     "password",
@@ -518,7 +518,7 @@ fn credits(value: &Object, result: &mut Object) {
                 let decimal = item
                     .as_str()
                     .filter(|text| DECIMAL.is_match(text))
-                    .and_then(|text| text.parse::<f64>().ok())
+                    .and_then(|text| decimal_ascii(text).parse::<f64>().ok())
                     .map(|value| json!(value));
                 let value = decimal.as_ref().unwrap_or(item);
                 if number(value, NUMBER_LIMIT) {
@@ -672,9 +672,10 @@ fn request(server: &str, args: Option<&Object>) -> Object {
         return metadata;
     };
     if server == "local_documents" {
-        if let Some(value) = text(args, "source")
-            .filter(|value| !value.is_empty())
-            .or_else(|| text(args, "target"))
+        if let Some(value) = args.get("source")
+            .filter(|value| truth(value))
+            .or_else(|| args.get("target"))
+            .and_then(Value::as_str)
         {
             let extension = value
                 .rsplit('.')
@@ -698,12 +699,14 @@ fn request(server: &str, args: Option<&Object>) -> Object {
             }
         }
     } else if server == "workspace_inspection" {
-        if let Some(limit) = args
-            .get("max_files")
-            .and_then(Value::as_u64)
-            .filter(|limit| *limit <= NUMBER_LIMIT)
-        {
-            metadata.insert("max_files".into(), limit.into());
+        if let Some(limit) = args.get("max_files").filter(|value| {
+            value.as_number().is_some_and(|number| {
+                let text = number.to_string();
+                let digits = text.strip_prefix('-').unwrap_or(&text);
+                !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        }) {
+            metadata.insert("max_files".into(), limit.as_u64().or_else(|| limit.as_i64().and_then(|value| u64::try_from(value).ok())).filter(|limit| *limit <= NUMBER_LIMIT).map(Value::from).unwrap_or(Value::Null));
         }
     } else if server == "web" {
         let urls = ["open", "click", "find", "screenshot"]
@@ -778,16 +781,23 @@ impl Observed {
 
 fn output_object(output: &Value) -> Option<std::borrow::Cow<'_, Object>> {
     use std::borrow::Cow;
-    fn list(items: Vec<Value>) -> Object {
-        Object::from_iter([("content".into(), Value::Array(items))])
+    fn list(mut items: Vec<Value>) -> Option<Object> {
+        if items.len() > 100 {
+            return None;
+        }
+        items.retain(|item| item.as_object().is_some_and(|item| {
+            matches!(text(item, "type"), Some("input_text" | "text"))
+        }));
+        let wrapper = Object::from_iter([("content".into(), Value::Array(items))]);
+        text(&decoded(&wrapper), "status").is_some().then_some(wrapper)
     }
     match output {
         Value::Object(value) => Some(Cow::Borrowed(value)),
-        Value::Array(items) => Some(Cow::Owned(list(items.clone()))),
+        Value::Array(items) if items.len() <= 100 => list(items.clone()).map(Cow::Owned),
         Value::String(raw) if within_output_limit(raw) => {
             match serde_json::from_str::<Value>(raw).ok()? {
                 Value::Object(value) => Some(Cow::Owned(value)),
-                Value::Array(items) => Some(Cow::Owned(list(items))),
+                Value::Array(items) => list(items).map(Cow::Owned),
                 _ => None,
             }
         }
@@ -802,8 +812,8 @@ static EXIT_CODE: LazyLock<Regex> = LazyLock::new(|| {
 static DECIMAL_DIGIT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\d$").expect("decimal digit"));
 
-fn decimal_exit_code(value: &str) -> Option<i32> {
-    let ascii: String = value.chars().map(|digit| {
+fn decimal_ascii(value: &str) -> String {
+    value.chars().map(|digit| {
         if digit.is_ascii() { return digit; }
         let code = digit as u32;
         let mut first = code;
@@ -812,8 +822,11 @@ fn decimal_exit_code(value: &str) -> Option<i32> {
             first -= 1;
         }
         char::from(b'0' + ((code - first) % 10) as u8)
-    }).collect();
-    ascii.parse().ok()
+    }).collect()
+}
+
+fn decimal_exit_code(value: &str) -> Option<i32> {
+    decimal_ascii(value).parse().ok()
 }
 
 /// Extract only bounded byte counts from one structured tool result.
@@ -1006,7 +1019,7 @@ impl Observed {
                 }
                 "write" | "write_output" if self.server == "local_documents" => value.is_boolean(),
                 "max_files" if self.server == "workspace_inspection" => {
-                    value.as_u64().is_some_and(|value| value <= NUMBER_LIMIT)
+                    value.is_null() || value.as_u64().is_some_and(|value| value <= NUMBER_LIMIT)
                 }
                 _ => false,
             })
@@ -1090,5 +1103,161 @@ mod exit_decimal_tests {
         }
         let late = Value::String(format!("{}\nProcess exited with code ７\n", "x".repeat(OUTPUT_CHARACTER_LIMIT)));
         assert!(!output_failed(&late));
+    }
+}
+
+#[cfg(test)]
+mod credit_decimal_tests {
+    use super::*;
+
+    #[test]
+    fn credit_strings_match_python_unicode_and_numeric_bounds() {
+        for (input, expected) in [
+            (json!("１２.５０"), Some(json!(12.5))),
+            (json!("٣.٢٥"), Some(json!(3.25))),
+            (json!("१२३"), Some(json!(123.0))),
+            (json!("𝟡.𝟘"), Some(json!(9.0))),
+            (json!("９００７１９９２５４７４０９９３"), Some(json!(9007199254740992.0))),
+            (json!(9007199254740993_u64), None),
+            (json!("9007199254740994"), None),
+            (json!("12345678901234567"), None),
+            (json!("1.12345678901234567"), None),
+            (json!("²"), None),
+            (json!("1e2"), None),
+        ] {
+            for (prefix, source) in [
+                ("", json!({"credits":{"balance":input.clone()}})),
+                ("usage_", json!({"usage":{"credits":{"balance":input.clone()}}})),
+            ] {
+                let mut result = Object::new();
+                credits(source.as_object().unwrap(), &mut result);
+                assert_eq!(result.get(&format!("{prefix}credits_balance")).cloned(), expected, "{input}");
+            }
+        }
+        for (prefix, source) in [
+            ("", json!({"credits":{"balance":"１","used":"２","remaining":"３","limit":"４","total":"５","has_credits":false,"unlimited":true,"secret":"private","unknown":"６"}})),
+            ("usage_", json!({"usage":{"credits":{"balance":"１","used":"２","remaining":"３","limit":"４","total":"５","has_credits":false,"unlimited":true,"secret":"private","unknown":"６"}}})),
+        ] {
+            let mut result = Object::new();
+            credits(source.as_object().unwrap(), &mut result);
+            for (key, expected) in [("balance", 1.0), ("used", 2.0), ("remaining", 3.0), ("limit", 4.0), ("total", 5.0)] {
+                assert_eq!(result[&format!("{prefix}credits_{key}")], json!(expected));
+            }
+            assert_eq!(result[&format!("{prefix}credits_has_credits")], false);
+            assert_eq!(result[&format!("{prefix}credits_unlimited")], true);
+            assert_eq!(result.len(), 7);
+            assert!(!serde_json::to_string(&result).unwrap().contains("private"));
+        }
+        let mut one_slot: Object = (0..39).map(|n| (format!("metric_{n}"), json!(n))).collect();
+        credits(json!({"credits":{"balance":"１","used":"２","unlimited":true},"usage":{"credits":{"balance":"３"}}}).as_object().unwrap(), &mut one_slot);
+        assert_eq!(one_slot.len(), 40);
+        assert_eq!(one_slot["credits_balance"], 1.0);
+        assert!(!one_slot.contains_key("credits_used"));
+        assert!(!one_slot.contains_key("credits_unlimited"));
+        assert!(!one_slot.contains_key("usage_credits_balance"));
+        let mut full: Object = (0..40).map(|n| (format!("metric_{n}"), json!(n))).collect();
+        let before = full.clone();
+        credits(json!({"credits":{"balance":"１２","unlimited":true}}).as_object().unwrap(), &mut full);
+        assert_eq!(full, before);
+    }
+}
+
+#[cfg(test)]
+mod document_source_tests {
+    use super::*;
+
+    #[test]
+    fn format_uses_python_source_or_target_precedence() {
+        for (source, expected) in [
+            (json!(null), Some("pdf")),
+            (json!(false), Some("pdf")),
+            (json!(0), Some("pdf")),
+            (json!(-0.0), Some("pdf")),
+            (json!(-1), None),
+            (json!(""), Some("pdf")),
+            (json!([]), Some("pdf")),
+            (json!({}), Some("pdf")),
+            (json!(true), None),
+            (json!(1), None),
+            (json!(["a"]), None),
+            (json!({"a":1}), None),
+            (json!("input.docx"), Some("docx")),
+            (json!("input.unknown"), None),
+        ] {
+            let args = json!({"source":source,"target":"fallback.pdf"});
+            let result = request("local_documents", args.as_object());
+            assert_eq!(result.get("format").and_then(Value::as_str), expected, "{source}");
+            assert_eq!(result.get("resources"), Some(&json!({})));
+        }
+        assert_eq!(request("local_documents", json!({"target":"fallback.pdf"}).as_object()).get("format"), Some(&json!("pdf")));
+        for args in [
+            json!({}),
+            json!({"source":null,"target":true}),
+            json!({"source":"","target":1}),
+            json!({"target":["fallback.pdf"]}),
+            json!({"source":false,"target":{"name":"fallback.pdf"}}),
+        ] {
+            assert!(!request("local_documents", args.as_object()).contains_key("format"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod raw_array_tests {
+    use super::*;
+
+    #[test]
+    fn raw_array_requires_one_typed_status_result() {
+        for value in [
+            json!([{"type":"text","text":"{\"error\":\"fixture\"}"}]),
+            json!([{"type":"image","text":"{\"status\":\"failed\"}"}]),
+            json!([{"text":"{\"status\":\"failed\"}"}]),
+            json!([{"type":"text","text":{"status":"failed"}},{"type":"text","text":{"status":"ok"}}]),
+        ] {
+            assert!(!output_failed(&value), "{value}");
+            assert!(!output_failed(&json!(value.to_string())), "encoded {value}");
+        }
+        let valid = json!([{"type":"text","text":{"status":"failed"}}]);
+        assert!(output_failed(&valid));
+        assert!(output_failed(&json!(valid.to_string())));
+        for count in [100, 101] {
+            let mut sparse = vec![json!({"type":"image","text":"unrelated"}); count];
+            sparse[0] = json!({"type":"text","text":{"status":"failed"}});
+            let sparse = json!(sparse);
+            assert_eq!(output_failed(&sparse), count == 100);
+            assert_eq!(output_failed(&json!(sparse.to_string())), count == 100);
+        }
+        assert!(output_failed(&json!({"content":[{"type":"text","text":"{\"error\":\"fixture\"}"}]})));
+        assert!(!output_failed(&json!((0..101).map(|_| json!({"type":"text","text":{"status":"failed"}})).collect::<Vec<_>>())));
+    }
+}
+
+#[cfg(test)]
+mod workspace_limit_parity_tests {
+    use super::*;
+
+    #[test]
+    fn nullable_integer_limit_matches_python_metadata() {
+        let tool = "mcp__workspace_inspection__inspect";
+        for (raw, expected) in [
+            ("-1", Some(Value::Null)),
+            ("9007199254740993", Some(Value::Null)),
+            ("18446744073709551615", Some(Value::Null)),
+            ("18446744073709551616", Some(Value::Null)),
+            ("-18446744073709551616", Some(Value::Null)),
+            ("0", Some(json!(0))),
+            ("-0", Some(json!(0))),
+            ("-0.0", None),
+            ("9007199254740992", Some(json!(9007199254740992_u64))),
+            ("1.0", None), ("true", None), ("null", None), ("\"1\"", None),
+        ] {
+            let args = Object::from_iter([("max_files".into(), serde_json::from_str(raw).unwrap())]);
+            let observed = Observed::new(tool, Some(&args)).unwrap();
+            assert_eq!(observed.metadata.get("max_files"), expected.as_ref(), "{raw}");
+            assert!(observed.valid_for(tool), "{raw}");
+            let mut invalid = observed.clone();
+            invalid.metadata.insert("max_files".into(), json!(-1));
+            assert!(!invalid.valid_for(tool));
+        }
     }
 }

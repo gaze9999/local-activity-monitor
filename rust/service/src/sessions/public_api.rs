@@ -1,6 +1,6 @@
 //! Explicit, bounded reads of fixed public status and release sources.
 use super::account::{Settings, Shared};
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Timelike, Utc};
 use regex::Regex;
 use reqwest::{redirect::Policy, Client};
 use serde_json::{json, Value};
@@ -52,10 +52,16 @@ impl Kind {
 }
 fn valid_time(value: &str) -> bool {
     value.len() <= 64
-        && (DateTime::parse_from_rfc3339(value).is_ok()
-            || NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f").is_ok()
-            || NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok())
+        && (DateTime::parse_from_rfc3339(value).is_ok_and(|date| {
+            (1..=9999).contains(&date.year()) && date.nanosecond() < 1_000_000_000
+        }) || NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f")
+            .is_ok_and(|date| {
+                (1..=9999).contains(&date.year()) && date.nanosecond() < 1_000_000_000
+            })
+            || NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .is_ok_and(|date| (1..=9999).contains(&date.year())))
 }
+
 fn project(kind: Kind, value: &Value) -> Option<Value> {
     match kind {
         Kind::Openai => {
@@ -244,5 +250,37 @@ mod tests {
         assert!(project(Kind::Openai, &json!({"status":{"indicator":"unknown"}})).is_none());
         assert_eq!(project(Kind::Codex,&json!({"draft":false,"prerelease":false,"tag_name":"rust-v1.2.3","published_at":"2026-01-01T00:00:00Z","secret":"private"})).unwrap(),json!({"version":"1.2.3","updated_at":"2026-01-01T00:00:00Z"}));
         assert!(project(Kind::Codex,&json!({"draft":false,"prerelease":true,"tag_name":"v1.2.3","published_at":"2026-01-01"})).is_none());
+    }
+}
+
+#[cfg(test)]
+mod calendar_bounds_tests {
+    use super::*;
+    #[test]
+    fn public_times_reject_non_python_years_and_leap_seconds() {
+        for (time, accepted) in [
+            ("0001-01-01T00:00:00+14:00", true),
+            ("9999-12-31T23:59:59-12:00", true),
+            ("2026-12-31T23:59:59.999999+08:00", true),
+            ("2027-01-01T00:00:00-05:00", true),
+            ("9999-12-31T23:59:60-12:00", false),
+            ("0000-12-31T23:59:59-12:00", false),
+            ("0000-01-01", false),
+            ("-0001-01-01", false),
+            ("+10000-01-01", false),
+            ("0000-01-01T00:00:00", false),
+            ("0000-01-01T00:00:00Z", false),
+            ("2016-12-31T23:59:60Z", false),
+            ("2016-12-31T23:59:60", false),
+            ("2016-12-31T23:59:60.5+08:00", false),
+            ("0001-01-01", true),
+            ("9999-12-31T23:59:59Z", true),
+            ("2024-02-29T00:00:00+08:00", true),
+            ("2025-02-29", false),
+        ] {
+            assert_eq!(valid_time(time), accepted, "{time}");
+            assert_eq!(project(Kind::Openai, &json!({"status":{"indicator":"none"},"page":{"updated_at":time}})).is_some(), accepted, "status: {time}");
+            assert_eq!(project(Kind::Codex, &json!({"draft":false,"prerelease":false,"tag_name":"v1.2.3","published_at":time})).is_some(), accepted, "release: {time}");
+        }
     }
 }

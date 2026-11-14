@@ -1,7 +1,7 @@
 //! Observe only selected Git metadata and shallow managed-worktree directories.
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::SyncSender,
@@ -37,6 +37,9 @@ fn relevant(path: &Path, selection: &Selection) -> bool {
             return false;
         };
         let parts: Vec<_> = relative.components().collect();
+        if parts.contains(&Component::ParentDir) {
+            return false;
+        }
         if parts.is_empty() {
             return true;
         }
@@ -55,7 +58,9 @@ fn relevant(path: &Path, selection: &Selection) -> bool {
     }
     if let Ok(relative) = path.strip_prefix(&selection.managed) {
         let parts: Vec<_> = relative.components().collect();
-        if parts.len() <= 2 || (parts.len() == 3 && parts[2].as_os_str() == ".git") {
+        if !parts.contains(&Component::ParentDir)
+            && (parts.len() <= 2 || (parts.len() == 3 && parts[2].as_os_str() == ".git"))
+        {
             return true;
         }
     }
@@ -283,5 +288,31 @@ mod tests {
             Path::new("/home/worktrees/group/child/src/private"),
             &selected
         ));
+    }
+}
+
+#[cfg(test)]
+mod parent_component_tests {
+    use super::*;
+
+    #[test]
+    fn notification_filters_reject_parent_components_like_source() {
+        let selection = Selection {
+            metadata: vec![PathBuf::from("fixture/git")],
+            managed: PathBuf::from("fixture/managed"),
+            ..Selection::default()
+        };
+        for relative in ["", "HEAD", "refs/heads/main", "worktrees/a/HEAD"] {
+            assert!(relevant(&selection.metadata[0].join(relative), &selection));
+        }
+        for relative in ["refs/../HEAD", "worktrees/a/../HEAD", "../outside"] {
+            assert!(!relevant(&selection.metadata[0].join(relative), &selection));
+        }
+        for relative in ["", "group", "group/repo", "group/repo/.git"] {
+            assert!(relevant(&selection.managed.join(relative), &selection));
+        }
+        for relative in ["../outside", "group/..", "../repo/.git", "group/repo/../.git"] {
+            assert!(!relevant(&selection.managed.join(relative), &selection));
+        }
     }
 }

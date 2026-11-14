@@ -5,9 +5,11 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::LazyLock;
 
 static TOKEN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"([\w.]{1,64})=("(?:\\.|[^"\\])*(?:"|$)|[^\s{},:"]+)|"(?:\\.|[^"\\])*(?:"|$)"#)
+    Regex::new(r#"([\p{L}\p{N}_.]{1,64})=("(?:\\.|[^"\\])*(?:"|$)|[^\s{},:"]+)|"(?:\\.|[^"\\])*(?:"|$)"#)
         .expect("diagnostic tokens")
 });
+static TOKEN_WORD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[\p{L}\p{N}_.]$").unwrap());
 static IDENTIFIER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_.:-]{1,160}$").unwrap());
 static ENDPOINT: LazyLock<Regex> =
@@ -64,7 +66,7 @@ pub fn project(module: &str, body: &str) -> Option<Map<String, Value>> {
             && body[..whole.start()]
                 .chars()
                 .next_back()
-                .is_some_and(|ch| ch.is_alphanumeric() || ch == '_' || ch == '.')
+                .is_some_and(|ch| TOKEN_WORD.is_match(ch.encode_utf8(&mut [0; 4])))
         {
             if let Some(value) = capture
                 .get(2)
@@ -388,5 +390,24 @@ fn legacy_merge(core: &VecDeque<Value>, desktop: &[Value]) -> VecDeque<Value> {
         assert_eq!(value["duration_ms"], 1.5);
         assert_eq!(value["http_status"], 429);
         assert_eq!(value["status"], "failed");
+    }
+}
+
+#[cfg(test)]
+mod token_word_tests {
+    use super::*;
+
+    #[test]
+    fn token_word_boundaries_follow_python_alphanumeric_keys() {
+        for prefix in ["\u{0301}", "\u{203f}", "\u{200d}", "\u{0345}", "\u{05b0}", "\u{093e}"] {
+            let body = format!("{prefix}event.name=codex.api_request success=true");
+            let value = project("codex_api::probe", &body).unwrap();
+            assert_eq!(value["status"], "returned");
+            assert_eq!(value["event_kind"], "request");
+        }
+        for prefix in ["é", "中", "²", "_", "."] {
+            let body = format!("{prefix}event.name=codex.api_request success=true");
+            assert!(project("codex_api::probe", &body).is_none());
+        }
     }
 }
