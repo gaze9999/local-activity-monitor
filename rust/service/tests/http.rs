@@ -961,6 +961,16 @@ fn dots_query_limits_metadata_filters_windows_and_honors_settings() {
     assert_eq!(all["events"].as_array().unwrap().len(), 1);
     assert_eq!(all["activity"].as_array().unwrap().len(), 3);
     assert!(!all.to_string().contains("PRIVATE"));
+    let mut bom = b"\xef\xbb\xbf".to_vec();
+    bom.extend(state.to_string().as_bytes());
+    let path = home.path().join(".codex-global-state.json");
+    fs::write(&path, &bom).unwrap();
+    let bom_all = service.get("/api/codex/dots?window=all").json();
+    assert_eq!(bom_all["health"], "ok");
+    assert_eq!(bom_all["events"], all["events"]);
+    assert_eq!(bom_all["activity"], all["activity"]);
+    assert!(!bom_all.to_string().contains("PRIVATE"));
+    assert_eq!(fs::read(path).unwrap(), bom);
     let recent = service.get("/api/codex/dots?window=24h").json();
     assert_eq!(recent["activity"].as_array().unwrap().len(), 2);
     assert_eq!(service.get("/api/codex/dots?window=bad").status, 400);

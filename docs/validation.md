@@ -829,3 +829,17 @@ Python 14 組 bytes / budget fixture 通過, 其中 UTF-16 / UTF-32 為 Python �
 Python Unicode 15.0.0 與 Rust Unicode 18.0.0 的非 ASCII scalar lowercase 稽核, 在輸出完全為 ASCII 的範圍皆僅有 U+212A → k, 此證據限定目前 ASCII 保留清單, 不宣稱所有 Unicode lowercase 行為相同
 
 Linux / Rust 1.100.0 的完整 service 352 項通過 (67.77 秒), focused HTTP 1 項通過 (0.31 秒), 完整 serial HTTP 單輪 219 項通過 (121.54 秒), 歷史 metadata POST 503 / WouldBlock、唯讀 GET 503、數字呈現與其他 Unicode / 平台驗收限制仍保留
+
+### 手動 Dots 查詢的前置 UTF-8 BOM
+
+來源 LAM main `5c03daf`、workbench-workspace main `4616074` 核對未變, Python `read_dots` 以 bytes 解析桌面快取而接受單一前置 UTF-8 BOM, `read_metadata` 則以 UTF-8 文字解析同檔而拒絕 BOM, 不能一併放寬共用讀取器
+
+Rust 僅在 `/api/codex/dots` 的按需查詢選用 BOM 解碼, 原有 16 MiB metadata / 實讀 bytes 檢查之後才移除精確前綴, 其他 project、schedule 與背景 Dots 的 text-mode 呼叫維持原判定, 不增加讀取次數、查詢參數、來源範圍或保存內容, 回應仍只取既有 thread / host / timestamp / artifact type 白名單, 不外露 artifact 本文與帳戶欄位
+
+新增兩項回歸修正前均失敗, 修正後 Dots 全家族 9 項通過 (0.27 秒), HTTP 既有查詢測試新增 BOM 內容與原投影一致、來源 bytes 不變、時間窗篩選及 metadata 停用仍生效的檢查, 該測試通過 (0.06 秒)
+
+Python 9 組 BOM / decode / byte-limit fixture 與既有 desktop activity 8 項通過, 涵蓋 BOM-only、double / 非前置 BOM、非 object、malformed 與無效 UTF-8 拒絕, 16 MiB 精確邊界接受、加一 byte 拒絕, 文字 metadata 路徑仍回報 unsupported
+
+Linux / Rust 1.100.0 的完整 service 354 項通過 (66.54 秒), 完整 serial HTTP 單輪 219 項通過 (121.86 秒)
+
+UTF-16 / UTF-32 bytes decoding 仍未支援, 歷史 metadata POST 503 / WouldBlock、唯讀 GET 503、數字呈現及其他 Unicode / 平台限制保留

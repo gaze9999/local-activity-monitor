@@ -67,6 +67,10 @@ pub(crate) fn read_state(home: &Path) -> Option<Value> {
 }
 
 pub(crate) fn read_state_with_health(home: &Path) -> Result<Value, &'static str> {
+    read_state_json(home, false)
+}
+
+fn read_state_json(home: &Path, allow_bom: bool) -> Result<Value, &'static str> {
     let path = home.join(".codex-global-state.json");
     let metadata = fs::symlink_metadata(&path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
@@ -106,7 +110,12 @@ pub(crate) fn read_state_with_health(home: &Path) -> Result<Value, &'static str>
     if bytes.len() as u64 > LIMIT {
         return Err("oversized");
     }
-    let value: Value = serde_json::from_slice(&bytes).map_err(|_| "unsupported")?;
+    let input = if allow_bom {
+        bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes)
+    } else {
+        &bytes
+    };
+    let value: Value = serde_json::from_slice(input).map_err(|_| "unsupported")?;
     if value.is_object() {
         Ok(value)
     } else {
@@ -115,7 +124,7 @@ pub(crate) fn read_state_with_health(home: &Path) -> Result<Value, &'static str>
 }
 
 pub fn read(home: &Path, window: &str, now: DateTime<Utc>) -> Value {
-    let Some(state) = read_state(home) else {
+    let Ok(state) = read_state_json(home, true) else {
         return json!({"health":"error","checked_at":now.to_rfc3339_opts(SecondsFormat::Secs,false),"source":"desktop_cache","window":window});
     };
     project(&state, window, now, Map::new())
@@ -410,6 +419,61 @@ fn project(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_bom_does_not_relax_text_metadata_readers() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".codex-global-state.json");
+        let id = "00000000-0000-4000-8000-000000000001";
+        let state = json!({"electron-persisted-atom-state":{"orbit-outputs-v1":[{
+            "threadId":id,"artifact":{"type":"text","producedAtMs":0,"content":"PRIVATE_MARKER"}
+        }]},"literal":"\u{feff}"});
+        let body = serde_json::to_vec(&state).unwrap();
+        let now = DateTime::from_timestamp(1, 0).unwrap();
+        fs::write(&path, &body).unwrap();
+        let expected = read(home.path(), "all", now);
+        assert_eq!(expected["health"], "ok");
+        assert_eq!(expected["events"].as_array().unwrap().len(), 1);
+        assert!(!expected.to_string().contains("PRIVATE_MARKER"));
+        let mut bom = b"\xef\xbb\xbf".to_vec();
+        bom.extend(&body);
+        fs::write(&path, &bom).unwrap();
+        assert_eq!(read(home.path(), "all", now), expected);
+        assert_eq!(read_state_with_health(home.path()), Err("unsupported"));
+        assert!(read_state(home.path()).is_none());
+        for window in background(home.path(), &Map::new(), now) {
+            assert_eq!(window["activity"], json!([]));
+        }
+        assert_eq!(fs::read(path).unwrap(), bom);
+    }
+
+    #[test]
+    fn query_bom_preserves_decode_rejections_and_byte_limit() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".codex-global-state.json");
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        for bytes in [
+            b"\xef\xbb\xbf".as_slice(),
+            b"\xef\xbb\xbf\xef\xbb\xbf{}",
+            b" \xef\xbb\xbf{}",
+            b"\xef\xbb\xbf[]",
+            b"\xef\xbb\xbf{",
+            b"\xef\xbb\xbf{\"x\":\"\xff\"}",
+        ] {
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(read(home.path(), "all", now)["health"], "error", "{bytes:?}");
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        let mut exact = b"\xef\xbb\xbf{}".to_vec();
+        exact.resize(LIMIT as usize, b' ');
+        fs::write(&path, &exact).unwrap();
+        assert_eq!(read(home.path(), "all", now)["health"], "ok");
+        exact.push(b' ');
+        fs::write(&path, &exact).unwrap();
+        assert_eq!(read(home.path(), "all", now)["health"], "error");
+        assert_eq!(read_state_with_health(home.path()), Err("oversized"));
+        assert_eq!(fs::read(path).unwrap(), exact);
+    }
 
     #[test]
     fn snapshot_field_precedence_preserves_invalid_and_missing_values() {
