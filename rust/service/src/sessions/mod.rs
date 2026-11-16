@@ -4961,6 +4961,7 @@ impl Collector {
                         tool_events_enabled,
                         files_enabled,
                         command_switches.jev_calls,
+                        complete_source_order,
                     );
                     apply_thread_metadata(
                         &mut value,
@@ -4994,6 +4995,7 @@ impl Collector {
                     tool_events_enabled,
                     files_enabled,
                     command_switches.jev_calls,
+                    false,
                 );
                 apply_thread_metadata(&mut value, Some(metadata), true);
                 rows.push(value);
@@ -5537,6 +5539,9 @@ mod log_tests {
             let ids: Vec<_> = value["errors"]["events"].as_array().unwrap().iter().filter(|event| event["source"] == "tool_result")
                 .map(|event| event["call_id"].as_str().unwrap()).collect();
             assert_eq!(ids, if restart { vec!["b", "a", "z"] } else { vec!["z", "a", "b"] });
+            let thread = value["codex"]["threads"].as_array().unwrap().iter().find(|thread| thread["thread_id"] == id).unwrap();
+            assert_eq!(thread["tool_events"].as_array().unwrap().iter().map(|event| event["call_id"].as_str().unwrap()).collect::<Vec<_>>(),
+                if restart { vec!["b", "a", "z"] } else { vec!["b", "z", "a"] });
             if restart {
                 assert!(value["codex"]["read_state"]["checkpoint"]["restored"].as_u64().unwrap() > 0);
                 let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();

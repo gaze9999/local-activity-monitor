@@ -5049,6 +5049,22 @@ fn skill_read_metadata_projects_commands_without_persisting_paths() {
 }
 
 #[test]
+fn jev_preview_preserves_live_call_ties_and_checkpoint_row_order() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    append_records(&path, &[
+        event(&stamp, "response_item", json!({"type":"function_call","name":"mcp__jev__jev_rank","call_id":"z","arguments":{"query":"fixture"}})),
+        event(&stamp, "response_item", json!({"type":"function_call","name":"mcp__jev__jev_evaluate","call_id":"a","arguments":{"query":"fixture"}})),
+    ]);
+    for restart in [false, true] {
+        let service = Service::start(home.path(), true, None);
+        let value = snapshot_when(&service, |value| value["codex"]["threads"][0]["jev_calls"].as_array().is_some_and(|calls| calls.len() == 2));
+        assert_eq!(value["codex"]["threads"][0]["jev_calls"].as_array().unwrap().iter()
+            .map(|call| call["call_id"].as_str().unwrap()).collect::<Vec<_>>(), if restart { vec!["a", "z"] } else { vec!["z", "a"] });
+    }
+}
+
+#[test]
 fn jev_observation_switch_preserves_mcp_and_replays_disabled_calls() {
     let home = tempdir().unwrap();
     let (path, stamp) = native_event_fixture(home.path());

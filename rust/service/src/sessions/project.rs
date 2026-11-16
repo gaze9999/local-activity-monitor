@@ -1074,10 +1074,11 @@ pub(super) fn skill_summary(
 /// Observe each resolved winner once; retain no call borrow after admission.
 #[derive(Default)]
 struct RowTools {
+    presentation_order: bool,
     count: usize,
     counts: BTreeMap<String, usize>,
     nested: BTreeMap<String, usize>,
-    preview: BTreeMap<(std::cmp::Reverse<Option<Time>>, String), Value>,
+    preview: BTreeMap<(std::cmp::Reverse<Option<Time>>, u64, String), Value>,
 }
 
 impl RowTools {
@@ -1093,7 +1094,8 @@ impl RowTools {
             }
         }
         if !enabled { return; }
-        let rank = (std::cmp::Reverse(call.time), id.to_owned());
+        let rank = (std::cmp::Reverse(call.time),
+            if self.presentation_order { call.presentation_sequence } else { 0 }, id.to_owned());
         if self.preview.len() == 100 && self.preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { return; }
         if self.preview.len() == 100 { self.preview.pop_last(); }
         let event = {
@@ -1113,14 +1115,16 @@ impl RowTools {
 /// Feed resolved calls for one row; preserve operation indices in tie order.
 #[derive(Default)]
 struct RowJev {
-    preview: BTreeMap<(std::cmp::Reverse<Option<Time>>, String, usize), Value>,
+    presentation_order: bool,
+    preview: BTreeMap<(std::cmp::Reverse<Option<Time>>, u64, String, usize), Value>,
 }
 
 impl RowJev {
     fn observe(&mut self, thread: Option<&str>, id: &str, call: &Call, enabled: bool) {
         if !enabled { return; }
         for (index, operation) in call.jev.iter().enumerate() {
-            let rank = (std::cmp::Reverse(call.time), id.to_owned(), index);
+            let rank = (std::cmp::Reverse(call.time),
+                if self.presentation_order { call.presentation_sequence } else { 0 }, id.to_owned(), index);
             if self.preview.len() == 100 && self.preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { continue; }
             if self.preview.len() == 100 { self.preview.pop_last(); }
             self.preview.insert(rank, json!({
@@ -2067,15 +2071,16 @@ impl Projection {
         tool_events_enabled: bool,
         files_enabled: bool,
         jev_calls_enabled: bool,
+        presentation_order: bool,
     ) -> Value {
         let eligible = |call: &Call| boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff));
-        let mut tools = RowTools::default();
-        let mut jev = RowJev::default();
+        let mut tools = RowTools { presentation_order, ..Default::default() };
+        let mut jev = RowJev { presentation_order, ..Default::default() };
         for (id, call) in self.calls.iter().filter(|(_, call)| eligible(call)) {
             tools.observe(id, call, tool_events_enabled, totals, nested_totals);
             jev.observe(self.id.as_deref(), id, call, jev_calls_enabled);
         }
-        let RowTools { count: call_count, counts, nested: nested_counts, preview } = tools;
+        let RowTools { count: call_count, counts, nested: nested_counts, preview, .. } = tools;
         let events: Vec<_> = preview.into_values().collect();
         let mut changes = FileSummary::new(200);
         let mut reads = FileSummary::new(200);
@@ -2324,7 +2329,7 @@ mod snapshot_merge_tests {
             let mut merged = Projection::for_id(first.id.clone());
             for source in sources { merged.merge_metadata(source); }
             let row = merged.row(false, None, base + chrono::Duration::minutes(11),
-                &mut BTreeMap::new(), &mut BTreeMap::new(), false, false, false);
+                &mut BTreeMap::new(), &mut BTreeMap::new(), false, false, false, false);
             assert_eq!(row["status_updated_at"], stamp(base + chrono::Duration::minutes(10)));
             assert_eq!(row["task_duration_ms"], expected, "reverse={reverse}, tied={tied}");
             assert_eq!(row["task_runs"], 1);
@@ -2333,7 +2338,7 @@ mod snapshot_merge_tests {
         merged.merge_metadata(&make(9, Some(8), Status::Running));
         assert_eq!(merged.task_start, Some(base + chrono::Duration::minutes(8)));
         let row = merged.row(false, None, base + chrono::Duration::minutes(11),
-            &mut BTreeMap::new(), &mut BTreeMap::new(), false, false, false);
+            &mut BTreeMap::new(), &mut BTreeMap::new(), false, false, false, false);
         assert_eq!(row["status"], "completed");
         assert!(row["task_duration_ms"].is_null());
         assert!(row["task_runs"].is_null());
@@ -2366,7 +2371,7 @@ mod snapshot_merge_tests {
                         durations.push((reference - start).num_milliseconds().max(0));
                     }
                     let row = projection.row(false, None, reference, &mut BTreeMap::new(),
-                        &mut BTreeMap::new(), false, false, false);
+                        &mut BTreeMap::new(), false, false, false, false);
                     assert_eq!(row["task_runs"], json!((!durations.is_empty()).then_some(durations.len())));
                     assert_eq!(row["task_duration_ms"], json!((!durations.is_empty()).then(|| durations.iter().sum::<i64>())));
                 }
@@ -2518,7 +2523,7 @@ mod snapshot_merge_tests {
         merged.merge_snapshot(&first,None,&[None;4]);
         merged.merge_snapshot(&second,Some(&selected),&[None;4]);
         for enabled in [false,true] {
-            let row = merged.row(false,None,reference,&mut BTreeMap::new(),&mut BTreeMap::new(),enabled,false,false);
+            let row = merged.row(false,None,reference,&mut BTreeMap::new(),&mut BTreeMap::new(),enabled,false,false, false);
             assert_eq!(row["tool_events"].as_array().unwrap().len(),if enabled {100} else {0});
             let mut series = ActivitySeries::new(); series.observe(&merged,None);
             let (activity,tools) = series.finish();
@@ -2565,8 +2570,8 @@ mod snapshot_merge_tests {
             for enabled in [false, true] {
                 let (mut lt, mut ln, mut rt, mut rn) = Default::default();
                 assert_eq!(
-                    left.row(false, boundary, reference, &mut lt, &mut ln, enabled, enabled, enabled),
-                    right.row(false, boundary, reference, &mut rt, &mut rn, enabled, enabled, enabled));
+                    left.row(false, boundary, reference, &mut lt, &mut ln, enabled, enabled, enabled, false),
+                    right.row(false, boundary, reference, &mut rt, &mut rn, enabled, enabled, enabled, false));
                 assert_eq!(lt, rt);
                 assert_eq!(ln, rn);
             }
@@ -2710,6 +2715,58 @@ mod snapshot_merge_tests {
     }
 
     #[test]
+    fn ordered_tool_preview_keeps_first_hundred_ties_without_changing_counts() {
+        let mut tools = RowTools { presentation_order: true, ..Default::default() };
+        let mut fallback = RowTools::default();
+        let (mut fallback_totals, mut fallback_nested) = (BTreeMap::new(), BTreeMap::new());
+        let (mut totals, mut nested) = (BTreeMap::new(), BTreeMap::new());
+        for index in 0..140 {
+            let mut value = call("fixture", Some("2026-11-13T01:00:00Z"));
+            value.presentation_sequence = 139 - index;
+            tools.observe(&format!("call-{index:03}"), &value, true, &mut totals, &mut nested);
+            fallback.observe(&format!("call-{index:03}"), &value, true, &mut fallback_totals, &mut fallback_nested);
+            assert!(tools.preview.len() <= 100);
+        }
+        assert_eq!(tools.count, 140);
+        assert_eq!(totals["fixture"], 140);
+        assert_eq!(tools.preview.values().map(|event| event["call_id"].as_str().unwrap()).collect::<Vec<_>>(),
+            (40..140).rev().map(|index| format!("call-{index:03}")).collect::<Vec<_>>());
+        assert_eq!(fallback.preview.values().map(|event| event["call_id"].as_str().unwrap()).collect::<Vec<_>>(),
+            (0..100).map(|index| format!("call-{index:03}")).collect::<Vec<_>>());
+        assert_eq!(totals, fallback_totals);
+        let mut disabled = RowTools { presentation_order: true, ..Default::default() };
+        disabled.observe("hidden", &call("fixture", None), false, &mut totals, &mut nested);
+        assert!(disabled.preview.is_empty());
+        assert_eq!(disabled.count, 1);
+    }
+
+    #[test]
+    fn ordered_jev_preview_preserves_operation_indices_and_hundred_event_limit() {
+        let mut ordered = RowJev { presentation_order: true, ..Default::default() };
+        let mut fallback = RowJev::default();
+        for index in 0..140 {
+            let mut value = call("fixture", Some("2026-11-13T01:00:00Z"));
+            value.presentation_sequence = 139 - index;
+            value.jev = vec![JevOperation { operation: JevKind::Rank, nested: true },
+                JevOperation { operation: JevKind::Evaluate, nested: true }];
+            ordered.observe(Some("fixture"), &format!("call-{index:03}"), &value, true);
+            fallback.observe(Some("fixture"), &format!("call-{index:03}"), &value, true);
+            assert!(ordered.preview.len() <= 100);
+        }
+        let ids = |preview: &RowJev| preview.preview.values().map(|event|
+            (event["call_id"].as_str().unwrap().to_owned(), event["index"].as_u64().unwrap())).collect::<Vec<_>>();
+        assert_eq!(ids(&ordered), (90..140).rev().flat_map(|index|
+            [(format!("call-{index:03}"), 0), (format!("call-{index:03}"), 1)]).collect::<Vec<_>>());
+        assert_eq!(ids(&fallback), (0..50).flat_map(|index|
+            [(format!("call-{index:03}"), 0), (format!("call-{index:03}"), 1)]).collect::<Vec<_>>());
+        let mut disabled = RowJev { presentation_order: true, ..Default::default() };
+        let mut value = call("fixture", None);
+        value.jev.push(JevOperation { operation: JevKind::Rank, nested: false });
+        disabled.observe(Some("fixture"), "hidden", &value, false);
+        assert!(disabled.preview.is_empty());
+    }
+
+    #[test]
     fn snapshot_call_previews_match_sorted_winners_without_full_reference_array() {
         let time = timestamp(Some("2026-11-13T01:00:00Z")).unwrap();
         let mut projection = Projection::for_id(Some("fixture".into()));
@@ -2788,7 +2845,7 @@ mod snapshot_merge_tests {
                     assert_eq!(streamed_jev.preview.into_values().collect::<Vec<_>>(), expected_jev);
 
                     let (mut totals, mut nested_totals) = (BTreeMap::from([("seed".into(),7)]), BTreeMap::from([("seed".into(),11)]));
-                    let row = projection.row(false,boundary,time,&mut totals,&mut nested_totals,tools_enabled,false,jev_enabled);
+                    let row = projection.row(false,boundary,time,&mut totals,&mut nested_totals,tools_enabled,false,jev_enabled, false);
                     assert_eq!(row["tool_calls"],calls.len());
                     assert_eq!(row["tools"],json!(expected_counts));
                     assert_eq!(row["nested_tools"],json!(expected_nested));
@@ -2868,7 +2925,7 @@ mod snapshot_merge_tests {
 
             assert!(!serde_json::to_string(&actual).unwrap().contains("PRIVATE_BODY_MUST_NOT_RENDER"));
             for tools_enabled in [false, true] {
-                let row = projection.row(false, boundary, time, &mut BTreeMap::new(), &mut BTreeMap::new(), tools_enabled, false, false);
+                let row = projection.row(false, boundary, time, &mut BTreeMap::new(), &mut BTreeMap::new(), tools_enabled, false, false, false);
                 assert_eq!(row["agent_messages"], json!(legacy));
             }
         }
@@ -2979,7 +3036,7 @@ mod snapshot_merge_tests {
                     assert_eq!(actual, (legacy, total, operations));
                 }
                 for projection in threads.values() {
-                    let row = projection.row(false, boundary, time, &mut BTreeMap::new(), &mut BTreeMap::new(), true, enabled, true);
+                    let row = projection.row(false, boundary, time, &mut BTreeMap::new(), &mut BTreeMap::new(), true, enabled, true, false);
                     let legacy = projection.file_events(boundary, enabled);
                     let reads: Vec<_> = legacy.iter().filter(|event| event["operation"] == "read").take(200).cloned().collect();
                     let changes: Vec<_> = legacy.iter().filter(|event| event["operation"] != "read").take(200).cloned().collect();
@@ -3053,7 +3110,7 @@ mod snapshot_merge_tests {
                 for boundary in cutoffs {
                     for tools in [false, true] {
                         let row = |projection: &Projection| projection.row(false, boundary, reference,
-                            &mut BTreeMap::new(), &mut BTreeMap::new(), tools, false, false);
+                            &mut BTreeMap::new(), &mut BTreeMap::new(), tools, false, false, false);
                         assert_eq!(row(&actual), row(&expected));
                     }
                 }

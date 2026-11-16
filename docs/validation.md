@@ -353,3 +353,15 @@ Python checkpoint 的實際規則是 `event_time DESC, call_id`, 只有 timestam
 基底 b5c9601, LAM main 5c03daf / workspace main 4616074 已核對未變, Python 實際 save/load/append fixture 與 Rust 回歸先失敗後通過, 新增跨來源選取 / 重複覆蓋 / 序號不持久化檢查, snapshot merge 20 項、HTTP checkpoint 22 項及 HTTP error 20 項通過, 最終含還原後 append 的回歸另行通過, 本段未重跑全套
 
 提交前已完成本批全套單執行緒 `--locked --offline` 回歸: service binary 310 項全數通過 (109.93 秒), HTTP 205 項全數通過 (151.96 秒), Linux / Rust 1.100.0, 未變更 eviction / capacity, 保留其他預覽、overflow 與原生平台驗收缺口
+
+### 完整 working set 的工具事件預覽順序
+
+thread.tool_events 的同時事件改依既有呈現序號決勝, 時間倒序仍優先, fresh parse 同時項目保留首次插入位置, checkpoint 依原始載入順序, 不改欄位、查詢參數或來源讀取
+
+RowTools 仍只保留 100 筆預覽, 以有界排序鍵加入序號, 不建立全量 call 參照陣列, tools / nested_tools 與總次數不受預覽截取影響, 停用仍不產生預覽, incomplete / overflow 使用既有 call ID fallback, communication、file 等其他預覽尚未改動
+
+基底 2c1a88c, LAM main 5c03daf / workspace main 4616074 已核對未變, Python 實際 save/load 確認 fresh b,z,a 與 restore b,a,z, Rust 回歸先失敗後通過, snapshot merge 21 項、140 calls 的 100 筆上限 / fallback / 停用測試與 HTTP tool 15 項通過, 本段未重跑全套
+
+同批 JEV call preview 使用相同呈現順序開關, 保留時間優先與 call 內 operation index, 100 筆事件上限、停用與 fallback 不變, 不改 MCP 觀測或 command 解析, Python 實際 save/load 確認 fresh z,a / restore a,z, HTTP 回歸先失敗後通過, JEV HTTP 13 項及含 140 calls / 每 call 2 operations 的有界預覽測試通過
+
+本批最終完整單執行緒 `--locked --offline` 回歸通過: service binary 312 項 (99.07 秒), HTTP 206 項 (146.91 秒), Linux / Rust 1.100.0 合成資料, communication / file / 全域 overflow 順序與其他既有容量、平台待辦未宣稱完成
