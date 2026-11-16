@@ -6896,9 +6896,44 @@ fn stdin_control_pauses_resumes_and_stops_the_owned_service() {
             .unwrap();
         let paused: Value = serde_json::from_str(&receive.recv_timeout(TIMEOUT).unwrap()).unwrap();
         assert_eq!(paused["status"], "paused");
-        let mut final_chunk = String::new();
-        stream.0.read_line(&mut final_chunk).unwrap();
-        assert_eq!(final_chunk, "0\r\n");
+        // Pause closes the server, but already transmitted SSE chunks remain readable.
+        // Validate those frames and require terminal chunk + EOF within the same timeout.
+        let deadline = Instant::now() + TIMEOUT;
+        let mut closed_stream = false;
+        for _ in 0..64 {
+            assert!(Instant::now() < deadline, "paused stream did not close");
+            stream.0.get_mut().set_read_timeout(Some(deadline.saturating_duration_since(Instant::now()))).unwrap();
+            let mut line = String::new();
+            assert_ne!(stream.0.read_line(&mut line).unwrap(), 0);
+            assert!(line.ends_with("\r\n"));
+            let size = usize::from_str_radix(line.trim(), 16).unwrap();
+            assert!(size <= 1024 * 1024);
+            if size == 0 {
+                let mut ending = String::new();
+                stream.0.read_line(&mut ending).unwrap();
+                assert_eq!(ending, "\r\n");
+                let mut eof = [0u8; 1];
+                assert_eq!(stream.0.read(&mut eof).unwrap(), 0);
+                assert!(Instant::now() < deadline, "paused stream closed too late");
+                closed_stream = true;
+                break;
+            }
+            let mut bytes = vec![0; size];
+            stream.0.read_exact(&mut bytes).unwrap();
+            let mut suffix = [0; 2];
+            stream.0.read_exact(&mut suffix).unwrap();
+            assert_eq!(suffix, *b"\r\n");
+            let message = String::from_utf8(bytes).unwrap();
+            assert!(message.ends_with("\n\n"));
+            if message != ": heartbeat\n\n" {
+                let mut lines = message.lines();
+                let version = lines.next().unwrap().strip_prefix("id: ").unwrap().parse::<u64>().unwrap();
+                assert_eq!(lines.next().unwrap(), "event: snapshot");
+                let value: Value = serde_json::from_str(lines.next().unwrap().strip_prefix("data: ").unwrap()).unwrap();
+                assert_eq!(value["version"], version);
+            }
+        }
+        assert!(closed_stream, "paused stream exceeded bounded queued frames");
         drop(stream);
         let mut closed = [0u8; 1];
         assert_eq!(slow.read(&mut closed).unwrap(), 0);
@@ -8153,13 +8188,16 @@ fn stream_and_http_publish_matching_window_snapshots_and_session_logs() {
         loop {
             let frame = stream.snapshot();
             let http = service.get("/api/snapshot?window=1h").json();
+            // Separate endpoints are not version-pinned. Compare one captured matching set.
+            let logs = service.get("/api/logs?window=1h").json();
             let has_cancelled = frame["logs"]["entries"]
                 .as_array()
                 .is_some_and(|rows| rows.iter().any(|row| row["code"] == "cancelled"));
             if frame["snapshot"]["updated_at"] == http["updated_at"]
+                && frame["logs"] == logs
                 && (!require_cancelled || has_cancelled)
             {
-                return (frame, http);
+                return (frame, http, logs);
             }
             assert!(
                 Instant::now() < deadline,
@@ -8167,7 +8205,7 @@ fn stream_and_http_publish_matching_window_snapshots_and_session_logs() {
             );
         }
     };
-    let (first, mut first_http_snapshot) = matching(&mut stream, false);
+    let (first, mut first_http_snapshot, first_http_logs) = matching(&mut stream, false);
     assert_eq!(first["window"], "1h");
     let mut first_stream_snapshot = first["snapshot"].clone();
     for snapshot in [&mut first_stream_snapshot, &mut first_http_snapshot] {
@@ -8187,7 +8225,7 @@ fn stream_and_http_publish_matching_window_snapshots_and_session_logs() {
         }
     }
     assert_eq!(first_stream_snapshot, first_http_snapshot);
-    assert_eq!(first["logs"], service.get("/api/logs?window=1h").json());
+    assert_eq!(first["logs"], first_http_logs);
     let session_logs = |logs: &Value| {
         logs["entries"]
             .as_array()
@@ -8218,7 +8256,7 @@ fn stream_and_http_publish_matching_window_snapshots_and_session_logs() {
         .unwrap()
         .write_all(line.as_bytes())
         .unwrap();
-    let (after, mut after_http_snapshot) = matching(&mut stream, true);
+    let (after, mut after_http_snapshot, after_http_logs) = matching(&mut stream, true);
     assert!(after["version"].as_u64().unwrap() > first["version"].as_u64().unwrap());
     let mut after_stream_snapshot = after["snapshot"].clone();
     for snapshot in [&mut after_stream_snapshot, &mut after_http_snapshot] {
@@ -8238,7 +8276,7 @@ fn stream_and_http_publish_matching_window_snapshots_and_session_logs() {
         }
     }
     assert_eq!(after_stream_snapshot, after_http_snapshot);
-    assert_eq!(after["logs"], service.get("/api/logs?window=1h").json());
+    assert_eq!(after["logs"], after_http_logs);
     assert_eq!(session_logs(&after["logs"]).len(), 2);
     assert_eq!(
         after["snapshot"]["errors"]["events"],

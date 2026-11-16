@@ -737,3 +737,15 @@ JEV 欄位重用稽核: health 為生成的固定狀態字串, checked_at 為生
 完整 serial HTTP 單輪為 217 通過、2 失敗 (107.36 秒), overflow fixture 本輪通過但不代表舊問題解決, 新失敗分別為 stdin_control_pauses_resumes_and_stops_the_owned_service 預期 terminal chunk 0 卻讀到 7551, 以及 stream_and_http_publish_matching_window_snapshots_and_session_logs 的 checked_at 欄位不同, desktop 為 .031 / .054、session / JEV 為 .031 / .055, 畫面列出的 entries / counts 相同, 完整記錄保留, 尚未判定根因或改動 assertion
 
 本輪不列為完整 HTTP 接受, 不重試直到通過, 舊 WouldBlock、metadata POST 503、唯讀 GET settings 503、cleanup 警告、Unicode digit 與 numeric rendering 待辦均保留
+
+### SSE 暫停與跨請求 logs 比較的測試同步
+
+在 `6416cd5` 上使用單次合成來源 probe, 初始 SSE version 2 後只追加 newline, error entries 與 totals 完全相同, 後續 GET logs 的 desktop / session / JEV checked_at 由 .171 變成 .201, 整份 logs 不同, 接著在不讀取已排入 SSE 的資料時 pause, paused acknowledgment 後仍收到 version 3 的有效 snapshot chunk (31318 bytes), 再收到 terminal 0 與 EOF, 暫停時 child 仍存活, stdin 結束後正常退出且 stderr 為空
+
+此 controlled probe 證明既有測試假設可被合法交錯打破, 不宣稱重建歷史失敗的精確排程, API 的 logs 只支援 window 選取, 沒有 pinned version, SSE 在同一發布版本內組裝 snapshot / logs, 之後的 HTTP GET 則讀取當時最新快照, pause 釋放連接埠並關閉 stream, 不撤回已送入用戶端緩衝區的有效資料
+
+僅修正測試同步: pause 在原 5 秒期限內驗證最多 64 個 queued SSE chunk, 每個沿用 1 MiB 上限, 接受有效 snapshot / heartbeat 後仍要求 terminal 0 與 EOF, 保留 slow socket 關閉、監聽連接埠釋放、resume、同 PID 與 journal 驗證, logs 比較移入原 matching loop 並要求整份內容完全相同, 最後比較同次擷取的 response, 不刪除 checked_at 或放寬內容等價要求, runtime 未修改
+
+focused pause 1 項通過 (4.63 秒)、matching 1 項通過 (0.23 秒), 完整 serial HTTP 本輪 218 通過、1 失敗 (122.81 秒), 兩項同步測試通過, overflow metadata POST 於 5.003903529 秒收到 455 bytes / HTTP 503 / Settings temporarily unavailable, child 仍存活, 沒有重試直到通過, 未宣稱完整 HTTP 接受
+
+前次相同 runtime 的 service 342 項通過結果保留, 本輪只改測試而未重跑 service, 歷史兩項 SSE 失敗、controlled probe、metadata 503 / WouldBlock / 唯讀 GET 503 與其他既有待辦均保存, 不把成功同步測試視為所有 stream / shutdown 排程的證明
