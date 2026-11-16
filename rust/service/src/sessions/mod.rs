@@ -5325,10 +5325,11 @@ impl Collector {
             };
             if jev_available {
                 let data = &snapshot["jev"];
-                let fields: Vec<_> = data["summary"]
+                let mut fields: Vec<_> = data["summary"]
                     .as_object()
                     .map(|summary| summary.keys().cloned().collect())
                     .unwrap_or_default();
+                fields.sort();
                 let source = json!({"name":"jev telemetry","features":["mcp","errors","logs"],"scope":data["scope"],"locations":data["reader"]["locations"],"mode":"read_only","fields":fields,"limits":{"loaded_records":data["recent"].as_array().map_or(0,Vec::len),"series_points":data["series"].as_array().map_or(0,Vec::len),"record_limit":80,"series_limit":168},"readers":[],"health":data["health"],"window":data["window"],"checked_at":data["reader"]["checked_at"],"error_type":data["reader"]["error_type"],"display_window":WINDOWS[index],"watch_health":match self.jev_watch_health {Some(true)=>"ok",Some(false)=>"unavailable",None=>"starting"}});
                 snapshot["sources"]["telemetry:jev"] = source;
                 let data = &snapshot["jev"];

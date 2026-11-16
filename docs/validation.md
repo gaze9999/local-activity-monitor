@@ -471,3 +471,11 @@ Python 原始 sources 方法以合成依賴執行確認, 單元先失敗後通�
 兩項 retention 測試連續 20 輪通過, aggregate 測試另連續 20 輪通過, 修正後第二次完整 HTTP 又遇獨立的 `read_only_history_rejects_retention_update_without_changing_data` GET settings 503 / 200 差異, 單項原程式重跑通過 (0.59 秒), 該測試與產品程式碼未改, 原因尚未確認, 未歸類為相同競爭條件
 
 最後完整單執行緒 `--locked --offline` HTTP 216 項通過 (158.81 秒), 前兩次全套各為 215 通過 / 1 失敗, 分別保留 aggregate 與唯讀錯誤證據, service 321 項為前一批已驗證且 runtime 未變的結果, 本輪未重跑, Linux / Rust 1.100.0 合成資料, 基底 d290a24 已核對遠端一致
+
+### Source registry 的欄位排序與 account reader 順序
+
+對照 Python `Dashboard.sources`, Jev telemetry source 的 fields 應為 summary key 排序後的清單, Rust 原先保留 summary 插入順序, HTTP 已先重現差異, 現在只排序既有欄位名稱向量, 不更動 summary、資料庫查詢、請求數、事件順序或保存集合
+
+另核對 account reader 應保留 protocol 宣告順序, 現有 serde_json preserve_order 相依功能已符合, 僅補單元與 fake CLI HTTP 回歸, 未新增真實帳號查詢, Python 以合成依賴執行原始 sources 方法確認兩種順序規則
+
+完整單執行緒 `--locked --offline` service binary 322 項 (107.72 秒)、HTTP 216 項 (162.27 秒) 通過, Linux / Rust 1.100.0 合成資料, 基底 c2a57b0 與遠端一致, LAM main 5c03daf / WBUIWS main 4616074 未變, 先前唯讀 settings GET 503 仍屬未明原因, 本次通過不代表已修復, 其他容量、overflow、保留策略與平台驗收待辦不變

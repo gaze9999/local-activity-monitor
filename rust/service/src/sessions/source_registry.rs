@@ -145,6 +145,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn account_readers_follow_protocol_declaration_order() {
+        let mut snapshot = json!({"codex":{"health":"ok","account":super::super::account::empty("disabled")}});
+        augment(&mut snapshot, Path::new("/fixture"), &json!({}), &json!({}), &[], &json!({}), &json!({}));
+        let names: Vec<_> = snapshot["sources"]["account_api"]["readers"].as_array().unwrap()
+            .iter().map(|reader| reader["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["account/read", "account/rateLimits/read", "account/usage/read"]);
+    }
+
+    #[test]
     fn checkpoint_readers_preserve_reported_times_and_integer_limits() {
         let mut snapshot = json!({"codex":{"health":"ok","read_state":{
             "count":3,"complete":true,"fraction":1.5,"checkpoint":{

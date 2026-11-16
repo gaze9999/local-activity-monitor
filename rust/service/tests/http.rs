@@ -3422,6 +3422,10 @@ done
         75
     );
     assert_eq!(snapshot["sources"]["account_api"]["health"], "ok");
+    assert_eq!(snapshot["sources"]["account_api"]["readers"], json!([
+        {"name":"account/read","health":"ok"},
+        {"name":"account/rateLimits/read","health":"ok"},
+        {"name":"account/usage/read","health":"ok"}]));
     assert!(!snapshot.to_string().contains("PRIVATE_EMAIL"));
     assert_eq!(service.get("/api/codex/account").json()["health"], "ok");
     assert_eq!(
@@ -4753,6 +4757,9 @@ fn jev_telemetry_snapshot_reads_configured_database_by_window() {
     assert_eq!(all["availability"]["jev"], true);
     assert_eq!(all["mcp"]["telemetry"]["jev"]["summary"]["calls"], 1);
     assert_eq!(all["sources"]["telemetry:jev"]["health"], "ok");
+    let mut fields: Vec<_> = all["mcp"]["telemetry"]["jev"]["summary"].as_object().unwrap().keys().cloned().collect();
+    fields.sort();
+    assert_eq!(all["sources"]["telemetry:jev"]["fields"], json!(fields));
     assert_eq!(
         all["sources"]["telemetry:jev"]["checked_at"],
         all["jev"]["reader"]["checked_at"]
