@@ -412,6 +412,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn snapshot_field_precedence_preserves_invalid_and_missing_values() {
+        let id = "00000000-0000-4000-8000-000000000001";
+        let cases = [
+            (json!({}), Some(json!("1970-01-01T00:00:02.000Z"))),
+            (json!({"threadId":null}), None),
+            (json!({"threadId":"bad"}), None),
+            (
+                json!({"updatedAtMs":"bad","timestampMs":1000}),
+                Some(json!("1970-01-01T00:00:02.000Z")),
+            ),
+            (
+                json!({"updatedAtMs":null,"timestampMs":1000}),
+                Some(json!("1970-01-01T00:00:02.000Z")),
+            ),
+            (
+                json!({"timestampMs":1000}),
+                Some(json!("1970-01-01T00:00:01.000Z")),
+            ),
+            (
+                json!({"updatedAtMs":0}),
+                Some(json!("1970-01-01T00:00:00.000Z")),
+            ),
+            (json!({"updatedAtMs":1e300}), Some(Value::Null)),
+            (
+                json!({"updatedAtMs":true}),
+                Some(json!("1970-01-01T00:00:02.000Z")),
+            ),
+            (json!({"hostId":"https://private.invalid"}), None),
+        ];
+        for (patch, expected) in cases {
+            let mut row = json!({"conversationId":id,"hostId":"local","updatedAt":2,"private":"PRIVATE_MARKER"});
+            row.as_object_mut()
+                .unwrap()
+                .extend(patch.as_object().unwrap().clone());
+            let state = json!({"electron-persisted-atom-state":{"orbit-activity-snapshots-v1":[{"data":[row]}]}});
+            let value = project(
+                &state,
+                "all",
+                DateTime::from_timestamp(3, 0).unwrap(),
+                Map::new(),
+            );
+            assert_eq!(value["activity_items"], 1);
+            if let Some(timestamp) = expected {
+                assert_eq!(
+                    value["activity"],
+                    json!([{"thread_id":id,"host_id":"local","timestamp":timestamp,"activity_type":"dot","environment":"local"}]),
+                    "{patch}"
+                );
+                assert_eq!(
+                    value["computers"],
+                    json!([{"host_id":"local","last_activity_at":timestamp,"thread_count":0,"connection_status":"unknown"}]),
+                    "{patch}"
+                );
+            } else {
+                assert_eq!(value["activity"], json!([]), "{patch}");
+                assert_eq!(value["computers"], json!([]), "{patch}");
+            }
+            assert!(!value.to_string().contains("PRIVATE_MARKER"));
+        }
+    }
+
+    #[test]
     fn invalid_atom_does_not_claim_an_empty_computer_catalog() {
         let now = DateTime::from_timestamp(0, 0).unwrap();
         for atom in [

@@ -26,7 +26,7 @@ pub fn valid_cursor(value: &str) -> bool {
     CURSOR.is_match(value)
 }
 fn text(value: &Value, limit: usize) -> Option<String> {
-    let value = value.as_str()?.trim();
+    let value = super::schedules::trim_text(value.as_str()?);
     (!value.is_empty()).then(|| value.chars().take(limit).collect())
 }
 fn timestamp(value: &Value) -> Option<String> {
@@ -236,6 +236,29 @@ mod tests {
             "cloud list --json --limit 20 -c analytics.enabled=false --cursor abc+/="
         );
     }
+    #[test]
+    fn projection_trims_python_whitespace_before_character_limits() {
+        for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}', '\u{2003}'] {
+            let title = format!("{separator}{}{separator}", "標".repeat(513));
+            let environment = format!("{separator}{}{separator}", "境".repeat(161));
+            let value = project(&json!({"tasks":[{"id":"task","title":title,"environment_label":environment,"summary":"PRIVATE_BODY"}]})).unwrap();
+            assert_eq!(value["items"][0]["title"], "標".repeat(512));
+            assert_eq!(value["items"][0]["environment_label"], "境".repeat(160));
+            assert!(!value.to_string().contains("PRIVATE_BODY"));
+            let empty = separator.to_string().repeat(3);
+            let value =
+                project(&json!({"tasks":[{"id":"task","title":empty,"environment_label":empty}]}))
+                    .unwrap();
+            assert!(value["items"][0]["title"].is_null());
+            assert!(value["items"][0]["environment_label"].is_null());
+        }
+        assert_eq!(text(&json!("a\u{1c}b"), 512).as_deref(), Some("a\u{1c}b"));
+        assert_eq!(
+            text(&json!("\u{200b}name\u{200b}"), 512).as_deref(),
+            Some("\u{200b}name\u{200b}")
+        );
+    }
+
     #[test]
     fn projection_validates_and_minimizes() {
         let v=project(&json!({"tasks":[{"id":"task_1","title":" test ","status":"done","updated_at":"2026-10-02T03:04:05Z","attempt_total":0,"secret":"private"}],"cursor":"a+/="})).unwrap();

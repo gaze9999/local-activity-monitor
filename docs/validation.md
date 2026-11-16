@@ -605,3 +605,19 @@ OverflowWorkdirScan 的 staging HashMap、winner、cursor、budget 與保存策�
 32 筆同時間 catalog 的原始 Python fixture 驗證 metadata / remote schedules / Dots hosts 順序與重複值優先序, 新 Rust 回歸修正前實際失敗, 修正後通過, 另驗證 state reader 與 index 最新 title / 首次位置, 新 HTTP 回歸驗證 metadata-only thread 順序與只有資料列排列改變時的重新發布, Dots computers 與 schedules 值保持不變
 
 Rust schedules 單元 12 項通過, 新 HTTP 回歸通過, 原始 Python schedules 5、subagent sources 2、desktop activity 8 項通過, 完整 service 332 項通過 (103.62 秒), 完整 serial HTTP 單輪 219 項通過 (153.39 秒), 原始失敗與 cleanup 警告仍保留, 本輪一併保留前述固定資產復原驗證
+
+### Dots snapshot 欄位優先序與無效值界線
+
+基底 `4ce131d` 與來源 LAM main `5c03daf`、workspace main `4616074` 重新核對未變, 原始 Python desktop_activity 的 primary key 存在但為 null / 無效值時不等於欄位缺少, threadId 存在時不退回 conversationId, 非數值 updatedAtMs 退回 updatedAt 而非 timestampMs, 數值超出日期範圍則維持 null, 不採用另一個有效時間
+
+新增 10 組 source-backed Rust fixture, 涵蓋缺少、null、無效字串、布林值、0、超出日期範圍、無效 host 與私有欄位排除, 同時驗證公開 activity / computers 投影與 activity_items 原始計數, 原始 Python 10 組實際輸出一致, 確認既有實作已符合, 本輪只有測試與文件變更, 未改 runtime、查詢、schema、容量或保存策略
+
+Rust Dots 單元 7 項通過, Dots HTTP 5 項通過, Python desktop_activity 8 項通過, 本輪未重跑完整 service / HTTP, 前一版 332 / 219 通過仍僅代表前一版檢查, overflow 順序排除與歷史獨立失敗、cleanup 警告不變
+
+### Cloud metadata 的 Python 空白修整
+
+原始 codex_cloud 投影沿用 codex_metadata.text, Python strip 也移除 U+001C 到 U+001F, Rust 原先 trim 未移除, 使純分隔字元顯示為非空標題, 並占用多字元標題的前段長度
+
+Cloud text 改用既有 schedules::trim_text, 只影響 /api/codex/cloud 與共用快取投影的 title / environment_label, 仍先修整再依 Unicode 字元取 512 / 160 個, 字串中間的分隔字元與非空白 U+200B 保留, 來源欄位、CLI 命令、授權、快取、查詢次數、schema 與資料保存未改
+
+新增回歸在修正前實際失敗, 原始 Python 驗證 5 種邊界空白、純空白、Unicode 長度與不應修整的內容, Rust Cloud 9 項、Cloud HTTP 3 項、Python Cloud 7 項通過, 合併前述 Dots regression 後完整 service 334 項通過 (114.49 秒), 完整 serial HTTP 單輪 219 項通過 (142.33 秒), 以上僅使用 synthetic fixtures, 未呼叫使用者已登入 CLI, 歷史獨立失敗與 overflow 排除範圍仍保留
