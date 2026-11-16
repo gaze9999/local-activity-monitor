@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use chrono::{DateTime, Datelike, Duration, SecondsFormat, Utc};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
@@ -38,6 +38,7 @@ fn date(seconds: Option<f64>) -> Value {
         return Value::Null;
     };
     DateTime::<Utc>::from_timestamp_millis(millis as i64)
+        .filter(|date| (1..=9999).contains(&date.year()))
         .map(|date| json!(date.to_rfc3339_opts(SecondsFormat::Millis, true)))
         .unwrap_or(Value::Null)
 }
@@ -393,6 +394,15 @@ fn project(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_dates_match_python_calendar_bounds() {
+        assert_eq!(date(Some(-62135596800.0)), "0001-01-01T00:00:00.000Z");
+        assert_eq!(date(Some(253402300799.0)), "9999-12-31T23:59:59.000Z");
+        for seconds in [-62135596801.0, 253402300800.0] {
+            assert!(date(Some(seconds)).is_null());
+        }
+    }
 
     #[test]
     fn remote_summary_activity_keeps_first_thread_encounter_order() {

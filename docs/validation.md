@@ -543,3 +543,13 @@ Linux / Rust 1.100.0 合成資料, 基底 d224a83 與遠端一致, LAM main 5c03
 rustfmt check 仍回報既有 dots.rs 格式, 比對 HEAD 與目前檔案的格式修正內容完全相同, 新增呼叫已符合格式, 未為此重排既有程式碼, diff whitespace 檢查通過
 
 本輪通過不代表先前 HTTP 217 / 1、overflow WouldBlock 與唯讀 503 的根因已解決, 原始記錄全部保留, 不變更保存、容量、timeout 或斷言, 此處驗證不等同遠端交付
+
+### Dots 日期的原始 Python 日曆範圍
+
+基底 `b2657d9` 已與遠端一致, LAM main `5c03daf` 與 workspace main `4616074` 未變, 原始 `codex_metadata.date` 透過 datetime 限制年份為 1 到 9999, Rust chrono 原先接受第 0 年或 10000 年而輸出不同日期字串
+
+Dots 日期投影增加相同年份範圍檢查, 超出範圍保留 null, 不改數值型別檢查、毫秒轉換、來源讀取、排序、容量或保存策略, 原始 Python 合成 fixture 驗證兩側有效邊界、超界 null 與投影排序, 新 Rust 回歸在修正前實際失敗, 修正後 Dots 單元 4 項與 HTTP 5 項通過, 既有 Python desktop activity 8 項通過
+
+所有先前獨立失敗與未完成驗收仍保留, 此次修正不處理 metadata-only 上游順序、overflow、SQLite 保存或唯讀 503
+
+完整 service 327 項通過 (112.61 秒), 完整 serial HTTP 單輪 218 項通過 (154.30 秒), 兩者使用 Rust 1.100.0 與既有 lockfile 的 offline 執行, 原始失敗仍不據此宣稱已找到根因
