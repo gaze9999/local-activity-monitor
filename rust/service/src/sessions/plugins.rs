@@ -148,7 +148,10 @@ fn read(home: &Path, path: &Path, budget: &mut Budget) -> (Option<Value>, &'stat
     if bytes.len() > MANIFEST || bytes.len() == remaining {
         return (None, "truncated");
     }
-    match serde_json::from_slice::<Value>(&bytes) {
+    // Python json.loads(bytes) accepts one leading UTF-8 BOM. Keep raw byte
+    // accounting and both budgets above unchanged; other encodings stay unsupported.
+    let payload = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes);
+    match serde_json::from_slice::<Value>(payload) {
         Ok(value) if value.is_object() => (Some(value), "available"),
         _ => (None, "unavailable"),
     }
@@ -473,6 +476,80 @@ pub(super) fn scan(home: &Path) -> (Value, Value, Vec<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn plugin_json_accepts_only_one_leading_utf8_bom() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("plugin.json");
+        for (raw, expected) in [
+            (b"\xef\xbb\xbf{\"name\":\"fixture\"}".as_slice(), Some(json!({"name":"fixture"}))),
+            (b"\xef\xbb\xbf", None),
+            (b"\xef\xbb\xbf\xef\xbb\xbf{}", None),
+            (b" \xef\xbb\xbf{}", None),
+            (b"{\"name\":\"\xef\xbb\xbf\"}", Some(json!({"name":"\u{feff}"}))),
+            (b"\xef\xbb\xbf{\"name\":\"\xff\"}", None),
+            (b"\xef\xbb\xbf[]", None),
+            (b"\xef\xbb\xbf{", None),
+        ] {
+            fs::write(&path, raw).unwrap();
+            let mut budget = Budget::default();
+            let (value, status) = read(home.path(), &path, &mut budget);
+            assert_eq!(status, if expected.is_some() { "available" } else { "unavailable" });
+            assert_eq!(value, expected);
+            assert_eq!(budget.bytes, raw.len());
+            assert_eq!(fs::read(&path).unwrap(), raw);
+        }
+    }
+
+    #[test]
+    fn plugin_json_bom_counts_toward_unchanged_byte_budgets() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("plugin.json");
+        for (size, expected) in [(MANIFEST, "available"), (MANIFEST + 1, "truncated")] {
+            let mut raw = b"\xef\xbb\xbf{}".to_vec();
+            raw.resize(size, b' ');
+            fs::write(&path, &raw).unwrap();
+            let mut budget = Budget::default();
+            assert_eq!(read(home.path(), &path, &mut budget).1, expected);
+            assert_eq!(budget.bytes, size);
+            assert_eq!(fs::read(&path).unwrap(), raw);
+        }
+        let raw = b"\xef\xbb\xbf{}";
+        fs::write(&path, raw).unwrap();
+        for (remaining, expected) in [(raw.len(), "truncated"), (raw.len() + 1, "available")] {
+            let before = BYTES - remaining;
+            let mut budget = Budget { bytes: before, ..Budget::default() };
+            assert_eq!(read(home.path(), &path, &mut budget).1, expected);
+            assert_eq!(budget.bytes, before + raw.len());
+            assert_eq!(fs::read(&path).unwrap(), raw);
+        }
+    }
+
+    #[test]
+    fn plugin_json_bom_manifest_and_mcp_keep_metadata_whitelist() {
+        for relative in ["plugin.json", ".codex-plugin/plugin.json"] {
+            let home = tempfile::tempdir().unwrap();
+            let directory = home.path().join("plugins/cache/provider/fixture/1.0.0");
+            let manifest = directory.join(relative);
+            fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+            let raw = b"\xef\xbb\xbf{\"version\":\"2.0.0\",\"description\":\"fixture\",\"mcpServers\":\".mcp.json\",\"unknown\":\"PRIVATE\"}";
+            let mcp = b"\xef\xbb\xbf{\"mcpServers\":{\"demo\":{\"command\":\"PRIVATE\"}}}";
+            fs::write(&manifest, raw).unwrap();
+            fs::write(directory.join(".mcp.json"), mcp).unwrap();
+            let (value, report, _) = scan(home.path());
+            let item = &value["items"][0];
+            assert_eq!(item["metadata_status"], "available");
+            assert_eq!(item["manifest_source"], relative);
+            assert_eq!(item["version"], "2.0.0");
+            assert_eq!(item["description"], "fixture");
+            assert_eq!(item["mcp_status"], "available");
+            assert_eq!(item["mcp_servers"], json!(["demo"]));
+            assert!(!value.to_string().contains("PRIVATE"));
+            assert_eq!(report["bytes_read"], raw.len() + mcp.len());
+            assert_eq!(fs::read(&manifest).unwrap(), raw);
+            assert_eq!(fs::read(directory.join(".mcp.json")).unwrap(), mcp);
+        }
+    }
+
     #[test]
     fn configuration_matches_python_line_boundaries_and_section_resets() {
         let home = tempfile::tempdir().unwrap();

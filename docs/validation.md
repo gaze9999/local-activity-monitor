@@ -799,3 +799,11 @@ focused heartbeat 1 項通過 (30.19 秒), 完整 serial HTTP 單輪 219 項通�
 僅在 YAML pair 的非浮點數 key 分支將精確 `-0` 正規化為 `0`, 引號中的 `'-0'` 仍為獨立字串 key, `-0.0` / `-0e0` 保持浮點負零 key, 大整數名稱與原始 numeric scalar 不變, 不改寫數字序列化、分頁 offset / hash 演算法、相依套件或容量界線, 非字串頁面的完整數字呈現差異仍待設計
 
 新增直接 parser / parse_document / 自動辨識回歸, 涵蓋頂層與 sequence mapping 的重複鍵拒絕、quoted / floating / large integer 保留及 scalar 值不變, 原始 Python 8 組 fixture 通過, 新 Rust 回歸修正前失敗記錄保留, 修正後 structured 全家族 14 項通過 (1.01 秒), 完整 service 346 項通過 (133.49 秒), 完整 serial HTTP 單輪 219 項通過 (134.67 秒), 歷史 503 / WouldBlock 與 Unicode 差異仍未宣告解決
+
+### Plugin JSON 的前置 UTF-8 BOM
+
+原始 Python `_json_metadata` 以 json.loads 解析 bytes, 接受一個位於最前方的 UTF-8 BOM, Rust 原先直接交給 serde_json 而回報 unavailable, 本輪僅在既有 byte-budget 檢查後移除一個精確 BOM 再解析, 適用 `.codex-plugin/plugin.json`、fallback `plugin.json` 與明確設定的 `.mcp.json`, 不更動 config.toml、全域 JSON parser、來源路徑或 metadata 白名單
+
+BOM 本身仍計入 bytes_read、單一 manifest 65536 bytes 與總計 2 MiB 上限, BOM-only、double BOM、非前置 BOM、無效 UTF-8、非 object 與 malformed JSON 仍拒絕, JSON 字串內的 U+FEFF 保留, 證據包含 source bytes 未改寫、兩種 manifest 路徑及 MCP runtime arguments 不外露
+
+Python 14 組 bytes / budget fixture 通過, 其中 UTF-16 / UTF-32 為 Python 可讀、Rust 本輪仍未支援的獨立編碼差異, 不宣稱完整 bytes decoding 等價, 新 Rust 3 項回歸修正前均失敗, 修正後 Plugin 全家族 11 項通過 (0.02 秒), Python 既有 Plugin 10 項通過, 完整 service 349 項通過 (120.31 秒), 完整 serial HTTP 單輪 219 項通過 (128.00 秒), 歷史 503、數字呈現與 Unicode 限制繼續保留
