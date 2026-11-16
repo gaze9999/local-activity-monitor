@@ -224,3 +224,17 @@ Web 歷史依 Python activity_history 規格只保存引用與允許的狀態, �
 工具結束碼記錄同樣接受 Python 的四種尾端控制空白, 避免漏報非零結束碼, 仍排除 0 與未結束的記錄文字, 不保存工具本文
 
 Python tool_error 合成案例與 Rust 先失敗後通過回歸確認正數、負 Unicode 數字及零值, 最終 history-store 完整套件 53 項通過, 工具錯誤 HTTP 快照、歷史與重啟回歸通過, 既有數值、字元讀取上限與欄位白名單不變
+
+### Metadata 文字缺值與回退
+
+排程與背景 metadata 的文字修剪對齊 Python, U+001C–U+001F 也視為頭尾空白, 避免只有控制空白的 catalog 標題阻止 state / session index 的有效名稱回退, 同時維持 project_scope 的空值語意
+
+隔離 SQLite、session index 與 Desktop 快取 fixture 直接比對 Python read_metadata、read_schedules、desktop_activity, 核對標題、model、project ID、排程及遠端名稱, Rust 回歸先失敗後通過, schedules 模組 11 項測試及 HTTP 索引更新回歸通過
+
+字元截斷、來源優先順序、選取對象、查詢次數與讀取界線不變, 未查詢實際帳號或使用者來源, 本段基底為 7761ea1, 原有大型快照與排序待辦不受影響
+
+同批將相同文字規則套用到專案 metadata, 修正頭尾控制空白造成的 project ID 對應失敗, 保留資料庫名稱優先與空 legacy 名稱回退, 專案根目錄仍只在已觀測專案的按需 detail 回傳
+
+Python 專案來源 fixture、Rust 先失敗後通過回歸、projects 模組 7 項測試與 HTTP 專案快照 / detail 回歸通過, 覆蓋 canonical mapping、名稱與路徑修剪、來源優先、metadata 停用及未知專案 / 任意路徑拒絕, 未增加查詢或改變來源範圍
+
+此 metadata 段落另執行完整 service 單執行緒回歸, `cargo test --locked --offline --manifest-path rust/service/Cargo.toml --bin local-activity-monitor -- --test-threads=1` 的 295 項與 `--test http -- --test-threads=1` 的 203 項全部通過, 這是 Linux 單執行緒測試證據, 不取代前次並行波動的穩定性驗證或原生平台驗收

@@ -39,6 +39,12 @@ pub(super) fn string(value: ValueRef<'_>) -> Option<&str> {
     }
 }
 
+pub(super) fn trim_text(value: &str) -> &str {
+    value.trim_matches(|character: char| {
+        character.is_whitespace() || matches!(character, '\u{1c}'..='\u{1f}')
+    })
+}
+
 fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 160
@@ -180,7 +186,7 @@ fn catalog_entries(home: &Path) -> (HashMap<String, Value>, Value) {
                 .get_ref(2)
                 .ok()
                 .and_then(string)
-                .map(str::trim)
+                .map(trim_text)
                 .filter(|s| !s.is_empty())
                 .map(|s| s.chars().take(512).collect::<String>());
             let kind = row
@@ -221,7 +227,7 @@ fn catalog_entries(home: &Path) -> (HashMap<String, Value>, Value) {
                 .get_ref(8)
                 .ok()
                 .and_then(string)
-                .map(str::trim)
+                .map(trim_text)
                 .filter(|s| !s.is_empty())
                 .map(|s| s.chars().take(160).collect::<String>());
             let model = row
@@ -575,8 +581,8 @@ fn merge_state_database(
                             if let Ok(value) = std::str::from_utf8(bytes) {
                                 if *key == "model" {
                                     if let Some(model) =
-                                        value.trim().chars().next().map(|_| {
-                                            value.trim().chars().take(160).collect::<String>()
+                                        trim_text(value).chars().next().map(|_| {
+                                            trim_text(value).chars().take(160).collect::<String>()
                                         })
                                     {
                                         values.insert((*key).into(), json!(model));
@@ -644,7 +650,7 @@ fn merge_state_database(
                         .get_ref(1)
                         .ok()
                         .and_then(string)
-                        .map(str::trim)
+                        .map(trim_text)
                         .filter(|s| !s.is_empty())
                     {
                         entry["name"] = json!(name.chars().take(512).collect::<String>());
@@ -815,7 +821,7 @@ pub(crate) fn merge_remote_state(home: &Path, entries: &mut HashMap<String, Valu
             let name = row
                 .get("title")
                 .and_then(Value::as_str)
-                .map(str::trim)
+                .map(trim_text)
                 .filter(|title| !title.is_empty())
                 .map(|title| title.chars().take(512).collect::<String>());
             let entry = entries
@@ -911,7 +917,7 @@ fn merge_session_index(
         let Some(title) = value
             .get("thread_name")
             .and_then(Value::as_str)
-            .map(str::trim)
+            .map(trim_text)
             .filter(|title| !title.is_empty())
         else {
             continue;
@@ -1030,7 +1036,7 @@ fn read_database(
                     item.insert(
                         "name".into(),
                         string(value)
-                            .map(str::trim)
+                            .map(trim_text)
                             .filter(|s| !s.is_empty())
                             .map(|s| Value::String(s.chars().take(256).collect()))
                             .unwrap_or(Value::Null),
@@ -1242,6 +1248,42 @@ mod tests {
                 && query["rows_read"] == 0));
     }
     use super::*;
+
+    #[test]
+    fn metadata_control_whitespace_preserves_missing_title_fallbacks() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join("sqlite")).unwrap();
+        let first = "00000000-0000-4000-8000-000000000001";
+        let second = "00000000-0000-4000-8000-000000000002";
+        let space = "\u{1c}\u{1d}\u{1e}\u{1f}";
+        let catalog = Connection::open(home.path().join("sqlite/codex-dev.db")).unwrap();
+        catalog.execute_batch("CREATE TABLE local_thread_catalog(host_id TEXT,thread_id TEXT,display_title TEXT,source_created_at INTEGER,source_updated_at INTEGER,source_kind TEXT,thread_source TEXT,project_id TEXT); CREATE TABLE automations(id TEXT,status TEXT,name TEXT);").unwrap();
+        for id in [first, second] {
+            catalog.execute("INSERT INTO local_thread_catalog VALUES('local',?1,?2,1,2,'cli','user',?2)", rusqlite::params![id, space]).unwrap();
+        }
+        catalog.execute("INSERT INTO automations VALUES('schedule','ACTIVE',?1)", [format!("{space}排程{space}")]).unwrap();
+        let state = Connection::open(home.path().join("state_1.sqlite")).unwrap();
+        state.execute_batch("CREATE TABLE threads(id TEXT,title TEXT,model TEXT,updated_at INTEGER)").unwrap();
+        state.execute("INSERT INTO threads VALUES(?1,?2,?3,3)", rusqlite::params![first, format!("{space}標題{space}"), format!("{space}model{space}")]).unwrap();
+        let index = [json!({"id":second,"thread_name":format!("{space}索引{space}")}), json!({"id":second,"thread_name":space})]
+            .into_iter().map(|row| format!("{row}\n")).collect::<String>();
+        std::fs::write(home.path().join("session_index.jsonl"), index).unwrap();
+        let (mut entries, _) = background_metadata(home.path(), &BTreeSet::from([first.into(),second.into()]), false, false);
+        assert_eq!(entries[first]["name"], "標題");
+        assert_eq!(entries[first]["model"], "model");
+        assert_eq!(entries[second]["name"], "索引");
+        for id in [first, second] {
+            assert!(entries[id]["project_id"].is_null());
+            assert_eq!(entries[id]["project_scope"], "none");
+        }
+        let (schedules, _) = read(home.path(), DateTime::from_timestamp(0, 0).unwrap(), &entries);
+        assert_eq!(schedules["items"][0]["name"], "排程");
+        std::fs::write(home.path().join(".codex-global-state.json"), json!({"electron-persisted-atom-state":{
+            "remote-thread-summaries-v3:remote-control:fixture":[{"conversationId":first,"updatedAt":4,"title":format!("{space}遠端{space}")}]
+        }}).to_string()).unwrap();
+        merge_remote_state(home.path(), &mut entries);
+        assert_eq!(entries[first]["name"], "遠端");
+    }
 
     #[test]
     fn session_index_supplies_only_observed_missing_titles() {

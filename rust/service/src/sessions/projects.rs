@@ -1,4 +1,4 @@
-use super::schedules::{columns, seconds_timestamp, state_files, string};
+use super::schedules::{columns, seconds_timestamp, state_files, string, trim_text};
 use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -47,7 +47,7 @@ pub(super) fn preserve_roots(
 
 fn text(value: Option<&str>, limit: usize) -> Option<String> {
     value
-        .map(str::trim)
+        .map(trim_text)
         .filter(|s| !s.is_empty())
         .map(|s| s.chars().take(limit).collect())
 }
@@ -800,6 +800,32 @@ mod tests {
         assert_eq!(reports[0]["loaded_projects"], 1);
     }
     use super::*;
+
+    #[test]
+    fn project_text_control_whitespace_preserves_membership_and_root_projection() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Connection::open(home.path().join("state_1.sqlite")).unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        let space = "\u{1c}\u{1d}\u{1e}\u{1f}";
+        db.execute_batch("CREATE TABLE threads(id TEXT,title TEXT,project_id TEXT); CREATE TABLE projects(id TEXT,name TEXT); CREATE TABLE project_roots(project_id TEXT,path TEXT);").unwrap();
+        db.execute("INSERT INTO threads VALUES(?1,'Thread',?2)", rusqlite::params![id, format!("{space}p{space}")]).unwrap();
+        db.execute("INSERT INTO projects VALUES('p',?1)", [format!("{space}專案{space}")]).unwrap();
+        db.execute("INSERT INTO project_roots VALUES('p',?1)", [format!("{space}/fixture/root{space}")]).unwrap();
+        std::fs::write(home.path().join(".codex-global-state.json"), json!({
+            "local-projects":{"p":{"name":space,"rootPaths":[space]}}
+        }).to_string()).unwrap();
+        let mut entries = HashMap::from([(id.to_owned(),json!({"thread_id":id,"name":"Thread"}))]);
+        let (projects, status) = read(home.path(), &mut entries, true, &mut Vec::new());
+        assert!(status.complete);
+        assert_eq!(entries[id]["project_id"], "p");
+        assert_eq!(entries[id]["project_name"], "專案");
+        assert_eq!(entries[id]["project_scope"], "project");
+        assert_eq!(projects["p"]["name"], "專案");
+        assert_eq!(projects["p"]["_folders"], json!(["/fixture/root"]));
+        assert_eq!(detail_folders(home.path(), "p", &[]).0, vec!["/fixture/root"]);
+        let (without_roots, _) = read(home.path(), &mut entries, false, &mut Vec::new());
+        assert!(without_roots["p"].get("_folders").is_none_or(|value| value.as_array().is_some_and(Vec::is_empty)));
+    }
 
     #[test]
     fn batched_roots_match_detail_priority_and_observation_switch() {

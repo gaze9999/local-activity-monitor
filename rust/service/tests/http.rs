@@ -5906,7 +5906,9 @@ fn project_snapshot_merges_authoritative_names_and_hides_project_paths() {
     catalog.execute_batch("CREATE TABLE automations(id TEXT,status TEXT); CREATE TABLE local_thread_catalog(host_id TEXT,thread_id TEXT,display_title TEXT,source_created_at INTEGER,source_updated_at INTEGER,source_kind TEXT,thread_source TEXT,project_id TEXT); INSERT INTO local_thread_catalog VALUES('local','00000000-0000-4000-8000-000000000001','Fixture',0,1700000000,'cli','user','legacy');").unwrap();
     let state = rusqlite::Connection::open(home.path().join("state_5.sqlite")).unwrap();
     state.execute_batch("CREATE TABLE threads(id TEXT,title TEXT,project_id TEXT); INSERT INTO threads VALUES('00000000-0000-4000-8000-000000000001','Fixture','legacy'); CREATE TABLE projects(id TEXT,name TEXT,updated_at_ms INTEGER); INSERT INTO projects VALUES('canonical','Database name',1700000000000); CREATE TABLE project_roots(project_id TEXT,path TEXT); INSERT INTO project_roots VALUES('canonical','/fixture/owned-root');").unwrap();
-    let global = json!({"local-projects":{"legacy":{"name":"Old name","rootPaths":["PRIVATE_PATH"]}},"app-server-project-id-by-legacy-project-id-by-host":{"local":{"legacy":"canonical"}},"thread-project-assignments":{id:{"projectId":"legacy","projectKind":"workspace","projectOrigin":"local"}},"electron-persisted-atom-state":{}});
+    state.execute("UPDATE projects SET name=?1", ["\u{1c}Database name\u{1f}"]).unwrap();
+    state.execute("UPDATE project_roots SET path=?1", ["\u{1d}/fixture/owned-root\u{1e}"]).unwrap();
+    let global = json!({"local-projects":{"legacy":{"name":"Old name","rootPaths":["PRIVATE_PATH"]}},"app-server-project-id-by-legacy-project-id-by-host":{"local":{"legacy":"canonical"}},"thread-project-assignments":{id:{"projectId":"\u{1c}legacy\u{1f}","projectKind":"workspace","projectOrigin":"local"}},"electron-persisted-atom-state":{}});
     fs::write(
         home.path().join(".codex-global-state.json"),
         global.to_string(),
@@ -7004,10 +7006,11 @@ fn observed_schedule_name_updates_when_session_index_changes() {
     fs::create_dir(home.path().join("sqlite")).unwrap();
     let catalog = rusqlite::Connection::open(home.path().join("sqlite/codex-dev.db")).unwrap();
     catalog.execute_batch("CREATE TABLE automations(id TEXT, status TEXT); CREATE TABLE local_thread_catalog(host_id TEXT, thread_id TEXT, display_title TEXT, source_created_at INTEGER, source_updated_at INTEGER, source_kind TEXT, thread_source TEXT, project_id TEXT); INSERT INTO local_thread_catalog VALUES('durable','00000000-0000-4000-8000-000000000002',NULL,0,1700000000,'chatgpt','schedule',NULL);").unwrap();
+    catalog.execute("UPDATE local_thread_catalog SET display_title=?1", ["\u{1c}\u{1d}\u{1e}\u{1f}"]).unwrap();
     let path = home.path().join("session_index.jsonl");
     fs::write(
         &path,
-        "{\"id\":\"00000000-0000-4000-8000-000000000002\",\"thread_name\":\"First\"}\n",
+        format!("{}\n", json!({"id":"00000000-0000-4000-8000-000000000002","thread_name":"\u{1c}First\u{1f}"})),
     )
     .unwrap();
     let service = Service::start(home.path(), true, None);
@@ -7045,7 +7048,7 @@ fn observed_schedule_name_updates_when_session_index_changes() {
     assert_eq!(catalog["queries"][1]["health"], "unsupported");
     fs::write(
         path,
-        "{\"id\":\"00000000-0000-4000-8000-000000000002\",\"thread_name\":\"Second\"}\n",
+        format!("{}\n{}\n", json!({"id":"00000000-0000-4000-8000-000000000002","thread_name":"\u{1d}Second\u{1e}"}), json!({"id":"00000000-0000-4000-8000-000000000002","thread_name":"\u{1c}\u{1d}\u{1e}\u{1f}"})),
     )
     .unwrap();
     snapshot_when(&service, |snapshot| {
