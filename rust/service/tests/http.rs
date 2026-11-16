@@ -7538,7 +7538,7 @@ fn overflow_tool_detail_uses_verified_source_and_masks_secrets() {
         fs::write(root.join(format!("rollout-{other}.jsonl")), "").unwrap();
     }
     eprintln!("overflow diagnostic: starting service");
-    let service = Service::start(home.path(), true, None);
+    let mut service = Service::start(home.path(), true, None);
     eprintln!("overflow diagnostic: waiting for initial snapshot");
     let deadline = Instant::now() + Duration::from_secs(45);
     loop {
@@ -7568,7 +7568,39 @@ fn overflow_tool_detail_uses_verified_source_and_masks_secrets() {
     assert!(!detail.to_string().contains("PRIVATE_VALUE"));
     eprintln!("overflow diagnostic: posting metadata setting");
     let setting = r#"{"observations":{"metadata":false}}"#;
-    let response = service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, setting.len()), setting);
+    // Keep the same request, timeout and assertions; retain partial-response evidence.
+    // This isolated fixture contains synthetic data only. Do not log request contents.
+    let request = format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, setting.len());
+    let mut stream =
+        TcpStream::connect_timeout(&(Ipv4Addr::LOCALHOST, service.port).into(), TIMEOUT).unwrap();
+    stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+    stream.set_write_timeout(Some(TIMEOUT)).unwrap();
+    write!(stream, "{request}Connection: close\r\n\r\n{setting}").unwrap();
+    let started = Instant::now();
+    let mut data = Vec::new();
+    let read = stream.read_to_end(&mut data);
+    eprintln!(
+        "overflow metadata POST: elapsed={:?} read={read:?} bytes={} child={:?}",
+        started.elapsed(),
+        data.len(),
+        service.child.try_wait()
+    );
+    // Only expose a response line and the known generic settings error, not settings data.
+    let status_line = data.split(|byte| *byte == b'\n').next().unwrap_or_default();
+    let status_line = String::from_utf8_lossy(status_line);
+    if status_line.starts_with("HTTP/1.") {
+        eprintln!("overflow metadata POST status: {}", status_line.trim_end());
+    }
+    eprintln!(
+        "overflow metadata POST generic_unavailable_body={}",
+        data.windows(b"Settings temporarily unavailable".len())
+            .any(|bytes| bytes == b"Settings temporarily unavailable")
+    );
+    read.unwrap();
+    let split = data.windows(4).position(|part| part == b"\r\n\r\n").unwrap();
+    let headers = String::from_utf8(data[..split].to_vec()).unwrap();
+    let status = headers.split_ascii_whitespace().nth(1).unwrap().parse().unwrap();
+    let response = Reply { status, headers, body: data.split_off(split + 4) };
     assert!(matches!(response.status, 200 | 202), "metadata update status={} body={}", response.status, String::from_utf8_lossy(&response.body));
     eprintln!("overflow diagnostic: waiting for updated snapshot");
     let deadline = Instant::now() + Duration::from_secs(30);

@@ -695,3 +695,35 @@ Unicode digit escape 待辦未修改, 歷史獨立 HTTP / WouldBlock / 唯讀 50
 該 fixture 不含本輪新增的四種控制空白, settings / refresh / overflow 程式碼未修改, 既有 settings snapshot 等待上限與測試 socket read timeout 都是 5 秒, 僅為待診斷的時間邊界, 未證明根因或排除所有間接影響, focused 遮蔽驗證不取代完整 HTTP 接受, 本輪 patch script 的 regex 錯誤與修正前再次測試失敗記錄亦保留
 
 Unicode digit escape、paged numeric rendering、既有獨立 503 / WouldBlock、cleanup 警告與 overflow 排除範圍仍未解決
+
+### Overflow metadata POST 的有界失敗診斷
+
+在 `83d76a2` 後僅為既有 overflow HTTP fixture 的 metadata POST 增加 elapsed、回應長度、HTTP status line、generic unavailable body 命中與 child liveness 記錄, 不輸出請求內容或完整 settings, 原有 5 秒 socket timeout 與 200 / 202 assertion 不變, 未修改 runtime
+
+單次 focused run 失敗 (0 通過、1 失敗, 17.46 秒), read_to_end 在 5.004049432 秒完成 455 bytes, 實際回應為 HTTP 503 與 Settings temporarily unavailable, child.try_wait 為 Ok(None), 這次取得 server 回應, 與前次無 status / body 的 WouldBlock 及更早唯讀 GET settings 503 分開保存, 不把前次未取得的回應推定為相同 503
+
+來源追蹤確認此 metadata-only 請求走 server.rs 專用分支, 不是 batch settings 的 202 fallback, 專用分支先更新 atomic 設定與 journal、喚醒 collector, 再最多等待 5 秒直到 published snapshot.metadata_enabled 符合, 未符合或 channel 結束即回 503, 本次證據尚未區分 collector 延遲或其他未發布原因
+
+collector 在 projections 階段讀取 metadata atomic, disabled 分支仍維持 overflow workdir 準備與既有 detail index 更新, 最後產生 snapshots 並 publish, 不能只以設定已寫入推定新投影可用, 原始 Python set_settings 在 refresh_lock 下同步 refresh 後回傳設定, 本輪不更動等待、隱私 guard、overflow 上限或資料保存
+
+下一步需區分設定送出時 collector 的階段與設定改變後首次 snapshot 發布時間, 本輪 focused 失敗不構成修復, 未另跑全套或重試直到通過, 先前所有獨立失敗保持未解決
+
+另以既有公開 snapshot collection metrics 進行單次獨立合成來源 phase probe, 不更改 production instrumentation, POST timeout 仍為 5 秒, 並行 GET 只記錄 phase / elapsed / metadata bool, POST 後 0.243 秒見 sessions, 0.955 至 3.911 秒的回應見 projections, phase_ms 為 257 至 3193, POST 於 3.854 秒回 200, 4.035 秒確認 metadata=false、private workdir 不可見, 最後 detail 200 且憑證已遮蔽, child 正常退出
+
+該 probe 未重現 503, 並行 GET 可能先擷取較舊 snapshot 再完成回應, 不可從回應完成時間推定發布順序倒退, 此觀察只定位成功路徑有數秒 projection / publication 延遲, 未證明失敗當次的細部耗時、根因或問題已解決, 原始失敗與本輪 focused 失敗仍保留
+
+### 隔離合成來源的 snapshot 成本分析
+
+以 exact `83d76a2` 的獨立 source copy、獨立 target 與 locked offline toolchain 建置時間戳診斷 binary, 主工作目錄 runtime 未改動, instrumentation patch 與每輪記錄分別保留, 所有來源均為 5001 個合成 session fixture
+
+第一輪取得 POST 503 (5.008 秒), 5.577 秒確認新 metadata=false snapshot, 該 cycle 的 overflow workdirs 6 ms、metadata branch 6 ms、detail_index 353 ms、snapshots 4759 ms、projection span 5126 ms, child 正常退出, 後續細分輪同樣取得 503 (5.054 秒), 5.514 秒確認新 snapshot, snapshots 4193 ms 中四個 windows 約 3380 ms、window 後處理約 620 ms
+
+再細分 windows 的一輪回 200 (4.235 秒), 非 503 重現, 每個 window 約 3.73 MB, metadata=false cycle 的四個 window 完成時間分別 575 / 935 / 571 / 645 ms, 包含 row / Value 建構與序列化, snapshot 總計 3813 ms, window 後至 return 約 721 ms, instrumentation、並行觀察及執行環境變異都可能影響時間, 不把某輪數字推定為歷史失敗根因
+
+一次 instrumentation script 因 typed windows binding 未符合預期而在寫入前失敗, 該 shell 未設定 set -e, 接著意外重跑原診斷 binary 一次, 另存 prestage-repeat 與 script failure 記錄, 不歸入新 stage 證據或接受結果, 後續命令已使用 set -e
+
+來源顯示 logs 組裝為取得 jev.health / reader.checked_at 而解析四個完整 window, 可評估直接重用已生成欄位以避免此成本, 尚未改動主 runtime, 須先核對欄位生成、augmentation 與序列化相容性, 不以縮減 snapshot、調高 timeout 或變更保存上限作為修正
+
+JEV 欄位重用稽核: health 為生成的固定狀態字串, checked_at 為生成時間, source_registry 不改寫 JEV, snapshot serializer 只特別處理 codex, 但既有 snapshot_json::field 仍先對完整 window 做 Checked 深度 / 語法驗證, 遇 reserved serde key 或 Unicode escape 採原 Value fallback, 直接重用 descriptor 會略過其他欄位造成的拒絕邊界
+
+本輪決定不實作 cached descriptor 或改寫 selector parser, 保留完整驗證後再重用只能省去第二次 RawValue traversal, 收益尚未量測且會增加 caller 與序列化結果一致性的要求, 新 single-pass selector 另需 duplicate-last、非 object、數字、深度與 legacy reserved-key 等價證據, HTTP 失敗保持未解決, 不以跳過驗證換取速度
