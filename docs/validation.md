@@ -843,3 +843,17 @@ Python 9 組 BOM / decode / byte-limit fixture 與既有 desktop activity 8 項�
 Linux / Rust 1.100.0 的完整 service 354 項通過 (66.54 秒), 完整 serial HTTP 單輪 219 項通過 (121.86 秒)
 
 UTF-16 / UTF-32 bytes decoding 仍未支援, 歷史 metadata POST 503 / WouldBlock、唯讀 GET 503、數字呈現及其他 Unicode / 平台限制保留
+
+### 結構化憑證 key 的 Unicode 小寫判定
+
+依 LAM main `5c03daf` 的 `operation_records.redact` 與 `payload_detail.complete_payload`, Python 先做 Unicode lowercase 再保留 ASCII a-z, Rust 原先先濾掉非 ASCII bytes 而漏遮蔽 `apİkey`、`cooKie` 等 key
+
+本輪保留原 ASCII 判定, 僅於未命中且含非 ASCII key 時加上 Unicode lowercase 判定, 避免直接替換使 `apiKkey` 等原有較保守遮蔽消失, 敏感 suffix 清單、無遮蔽輸出、來源 bytes、schema、讀取與保存界線不變, 沒有新增 endpoint、查詢參數或網路請求
+
+新增兩項單元回歸涵蓋字典、巢狀內容、完整 / 有界 payload、diagnostic 與表格欄位, Unicode 漏遮蔽測試先失敗再通過, 380 組原有保守 key 仍通過, 四組不應新增匹配的字元控制保留, HTTP Context fixture 驗證新 key 遮蔽、一般欄位保留與來源 bytes 未改寫, focused HTTP 1 項通過 (0.13 秒)
+
+Python 25 組遮蔽 / 無遮蔽路徑、4 組控制與既有 payload 12 項通過, Python Unicode 15.0.0 與 Rust Unicode 18.0.0 的非 ASCII scalar lowercase 後擷取 ASCII 字母稽核, 兩者皆僅 U+0130 → i 與 U+212A → k, 不宣稱其他 Unicode 行為完全等價
+
+先前完整 service 記錄在中斷後缺少結束結果, 保留為未完成而不計入通過, 恢復後 Linux / Rust 1.100.0 的新一輪完整 service 356 項通過 (89.44 秒), 完整 serial HTTP 單輪 219 項通過 (134.67 秒)
+
+原始純文字 regex 的 Unicode IGNORECASE dotted / dotless I 差異不在本輪字典 key 修正內, 歷史 metadata POST 503 / WouldBlock、唯讀 GET 503、數字呈現、UTF-16/32 及其他 Unicode / 平台限制仍保留

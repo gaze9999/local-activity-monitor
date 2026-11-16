@@ -1843,10 +1843,11 @@ fn context_detail_projects_safe_structures_and_masks_nested_fields() {
         {"type":"input_text","text":"name\tcount\nexample\t2"},
         {"type":"input_text","text":"token,token\nPRIVATE_DUPLICATE,PRIVATE_DUPLICATE"},
         {"type":"input_text","text":"{'ok': True, 'secret': 'PRIVATE_PYTHON', 'items': (0, False)}"},
-        {"type":"input_text","text":"a,b\n\"alpha\", 'beta'"}
+        {"type":"input_text","text":"a,b\n\"alpha\", 'beta'"},
+        {"type":"input_text","text":"{\"apİkey\":\"PRIVATE_UNICODE\",\"cooKie\":{\"nested\":\"PRIVATE_NESTED\"},\"ordinary\":\"public\"}"}
     ]});
     fs::write(
-        path,
+        &path,
         format!(
             "{}{}",
             event(&stamp, "session_meta", json!({"id":id})),
@@ -1854,6 +1855,7 @@ fn context_detail_projects_safe_structures_and_masks_nested_fields() {
         ),
     )
     .unwrap();
+    let source_bytes = fs::read(&path).unwrap();
     let service = Service::start(home.path(), true, None);
     snapshot_when(&service, |value| {
         value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok"
@@ -1879,7 +1881,11 @@ fn context_detail_projects_safe_structures_and_masks_nested_fields() {
     assert_eq!(content[9]["text"]["secret"], "[已隱藏]");
     assert_eq!(content[9]["text"]["items"], json!([0, false]));
     assert_eq!(content[10]["text"]["rows"][0]["b"], "'beta'");
+    assert_eq!(content[11]["text"]["apİkey"], "[已隱藏]");
+    assert_eq!(content[11]["text"]["cooKie"], "[已隱藏]");
+    assert_eq!(content[11]["text"]["ordinary"], "public");
     assert!(!result.to_string().contains("PRIVATE"));
+    assert_eq!(fs::read(path).unwrap(), source_bytes);
 }
 
 #[test]

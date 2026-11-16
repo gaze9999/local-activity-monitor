@@ -391,7 +391,7 @@ fn sensitive(key: &str) -> bool {
         .filter(|byte| byte.is_ascii_alphabetic())
         .map(|byte| (byte as char).to_ascii_lowercase())
         .collect();
-    [
+    let suffixes = [
         "apikey",
         "password",
         "secret",
@@ -401,9 +401,19 @@ fn sensitive(key: &str) -> bool {
         "header",
         "headers",
         "token",
-    ]
-    .iter()
-    .any(|suffix| normalized.ends_with(suffix))
+    ];
+    if suffixes.iter().any(|suffix| normalized.ends_with(suffix)) {
+        return true;
+    }
+    if key.is_ascii() {
+        return false;
+    }
+    let normalized: String = key
+        .to_lowercase()
+        .chars()
+        .filter(|character| character.is_ascii_lowercase())
+        .collect();
+    suffixes.iter().any(|suffix| normalized.ends_with(suffix))
 }
 fn text_value(text: &str, masked: bool, depth: usize) -> serde_json::Value {
     if depth > 64 {
@@ -1792,6 +1802,46 @@ impl DetailFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_keys_lower_unicode_before_ascii_filtering() {
+        for key in ["apİkey", "cooKie", "authorİzatİon", "credentİal", "service.APİ_KEY"] {
+            assert!(sensitive(key), "{key}");
+            let original = json!({key:"SYNTHETIC_VALUE","ordinary":"public"});
+            let expected = json!({key:"[已隱藏]","ordinary":"public"});
+            assert_eq!(redact_value(original.clone(), true, 0), expected);
+            assert_eq!(redact_value(original.clone(), false, 0), original);
+            for full in [false, true] {
+                assert_eq!(payload(original.clone(), true, full), (expected.clone(), false));
+                assert_eq!(payload(original.clone(), false, full), (original.clone(), false));
+            }
+            let diagnostic: serde_json::Value = serde_json::from_str(&diagnostic_redact(&original.to_string(), 0)).unwrap();
+            assert_eq!(diagnostic, expected);
+            let nested = json!({"outer":[original.clone()]});
+            assert_eq!(redact_value(nested, true, 0), json!({"outer":[expected]}));
+            let table = json!([[key,"ordinary"],["SYNTHETIC_VALUE","public"]]);
+            assert_eq!(redact_value(table.clone(), true, 0), json!([[key,"ordinary"],["[已隱藏]","public"]]));
+            assert_eq!(redact_value(table.clone(), false, 0), table);
+        }
+        for key in ["apıkey", "cooκie", "publicİ", "paſsword"] {
+            assert!(!sensitive(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn credential_keys_keep_prior_conservative_masks() {
+        let suffixes = ["apikey", "password", "secret", "credential", "authorization", "cookie", "header", "headers", "token"];
+        for suffix in suffixes {
+            for inserted in ['İ', 'K', 'ı', '中', '\u{301}'] {
+                for index in 0..=suffix.len() {
+                    let key = format!("service.{}{inserted}{}", &suffix[..index], &suffix[index..]);
+                    let old: String = key.bytes().filter(|byte| byte.is_ascii_alphabetic()).map(|byte| (byte as char).to_ascii_lowercase()).collect();
+                    assert!(suffixes.iter().any(|suffix| old.ends_with(suffix)));
+                    assert!(sensitive(&key), "prior mask lost: {key}");
+                }
+            }
+        }
+    }
     #[test]
     fn credential_masking_adds_nonletter_boundaries_without_losing_prefixes() {
         for prefix in ['\u{301}', '\u{200c}', '\u{200d}', '\u{203f}'] {
