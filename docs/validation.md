@@ -1098,3 +1098,19 @@ Rust loopback HTTP 回歸先失敗後通過, platform 9 項通過, 涵蓋 UTF-8 
 此結果分別來自 Python 模擬 transport 與 Rust loopback reader, 不代表實際帳戶、外部 Platform 或跨平台認證驗收, surrogate、歷史失敗與其他限制保留
 
 Linux / Rust 1.100.0 的完整 service 單輪 382 項通過 (62.51 秒), 完整 serial HTTP 單輪 225 項通過 (129.65 秒)
+
+### 關聯子代理尾段的原始列選取
+
+依 LAM main `5c03daf` 的 `CodexCollector.subagent_lifecycle`, 只讀取已選定、未載入的關聯 session 尾段, body 使用 CR / LF / CRLF 分行, 並先要求原始 bytes 含帶雙引號的 task_started 或 task_complete 再解析 JSON
+
+Rust 改用既有 byte iterator 與 JSON bytes decoder, 補齊 CR 分行、UTF-8 BOM 與原始標記篩選, 保留 64 KiB tail、讀取預算、檔案身分 / symlink 檢查、快取及同時間選取順序
+
+超限後第一段仍只依 LF 丟棄, 不改成 CR 分隔, UTF-16/32 與只有跳脫文字的標記仍不通過原始 byte 篩選, 標記位於其他欄位時仍沿原始流程繼續解析, 不將此條件擴大套用到一般 session 收集
+
+本機 Python 的 decode_record 呼叫與 main 的 json.loads 有差異, 因此另取固定 main 的完整方法直接驗證 8 組 fixture, 沒有宣稱整份 collector 相同
+
+Rust 新回歸先失敗後通過, related_lifecycle 3 項通過, 新 snapshot HTTP fixture 1 項通過, 驗證 session header 所屬 parent 與檔名 child 不同時確實走關聯 fallback, CR 與 BOM 的完成狀態進入投影且不外露本文
+
+`/api/snapshot` 的 thread status / status_updated_at / status_source 與 metadata_sources.rows_read 仍來自既有選取尾段, 不新增 endpoint、參數、檔案讀取或保存欄位, surrogate、歷史失敗與其他限制保留
+
+Linux / Rust 1.100.0 的完整 service 單輪 383 項通過 (66.43 秒), 完整 serial HTTP 單輪 226 項通過 (131.49 秒)

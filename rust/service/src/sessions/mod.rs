@@ -2622,8 +2622,13 @@ impl Collector {
                 };
                 let mut status = json!({});
                 let mut rows = 0;
-                for line in content.split(|byte| *byte == b'\n') {
-                    let Ok(value) = serde_json::from_slice::<Value>(line) else {
+                for line in crate::journal::byte_lines(content) {
+                    if ![b"\"task_started\"".as_slice(), b"\"task_complete\""].iter()
+                        .any(|marker| line.windows(marker.len()).any(|part| part == *marker))
+                    {
+                        continue;
+                    }
+                    let Some(value) = crate::json_bytes::parse(line) else {
                         continue;
                     };
                     if value["type"] != "event_msg" {
@@ -7478,6 +7483,48 @@ mod log_tests {
         let cached = collector.related_lifecycle(&root, &mut next);
         assert_eq!(cached["bytes_read"], 0);
         assert_eq!(next[id]["status"], "completed");
+    }
+
+    #[test]
+    fn related_lifecycle_preserves_raw_marker_and_line_selection() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let id = "00000000-0000-4000-8000-000000000002";
+        let path = root.join(format!("rollout-{id}.jsonl"));
+        let row = |kind: &str, minute| json!({"timestamp":format!("2026-11-12T10:{minute:02}:00Z"),"type":"event_msg","payload":{"type":kind,"secret":"PRIVATE"}}).to_string().into_bytes();
+        let a = row("task_started", 0);
+        let b = row("task_complete", 1);
+        let escaped = String::from_utf8(a.clone()).unwrap().replace("task_started", r"task_\u0073tarted").into_bytes();
+        let elsewhere = String::from_utf8(escaped.clone()).unwrap().replace("PRIVATE", "task_started").into_bytes();
+        let utf16: Vec<_> = b.iter().flat_map(|byte| u16::from(*byte).to_le_bytes()).collect();
+        let utf32: Vec<_> = b.iter().flat_map(|byte| u32::from(*byte).to_be_bytes()).collect();
+        for (raw, status, rows) in [
+            ([a.as_slice(), b"\r", &b, b"\r\n"].concat(), Some("completed"), 2),
+            ([b"\xef\xbb\xbf".as_slice(), &b, b"\n"].concat(), Some("completed"), 1),
+            (escaped, None, 0),
+            (elsewhere, Some("running"), 1),
+            (utf16, None, 0),
+            (utf32, None, 0),
+            ([vec![b'x'; 70_000], b"\r".to_vec(), b.clone(), b"\r".to_vec()].concat(), None, 0),
+            ([vec![b'x'; 70_000], b"\n".to_vec(), a, b"\r".to_vec(), b, b"\n".to_vec()].concat(), Some("completed"), 2),
+        ] {
+            std::fs::write(&path, &raw).unwrap();
+            let mut collector = Collector::new(root.join("monitoring"), true, None);
+            collector.session_paths.insert(id.to_owned(), path.clone());
+            collector.related_budget = 65_536;
+            let original = json!({"execution":{"parent_thread_id":"00000000-0000-4000-8000-000000000001"}});
+            let mut metadata = Map::from_iter([(id.to_owned(), original.clone())]);
+            let report = collector.related_lifecycle(&root, &mut metadata);
+            assert_eq!(metadata[id]["status"].as_str(), status);
+            assert_eq!(report["rows_read"], rows);
+            assert_eq!(report["bytes_read"], raw.len().min(65_536));
+            assert_eq!(collector.related_budget, 65_536 - raw.len().min(65_536));
+            assert!(!json!(metadata).to_string().contains("PRIVATE"));
+            assert_eq!(std::fs::read(&path).unwrap(), raw);
+            let mut next = Map::from_iter([(id.to_owned(), original)]);
+            assert_eq!(collector.related_lifecycle(&root, &mut next)["bytes_read"], 0);
+            assert_eq!(next[id]["status"].as_str(), status);
+        }
     }
 
     #[cfg(unix)]

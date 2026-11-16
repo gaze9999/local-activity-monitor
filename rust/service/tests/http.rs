@@ -8060,6 +8060,53 @@ fn related_subagent_tail_is_projected_into_snapshot() {
 }
 
 #[test]
+fn related_subagent_tail_accepts_cr_boundaries_and_utf8_bom() {
+    let home = tempdir().unwrap();
+    let root = home.path().join("sessions");
+    fs::create_dir(&root).unwrap();
+    let parent = "00000000-0000-4000-8000-000000000001";
+    let child = "00000000-0000-4000-8000-000000000002";
+    let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now());
+    let started = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let completed = (now + chrono::Duration::milliseconds(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    fs::write(
+        root.join(format!("rollout-{child}-suffix.jsonl")),
+        format!("{}{}\r\u{feff}{}\r\n",
+            event(&started, "session_meta", json!({"id":parent})),
+            event(&started, "event_msg", json!({"type":"task_started"})).trim_end_matches('\n'),
+            event(&completed, "event_msg", json!({"type":"task_complete","secret":"PRIVATE"})).trim_end_matches('\n')),
+    )
+    .unwrap();
+    let db = rusqlite::Connection::open(home.path().join("state_1.sqlite")).unwrap();
+    db.execute_batch(&format!("CREATE TABLE threads(id TEXT,title TEXT); CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT); INSERT INTO threads VALUES('{child}','Child'); INSERT INTO thread_spawn_edges VALUES('{parent}','{child}');")).unwrap();
+    let service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |snapshot| {
+        snapshot["codex"]["threads"].as_array().is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row["thread_id"] == child && row["status_source"] == "session_lifecycle")
+        })
+    });
+    let child_row = snapshot["codex"]["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["thread_id"] == child)
+        .unwrap();
+    assert_eq!(child_row["status"], "completed");
+    assert_eq!(child_row["status_updated_at"], completed);
+    let report = snapshot["codex"]["metadata_sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["name"] == "subagent_lifecycle")
+        .unwrap();
+    assert_eq!(report["health"], "ok");
+    assert_eq!(report["pending_files"], 0);
+    assert!(!snapshot.to_string().contains("PRIVATE"));
+}
+
+#[test]
 fn disabled_model_api_reports_both_sources_in_original_order() {
     let home = tempdir().unwrap();
     let service = Service::start(home.path(), false, None);
