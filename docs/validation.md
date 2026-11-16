@@ -1070,3 +1070,17 @@ Linux / Rust 1.100.0 的完整 service 單輪 379 項通過 (60.98 秒), 完整 
 此結果僅涵蓋合成 CLI 與本機 HTTP, 不代表實際帳戶或跨平台認證驗收, 未成對 surrogate 與既有歷史失敗、其他驗收限制保留, 不新增 endpoint、參數或請求次數
 
 Linux / Rust 1.100.0 的完整 service 單輪 380 項通過 (62.28 秒), 完整 serial HTTP 單輪 225 項通過 (137.47 秒)
+
+### 固定公開來源的 HTTP JSON 編碼
+
+依 LAM main `5c03daf` 的 `PublicApiSource._read`, OpenAI 狀態與 Codex 發布資訊皆先限制原始 response bytes 再交給 `json.loads`, 本輪 Rust 共用 reader 改用既有私有 JSON bytes decoder
+
+支援 UTF-8 BOM 與有 / 無 BOM 的 UTF-16、UTF-32 LE / BE, OpenAI 的 64 KiB 與 Codex 的 1 MiB 原始上限維持不變, 不依解碼後長度放寬輸入
+
+Python 原始 reader 的 loopback HTTP 20 組編碼與 4 組上限 fixture 通過, Rust 新回歸先重現 BOM 輸出解析失敗, 修正後 public_api 6 項通過, 涵蓋兩種投影、剛好上限、超出 2 bytes、截斷編碼、redirect 與非成功狀態拒絕
+
+測試 server 改以原始 bytes 回覆, 原有 redirect / 超限斷言保留, 執行期固定 URL、60 秒快取、查詢條件、白名單與請求次數不變
+
+此輪只驗證 loopback HTTP reader 與既有快取測試, 未連線實際固定來源, 不代表遠端服務可用性或完整外部 endpoint 驗收, surrogate 與既有歷史失敗、其他限制保留
+
+Linux / Rust 1.100.0 的完整 service 單輪 381 項通過 (65.06 秒), 完整 serial HTTP 單輪 225 項通過 (131.32 秒)

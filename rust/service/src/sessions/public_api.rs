@@ -117,7 +117,7 @@ async fn read(client: &Client, kind: Kind, url: &str) -> Option<Value> {
         }
         body.extend_from_slice(&chunk);
     }
-    project(kind, &serde_json::from_slice::<Value>(&body).ok()?)
+    project(kind, &crate::json_bytes::parse(&body)?)
 }
 pub struct Source {
     kind: Kind,
@@ -196,16 +196,17 @@ impl Source {
 #[cfg(test)]
 mod tests {
     use super::*;
-    async fn fake_response(status: &str, body: &str) -> String {
+    async fn fake_response(status: &str, body: &[u8]) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let response = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nLocation: /other\r\nConnection: close\r\n\r\n{body}", body.len());
+        let mut response = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nLocation: /other\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+        response.extend_from_slice(body);
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0; 2048];
             let _ = stream.read(&mut request).await;
-            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.write_all(&response).await;
         });
         format!("http://{address}/")
     }
@@ -218,16 +219,58 @@ mod tests {
             .build()
             .unwrap();
         let body = r#"{"status":{"indicator":"none"}}"#;
-        let url = fake_response("200 OK", body).await;
+        let url = fake_response("200 OK", body.as_bytes()).await;
         assert_eq!(
             read(&client, Kind::Openai, &url).await.unwrap()["indicator"],
             "none"
         );
-        let url = fake_response("302 Found", body).await;
+        let url = fake_response("302 Found", body.as_bytes()).await;
         assert!(read(&client, Kind::Openai, &url).await.is_none());
-        let url = fake_response("200 OK", &"x".repeat(65537)).await;
+        let url = fake_response("200 OK", &vec![b'x'; 65537]).await;
         assert!(read(&client, Kind::Openai, &url).await.is_none());
     }
+    #[tokio::test]
+    async fn bounded_http_decodes_json_bytes_after_each_source_raw_limit() {
+        let client = Client::builder().no_proxy().redirect(Policy::none()).timeout(Duration::from_secs(2)).build().unwrap();
+        for (kind, body, expected) in [
+            (Kind::Openai, r#"{"status":{"indicator":"none"},"secret":"PRIVATE"}"#, json!({"indicator":"none","updated_at":null})),
+            (Kind::Codex, r#"{"draft":false,"prerelease":false,"tag_name":"v1.2.3","published_at":"2026-01-01T00:00:00Z","secret":"PRIVATE"}"#, json!({"version":"1.2.3","updated_at":"2026-01-01T00:00:00Z"})),
+        ] {
+            for (width, big_endian, prefix) in [
+                (1, false, b"\xef\xbb\xbf".as_slice()),
+                (2, false, b"\xff\xfe"), (2, true, b"\xfe\xff"),
+                (4, false, b"\xff\xfe\0\0"), (4, true, b"\0\0\xfe\xff"),
+            ] {
+                for bom in [false, true] {
+                    let mut raw = if bom { prefix.to_vec() } else { Vec::new() };
+                    for byte in body.bytes() {
+                        match width {
+                            1 => raw.push(byte),
+                            2 => raw.extend(if big_endian { u16::from(byte).to_be_bytes() } else { u16::from(byte).to_le_bytes() }),
+                            4 => raw.extend(if big_endian { u32::from(byte).to_be_bytes() } else { u32::from(byte).to_le_bytes() }),
+                            _ => unreachable!(),
+                        }
+                    }
+                    let url = fake_response("200 OK", &raw).await;
+                    assert_eq!(read(&client, kind, &url).await, Some(expected.clone()), "{width} {big_endian} {bom}");
+                }
+            }
+            let mut raw = b"\xff\xfe".to_vec();
+            for byte in body.bytes() { raw.extend(u16::from(byte).to_le_bytes()); }
+            while raw.len() < kind.limit() { raw.extend(b" \0"); }
+            assert_eq!(raw.len(), kind.limit());
+            let url = fake_response("200 OK", &raw).await;
+            assert_eq!(read(&client, kind, &url).await, Some(expected.clone()));
+            raw.extend(b" \0");
+            let url = fake_response("200 OK", &raw).await;
+            assert!(read(&client, kind, &url).await.is_none());
+            let url = fake_response("200 OK", b"\xff\xfe{").await;
+            assert!(read(&client, kind, &url).await.is_none());
+            let url = fake_response("500 Error", body.as_bytes()).await;
+            assert!(read(&client, kind, &url).await.is_none());
+        }
+    }
+
     #[tokio::test]
     async fn enabled_source_publishes_cached_result_without_network() {
         let shared = Arc::new(Shared::new());
