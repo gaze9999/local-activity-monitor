@@ -1028,3 +1028,17 @@ Python 原始 reader 的 50 組編碼 / 分隔符 fixture 通過, 另核對 2 �
 新增 `/api/logs?window=all` 的 UTF-32 LE BOM fixture, 驗證投影與 unsupported_lines, 沒有新增 endpoint、參數、來源讀取次數或寫入格式
 
 Linux / Rust 1.100.0 的完整 service 單輪 375 項通過 (75.20 秒), 完整 serial HTTP 單輪 222 項通過 (128.63 秒), 使用既有固定 WBUI `e9741c6` 資產且離線驗證通過
+
+### PerformanceDebug 的實體資料列保留
+
+依 LAM main `5c03daf` 的 `PerformanceDebug.load`, 每份檔案先驗證最多 8,192 bytes 的 LF 首列, 再讀最後 256 KiB、依 CR / LF / CRLF 分行、超限時丟棄第一列, 最後只解析尾端 150 個實體資料列
+
+Rust 原先在保留與超限首列判斷前排除空白列, 且只依 LF 分行, 本輪共用現有 journal byte iterator, 空白列不會產生記錄但仍占原始 150 列範圍, 不因空白列而重新帶入更舊記錄
+
+原始 Python 的 7 組 fixture 通過, Rust 新回歸先重現 CR 分隔的兩筆記錄遺漏, 修正後 PerformanceDebug 5 項通過, 覆蓋 150 列邊界、混合換行、空白 tail 首列、來源 bytes 不變及私密欄位排除
+
+新增 `/api/snapshot` 回歸核對 `monitor.debug.records` 的倒序投影, debug 未啟用時仍能唯讀載入歷史且不改寫檔案, 不新增 endpoint、參數或讀取次數
+
+首列驗證仍只以 LF 結束, 兩筆 bare-CR 相接不能變成有效 header, JSON BOM / UTF-16 / UTF-32 與 surrogate 的既有差異未在本輪擴充, 輪替、寫入與其他驗收限制保持不變
+
+Linux / Rust 1.100.0 的完整 service 單輪 377 項通過 (64.36 秒), 完整 serial HTTP 單輪 223 項通過 (127.96 秒)

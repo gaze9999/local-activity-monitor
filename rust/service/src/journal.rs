@@ -10,7 +10,7 @@ const RECORDS: usize = 1000;
 const EVENTS: usize = 200;
 
 // Match Python bytes.splitlines: CR/LF only, CRLF as one separator, no trailing phantom row.
-fn byte_lines(mut bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+pub(crate) fn byte_lines(mut bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     std::iter::from_fn(move || {
         if bytes.is_empty() {
             return None;

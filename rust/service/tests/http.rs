@@ -625,6 +625,25 @@ fn monitor_reports_http_requests_errors_and_snapshot_sizes() {
 }
 
 #[test]
+fn debug_reload_respects_physical_row_retention_in_snapshot() {
+    let home = tempdir().unwrap();
+    fs::create_dir(home.path().join("monitoring")).unwrap();
+    let row = |n| json!({"application":"local-activity-monitor","version":1,"kind":"collection","refresh_ms":n,"secret":"PRIVATE"}).to_string();
+    let raw = format!("{}\n{}{}\r{}\r\n", row(1), "\n".repeat(148), row(2), row(3));
+    let path = home.path().join("monitoring/performance-debug.jsonl");
+    fs::write(&path, &raw).unwrap();
+    let service = Service::start(home.path(), false, None);
+    let response = service.get("/api/snapshot");
+    assert_eq!(response.status, 200);
+    let snapshot = response.json();
+    let debug = &snapshot["monitor"]["debug"];
+    assert_eq!(debug["enabled"], false);
+    assert_eq!(debug["records"].as_array().unwrap().iter().map(|record| record["refresh_ms"].as_u64().unwrap()).collect::<Vec<_>>(), [3, 2]);
+    assert!(!debug.to_string().contains("PRIVATE"));
+    assert_eq!(fs::read(&path).unwrap(), raw.as_bytes());
+}
+
+#[test]
 fn debug_setting_records_collection_only_when_enabled() {
     let home = tempdir().unwrap();
     let service = Service::start(home.path(), false, None);

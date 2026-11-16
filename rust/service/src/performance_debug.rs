@@ -361,10 +361,7 @@ impl PerformanceDebug {
             reader.seek(SeekFrom::Start(size.saturating_sub(READ_BYTES)))?;
             let mut bytes = Vec::new();
             reader.take(READ_BYTES).read_to_end(&mut bytes)?;
-            let mut lines: Vec<_> = bytes
-                .split(|byte| *byte == b'\n')
-                .filter(|line| !line.is_empty())
-                .collect();
+            let mut lines: Vec<_> = crate::journal::byte_lines(&bytes).collect();
             if size > READ_BYTES && !lines.is_empty() {
                 lines.remove(0);
             }
@@ -539,6 +536,63 @@ impl PerformanceDebug {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fixture_row(value: u64) -> Vec<u8> {
+        json!({"application":"local-activity-monitor","version":1,"kind":"collection","refresh_ms":value,"secret":"PRIVATE"}).to_string().into_bytes()
+    }
+
+    #[test]
+    fn reload_uses_raw_line_boundaries_and_counts_blank_rows_before_retention() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("performance-debug.jsonl");
+        let a = fixture_row(1);
+        let b = fixture_row(2);
+        let c = fixture_row(3);
+        for (raw, expected) in [
+            ([a.as_slice(), b"\n", &b, b"\r", &c, b"\r\n"].concat(), vec![1, 2, 3]),
+            ([a.as_slice(), b"\n", &vec![b'\n'; 150]].concat(), vec![]),
+            ([a.as_slice(), b"\n", &vec![b'\n'; 149], &b, b"\n"].concat(), vec![2]),
+            ([a.as_slice(), b"\n", &vec![b'\n'; 148], &b, b"\n"].concat(), vec![1, 2]),
+        ] {
+            fs::write(&path, &raw).unwrap();
+            let debug = PerformanceDebug::new(folder.path(), "abcdef012345".into());
+            assert!(!debug.invalid);
+            assert_eq!(debug.records.iter().map(|row| row["refresh_ms"].as_u64().unwrap()).collect::<Vec<_>>(), expected);
+            assert!(!debug.snapshot().to_string().contains("PRIVATE"));
+            assert_eq!(fs::read(&path).unwrap(), raw);
+        }
+    }
+
+    #[test]
+    fn reload_discards_first_raw_tail_row_before_blank_row_filtering() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("performance-debug.jsonl");
+        let a = fixture_row(1);
+        let b = fixture_row(2);
+        let mut tail = vec![b'x'; READ_BYTES as usize - b.len() - 4];
+        tail.extend([b"\r\n".as_slice(), &b, b"\r\n"].concat());
+        let raw = [a.as_slice(), b"\n", &tail].concat();
+        fs::write(&path, &raw).unwrap();
+        let debug = PerformanceDebug::new(folder.path(), "abcdef012345".into());
+        assert!(!debug.invalid);
+        assert_eq!(debug.records.len(), 1);
+        assert_eq!(debug.records[0]["refresh_ms"], 2);
+        assert_eq!(fs::read(&path).unwrap(), raw);
+        let mut tail = [b"\r\n".as_slice(), &b, b"\n"].concat();
+        tail.resize(READ_BYTES as usize, b'x');
+        let raw = [a.as_slice(), b"\n", &tail].concat();
+        fs::write(&path, &raw).unwrap();
+        let debug = PerformanceDebug::new(folder.path(), "abcdef012345".into());
+        assert_eq!(debug.records.len(), 1);
+        assert_eq!(debug.records[0]["refresh_ms"], 2);
+        assert_eq!(fs::read(&path).unwrap(), raw);
+        let raw = [a.as_slice(), b"\r", &b].concat();
+        fs::write(&path, &raw).unwrap();
+        let debug = PerformanceDebug::new(folder.path(), "abcdef012345".into());
+        assert!(debug.invalid);
+        assert!(debug.records.is_empty());
+        assert_eq!(fs::read(&path).unwrap(), raw);
+    }
+
     #[cfg(any(unix, windows))]
     #[test]
     fn records_available_process_cpu_and_peak_memory() {
