@@ -389,3 +389,13 @@ Python 實際 save/load 確認各種 fresh z,a / restore a,z, HTTP 回歸先失�
 Python 實際 save/load 確認較晚修改來源的 thread 優先, live call 為 z,a、restore 為 a,z, 跨 thread HTTP 先失敗後通過, 2400 operations 的單元測試驗證 1000 筆上限與索引順序, 既有 canonical fallback 測試保留
 
 本批完整單執行緒 `--locked --offline` 回歸通過: service binary 315 項 (109.51 秒), HTTP 209 項 (149.02 秒), Linux / Rust 1.100.0 合成資料, 基底 c8e8a4f 已核對遠端一致, 其他全域預覽、overflow、restore 容量、大型快照與原生平台驗收仍待完成
+
+### 完整 working set 的 Git / checks 全域預覽順序
+
+原始 Python 依 thread / call 插入順序收集後穩定排序, Rust 完整來源集合重用 thread 順序索引與 call 呈現序號, 保留 timestamp 優先及 call 內 operation index, 每種 500 筆預覽上限、完整 Git 統計、時間篩選、停用與 incomplete / overflow fallback 不變
+
+Python 實際 save/load 確認 thread2 優先, live call 為 z,a、restore 為 a,z, HTTP 回歸先失敗後通過, fixture 指令僅供靜態辨識, 未執行其中 Git 或測試指令, 不新增 API 或查詢、不變更欄位來源、容量、eviction 或保存策略
+
+每種 1200 operations 的單元測試確認 500 筆上限、thread / call 順序、Git index 與統計, 既有 fallback 回歸保留, 首次全套新增 fixture 缺少 sequence 而失敗, 補齊 fixture 後 targeted 2 項與完整單執行緒 `--locked --offline` service binary 316 項 (83.25 秒)、HTTP 210 項 (157.17 秒) 通過
+
+驗證為 Linux / Rust 1.100.0 合成資料, 基底 83159ec 已核對遠端一致, 其他全域預覽、overflow、restore 容量、大型快照與原生平台驗收仍待完成

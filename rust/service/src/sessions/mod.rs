@@ -5057,7 +5057,7 @@ impl Collector {
                 }
             }
             let observed = totals.values().sum::<usize>();
-            let (mut git, mut checks) = command_calls.window(boundary);
+            let (mut git, mut checks) = command_calls.window(boundary, complete_source_order.then_some(&thread_order));
             for event in git["events"].as_array_mut().into_iter().flatten().chain(checks.iter_mut()) {
                 if let Some(name) = event["thread_id"].as_str().and_then(|id| thread_names.get(id)) {
                     event["thread_name"] = name.clone();

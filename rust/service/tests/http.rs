@@ -1326,6 +1326,38 @@ fn session_execution_metadata_is_selected_and_survives_checkpoint_restore() {
 }
 
 #[test]
+fn global_command_previews_preserve_first_thread_and_call_order() {
+    let home = tempdir().unwrap();
+    let sessions = home.path().join("sessions");
+    fs::create_dir(&sessions).unwrap();
+    for (number, modified) in [(1, 100), (2, 200)] {
+        let id = format!("00000000-0000-4000-8000-{number:012}");
+        let path = sessions.join(format!("rollout-{id}.jsonl"));
+        let mut records = vec![event("2026-11-13T00:00:00Z", "session_meta", json!({"id":id}))];
+        for call in ["z", "a"] {
+            records.push(event("2026-11-13T01:00:00Z", "response_item", json!({"type":"function_call","name":"exec_command","call_id":call,"arguments":{"cmd":"git status; python -m pytest"}})));
+        }
+        fs::write(&path, records.join("\n")+"\n").unwrap();
+        fs::File::options().write(true).open(path).unwrap().set_times(fs::FileTimes::new().set_modified(
+            std::time::UNIX_EPOCH + Duration::from_secs(modified))).unwrap();
+    }
+    for restart in [false, true] {
+        let service = Service::start(home.path(), true, None);
+        let value = snapshot_when(&service, |value| value["codex"]["git"]["total"] == 4 && value["codex"]["checks"].as_array().is_some_and(|items| items.len() == 4));
+        for events in [&value["codex"]["git"]["events"], &value["codex"]["checks"]] {
+            let actual: Vec<_> = events.as_array().unwrap().iter().map(|event|
+                (event["thread_id"].as_str().unwrap().to_owned(),event["call_id"].as_str().unwrap().to_owned())).collect();
+            let calls = if restart { ["a", "z"] } else { ["z", "a"] };
+            let expected: Vec<_> = [2,1].into_iter().flat_map(|number| calls.into_iter().map(move |call|
+                (format!("00000000-0000-4000-8000-{number:012}"),call.to_owned()))).collect();
+            assert_eq!(actual, expected);
+        }
+        assert_eq!(value["codex"]["git"]["operations"]["status"], 4);
+    }
+}
+
+
+#[test]
 fn global_file_preview_preserves_first_thread_and_call_order() {
     let home = tempdir().unwrap();
     let sessions = home.path().join("sessions");

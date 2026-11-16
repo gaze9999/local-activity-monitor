@@ -20,15 +20,17 @@ fn retain_preview<K: Ord, V>(preview: &mut BTreeMap<K, V>, rank: K, render: impl
 /// releasing each call after observation; full operation counts remain exact.
 struct WindowSummary {
     boundary: Option<DateTime<Utc>>,
-    git: BTreeMap<(Reverse<Option<DateTime<Utc>>>, String, String, usize), Value>,
-    checks: BTreeMap<(Reverse<Option<DateTime<Utc>>>, String, String, usize), Value>,
+    presentation_order: bool,
+    thread_order: usize,
+    git: BTreeMap<(Reverse<Option<DateTime<Utc>>>, usize, String, u64, String, usize), Value>,
+    checks: BTreeMap<(Reverse<Option<DateTime<Utc>>>, usize, String, u64, String, usize), Value>,
     operations: BTreeMap<String, usize>,
     total: usize,
 }
 
 impl WindowSummary {
     fn new(boundary: Option<DateTime<Utc>>) -> Self {
-        Self { boundary, git: BTreeMap::new(), checks: BTreeMap::new(), operations: BTreeMap::new(), total: 0 }
+        Self { boundary, presentation_order: false, thread_order: 0, git: BTreeMap::new(), checks: BTreeMap::new(), operations: BTreeMap::new(), total: 0 }
     }
 
     fn observe(&mut self, thread: &str, id: &str, call: &Call) {
@@ -36,14 +38,16 @@ impl WindowSummary {
         self.total += call.commands.git.len();
         for (index, event) in call.commands.git.iter().enumerate() {
             *self.operations.entry(event.operation.clone()).or_default() += 1;
-            retain_preview(&mut self.git, (Reverse(call.time), thread.to_owned(), id.to_owned(), index), || json!({
+            retain_preview(&mut self.git, (Reverse(call.time), self.thread_order, thread.to_owned(),
+                if self.presentation_order { call.presentation_sequence } else { 0 }, id.to_owned(), index), || json!({
                 "thread_id":thread, "thread_name":null, "call_id":id, "index":index,
                 "timestamp":call.time.map(stamp), "completed_at":call.completed_at().map(stamp), "duration_ms":call.duration_ms(),
                 "operation":event.operation, "repository":event.repository,
             }), GIT_EVENT_LIMIT);
         }
         for (index, event) in call.commands.checks.iter().enumerate() {
-            retain_preview(&mut self.checks, (Reverse(call.time), thread.to_owned(), id.to_owned(), index), || json!({
+            retain_preview(&mut self.checks, (Reverse(call.time), self.thread_order, thread.to_owned(),
+                if self.presentation_order { call.presentation_sequence } else { 0 }, id.to_owned(), index), || json!({
                 "thread_id":thread, "thread_name":null, "call_id":id,
                 "timestamp":call.time.map(stamp), "completed_at":call.completed_at().map(stamp), "duration_ms":call.duration_ms(),
                 "operation":event.operation, "category":event.category,
@@ -62,10 +66,14 @@ impl<'a> Calls<'a> {
         Self(threads)
     }
 
-    /// Consume already resolved winners once, preserving timestamp/thread/call/index ties.
-    pub fn window(&self, boundary: Option<DateTime<Utc>>) -> (Value, Vec<Value>) {
+    /// Consume resolved winners once, using source ordinals only for a complete set.
+    pub fn window(&self, boundary: Option<DateTime<Utc>>, thread_order: Option<&BTreeMap<&str, usize>>) -> (Value, Vec<Value>) {
         let mut summary = WindowSummary::new(boundary);
         for (&thread, (projection, _)) in self.0 {
+            if let Some(order) = thread_order {
+                summary.presentation_order = true;
+                summary.thread_order = order.get(thread).copied().unwrap_or(usize::MAX);
+            }
             for (id, call) in &projection.calls { summary.observe(thread, id, call); }
         }
         summary.finish()
@@ -76,6 +84,41 @@ impl<'a> Calls<'a> {
 mod tests {
     use super::*;
     use super::super::project::Call;
+
+    #[test]
+    fn ordered_command_previews_keep_call_indices_and_five_hundred_limit() {
+        let mut threads = BTreeMap::new();
+        for thread in ["a", "z"] {
+            let mut projection = Projection::for_id(Some(thread.into()));
+            for index in 0..300 {
+                let mut call: Call = serde_json::from_value(json!({
+                    "tool":"exec", "time":"2026-11-13T01:00:00Z", "sequence":index,
+                    "commands":{"git":[{"operation":"status"},{"operation":"diff"}],
+                        "checks":[{"operation":"cargo test","category":"runtime"},{"operation":"cargo check","category":"runtime"}]}
+                })).unwrap();
+                call.presentation_sequence = 299 - index;
+                projection.calls.insert(format!("call-{index:03}"), call);
+            }
+            threads.insert(thread, (projection, false));
+        }
+        let ranks = BTreeMap::from([("z",0),("a",1)]);
+        let (git, checks) = Calls::new(&threads).window(None, Some(&ranks));
+        assert_eq!(git["total"], 1200);
+        assert_eq!(git["operations"], json!({"status":600,"diff":600}));
+        let expected: Vec<_> = (50..300).rev().flat_map(|index|
+            (0..2).map(move |ordinal| (format!("call-{index:03}"), ordinal))).collect();
+        for events in [git["events"].as_array().unwrap(), &checks] {
+            assert_eq!(events.len(), 500);
+            assert!(events.iter().all(|event| event["thread_id"] == "z"));
+            assert_eq!(events.iter().enumerate().map(|(index,event)|
+                (event["call_id"].as_str().unwrap().to_owned(),index%2)).collect::<Vec<_>>(), expected);
+        }
+        for (index,event) in git["events"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(event["index"], index%2);
+        }
+        assert_eq!(checks[0]["operation"], "cargo test");
+        assert_eq!(checks[1]["operation"], "cargo check");
+    }
 
     #[test]
     fn snapshot_command_previews_match_legacy_sort_and_full_counts() {
@@ -112,7 +155,7 @@ mod tests {
             threads.insert(thread,(projection,false));
         }
         for boundary in [None,Some(time-chrono::Duration::hours(1)),Some(time),Some(time+chrono::Duration::hours(3))] {
-            let actual = Calls::new(&threads).window(boundary);
+            let actual = Calls::new(&threads).window(boundary, None);
             assert_eq!(actual,legacy_window(&threads,boundary));
             let mut streamed = WindowSummary::new(boundary);
             for (&thread, (projection, _)) in threads.iter().rev() {
@@ -134,7 +177,7 @@ mod tests {
             assert!(preview.len()<=GIT_EVENT_LIMIT);
         }
         assert_eq!(preview.into_keys().collect::<Vec<_>>(),(0..GIT_EVENT_LIMIT).collect::<Vec<_>>());
-        assert_eq!(Calls::new(&BTreeMap::new()).window(None),(json!({"events":[],"operations":{},"total":0}),Vec::new()));
+        assert_eq!(Calls::new(&BTreeMap::new()).window(None, None),(json!({"events":[],"operations":{},"total":0}),Vec::new()));
     }
 
     fn legacy_window(threads: &BTreeMap<&str, (Projection, bool)>, boundary: Option<DateTime<Utc>>) -> (Value, Vec<Value>) {
