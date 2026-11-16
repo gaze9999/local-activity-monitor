@@ -817,3 +817,15 @@ Python 14 組 bytes / budget fixture 通過, 其中 UTF-16 / UTF-32 為 Python �
 不改動共用 global-state decoder 或其他 JSON 來源, Python 對 global-state 的專案與 Dots 呼叫分別使用文字與 bytes, 不以單一 decoder 變更推定兩者等價, UTF-16/32 仍是獨立未支援差異
 
 原始 Python 2 組完整來源 fixture 通過且 bytes 未改寫, 新 Rust 2 項回歸修正前失敗記錄保留, 修正後 schedules 全家族 15 項通過 (0.06 秒), Python 既有 subagent sources 2 項通過, 完整 service 351 項通過 (126.44 秒), 完整 serial HTTP 單輪 219 項通過 (121.07 秒), 歷史 503、數字呈現與 Unicode 限制仍保留
+
+### 已觀察檔案的 Unicode 保留副檔名
+
+來源 LAM main `5c03daf`、workbench-workspace main `4616074` 核對未變, Python `observed_file_metadata` 使用 Unicode lowercase 判定保留檔名與副檔名, Rust 原先使用 ASCII lowercase 而讓合成 `fixture.KEY` 回傳檔案 metadata
+
+僅將既有兩個 lowercase 呼叫改為 Unicode 版本, 保留 `.env`、`auth.json`、`credentials.json`、`.pem` 與 `.key` 清單、已觀察事件篩選、絕對路徑與 symlink 防護, 不讀取檔案本文、不新增 endpoint 或查詢參數、不改變請求數量與資料保存
+
+原始 Python 18 組絕對 / workdir 相對路徑 fixture 通過且 9 個來源檔案 bytes 未改寫, 新 Rust 單元回歸先重現差異再通過, 涵蓋大小寫保留檔、Kelvin sign、希臘字母、dotted I 與 `.KEY.txt` 非保留副檔名, HTTP detail 與 summary 回歸確認保留檔回傳 rejected 且 bytes / modified_at 為 null, 未觀察路徑與停用觀察的既有拒絕檢查仍保留
+
+Python Unicode 15.0.0 與 Rust Unicode 18.0.0 的非 ASCII scalar lowercase 稽核, 在輸出完全為 ASCII 的範圍皆僅有 U+212A → k, 此證據限定目前 ASCII 保留清單, 不宣稱所有 Unicode lowercase 行為相同
+
+Linux / Rust 1.100.0 的完整 service 352 項通過 (67.77 秒), focused HTTP 1 項通過 (0.31 秒), 完整 serial HTTP 單輪 219 項通過 (121.54 秒), 歷史 metadata POST 503 / WouldBlock、唯讀 GET 503、數字呈現與其他 Unicode / 平台驗收限制仍保留

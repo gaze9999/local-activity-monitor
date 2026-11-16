@@ -5940,10 +5940,16 @@ fn observed_file_metadata_rejects_unobserved_and_protected_paths() {
     let physical_home = home.path().canonicalize().unwrap();
     let file_path = physical_home.join("document.txt");
     let secret_path = physical_home.join(".env");
+    let unicode_key = physical_home.join("fixture.KEY");
     fs::write(&file_path, "fixture").unwrap();
     fs::write(&secret_path, "private").unwrap();
+    fs::write(&unicode_key, "synthetic key").unwrap();
     let mut output = fs::OpenOptions::new().append(true).open(&session).unwrap();
-    for (call, path) in [("file1", &file_path), ("secret", &secret_path)] {
+    for (call, path) in [
+        ("file1", &file_path),
+        ("secret", &secret_path),
+        ("unicode_key", &unicode_key),
+    ] {
         output.write_all(event(&stamp, "response_item", json!({"type":"function_call","name":"mcp__fixture__read_file","call_id":call,"arguments":{"path":path}})).as_bytes()).unwrap();
     }
     #[cfg(unix)]
@@ -5957,7 +5963,7 @@ fn observed_file_metadata_rejects_unobserved_and_protected_paths() {
     snapshot_when(&service, |value| {
         value["codex"]["file_activity"]["total"]
             .as_u64()
-            .is_some_and(|total| total >= 2)
+            .is_some_and(|total| total >= 3)
     });
     let detail = |call: &str, path: &Path| {
         let query = form_urlencoded::Serializer::new(String::new())
@@ -5971,6 +5977,11 @@ fn observed_file_metadata_rejects_unobserved_and_protected_paths() {
     assert_eq!(result["health"], "ok");
     assert_eq!(result["bytes"], 7);
     assert_eq!(detail("secret", &secret_path).json()["health"], "rejected");
+    let protected = detail("unicode_key", &unicode_key).json();
+    assert_eq!(protected["health"], "rejected");
+    assert!(protected["bytes"].is_null());
+    assert!(protected["modified_at"].is_null());
+    assert_eq!(fs::read(&unicode_key).unwrap(), b"synthetic key");
     assert_eq!(detail("file1", &secret_path).status, 409);
     #[cfg(unix)]
     assert_eq!(
@@ -5978,7 +5989,16 @@ fn observed_file_metadata_rejects_unobserved_and_protected_paths() {
         "rejected"
     );
     let summary = service.get("/api/codex/file-summary?window=all").json();
-    assert!(summary["total"].as_u64().unwrap() >= 2);
+    assert!(summary["total"].as_u64().unwrap() >= 3);
+    let protected = summary["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["path"] == unicode_key.to_str().unwrap())
+        .unwrap();
+    assert_eq!(protected["health"], "rejected");
+    assert!(protected["bytes"].is_null());
+    assert!(protected["modified_at"].is_null());
     assert!(summary["files"]
         .as_array()
         .unwrap()

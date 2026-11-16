@@ -19,12 +19,12 @@ pub(crate) fn observed(event: &Value) -> Value {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("")
-        .to_ascii_lowercase();
+        .to_lowercase();
     let extension = joined
         .extension()
         .and_then(|extension| extension.to_str())
         .unwrap_or("")
-        .to_ascii_lowercase();
+        .to_lowercase();
     let rendered = joined.to_string_lossy();
     if !joined.is_absolute()
         || rendered.starts_with("\\\\")
@@ -57,5 +57,49 @@ pub(crate) fn observed(event: &Value) -> Value {
             json!({"modified_at":null,"bytes":null,"health":"missing"})
         }
         Err(_) => json!({"modified_at":null,"bytes":null,"health":"unavailable"}),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reserved_extensions_use_unicode_lowercase() {
+        let home = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        let root = home.path().to_path_buf();
+        #[cfg(not(windows))]
+        let root = home.path().canonicalize().unwrap();
+        for (name, rejected) in [
+            ("fixture.KEY", true),
+            ("fixture.KEY", true),
+            ("fixture.PEM", true),
+            ("AUTH.JSON", true),
+            ("CREDENTIALS.JSON", true),
+            (".ENV", true),
+            ("fixture.KEY.txt", false),
+            ("fixture.κey", false),
+            ("fixture.İey", false),
+        ] {
+            let path = root.join(name);
+            fs::write(&path, b"synthetic fixture").unwrap();
+            for event in [json!({"path":path}), json!({"path":name,"workdir":root})] {
+                let result = observed(&event);
+                assert_eq!(
+                    result["health"],
+                    if rejected { "rejected" } else { "ok" },
+                    "{name}"
+                );
+                if rejected {
+                    assert!(result["bytes"].is_null(), "{name}");
+                    assert!(result["modified_at"].is_null(), "{name}");
+                } else {
+                    assert_eq!(result["bytes"], 17, "{name}");
+                    assert!(result["modified_at"].is_string(), "{name}");
+                }
+            }
+            assert_eq!(fs::read(path).unwrap(), b"synthetic fixture");
+        }
     }
 }
