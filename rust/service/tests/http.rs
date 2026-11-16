@@ -978,7 +978,19 @@ fn dots_query_limits_metadata_filters_windows_and_honors_settings() {
     assert_eq!(bom_all["events"], all["events"]);
     assert_eq!(bom_all["activity"], all["activity"]);
     assert!(!bom_all.to_string().contains("PRIVATE"));
-    assert_eq!(fs::read(path).unwrap(), bom);
+    assert_eq!(fs::read(&path).unwrap(), bom);
+    let utf16: Vec<_> = state.to_string().encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut utf32 = vec![0, 0, 0xfe, 0xff];
+    utf32.extend(state.to_string().chars().flat_map(|character| (character as u32).to_be_bytes()));
+    for raw in [utf16, utf32] {
+        fs::write(&path, &raw).unwrap();
+        let encoded = service.get("/api/codex/dots?window=all").json();
+        assert_eq!(encoded["health"], "ok");
+        assert_eq!(encoded["events"], all["events"]);
+        assert_eq!(encoded["activity"], all["activity"]);
+        assert!(!encoded.to_string().contains("PRIVATE"));
+        assert_eq!(fs::read(&path).unwrap(), raw);
+    }
     let recent = service.get("/api/codex/dots?window=24h").json();
     assert_eq!(recent["activity"].as_array().unwrap().len(), 2);
     assert_eq!(service.get("/api/codex/dots?window=bad").status, 400);

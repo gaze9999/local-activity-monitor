@@ -6,6 +6,7 @@ mod gpu_info;
 mod gpu_windows;
 mod history;
 mod journal;
+mod json_bytes;
 mod performance_debug;
 mod process_usage;
 mod runtime_info;

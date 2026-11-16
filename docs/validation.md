@@ -940,3 +940,20 @@ HTTP fixture 延續原 UTF-8 / UTF-16 更新, 再寫入 UTF-32 LE BOM manifest, 
 Linux / Rust 1.100.0 的完整 service 365 項通過 (65.90 秒), 完整 serial HTTP 單輪 219 項通過 (125.53 秒)
 
 先前 Plugin UTF-32 不支援範圍由本輪明確接受條件取代, Python 另有 4 組有 / 無 BOM 的 unpaired surrogate fixture 可讀, Rust 保持拒絕, 不宣稱完整 JSON 或 Unicode 等價, 其他 JSON 呼叫的 UTF-16/32、歷史 HTTP 503 / WouldBlock、數字呈現與平台限制仍保留
+
+
+### 手動 Dots 查詢的 UTF-16 / UTF-32 bytes 解碼
+
+來源 LAM main `5c03daf`、workbench-workspace main `4616074` 再次核對未變, 依 `read_dots`, 手動查詢使用 `json.loads(bytes)`, 共享 metadata 與背景讀取則為 UTF-8 文字, 兩種來源模式不得一起放寬, 本輪先以原始 Python 核對 8 種 LE / BE、有 / 無 BOM 的 UTF-16 / UTF-32 fixture, 直接 Dots 成功而文字 metadata 保持 unsupported
+
+將前輪 Plugin decoder 移到私有 `json_bytes::parse`, 除 Vec 改為 slice 存取及說明外解析邏輯相同, helper 不讀檔也不決定讀取上限或 object 白名單, 僅由既有 Plugin reader 與 Dots bytes-mode 呼叫, Plugin 保留原門檻及 object 判定, Dots 仍先完成 16 MiB metadata / 實讀 bytes 檢查再解碼
+
+新增兩項 Dots 回歸修正前失敗, 修正後 Dots 全家族 11 項通過 (3.25 秒)、Plugin 全家族 16 項通過 (0.03 秒), 涵蓋 UTF-16/32 各端序與 BOM 組合、白名單、來源 bytes、不完整 / 非 object / malformed / surrogate 拒絕, 兩種代表編碼的 16 MiB 精確邊界接受、加一 byte 拒絕
+
+文字模式的 `read_state_with_health` 仍回報 unsupported, `read_state` 仍為 None, 背景 Dots 不新增 activity, 不改動 project / schedule 的共同讀取方式, 16 MiB 是原始輸入限制, 不代表解碼與 JSON 配置的整體記憶體低於 16 MiB
+
+HTTP 既有查詢 fixture 新增無 BOM UTF-16 LE 與有 BOM UTF-32 BE, events / activity 與原 UTF-8 結果相同、來源 bytes 未改寫且私密 artifact / account 欄位不外露, 原時間窗與 metadata 開關檢查保留, focused HTTP 1 項通過 (0.07 秒), Python 12 組 direct / text-mode / byte-limit fixture 與既有 desktop activity 8 項通過
+
+Linux / Rust 1.100.0 的完整 service 367 項通過 (60.08 秒), 完整 serial HTTP 單輪 219 項通過 (126.35 秒)
+
+不新增 endpoint、查詢參數、讀取次數或保存內容, unpaired surrogate 仍不支援, 其他 JSON bytes 呼叫未自動採用新 helper, 歷史 HTTP 503 / WouldBlock、數字呈現與 Unicode / 平台限制仍保留

@@ -70,7 +70,7 @@ pub(crate) fn read_state_with_health(home: &Path) -> Result<Value, &'static str>
     read_state_json(home, false)
 }
 
-fn read_state_json(home: &Path, allow_bom: bool) -> Result<Value, &'static str> {
+fn read_state_json(home: &Path, bytes_mode: bool) -> Result<Value, &'static str> {
     let path = home.join(".codex-global-state.json");
     let metadata = fs::symlink_metadata(&path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
@@ -110,12 +110,11 @@ fn read_state_json(home: &Path, allow_bom: bool) -> Result<Value, &'static str> 
     if bytes.len() as u64 > LIMIT {
         return Err("oversized");
     }
-    let input = if allow_bom {
-        bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes)
+    let value = if bytes_mode {
+        crate::json_bytes::parse(&bytes)
     } else {
-        &bytes
-    };
-    let value: Value = serde_json::from_slice(input).map_err(|_| "unsupported")?;
+        serde_json::from_slice::<Value>(&bytes).ok()
+    }.ok_or("unsupported")?;
     if value.is_object() {
         Ok(value)
     } else {
@@ -419,6 +418,76 @@ fn project(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn encoded_json(text: &str, width: usize, big_endian: bool, bom: bool) -> Vec<u8> {
+        let text = format!("{}{text}", if bom { "\u{feff}" } else { "" });
+        if width == 2 {
+            text.encode_utf16().flat_map(|unit| if big_endian { unit.to_be_bytes() } else { unit.to_le_bytes() }).collect()
+        } else {
+            text.chars().flat_map(|character| if big_endian { (character as u32).to_be_bytes() } else { (character as u32).to_le_bytes() }).collect()
+        }
+    }
+
+    #[test]
+    fn query_encoded_bytes_do_not_relax_text_metadata_readers() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".codex-global-state.json");
+        let state = json!({"electron-persisted-atom-state":{"orbit-outputs-v1":[{
+            "threadId":"00000000-0000-4000-8000-000000000001",
+            "artifact":{"type":"text","producedAtMs":0,"content":"PRIVATE_MARKER"}
+        }]},"literal":"\u{feff}中文😀"});
+        let body = state.to_string();
+        let now = DateTime::from_timestamp(1, 0).unwrap();
+        fs::write(&path, &body).unwrap();
+        let expected = read(home.path(), "all", now);
+        assert_eq!(expected["health"], "ok");
+        assert!(!expected.to_string().contains("PRIVATE_MARKER"));
+        for width in [2, 4] {
+            for big_endian in [false, true] {
+                for bom in [false, true] {
+                    let raw = encoded_json(&body, width, big_endian, bom);
+                    fs::write(&path, &raw).unwrap();
+                    assert_eq!(read(home.path(), "all", now), expected, "{width}/{big_endian}/{bom}");
+                    assert_eq!(read_state_with_health(home.path()), Err("unsupported"));
+                    assert!(read_state(home.path()).is_none());
+                    for window in background(home.path(), &Map::new(), now) {
+                        assert_eq!(window["activity"], json!([]));
+                    }
+                    assert_eq!(fs::read(&path).unwrap(), raw);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn query_encoded_bytes_preserve_rejections_and_byte_limit() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".codex-global-state.json");
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        for (width, big_endian, bom) in [(2, false, true), (4, true, false)] {
+            for text in ["", "[]", "{"] {
+                let raw = encoded_json(text, width, big_endian, bom);
+                fs::write(&path, &raw).unwrap();
+                assert_eq!(read(home.path(), "all", now)["health"], "error");
+                assert_eq!(fs::read(&path).unwrap(), raw);
+            }
+            let text = format!("{{}}{}", " ".repeat((LIMIT as usize - if bom { width } else { 0 }) / width - 2));
+            let mut raw = encoded_json(&text, width, big_endian, bom);
+            assert_eq!(raw.len(), LIMIT as usize);
+            fs::write(&path, &raw).unwrap();
+            assert_eq!(read(home.path(), "all", now)["health"], "ok");
+            raw.push(b' ');
+            fs::write(&path, &raw).unwrap();
+            assert_eq!(read(home.path(), "all", now)["health"], "error");
+            assert_eq!(read_state_with_health(home.path()), Err("oversized"));
+            assert_eq!(fs::read(&path).unwrap(), raw);
+        }
+        let mut surrogate = encoded_json("{\"x\":\"", 2, false, true);
+        surrogate.extend([0, 0xd8]);
+        surrogate.extend(encoded_json("\"}", 2, false, false));
+        fs::write(&path, surrogate).unwrap();
+        assert_eq!(read(home.path(), "all", now)["health"], "error");
+    }
 
     #[test]
     fn query_bom_does_not_relax_text_metadata_readers() {
