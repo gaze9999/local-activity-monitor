@@ -479,3 +479,13 @@ Python 原始 sources 方法以合成依賴執行確認, 單元先失敗後通�
 另核對 account reader 應保留 protocol 宣告順序, 現有 serde_json preserve_order 相依功能已符合, 僅補單元與 fake CLI HTTP 回歸, 未新增真實帳號查詢, Python 以合成依賴執行原始 sources 方法確認兩種順序規則
 
 完整單執行緒 `--locked --offline` service binary 322 項 (107.72 秒)、HTTP 216 項 (162.27 秒) 通過, Linux / Rust 1.100.0 合成資料, 基底 c2a57b0 與遠端一致, LAM main 5c03daf / WBUIWS main 4616074 未變, 先前唯讀 settings GET 503 仍屬未明原因, 本次通過不代表已修復, 其他容量、overflow、保留策略與平台驗收待辦不變
+
+### Dots output preview 的衍生電腦與活動範圍
+
+Python `project_dots` 先依時間排序並取既有 500 筆 output preview, 再衍生 computers / activity, Rust 原先使用全部最多 2000 筆讀入候選, 因而把只出現在更舊 output 的電腦也列入
+
+現在提前使用既有穩定排序, 只在衍生活動時使用前 500 筆, 完整候選仍保留供 window 選擇與 total 計算, 不改來源讀取上限、顯示上限、保存容量或 eviction, `/api/codex/dots` 與背景 snapshot 使用相同投影, 沒有新增檔案或網路請求
+
+Python 原始 project_dots / read_dots 與 HTTP 合成 501 筆輸入確認 total 501、events / activity 500、排除只在最舊 output 出現的電腦, HTTP 先失敗後通過並涵蓋 all / 1h、背景 snapshot 與私密內容不輸出, 單元與 Python 另確認同時間的插入順序, focused dots HTTP 4 項通過
+
+完整單執行緒 `--locked --offline` service binary 323 項 (107.11 秒)、HTTP 217 項 (167.37 秒) 通過, Linux / Rust 1.100.0 合成資料, 基底 326c15b 與遠端一致, LAM main 5c03daf / WBUIWS main 4616074 未變, 先前唯讀 settings GET 503 仍未明原因且保留原始失敗證據, 本次通過不代表已修復, 其他既有待辦不變

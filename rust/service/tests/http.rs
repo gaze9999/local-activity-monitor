@@ -926,6 +926,32 @@ fn dots_query_limits_metadata_filters_windows_and_honors_settings() {
 }
 
 #[test]
+fn dots_computers_use_output_preview_without_losing_event_totals() {
+    let home = tempdir().unwrap();
+    let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).timestamp_millis();
+    let id = "00000000-0000-4000-8000-000000000001";
+    let outputs: Vec<_> = (0..501).map(|index| json!({
+        "threadId":id,"turnId":format!("turn-{index}"),
+        "hostId":if index == 0 { "remote-control:old" } else { "remote-control:recent" },
+        "artifact":{"type":"text","producedAtMs":now - (501-index)*1000,"content":"PRIVATE_BODY"}
+    })).collect();
+    fs::write(home.path().join(".codex-global-state.json"),
+        json!({"electron-persisted-atom-state":{"orbit-outputs-v1":outputs}}).to_string()).unwrap();
+    let service = Service::start(home.path(), true, None);
+    for window in ["all", "1h"] {
+        let dots = service.get(&format!("/api/codex/dots?window={window}")).json();
+        assert_eq!(dots["total"], 501);
+        assert_eq!(dots["events"].as_array().unwrap().len(), 500);
+        assert_eq!(dots["activity"].as_array().unwrap().len(), 500);
+        assert_eq!(dots["computers"].as_array().unwrap().len(), 1);
+        assert_eq!(dots["computers"][0]["host_id"], "remote-control:recent");
+        assert!(!dots.to_string().contains("PRIVATE_BODY"));
+    }
+    let snapshot = snapshot_when(&service, |value| value["codex"]["dots"]["total"] == 501);
+    assert_eq!(snapshot["codex"]["dots"]["computers"].as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn dots_background_merges_catalog_and_updates_with_source() {
     let home = tempdir().unwrap();
     fs::create_dir(home.path().join("sqlite")).unwrap();

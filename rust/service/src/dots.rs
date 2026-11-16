@@ -296,7 +296,13 @@ fn project(
             }
         }
     }
-    for event in &events {
+    events.sort_by(|a, b| {
+        b["timestamp"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(a["timestamp"].as_str().unwrap_or(""))
+    });
+    for event in events.iter().take(500) {
         let id = event["thread_id"].as_str().unwrap_or("");
         let host_id = event["host_id"]
             .as_str()
@@ -348,12 +354,6 @@ fn project(
     };
     activity.retain(&contains);
     events.retain(&contains);
-    events.sort_by(|a, b| {
-        b["timestamp"]
-            .as_str()
-            .unwrap_or("")
-            .cmp(a["timestamp"].as_str().unwrap_or(""))
-    });
     let total = events.len();
     events.truncate(500);
     result["health"] = json!("ok");
@@ -378,4 +378,25 @@ fn project(
         })
         .unwrap_or(Value::Null);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_preview_keeps_equal_time_insertion_order_and_all_event_totals() {
+        let outputs: Vec<_> = (0..501).map(|index| json!({
+            "threadId":"00000000-0000-4000-8000-000000000001", "turnId":index.to_string(),
+            "hostId":if index == 500 { "remote-control:excluded" } else { "remote-control:shown" },
+            "artifact":{"type":"text","producedAtMs":1000}
+        })).collect();
+        let state = json!({"electron-persisted-atom-state":{"orbit-outputs-v1":outputs}});
+        let value = project(&state, "all", DateTime::from_timestamp(2, 0).unwrap(), BTreeMap::new());
+        assert_eq!(value["total"], 501);
+        assert_eq!(value["events"].as_array().unwrap().len(), 500);
+        assert_eq!(value["activity"].as_array().unwrap().len(), 500);
+        assert_eq!(value["computers"].as_array().unwrap().len(), 1);
+        assert_eq!(value["computers"][0]["host_id"], "remote-control:shown");
+    }
 }
