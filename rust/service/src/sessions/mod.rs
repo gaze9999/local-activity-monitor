@@ -3660,6 +3660,21 @@ impl Collector {
                 })
             })
             .collect();
+        let mut live_errors: Vec<_> = session.iter().map(|event| (false, None, event))
+            .chain(tool_errors.iter().map(|(start, event)| (true, *start, event))).collect();
+        if self.has_complete_source_order() {
+            let mut thread_order = BTreeMap::new();
+            for (_, state) in self.ordered_working_sources() {
+                if let Some(id) = state.projection.id.as_deref() {
+                    let next = thread_order.len();
+                    thread_order.entry(id).or_insert(next);
+                }
+            }
+            // Stable grouping keeps each thread's session errors before its
+            // call failures without changing retained-history positions.
+            live_errors.sort_by_key(|(_, _, event)| event["thread_id"].as_str()
+                .and_then(|id| thread_order.get(id)).copied().unwrap_or(usize::MAX));
+        }
         let session_source = json!({"source":"session","health":health,"files":[],"file_count":self.discovered_file_count(),
                            "checked_at":self.updated.map(stamp),"read_bytes":self.read_bytes,
                            "unsupported_lines":self.malformed});
@@ -3695,12 +3710,9 @@ impl Collector {
             let boundary = HOURS[index].map(|hours| reference - Duration::hours(hours));
             let mut errors = visible_logs(
                 self.error_history.iter()
-                    .chain(session.iter().filter(|_| health != "disabled"))
-                    .chain(
-                        tool_errors.iter().filter(|_| health != "disabled")
-                            .filter(|(start, _)| boundary.is_none_or(|cutoff| start.is_some_and(|time| time >= cutoff)))
-                            .map(|(_, event)| event),
-                    )
+                    .chain(live_errors.iter().filter(|_| health != "disabled")
+                        .filter(|(tool, start, _)| !tool || boundary.is_none_or(|cutoff| start.is_some_and(|time| time >= cutoff)))
+                        .map(|(_, _, event)| *event))
                     .chain(self.core.errors.iter().filter(|_| health != "disabled"))
                     .chain(self.desktop.errors.iter().filter(|_| health != "disabled"))
                     .chain(&self.jev_errors)
@@ -4859,7 +4871,21 @@ impl Collector {
             mcp::apply_diagnostics(&mut all_mcp, diagnostics);
         }
         all_mcp["configuration"] = json!({"location":self.catalog_home.join("config.toml").to_string_lossy(),"configured_sources":self.mcp_catalog.len()});
-        let mut session_errors: Vec<_> = self.files.iter()
+        let mut error_sources = self.ordered_working_sources();
+        if self.has_complete_source_order() {
+            // Python groups each thread at its first discovered source, then
+            // appends that thread's source errors in discovery order.
+            let mut thread_order = BTreeMap::new();
+            for (_, state) in &error_sources {
+                if let Some(id) = state.projection.id.as_deref() {
+                    let next = thread_order.len();
+                    thread_order.entry(id).or_insert(next);
+                }
+            }
+            error_sources.sort_by_key(|(_, state)| state.projection.id.as_deref()
+                .and_then(|id| thread_order.get(id)).copied());
+        }
+        let mut session_errors: Vec<_> = error_sources.into_iter()
             .filter(|(_, state)| state.projection.id.is_some())
             .flat_map(|(path, state)| state.error_events(path, &state.projection.errors))
             .collect();
@@ -6405,6 +6431,67 @@ mod log_tests {
         assert!(usage(&collector, "disabled").is_null());
         collector.applied_command_switches.usage = false;
         assert!(usage(&collector, "ok").is_null());
+    }
+
+    #[test]
+    fn complete_source_session_errors_follow_first_thread_then_source_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let first = "00000000-0000-4000-8000-000000000001";
+        let second = "00000000-0000-4000-8000-000000000002";
+        for (name, id, mtime) in [("a", first, 100), ("m", second, 200), ("z", first, 300)] {
+            let path = root.join(format!("rollout-{name}-{id}.jsonl"));
+            let records = [
+                json!({"type":"session_meta","timestamp":"2026-11-13T00:00:00Z","payload":{"id":id}}),
+                json!({"type":"event_msg","timestamp":"2026-11-13T01:00:00Z","payload":{"type":"turn_failed","error_code":name}}),
+            ];
+            let mut records = records.to_vec();
+            if name == "z" {
+                records.extend([
+                    json!({"type":"response_item","timestamp":"2026-11-13T00:30:00Z","payload":{"type":"function_call","name":"exec_command","call_id":"tool","arguments":"{}"}}),
+                    json!({"type":"response_item","timestamp":"2026-11-13T01:00:00Z","payload":{"type":"function_call_output","call_id":"tool","output":{"exit_code":2,"output":"fixture failure"}}}),
+                ]);
+            }
+            std::fs::write(&path, records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")+"\n").unwrap();
+            std::fs::File::options().write(true).open(path).unwrap().set_times(
+                std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(mtime))
+            ).unwrap();
+        }
+        let mut collector = Collector::new(root.join("monitoring"), true, None);
+        for _ in 0..4 { collector.refresh(&root, &AtomicBool::new(false), true, true, CommandSwitches::default()); }
+        // Isolate live source ordering; retained-history insertion order is a
+        // separate presentation rule and must not be rewritten by this change.
+        collector.error_history.clear();
+        collector.logs_enabled = true;
+        collector.updated = Some(chrono::DateTime::parse_from_rfc3339("2026-11-13T02:00:00Z").unwrap().with_timezone(&Utc));
+        let codes = |collector: &Collector| {
+            let snapshots = collector.snapshots("ok", "ok", 1);
+            let value: Value = serde_json::from_slice(&snapshots.window_bytes(3)).unwrap();
+            value["errors"]["events"].as_array().unwrap().iter().filter(|event| event["source"] == "session")
+                .map(|event| event["code"].as_str().unwrap().to_owned()).collect::<Vec<_>>()
+        };
+        assert_eq!(codes(&collector), ["z", "a", "m"]);
+        let snapshots = collector.snapshots("ok", "ok", 1);
+        for window in 0..4 {
+            let value: Value = serde_json::from_slice(&snapshots.window_bytes(window)).unwrap();
+            let logs: Value = serde_json::from_slice(&snapshots.logs[window]).unwrap();
+            for rows in [&value["errors"]["events"], &logs["entries"]] {
+                assert_eq!(rows.as_array().unwrap().iter().filter(|event| event["source"] == "session")
+                    .map(|event| event["code"].as_str().unwrap()).collect::<Vec<_>>(), ["z", "a", "m"]);
+                assert_eq!(rows.as_array().unwrap().iter().filter(|event| matches!(event["source"].as_str(), Some("session" | "tool_result"))).map(|event| {
+                    if event["source"] == "tool_result" { "tool" } else { event["code"].as_str().unwrap() }
+                }).collect::<Vec<_>>(), if window == 0 { vec!["z", "a", "m"] } else { vec!["z", "a", "tool", "m"] });
+            }
+        }
+        let value: Value = serde_json::from_slice(&snapshots.window_bytes(3)).unwrap();
+        assert_eq!(value["errors"]["events"].as_array().unwrap().iter().map(|event| {
+            if event["source"] == "tool_result" { "tool" } else { event["code"].as_str().unwrap() }
+        }).collect::<Vec<_>>(), ["z", "a", "tool", "m"]);
+        collector.error_history = value["errors"]["events"].as_array().unwrap().iter().rev().cloned().collect();
+        assert_eq!(codes(&collector), ["m", "a", "z"]);
+        collector.error_history.clear();
+        collector.discovered_files = Some(4);
+        assert_eq!(codes(&collector), ["a", "m", "z"]);
     }
 
     #[test]

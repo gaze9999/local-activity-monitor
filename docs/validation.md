@@ -327,3 +327,17 @@ Python CodexCollector 隔離 fixture 確認原始來源順序、mtime rescan、�
 同批補強來源順序的 metadata 驗收: 相同 context / token timestamp 時, model、reasoning_effort、execution 與 tokens 由後來源覆蓋, 與額度的前來源決勝分別驗證, Python 原始 fixture 與 HTTP 啟動 / checkpoint 重啟 / rescan / 路徑決勝全部通過, 不需新增 runtime 修改
 
 本批最終完整單執行緒 `--locked --offline` service binary 307 項全數通過 (82.29 秒), HTTP 205 項全數通過 (155.81 秒), Linux / Rust 1.100.0 合成資料驗證, 未延伸為並行、原生平台或真實資料驗收
+
+### 完整 working set 的 session error 分組順序
+
+未由保留歷史提供位置的 live session errors, 改依 Python 首次出現的 thread 順序分組, 同 thread 內保持 discovery 來源順序, 修正相同 timestamp 的 session events 被檔名排序打亂, 四個時間窗與 logs 保留一致排序
+
+只調整完整 working set 的發布遍歷, 不改寫保留歷史、保存上限、事件內容、來源讀取或按需 detail, 已有歷史位置仍依原規則保留, discovery 不完整與 overflow 維持既有 fallback, tool-result / call 事件交錯與全域排序仍待完成
+
+基底 ab31b23, LAM main 5c03daf / workspace main 4616074 已核對未變, Python fixture 確認三來源兩 thread 的順序為 z,a,m, 不是字母排序 a,m,z 或平鋪來源 z,m,a, Rust 回歸先失敗後通過, 最終四窗 / logs / history / fallback 回歸通過, 既有 error 單元 11 項與 HTTP error 20 項通過, 未宣稱完整或跨平台驗收
+
+同批將各 thread 的 tool-result errors 接在該 thread 的 session errors 後面, 修正同時事件被拆成「所有 session 後才是所有 tool」的順序, 新增的暫存排序僅持有既有事件參照, 不複製本文、改寫歷史或增加來源讀取, 同 thread 多 call 插入順序仍未完成
+
+Python 原始 fixture 與先失敗後通過回歸確認 z,a,tool,m, 四窗測試另確認 1h 排除開始時間在窗外的 call failure, 即使完成時間仍在窗內, logs 僅針對 session / tool_result 比較順序, 不排除原有 monitor 啟動事件, 初版測試誤含窗外 call 並把 monitor 訊息納入期望, 已修正測試而非改動 runtime 篩選
+
+最終版本以 Linux / Rust 1.100.0 執行完整 `--locked --offline` 單執行緒回歸, service binary 308 項全數通過 (91.28 秒), HTTP 205 項全數通過 (142.64 秒), 保留並行、原生平台與真實資料驗收限制
