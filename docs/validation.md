@@ -661,3 +661,13 @@ Cloud text 改用既有 schedules::trim_text, 只影響 /api/codex/cloud 與共�
 新回歸在修正前於 CR 案例實際失敗, 原始 Python 換行、同層 key、空 parent、comment、tab / 非換行 / 行數拒絕 fixture 通過, Rust structured 11、MCP documents 6、Python payload_detail 12 項通過, 完整 service 338 項通過 (124.25 秒), 完整 serial HTTP 單輪 219 項通過 (151.34 秒)
 
 本輪合併前述 Unicode digit escape 稽核記錄, 該差異仍未修改, 其他 YAML scalar / grammar 完整相容性不由本輪推定, 歷史獨立 HTTP / WouldBlock / 唯讀 503、cleanup 警告與 overflow 排除範圍保留
+
+### YAML subset 非換行空白的 scalar 與 sequence 語意
+
+基底 `50a085c` 與來源 main 核對未變, 原始 Python 將 U+001F 視為空白而非換行, scalar 修整、key 冒號後分隔、sequence body 與 inline comment 判定均使用此語意, Rust 原先可能拒絕內容或將布林值誤保留為字串
+
+僅對齊上述 YAML 空白判定, 沿用既有 trim_text 並補齊來源 regex 的空白範圍, 引號內 U+001F 仍保留, tags / anchors / 重複 key 仍拒絕, 已選取內容的遮蔽投影、行數 / 深度 / bytes 上限與資料保存不變, 沒有新增查詢、來源讀取、相依套件或 schema
+
+新回歸修正前於 key 分隔案例實際失敗, 原始 Python 6 組 scalar / sequence / comment 案例、3 組拒絕與敏感欄位遮蔽通過, Rust structured 12、MCP documents 6、Python payload_detail 12 項通過, 完整 service 339 項通過 (113.92 秒), 完整 serial HTTP 單輪 219 項通過 (147.88 秒)
+
+Unicode digit escape 待辦未修改, 歷史獨立 HTTP / WouldBlock / 唯讀 503、cleanup 警告及 overflow 排除範圍仍保留, 不宣稱所有 YAML grammar 完全相同

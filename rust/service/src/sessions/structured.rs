@@ -7,9 +7,9 @@ const LIMIT: usize = 1024 * 1024;
 const LINES: usize = 20_000;
 static NUMBER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$").unwrap());
-static COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+#").unwrap());
+static COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\s\x1c-\x1f]+#").unwrap());
 static YAML_PAIR: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[^:{}\[\],]+:(?:\s|$)").unwrap());
+    LazyLock::new(|| Regex::new(r"^[^:{}\[\],]+:(?:[\s\x1c-\x1f]|$)").unwrap());
 static TOML_START: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:\[[^\n]+\]|[A-Za-z_]\w*\s*=)").unwrap());
 
@@ -429,7 +429,7 @@ fn csv_value(source: &str, dialect: &super::csv_dialect::Dialect) -> Option<Valu
 }
 
 fn scalar(input: &str) -> Option<Value> {
-    let value = input.trim();
+    let value = super::schedules::trim_text(input);
     if value.starts_with(['!', '&', '*', '|', '>']) {
         return None;
     }
@@ -451,10 +451,9 @@ fn scalar(input: &str) -> Option<Value> {
             .strip_suffix('\'')
             .map(|s| json!(s.replace("''", "'")));
     }
-    let value = COMMENT
-        .find(value)
-        .map_or(value, |found| &value[..found.start()])
-        .trim_end();
+    let value = super::schedules::trim_text(
+        COMMENT.find(value).map_or(value, |found| &value[..found.start()]),
+    );
     if matches!(value, "null" | "Null" | "NULL" | "~") {
         return Some(Value::Null);
     }
@@ -478,7 +477,7 @@ fn pair(body: &str) -> Option<(String, &str)> {
         || key
             .chars()
             .any(|ch| matches!(ch, ':' | '{' | '}' | '[' | ']' | ','))
-        || (!rest.is_empty() && !rest.starts_with(char::is_whitespace))
+        || (!rest.is_empty() && !rest.starts_with(|character: char| character.is_whitespace() || matches!(character, '\u{1c}'..='\u{1f}')))
     {
         return None;
     }
@@ -509,7 +508,7 @@ fn pair(body: &str) -> Option<(String, &str)> {
     if key == "<<" {
         return None;
     }
-    Some((key, rest.trim_start()))
+    Some((key, rest.trim_start_matches(|character: char| character.is_whitespace() || matches!(character, '\u{1c}'..='\u{1f}'))))
 }
 struct Yaml<'a> {
     lines: Vec<(usize, &'a str)>,
@@ -530,7 +529,7 @@ impl Yaml<'_> {
                 if body != "-" && !body.starts_with("- ") {
                     return None;
                 }
-                let content = body[1..].trim();
+                let content = super::schedules::trim_text(&body[1..]);
                 self.position += 1;
                 let child = if content.is_empty() {
                     if self.position < self.lines.len() && self.lines[self.position].0 > indent {
@@ -628,6 +627,45 @@ fn yaml(source: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn yaml_non_line_separator_whitespace_preserves_scalar_types() {
+        for (source, expected) in [
+            ("key:\u{1f}true\nother: 1", json!({"key":true,"other":1})),
+            ("key: true\u{1f}\nother: 1", json!({"key":true,"other":1})),
+            (
+                "key: text\u{1f}# comment\nother: 1",
+                json!({"key":"text","other":1}),
+            ),
+            (
+                "- key:\u{1f}true\n- other: false",
+                json!([{"key":true},{"other":false}]),
+            ),
+            ("- \u{1f}\n  key: true", json!([{"key":true}])),
+            (
+                "key: \"a\\u001fb\"\nother: 1",
+                json!({"key":"a\u{1f}b","other":1}),
+            ),
+        ] {
+            assert_eq!(parse(source), Some(expected.clone()), "{source:?}");
+            assert_eq!(
+                parse_document(source, "yaml"),
+                Some((expected, "YAML subset")),
+                "{source:?}"
+            );
+        }
+        assert_eq!(
+            super::super::details::redact_value(json!("secret:\u{1f}PRIVATE\nvisible: 1"), true, 0),
+            json!({"secret":"[已隱藏]","visible":1})
+        );
+        for source in [
+            "key:\u{1f}!tag\nother: 1",
+            "key:\u{1f}&anchor\nother: 1",
+            "key:\u{1f}true\nkey: false",
+        ] {
+            assert!(parse_document(source, "yaml").is_none(), "{source:?}");
+        }
+    }
+
     #[test]
     fn yaml_line_boundaries_and_indentation_match_python_subset() {
         let expected = json!({"a":1,"b":2});
