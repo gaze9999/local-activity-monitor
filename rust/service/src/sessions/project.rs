@@ -25,22 +25,24 @@ pub(super) use statistics::ToolStatistics;
 type Time = DateTime<Utc>;
 
 /// Counts over resolved call winners, independent of the per-thread event preview.
-pub(super) struct ActivitySeries<'a> {
+/// Own retained tool keys so observed payloads may be released between chunks.
+/// The existing key-count caps remain; this is not a fixed byte-budget guarantee.
+pub(super) struct ActivitySeries {
     minutes: BTreeMap<i64, usize>,
-    tools: BTreeMap<(i64, &'a str), usize>,
+    tools: BTreeMap<(i64, String), usize>,
 }
 
-impl<'a> ActivitySeries<'a> {
+impl ActivitySeries {
     pub(super) fn new() -> Self {
         Self { minutes: BTreeMap::new(), tools: BTreeMap::new() }
     }
 
-    pub(super) fn observe(&mut self, projection: &'a Projection, boundary: Option<Time>) {
+    pub(super) fn observe(&mut self, projection: &Projection, boundary: Option<Time>) {
         for call in projection.calls.values() {
             let Some(time) = call.time.filter(|time| boundary.is_none_or(|cutoff| *time >= cutoff)) else { continue; };
             let minute = time.timestamp().div_euclid(60);
             Self::increment(&mut self.minutes, minute, 10_080);
-            Self::increment(&mut self.tools, (minute, call.tool.as_str()), 20_000);
+            Self::increment(&mut self.tools, (minute, call.tool.clone()), 20_000);
         }
     }
 
@@ -69,7 +71,7 @@ impl<'a> ActivitySeries<'a> {
     }
 }
 
-impl ActivitySeries<'_> {
+impl ActivitySeries {
     /// Inject the bounded series only at final encoding, after source augmentation.
     pub(super) fn snapshot_json(&self, snapshot: &Value, statistics: Option<&ToolStatistics<'_>>) -> String {
         let Some(root) = snapshot.as_object() else { return snapshot.to_string(); };
@@ -82,7 +84,7 @@ impl ActivitySeries<'_> {
 struct SnapshotWithSeries<'a> {
     root: &'a serde_json::Map<String, Value>,
     codex: &'a serde_json::Map<String, Value>,
-    series: &'a ActivitySeries<'a>,
+    series: &'a ActivitySeries,
     statistics: Option<&'a ToolStatistics<'a>>,
 }
 
@@ -101,7 +103,7 @@ impl Serialize for SnapshotWithSeries<'_> {
 
 struct CodexWithSeries<'a> {
     fields: &'a serde_json::Map<String, Value>,
-    series: &'a ActivitySeries<'a>,
+    series: &'a ActivitySeries,
     statistics: Option<&'a ToolStatistics<'a>>,
 }
 
@@ -135,7 +137,7 @@ struct ActivityPoint { time: Minute, calls: usize }
 #[derive(Serialize)]
 struct ToolPoint<'a> { time: Minute, tool: &'a str, calls: usize }
 struct MinuteSeries<'a>(&'a BTreeMap<i64, usize>);
-struct ToolSeries<'a>(&'a BTreeMap<(i64, &'a str), usize>);
+struct ToolSeries<'a>(&'a BTreeMap<(i64, String), usize>);
 
 impl Serialize for MinuteSeries<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -150,7 +152,7 @@ impl Serialize for ToolSeries<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeSeq;
         let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
-        for (&(minute, tool), &calls) in self.0 { sequence.serialize_element(&ToolPoint { time: Minute(minute), tool, calls })?; }
+        for ((minute, tool), &calls) in self.0 { sequence.serialize_element(&ToolPoint { time: Minute(*minute), tool, calls })?; }
         sequence.end()
     }
 }
@@ -881,6 +883,8 @@ pub struct Projection {
     status_cached: bool,
     task_start: Option<Time>,
     intervals: BTreeMap<Time, Time>,
+    #[serde(default)]
+    interval_order: VecDeque<Time>,
     #[serde(skip)]
     pub calls: BTreeMap<String, Call>,
     pub errors: Vec<SessionError>,
@@ -910,7 +914,7 @@ pub(super) struct FileSummary {
     limit: usize,
     total: usize,
     operations: BTreeMap<String, usize>,
-    preview: BTreeMap<(std::cmp::Reverse<Option<String>>, usize), Value>,
+    preview: BTreeMap<(std::cmp::Reverse<Option<String>>, Option<String>, String, usize), Value>,
 }
 
 struct FilePreview<'a> {
@@ -943,23 +947,24 @@ impl FileSummary {
         Self { limit, total: 0, operations: BTreeMap::new(), preview: BTreeMap::new() }
     }
 
-    /// Feed projections in the original thread traversal order. Calls must
-    /// already be deduplicated by source precedence; counts are not reversible.
+    /// Feed each resolved (thread, call) winner exactly once, in any order.
+    /// Explicit canonical ties match the existing Rust BTreeMap traversal.
+    /// This does not establish Python insertion-order parity for timestamp ties.
+    /// Calls must already be deduplicated; counts are not reversible.
     /// read_filter None includes all operations, Some(true) reads only.
     pub(super) fn observe(&mut self, projection: &Projection, boundary: Option<Time>, enabled: bool, read_filter: Option<bool>) {
         if !enabled { return; }
         for (id, call) in &projection.calls {
             if !boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff)) { continue; }
             let timestamp = call.time.map(stamp);
-            for file in &call.files {
+            for (index, file) in call.files.iter().enumerate() {
                 if read_filter.is_some_and(|read| (file["operation"] == "read") != read) { continue; }
-                let ordinal = self.total;
                 self.total += 1;
                 if let Some(operation) = file["operation"].as_str() {
                     *self.operations.entry(operation.to_owned()).or_default() += 1;
                 }
                 if self.limit == 0 { continue; }
-                let rank = (std::cmp::Reverse(timestamp.clone()), ordinal);
+                let rank = (std::cmp::Reverse(timestamp.clone()), projection.id.clone(), id.clone(), index);
                 if self.preview.len() == self.limit && self.preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { continue; }
                 if self.preview.len() == self.limit { self.preview.pop_last(); }
                 self.preview.insert(rank, FilePreview { thread: projection.id.as_deref(), id, call, file }.render());
@@ -1227,6 +1232,9 @@ impl Projection {
                     })
             })
             || self.intervals.len() > 1024
+            || self.interval_order.len() != self.intervals.len()
+            || self.interval_order.iter().copied().collect::<BTreeSet<_>>()
+                != self.intervals.keys().copied().collect::<BTreeSet<_>>()
             || calls.values().any(|call| {
                 !valid_name(&call.tool, 160, true)
                     || !call.valid_agent_messages()
@@ -1561,9 +1569,14 @@ impl Projection {
         } else {
             let end = timestamp(text(field(payload, "completed_at"))).unwrap_or(when);
             if let Some(start) = start.or(self.task_start).filter(|start| end >= *start) {
+                if !self.intervals.contains_key(&start) {
+                    self.interval_order.push_back(start);
+                }
                 self.intervals.insert(start, end);
                 if self.intervals.len() > 1024 {
-                    self.intervals.pop_first();
+                    if let Some(first) = self.interval_order.pop_front() {
+                        self.intervals.remove(&first);
+                    }
                 }
             }
             if latest {
@@ -1925,7 +1938,7 @@ impl Projection {
             self.kind = other.kind;
             self.trigger = other.trigger.clone();
         }
-        if other.context_seen && other.context_at >= self.context_at {
+        if other.context_seen && other.context_at.is_some() && other.context_at >= self.context_at {
             self.context_at = other.context_at;
             self.model = other.model.clone();
             self.effort = other.effort.clone();
@@ -1941,6 +1954,9 @@ impl Projection {
             self.status_at = other.status_at;
             self.status_cached = other.status_cached;
             self.status = other.status;
+            self.task_start = other.task_start;
+        }
+        if other.task_start.is_some() && other.task_start > self.task_start {
             self.task_start = other.task_start;
         }
         self.intervals
@@ -2067,6 +2083,231 @@ impl Projection {
 mod snapshot_merge_tests {
     use super::*;
 
+    // Executable contract for a future streamed snapshot path, not used by publication.
+    // Selection is complete; callers must supply verified Python source traversal.
+    // Active-then-overflow order alone is NOT sufficient for Python parity.
+    #[derive(Debug, PartialEq)]
+    struct SnapshotWinnerDescriptor {
+        thread: String,
+        call: String,
+        source: usize,
+    }
+
+    // Only identified-thread metadata. Allowance and per-source errors must
+    // independently retain sources lacking a thread ID in the eventual pipeline.
+    struct SnapshotWinnerPlan {
+        thread_metadata_sources: Vec<usize>,
+        calls: Vec<SnapshotWinnerDescriptor>,
+    }
+
+    fn snapshot_winner_plan(
+        sources: &[(&Projection, &BTreeSet<String>)],
+        source_orders: &[Vec<String>],
+        selection_complete: bool,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Option<SnapshotWinnerPlan> {
+        if !selection_complete || sources.len() != source_orders.len() || cancelled() { return None; }
+        let mut thread_metadata_sources = Vec::new();
+        let mut threads = Vec::<(String, Vec<SnapshotWinnerDescriptor>)>::new();
+        let mut thread_slots = BTreeMap::<String, usize>::new();
+        let mut call_slots = BTreeMap::<(String, String), usize>::new();
+        for (source, (projection, selected)) in sources.iter().enumerate() {
+            if cancelled() { return None; }
+            let Some(thread) = &projection.id else { continue };
+            thread_metadata_sources.push(source);
+            let next = threads.len();
+            let slot = *thread_slots.entry(thread.clone()).or_insert_with(|| {
+                threads.push((thread.clone(), Vec::new())); next
+            });
+            // The current source path supplies its observed order explicitly.
+            // Python live parse and checkpoint restore do not use the same order.
+            if selected.iter().any(|id| !projection.calls.contains_key(id)) { return None; }
+            let mut seen = BTreeSet::new();
+            let mut calls = Vec::new();
+            for id in &source_orders[source] {
+                if !projection.calls.contains_key(id) || !seen.insert(id) { return None; }
+                if selected.contains(id) { calls.push(id); }
+            }
+            if projection.calls.keys().any(|id| selected.contains(id) && !seen.contains(id)) { return None; }
+            for id in calls {
+                if cancelled() { return None; }
+                let key = (thread.clone(), id.clone());
+                if let Some(&call_slot) = call_slots.get(&key) {
+                    threads[slot].1[call_slot].source = source;
+                } else {
+                    call_slots.insert(key, threads[slot].1.len());
+                    threads[slot].1.push(SnapshotWinnerDescriptor { thread:thread.clone(), call:id.clone(), source });
+                }
+            }
+        }
+        if cancelled() { return None; }
+        Some(SnapshotWinnerPlan { thread_metadata_sources,
+            calls: threads.into_iter().flat_map(|(_, calls)| calls).collect() })
+    }
+
+    #[test]
+    fn snapshot_winner_contract_matches_materialized_selection_and_ties() {
+        let time = timestamp(Some("2026-11-13T01:00:00Z"));
+        let mut active_a = source("active-a", time);
+        active_a.calls.get_mut("unique-active-a").unwrap().sequence = 2;
+        let mut active_b = source("active-b", time);
+        active_b.id = Some("another-thread".into());
+        active_b.calls.get_mut("unique-active-b").unwrap().sequence = 2;
+        let mut overflow = source("overflow", time);
+        // Later source overwrites a selected duplicate even with an older call time.
+        overflow.calls.get_mut("duplicate").unwrap().time = time.map(|t| t - chrono::Duration::hours(1));
+        let metadata_only = source("metadata-only", time);
+        let all_a = active_a.calls.keys().cloned().collect();
+        let all_b = active_b.calls.keys().cloned().collect();
+        let selected_overflow = BTreeSet::from(["duplicate".into()]);
+        let empty = BTreeSet::new();
+        let sources = [(&active_a, &all_a), (&active_b, &all_b), (&overflow, &selected_overflow), (&metadata_only, &empty)];
+        let orders: Vec<Vec<String>> = sources.iter().map(|(p, _)| p.calls.keys().cloned().collect()).collect();
+        let plan = snapshot_winner_plan(&sources, &orders, true, || false).unwrap();
+        assert_eq!(plan.thread_metadata_sources, [0, 1, 2, 3]);
+        let mut materialized = BTreeMap::<String, Projection>::new();
+        for (projection, selected) in sources {
+            let thread = projection.id.as_ref().unwrap();
+            materialized.entry(thread.clone()).or_insert_with(|| Projection::for_id(Some(thread.clone())))
+                .merge_snapshot(projection, Some(selected), &[None; 4]);
+        }
+        let mut actual: Vec<_> = plan.calls.iter().map(|winner| {
+            let call = &sources[winner.source].0.calls[&winner.call];
+            (winner.thread.clone(), winner.call.clone(), call.tool_name().to_owned(), call.time)
+        }).collect();
+        let expected: Vec<_> = materialized.iter().flat_map(|(thread, projection)| projection.calls.iter()
+            .map(move |(id, call)| (thread.clone(), id.clone(), call.tool_name().to_owned(), call.time))).collect();
+        // Rust oracle checks winner content only, not Python insertion ordering.
+        actual.sort();
+        assert_eq!(actual, expected);
+        assert_eq!(plan.calls.iter().find(|winner| winner.thread == active_a.id.as_ref().unwrap().as_str()
+            && winner.call == "duplicate").unwrap().source, 2);
+        assert!(!plan.calls.iter().any(|winner| winner.call == "unique-overflow"));
+        assert_eq!(materialized[active_a.id.as_ref().unwrap()].model.as_deref(), Some("metadata-only"));
+        assert!(snapshot_winner_plan(&sources, &orders, false, || false).is_none());
+        let mut checks = 0;
+        assert!(snapshot_winner_plan(&sources, &orders, true, || { checks += 1; false }).is_some());
+        for cancel_at in 0..checks {
+            let mut checked = 0;
+            assert!(snapshot_winner_plan(&sources, &orders, true, || {
+                let cancelled = checked == cancel_at; checked += 1; cancelled
+            }).is_none());
+        }
+        assert_eq!(snapshot_winner_plan(&sources, &orders, true, || false).unwrap().calls, plan.calls);
+    }
+
+    #[test]
+    fn snapshot_winner_contract_preserves_python_first_insertion_slots() {
+        let make = |thread: &str, ids: &[&str]| {
+            let mut projection = Projection::for_id(Some(thread.into()));
+            for (sequence, id) in ids.iter().enumerate() {
+                let mut value = call("fixture", Some("2026-11-13T01:00:00Z"));
+                value.sequence = sequence as u64;
+                projection.calls.insert((*id).into(), value);
+            }
+            projection
+        };
+        // Actual Python collector fixtures: newer source z,a; older z replacement,b.
+        let newer = make("thread-1", &["z", "a"]);
+        let older = make("thread-1", &["z", "b"]);
+        let another = make("thread-0", &["q"]);
+        let selected: Vec<BTreeSet<String>> = [&newer, &older, &another].iter()
+            .map(|p| p.calls.keys().cloned().collect()).collect();
+        let sources = [(&newer, &selected[0]), (&older, &selected[1]), (&another, &selected[2])];
+        let orders = vec![vec!["z".into(), "a".into()], vec!["z".into(), "b".into()], vec!["q".into()]];
+        let plan = snapshot_winner_plan(&sources, &orders, true, || false).unwrap();
+        let actual: Vec<_> = plan.calls.iter().map(|w| (w.thread.as_str(), w.call.as_str(), w.source)).collect();
+        assert_eq!(actual, [("thread-1", "z", 1), ("thread-1", "a", 0), ("thread-1", "b", 1), ("thread-0", "q", 2)]);
+        for invalid in [vec!["z".into()], vec!["z".into(), "z".into(), "a".into()], vec!["missing".into()]] {
+            assert!(snapshot_winner_plan(&[(&newer, &selected[0])], &[invalid], true, || false).is_none());
+        }
+        let missing_selection = BTreeSet::from(["missing".to_owned()]);
+        assert!(snapshot_winner_plan(&[(&newer, &missing_selection)], &orders[..1], true, || false).is_none());
+        // Python's checkpoint load orders equal-time calls by ID instead.
+        let restored_order = vec![vec!["a".into(), "z".into()]];
+        let restored = snapshot_winner_plan(&[(&newer, &selected[0])], &restored_order, true, || false).unwrap();
+        assert_eq!(restored.calls.iter().map(|w| w.call.as_str()).collect::<Vec<_>>(), ["a", "z"]);
+        // Actual Python restore -> replacement/append -> explicit rescan fixture.
+        let changed_a = make("thread-1", &["a", "z", "b"]);
+        let changed_b = make("thread-1", &["q", "z"]);
+        let selected_a = changed_a.calls.keys().cloned().collect();
+        let selected_b = changed_b.calls.keys().cloned().collect();
+        let order_a = vec!["a".into(), "z".into(), "b".into()];
+        let order_b = vec!["q".into(), "z".into()];
+        let before_scan = snapshot_winner_plan(
+            &[(&changed_a, &selected_a), (&changed_b, &selected_b)],
+            &[order_a.clone(), order_b.clone()], true, || false).unwrap();
+        assert_eq!(before_scan.calls.iter().map(|w| (w.call.as_str(), w.source)).collect::<Vec<_>>(),
+            [("a", 0), ("z", 1), ("b", 0), ("q", 1)]);
+        let after_scan = snapshot_winner_plan(
+            &[(&changed_b, &selected_b), (&changed_a, &selected_a)],
+            &[order_b, order_a], true, || false).unwrap();
+        assert_eq!(after_scan.calls.iter().map(|w| (w.call.as_str(), w.source)).collect::<Vec<_>>(),
+            [("q", 0), ("z", 1), ("a", 1), ("b", 1)]);
+    }
+
+    #[test]
+    fn snapshot_context_requires_observed_timestamp_like_python() {
+        let payload = br#"{"model":"fixture-model","reasoning_effort":"high","approval_policy":"never"}"#;
+        let context = JsonValue::parse(payload, false).unwrap();
+        let time = timestamp(Some("2026-11-13T00:10:00Z")).unwrap();
+        for missing in [None, timestamp(Some("not-a-timestamp"))] {
+            let mut undated = Projection::for_id(Some("same-thread".into()));
+            undated.context(&context, missing);
+            assert_eq!(undated.model.as_deref(), Some("fixture-model"));
+            let mut merged = Projection::for_id(undated.id.clone());
+            merged.merge_snapshot(&undated, None, &[None; 4]);
+            assert!(merged.model.is_none() && merged.effort.is_none());
+            assert_eq!(merged.execution["approval_policy"], "never");
+            let mut dated = Projection::for_id(undated.id.clone());
+            dated.context(&context, Some(time));
+            for reverse in [false, true] {
+                let mut merged = Projection::for_id(undated.id.clone());
+                let sources = if reverse { [&dated, &undated] } else { [&undated, &dated] };
+                for source in sources { merged.merge_snapshot(source, None, &[None; 4]); }
+                assert_eq!(merged.model.as_deref(), Some("fixture-model"));
+                assert_eq!(merged.effort.as_deref(), Some("high"));
+                assert_eq!(merged.context_at, Some(time));
+                assert_eq!(merged.execution["approval_policy"], "never");
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_lifecycle_start_merge_matches_python_source_order() {
+        let base = timestamp(Some("2026-11-13T00:00:00Z")).unwrap();
+        let make = |status_minute, start_minute: Option<i64>, status| {
+            let mut value = Projection::for_id(Some("same-thread".into()));
+            value.status_at = Some(base + chrono::Duration::minutes(status_minute));
+            value.task_start = start_minute.map(|n| base + chrono::Duration::minutes(n));
+            value.status = Some(status);
+            value
+        };
+        // Python first accepts a newer status, then a newer nonempty start from
+        // each source. Reversing sources can therefore reset the start.
+        for (reverse, tied, expected) in [(false, false, 180000), (true, false, 360000),
+                                         (false, true, 180000), (true, true, 180000)] {
+            let first = make(10, Some(5), Status::Running);
+            let second = make(if tied {10} else {9}, Some(8), Status::Running);
+            let sources = if reverse { [&second, &first] } else { [&first, &second] };
+            let mut merged = Projection::for_id(first.id.clone());
+            for source in sources { merged.merge_metadata(source); }
+            let row = merged.row(false, None, base + chrono::Duration::minutes(11),
+                &mut BTreeMap::new(), &mut BTreeMap::new(), false, false, false);
+            assert_eq!(row["status_updated_at"], stamp(base + chrono::Duration::minutes(10)));
+            assert_eq!(row["task_duration_ms"], expected, "reverse={reverse}, tied={tied}");
+            assert_eq!(row["task_runs"], 1);
+        }
+        let mut merged = make(10, None, Status::Completed);
+        merged.merge_metadata(&make(9, Some(8), Status::Running));
+        assert_eq!(merged.task_start, Some(base + chrono::Duration::minutes(8)));
+        let row = merged.row(false, None, base + chrono::Duration::minutes(11),
+            &mut BTreeMap::new(), &mut BTreeMap::new(), false, false, false);
+        assert_eq!(row["status"], "completed");
+        assert!(row["task_duration_ms"].is_null());
+        assert!(row["task_runs"].is_null());
+    }
+
     #[test]
     fn snapshot_task_duration_matches_full_vector() {
         let reference = lam_history_store::parse_utc_stamp("2026-11-14T00:00:00Z").unwrap();
@@ -2104,6 +2345,22 @@ mod snapshot_merge_tests {
 
     fn call(tool: &str, time: Option<&str>) -> Call {
         serde_json::from_value(json!({"tool":tool,"time":time,"completed":null,"sequence":1})).unwrap()
+    }
+
+    #[test]
+    fn snapshot_series_releases_temporary_sources_before_serialization() {
+        let mut series = ActivitySeries::new();
+        for index in 0..3 {
+            let mut temporary = Projection::for_id(Some(format!("thread-{index}")));
+            temporary.calls.insert("known".into(), call("quoted\"tool", Some("2026-11-13T01:00:01Z")));
+            temporary.calls.insert("unknown".into(), call("unknown", None));
+            series.observe(&temporary, None);
+            // Every source and its tool storage are dropped before publication.
+        }
+        let encoded = series.snapshot_json(&json!({"codex":{"keep":true}}), None);
+        assert_eq!(serde_json::from_str::<Value>(&encoded).unwrap(), json!({"codex":{
+            "keep":true,"activity_series":[{"time":"2026-11-13T01:00:00Z","calls":3}],
+            "tool_series":[{"time":"2026-11-13T01:00:00Z","tool":"quoted\"tool","calls":3}]}}));
     }
 
     #[test]
@@ -2569,6 +2826,46 @@ mod snapshot_merge_tests {
     }
 
     #[test]
+    fn snapshot_file_summary_preserves_ties_across_reversed_winner_chunks() {
+        let time = timestamp(Some("2026-11-13T01:00:00Z")).unwrap();
+        let mut threads = BTreeMap::new();
+        for thread in ["a", "b"] {
+            let mut projection = Projection::for_id(Some(thread.into()));
+            for n in 0..4 {
+                let mut value = call("fixture", None);
+                value.time = (n != 0).then_some(time + chrono::Duration::microseconds(if n == 3 { 500 } else { 0 }));
+                value.files = (0..3).map(|index| json!({"operation":if index == 0 {"read"} else {"write"},
+                    "path":format!("{thread}/{n}"),"tool":"fixture","nested":false})).collect();
+                projection.calls.insert(format!("call-{n}"), value);
+            }
+            threads.insert(thread, projection);
+        }
+        for boundary in [None, Some(time), Some(time + chrono::Duration::microseconds(250))] {
+            for filter in [None, Some(true), Some(false)] {
+                for limit in [0, 1, 5, 200, 1000] {
+                    let mut expected: Vec<_> = threads.values().flat_map(|projection| projection.file_events(boundary, true))
+                        .filter(|event| filter.is_none_or(|read| (event["operation"] == "read") == read)).collect();
+                    expected.sort_by(|a, b| b["timestamp"].as_str().cmp(&a["timestamp"].as_str()));
+                    let total = expected.len();
+                    let mut counts = BTreeMap::new();
+                    for event in &expected { *counts.entry(event["operation"].as_str().unwrap().to_owned()).or_insert(0usize) += 1; }
+                    expected.truncate(limit);
+                    let mut streamed = FileSummary::new(limit);
+                    for projection in threads.values().rev() {
+                        for (id, call) in projection.calls.iter().rev() {
+                            let mut chunk = Projection::for_id(projection.id.clone());
+                            chunk.calls.insert(id.clone(), call.clone());
+                            streamed.observe(&chunk, boundary, true, filter);
+                            assert!(streamed.preview.len() <= limit);
+                        }
+                    }
+                    assert_eq!(streamed.finish(), (expected, total, counts));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn snapshot_file_summary_matches_full_sort_with_bounded_previews() {
         let time = timestamp(Some("2026-11-13T01:00:00Z")).unwrap();
         let mut threads = BTreeMap::new();
@@ -2711,6 +3008,41 @@ mod snapshot_merge_tests {
     }
 
     #[test]
+    fn lifecycle_interval_cap_preserves_insertion_order_across_restore() {
+        let base = timestamp(Some("2026-11-13T01:00:00Z")).unwrap();
+        let mut projection = Projection::default();
+        let complete = |projection: &mut Projection, start: Time, seconds: i64| {
+            let end = start + chrono::Duration::seconds(seconds);
+            let encoded = json!({"started_at": stamp(start), "completed_at": stamp(end)}).to_string();
+            let payload = JsonValue::parse(encoded.as_bytes(), false).unwrap();
+            projection.lifecycle(&payload, Some(end), false);
+        };
+        // Descending timestamps distinguish first insertion from earliest time.
+        for index in (0..1024).rev() {
+            complete(&mut projection, base + chrono::Duration::minutes(index), 1);
+        }
+        let first = base + chrono::Duration::minutes(1023);
+        complete(&mut projection, first, 2);
+        assert_eq!(projection.interval_order.front(), Some(&first));
+        let encoded = serde_json::to_vec(&projection).unwrap();
+        let mut restored: Projection = serde_json::from_slice(&encoded).unwrap();
+        complete(&mut restored, base - chrono::Duration::minutes(1), 3);
+        assert_eq!(restored.intervals.len(), 1024);
+        assert!(!restored.intervals.contains_key(&first));
+        assert!(restored.intervals.contains_key(&base));
+        assert!(restored.intervals.contains_key(&(base - chrono::Duration::minutes(1))));
+        assert_eq!(restored.interval_order.len(), 1024);
+        assert!(restored.clone().restore_calls(BTreeMap::new()));
+        let mut malformed = restored.clone();
+        malformed.interval_order.pop_back();
+        assert!(!malformed.restore_calls(BTreeMap::new()));
+        let mut malformed = restored;
+        let duplicate = malformed.interval_order[0];
+        malformed.interval_order[1] = duplicate;
+        assert!(!malformed.restore_calls(BTreeMap::new()));
+    }
+
+    #[test]
     fn snapshot_metadata_merge_retains_timestamp_ties_and_interval_start_dedup() {
         let time = timestamp(Some("2026-11-13T01:00:00Z"));
         let first = source("first", time);
@@ -2749,7 +3081,7 @@ mod snapshot_merge_tests {
             target.kind = other.kind;
             target.trigger = other.trigger.clone();
         }
-        if other.context_seen && other.context_at >= target.context_at {
+        if other.context_seen && other.context_at.is_some() && other.context_at >= target.context_at {
             target.context_at = other.context_at;
             target.model = other.model.clone();
             target.effort = other.effort.clone();
@@ -2765,6 +3097,10 @@ mod snapshot_merge_tests {
             target.status_at = other.status_at;
             target.status_cached = other.status_cached;
             target.status = other.status;
+            target.task_start = other.task_start;
+        }
+        // Preserve the independent Python start precedence in this merge oracle.
+        if other.task_start.is_some() && other.task_start > target.task_start {
             target.task_start = other.task_start;
         }
         target.intervals

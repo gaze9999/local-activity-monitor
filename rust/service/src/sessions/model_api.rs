@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::LazyLock;
 
 static TOKEN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"([\p{L}\p{N}_.]{1,64})=("(?:\\.|[^"\\])*(?:"|$)|[^\s{},:"]+)|"(?:\\.|[^"\\])*(?:"|$)"#)
+    Regex::new(r#"([\p{L}\p{N}_.]{1,64})=("(?:\\.|[^"\\])*(?:"|$)|[^\s\x1c-\x1f{},:"]+)|"(?:\\.|[^"\\])*(?:"|$)"#)
         .expect("diagnostic tokens")
 });
 static TOKEN_WORD: LazyLock<Regex> =
@@ -257,85 +257,79 @@ pub fn summary(
     json!({"enabled":enabled,"events":selected,"requests":count("request"),"connections":count("connection"),"retry_events":count("retry"),"failed_requests":failed,"limit":1000,"sources":[source]})
 }
 
-pub fn merge(core: &VecDeque<Value>, desktop: &[Value]) -> VecDeque<Value> {
-    let mut unique = BTreeMap::new();
-    for event in core.iter().chain(desktop) {
-        if let Some(id) = event["observation_id"].as_str() {
-            unique.insert(id, event);
+// One retained arrival sequence for both diagnostic sources, like Python observe_api.
+// The caller commits Desktop observations before Core observations each round.
+pub fn collect(retained: &mut VecDeque<Value>, core: &mut VecDeque<Value>, desktop: &mut Vec<Value>) {
+    for event in desktop.drain(..).chain(core.drain(..)) {
+        let Some(id) = event["observation_id"].as_str() else { continue };
+        if retained.iter().any(|old| old["observation_id"].as_str() == Some(id)) {
+            continue;
         }
+        if retained.len() == 1000 {
+            let (index, oldest) = retained.iter().enumerate()
+                .min_by_key(|(_, value)| value["timestamp"].as_str().unwrap_or_default())
+                .expect("full API event queue");
+            if event["timestamp"].as_str().unwrap_or_default() < oldest["timestamp"].as_str().unwrap_or_default() {
+                continue;
+            }
+            retained.remove(index);
+        }
+        retained.push_back(event);
     }
-    let mut preview = BTreeMap::new();
-    for (id, event) in unique {
-        preview.insert((std::cmp::Reverse(event["timestamp"].as_str()), id), event);
-        if preview.len() > 1000 { preview.pop_last(); }
-    }
-    preview.into_values().cloned().collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn snapshot_merge_preview_matches_full_clone_sort() {
-        let mut core = VecDeque::new();
-        let mut desktop = Vec::new();
-        for index in 0..2403 {
-            let event = json!({"observation_id":format!("id-{index:04}"),
-                "timestamp":match index % 5 { 0 => Value::Null, 1 => json!(17),
-                    2 => json!(""), _ => json!(format!("2026-11-{:02}", index % 20 + 1)) },
-                "source":"core","value":index});
-            core.push_back(event);
-            if index % 2 == 0 {
-                desktop.push(json!({"observation_id":format!("id-{index:04}"),
-                    "timestamp":"older","source":"desktop","value":index}));
-            }
-        }
-        core.push_back(json!({"observation_id":"","timestamp":""}));
-        desktop.push(json!({"observation_id":null,"timestamp":"latest"}));
-        desktop.push(json!({"observation_id":17}));
-        desktop.push(json!({"observation_id":"id-0000","timestamp":null,"value":"last winner"}));
-        for reverse in [false,true] {
-            if reverse { core.make_contiguous().reverse(); desktop.reverse(); }
-            for limit in [0,1,999,1000,1001,core.len()] {
-                let input = core.iter().take(limit).cloned().collect();
-                for rows in [&[][..], desktop.as_slice()] {
-                    let actual = merge(&input, rows);
-                    assert_eq!(actual, legacy_merge(&input, rows));
-                    assert!(actual.len() <= 1000);
-                }
-            }
-        }
+    fn api_event(id: &str, timestamp: &str, kind: &str) -> Value {
+        json!({"observation_id":id,"timestamp":timestamp,"event_kind":kind,"status":"returned"})
     }
 
-fn legacy_merge(core: &VecDeque<Value>, desktop: &[Value]) -> VecDeque<Value> {
-    let mut unique = BTreeMap::new();
-    for event in core.iter().chain(desktop) {
-        if let Some(id) = event["observation_id"].as_str() {
-            unique.insert(id, event.clone());
-        }
+    #[test]
+    fn api_retention_preserves_source_and_cross_round_ties_without_replaying_duplicates() {
+        let timestamp = "2026-11-12T00:00:00Z";
+        let mut retained = VecDeque::new();
+        let mut core = VecDeque::from([api_event("a", timestamp, "request")]);
+        let mut desktop = vec![api_event("z", timestamp, "connection")];
+        collect(&mut retained, &mut core, &mut desktop);
+        assert!(core.is_empty() && desktop.is_empty());
+        assert_eq!(retained.iter().map(|v| v["observation_id"].as_str().unwrap()).collect::<Vec<_>>(), ["z", "a"]);
+        core.push_back(api_event("a", timestamp, "retry"));
+        desktop.push(api_event("b", timestamp, "retry"));
+        collect(&mut retained, &mut core, &mut desktop);
+        let value = summary(&retained, None, true, json!({}));
+        assert_eq!(value["events"].as_array().unwrap().iter().map(|v| v["observation_id"].as_str().unwrap()).collect::<Vec<_>>(), ["z", "a", "b"]);
+        assert_eq!(value["requests"], 1);
+        assert_eq!(value["connections"], 1);
+        assert_eq!(value["retry_events"], 1);
+        collect(&mut retained, &mut core, &mut desktop);
+        assert_eq!(summary(&retained, None, true, json!({})), value);
     }
-    let mut values: Vec<_> = unique.into_values().collect();
-    values.sort_by(|left, right| right["timestamp"].as_str().cmp(&left["timestamp"].as_str()));
-    values.truncate(1000);
-    values.into()
-}
 
     #[test]
-    fn merges_duplicate_observations_before_enforcing_limit() {
-        let mut core = VecDeque::new();
+    fn api_retention_applies_one_global_cap_in_arrival_order() {
+        let timestamp = "2026-11-12T00:00:00Z";
+        let mut retained = VecDeque::new();
+        let mut core = (0..1000).map(|i| api_event(&format!("a{i:04}"), timestamp, "request")).collect();
         let mut desktop = Vec::new();
-        for id in 0..1000 {
-            core.push_back(json!({"observation_id":format!("core-{id}"),"timestamp":"2026-11-12T00:00:00Z","event_kind":"request","status":"returned"}));
-        }
-        for id in 0..1000 {
-            desktop.push(json!({"observation_id":format!("core-{id}"),"timestamp":"2026-11-12T00:00:01Z","event_kind":"request","status":"failed"}));
-        }
-        desktop.push(json!({"observation_id":"unique","timestamp":"2026-11-12T00:00:00Z","event_kind":"retry","status":"retrying"}));
-        let merged = merge(&core, &desktop);
-        assert_eq!(merged.len(), 1000);
-        assert!(merged.iter().all(|event| event["status"] == "failed"));
-        assert_eq!(summary(&merged, None, true, json!({}))["requests"], 1000);
+        collect(&mut retained, &mut core, &mut desktop);
+        desktop.push(api_event("z", timestamp, "connection"));
+        collect(&mut retained, &mut core, &mut desktop);
+        assert_eq!(retained.len(), 1000);
+        assert_eq!(retained.front().unwrap()["observation_id"], "a0001");
+        assert_eq!(retained.back().unwrap()["observation_id"], "z");
+        let value = summary(&retained, None, true, json!({}));
+        assert_eq!(value["requests"], 999);
+        assert_eq!(value["connections"], 1);
+        desktop.push(api_event("old", "2026-11-11T00:00:00Z", "retry"));
+        core.push_back(api_event("a0001", timestamp, "retry"));
+        collect(&mut retained, &mut core, &mut desktop);
+        assert_eq!(summary(&retained, None, true, json!({})), value);
+        retained.clear();
+        core.push_back(api_event("a0001", timestamp, "request"));
+        collect(&mut retained, &mut core, &mut desktop);
+        assert_eq!(retained.len(), 1);
     }
 
     #[test]
@@ -390,6 +384,18 @@ fn legacy_merge(core: &VecDeque<Value>, desktop: &[Value]) -> VecDeque<Value> {
         assert_eq!(value["duration_ms"], 1.5);
         assert_eq!(value["http_status"], 429);
         assert_eq!(value["status"], "failed");
+    }
+
+    #[test]
+    fn projects_metadata_separated_by_python_control_whitespace() {
+        for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let body = format!("event.name=codex.api_request{separator}input_tokens=7{separator}output_tokens=9{separator}status_code=200");
+            let value = project("codex_otel.log_only", &body).unwrap();
+            assert_eq!(value["input_tokens"], 7);
+            assert_eq!(value["output_tokens"], 9);
+            assert_eq!(value["status"], "returned");
+            assert_eq!(value["http_status"], 200);
+        }
     }
 }
 

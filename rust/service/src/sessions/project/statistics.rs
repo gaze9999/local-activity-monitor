@@ -143,6 +143,146 @@ mod tests {
     use super::super::{ActivitySeries, NestedActivity};
     use serde_json::{json, Value};
 
+    // Non-runtime prototype. Bounds are injected by tests, not product limits.
+    #[derive(Default)]
+    struct OwnedGroup {
+        calls: usize,
+        threads: std::collections::BTreeSet<String>,
+        returned: usize,
+        durations: Vec<i64>,
+        last_at: Option<Time>,
+        last_response: Option<Time>,
+    }
+
+    struct OwnedStatistics {
+        groups: BTreeMap<(String, bool), OwnedGroup>,
+        boundary: Option<Time>,
+        enabled: bool,
+        units: usize,
+        key_bytes: usize,
+        unit_limit: usize,
+        key_limit: usize,
+        valid: bool,
+    }
+
+    impl OwnedStatistics {
+        fn new(boundary: Option<Time>, enabled: bool, unit_limit: usize, key_limit: usize) -> Self {
+            Self { groups: BTreeMap::new(), boundary, enabled, units: 0, key_bytes: 0,
+                unit_limit, key_limit, valid: true }
+        }
+
+        fn admit(&mut self, thread: &str, tool: &str, nested: bool, count: usize, call: &Call) {
+            if !self.valid { return; }
+            let key = (tool.to_owned(), nested);
+            let previous = self.groups.get(&key);
+            let new_group = previous.is_none();
+            let new_thread = previous.is_none_or(|group| !group.threads.contains(thread));
+            let duration = (!nested).then(|| call.duration_ms()).flatten();
+            let units = usize::from(new_group) + usize::from(new_thread) + usize::from(duration.is_some());
+            let bytes = if new_group { tool.len() } else { 0 } + if new_thread { thread.len() } else { 0 };
+            if units > self.unit_limit.saturating_sub(self.units)
+                || bytes > self.key_limit.saturating_sub(self.key_bytes)
+                || previous.is_some_and(|group| group.calls.checked_add(count).is_none()) {
+                self.valid = false;
+                self.groups.clear();
+                self.units = 0;
+                self.key_bytes = 0;
+                return;
+            }
+            self.units += units;
+            self.key_bytes += bytes;
+            let group = self.groups.entry(key).or_default();
+            group.calls += count;
+            group.threads.insert(thread.to_owned());
+            group.last_at = group.last_at.max(call.completed.or(call.time));
+            if !nested {
+                if let Some(completed) = call.completed {
+                    group.returned += 1;
+                    group.last_response = group.last_response.max(Some(completed));
+                }
+                if let Some(duration) = duration { group.durations.push(duration); }
+            }
+        }
+
+        fn observe(&mut self, thread: &str, call: &Call) {
+            if !self.valid || !self.enabled
+                || self.boundary.is_some_and(|cutoff| call.time.is_none_or(|time| time < cutoff)) { return; }
+            self.admit(thread, &call.tool, false, 1, call);
+            if let Some(nested) = &call.nested {
+                for (tool, count) in &nested.tools { self.admit(thread, tool, true, *count, call); }
+            }
+        }
+
+        fn finish(self) -> Option<Value> {
+            if !self.valid { return None; }
+            Some(Value::Array(self.groups.into_iter().map(|((tool, nested), mut group)| {
+                let (average_ms, p99_ms) = metrics(&mut group.durations);
+                serde_json::to_value(Row { tool: &tool, nested, calls: group.calls,
+                    thread_count: group.threads.len(), returned: (!nested).then_some(group.returned),
+                    known_duration_count: (!nested).then_some(group.durations.len()),
+                    average_ms, p99_ms, last_at: group.last_at.map(stamp),
+                    last_response_at: group.last_response.map(stamp) }).unwrap()
+            }).collect()))
+        }
+    }
+
+    #[test]
+    fn owned_statistics_prototype_matches_exact_oracle_and_discards_over_budget() {
+        let start = "2026-11-13T01:00:00Z";
+        let end = "2026-11-13T01:00:01Z";
+        let mut threads = BTreeMap::new();
+        for thread in ["a", "b"] {
+            let mut projection = Projection::for_id(Some(thread.into()));
+            for n in 0..101 {
+                let mut item = call("tool", Some(start), Some(end), &[("tool", 2), ("nested", 0)]);
+                item.completed = item.time.map(|time| time + chrono::Duration::milliseconds(n));
+                projection.calls.insert(format!("call-{n:03}"), item);
+            }
+            projection.calls.insert("missing".into(), call("unknown", None, Some(end), &[]));
+            projection.calls.insert("pending".into(), call("tool", Some(end), None, &[]));
+            projection.calls.insert("negative".into(), call("zero", Some(end), Some(start), &[]));
+            threads.insert(thread, (projection, false));
+        }
+        for boundary in [None, super::super::timestamp(Some(end))] {
+            for enabled in [false, true] {
+                let expected = render(&threads, boundary, enabled);
+                let mut owned = OwnedStatistics::new(boundary, enabled, 1000, 1000);
+                for (thread, (projection, _)) in threads.iter().rev() {
+                    for call in projection.calls.values().rev() {
+                        let temporary = call.clone();
+                        owned.observe(thread, &temporary);
+                    }
+                }
+                assert!(owned.units <= 1000 && owned.key_bytes <= 1000);
+                assert_eq!(owned.finish(), Some(expected));
+            }
+        }
+        let single = call("tool", Some(start), Some(end), &[]);
+        let mut exact = OwnedStatistics::new(None, true, 3, 5);
+        exact.observe("a", &single);
+        assert_eq!((exact.units, exact.key_bytes), (3, 5));
+        assert!(exact.finish().is_some());
+        for (units, bytes) in [(2, 5), (3, 4)] {
+            let mut rejected = OwnedStatistics::new(None, true, units, bytes);
+            rejected.observe("a", &single);
+            assert!(rejected.finish().is_none());
+        }
+        let mut byte_exhaustion = OwnedStatistics::new(None, true, 10, 5);
+        byte_exhaustion.observe("a", &single);
+        assert!(!byte_exhaustion.groups.is_empty());
+        byte_exhaustion.observe("b", &single);
+        assert!(byte_exhaustion.groups.is_empty());
+        assert!(byte_exhaustion.finish().is_none());
+        for (units, bytes) in [(0, 1000), (1000, 0), (3, 1000)] {
+            let mut owned = OwnedStatistics::new(None, true, units, bytes);
+            for (thread, (projection, _)) in &threads {
+                for call in projection.calls.values() { owned.observe(thread, call); }
+            }
+            assert!(owned.groups.is_empty());
+            assert!(owned.finish().is_none());
+        }
+    }
+
     fn call(tool: &str, time: Option<&str>, completed: Option<&str>, nested: &[(&str,usize)]) -> Call {
         let mut call: Call = serde_json::from_value(json!({"tool":tool,"time":time,"completed":completed,"sequence":1})).unwrap();
         if !nested.is_empty() { call.nested = Some(NestedActivity { tools:nested.iter().map(|(tool,count)|(tool.to_string(),*count)).collect(),events:vec![],isolated:false,truncated:false,tool_counts_incomplete:false,single_invocation:false }); }

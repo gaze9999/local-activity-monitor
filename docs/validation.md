@@ -14,3 +14,194 @@
 ## 2026-10-24 固定版本資產校正
 
 重建時比對封裝資產與固定 WBUI revision 的 Git blob, 避免工作目錄的 CRLF / LF 轉換改變封裝內容, 核對方式見[維護與驗收](maintenance.md#共用-ui-與按需內容)
+
+## 2026-11-16 Desktop Model API 翻譯
+
+以 LAM main `5c03daf9` 的 Python `observe_api` 為來源, Rust 分支基準為 `8f8baf1`, Linux 雲端環境使用 Rust 1.100.0
+
+- API 投影的 `thread.id`、`conversation.id` 與加引號的 `thread_id` 優先於診斷來源的 thread metadata, 無效 API ID 才保留來源 ID
+- API 記錄滿 1,000 筆時, 同時間的新記錄取代最早插入的記錄, 較舊記錄及重複 observation 不擠掉既有記錄
+- 兩個合成資料測試先重現差異, 修正後通過, 同時核對 observation ID、來源位移及不保存本文
+- 此輪僅執行針對性測試, 未完成整體翻譯、實際平台來源或介面驗收
+
+### 跨來源 Model API 保存順序
+
+- Core 與 Desktop 共用 1,000 筆已觀察記錄, 每輪依 Python 的 Desktop → Core 順序加入, 同時間排序保留先後順序, 不以 observation ID 決定顯示或淘汰
+- 關閉 Model API 觀察或重新掃描診斷來源時清除對應暫存狀態, 再由已授權的來源重新讀取, 不改動持久化歷史格式
+- 兩個 queue 回歸測試及五個 Model API HTTP 測試通過, 包含跨輪重複、同時間淘汰、來源停用 / 重新啟用及 Core 1,000 筆後新增 Desktop 事件
+- 未重跑完整套件, 此結果不代表所有翻譯或平台行為已完成驗收
+
+來源暫存保留每個讀取批次的完整到達順序, 不在共用 queue 前提前去重或截短, 避免 `[a0, new, a0]` 的第二次 `a0` 在前次淘汰後被遺漏
+
+Desktop commit → 共用 queue 的重複淘汰回歸通過, 寫入失敗測試確認失敗時不發布 API 事件、重試後分兩批保存 4 筆與 1 筆且不重複, 暫存沿用讀取批次預算並每輪排空, 共用保存上限仍為 1,000 筆
+
+### 同一 thread 的工作起點合併
+
+依同一 Python revision 的 `collectors.py`, 各來源先比較狀態時間, 再獨立接受較新的非空工作起點, 不能只用狀態勝出來源的起點
+
+兩個來源互換順序、狀態時間相同及 completed 狀態的合成案例已與 Python collector 核對, 新回歸先重現 360,000 ms 與應為 180,000 ms 的差異, 修正後通過, 既有 metadata 合併測試也通過, 未改動持久化格式或重跑完整套件
+
+### 未知 Context 時間
+
+缺少或無法解析 timestamp 的 Context 不作為彙總 model / reasoning effort 的依據, 仍保留來源內的原始投影與可用 execution metadata, 有效時間的 Context 依既有時間規則選用
+
+以相同 Python revision 的 collector 確認此行為, 缺少 / 無效時間、有效時間與不同合併順序的針對性回歸先失敗後通過, 既有選取來源合併測試通過, 未修改 checkpoint 欄位或宣稱平台驗收
+
+### Execution metadata 別名
+
+canonical 欄位存在但無效時不退回別名, 與 Python `execution_metadata` 一致, 涵蓋 approval policy 與 model provider, 只保留欄位存在的判斷而不保存無效原始內容
+
+缺少 canonical、null / bool / object / 過長值、有效值優先、巢狀與序列化 spawn 的針對性回歸先失敗後通過, 既有模式與私密欄位排除測試也通過
+
+### 結構化 metadata 字元上限
+
+序列化 sandbox policy、collaboration mode 與 spawn source 的上限依 Python 計算 4,096 個字元, 不把 UTF-8 位元組數當作字元數, 計數最多檢查 4,097 個字元且仍只輸出既有白名單欄位
+
+含中文但僅選用安全 metadata 的 4,096 / 4,097 字元邊界回歸先失敗後通過, 三個 metadata 測試通過, 忽略欄位不出現在結果
+
+### 大型快照的 winner 描述規格
+
+新增僅供測試的不可變 winner plan, 比對既有 materialized `merge_snapshot` 的結果, 單一針對性測試通過, 不接入執行期發布
+
+- 先保留既有選取結果, 再依 active → overflow 來源順序決定同 thread / call ID 的 winner, 不改成以事件時間決勝
+- 描述依 thread / call 的既有排序輸出, 沒有選中 call 的已識別 thread 來源仍參與 thread metadata 合併, 無 thread ID 的來源仍須另外保留 allowance 與來源錯誤
+- 選取未完成或測試建構過程取消時不產生 plan, 重試不沿用部分結果
+
+此規格不代表 16 MiB 限制已解決, 尚未實作跨輪來源更新驗證或串流 reducer, 也不是實際服務取消流程的驗收
+
+後續移植須保留 canonical thread / call / file-index 的同時間次序、精確 p99 的 duration 樣本、distinct-thread 與 history identity 狀態, 不得以近似值或提前截斷取代
+
+Allowance、來源錯誤、connection、skill history、MCP / SQL history merge 與 error detail 的原有優先順序仍須獨立保留, 發布前需一併驗證 active payload、來源 signature / epoch、reference / cutoffs、設定與歷史版本, 全部 windows 和 detail metadata 必須一致發布
+
+現行四個 window 的最終序列化資料仍留在記憶體, 解決來源 payload staging 不等於保證整體記憶體不超過 16 MiB
+
+### FileSummary 相同時間的排序
+
+FileSummary 預覽以既有 timestamp 字串、thread ID、call ID 與原始檔案事件 index 排序, 取代依輸入到達次序產生的 ordinal, 保留目前 Rust BTreeMap canonical 輸入的相同結果, 允許已決定 winner 的呼叫以不同分批順序處理
+
+原始 index 在 read / change 篩選前取得, 外觀相同的事件不去重, 每個已決定的 thread / call winner 仍只能觀察一次, 全部計數與預覽上限不變
+
+反向分批測試先重現預覽次序差異, 修正後連同未修改的 full-sort oracle 共兩個測試通過, 涵蓋未知時間、毫秒內時間差、時間界線、read / change 篩選、重複外觀及不同預覽上限, 執行期發布與來源掃描未切換, 16 MiB 問題仍未解決
+
+### ActivitySeries 資料生命週期
+
+ActivitySeries 改為自行保存 tool bucket 的工具名稱, 可在分批觀察後釋放暫時 Projection, 再序列化結果, 10,080 個 minute bucket 與 20,000 個 tool bucket 上限、精確計數與排序維持不變
+
+六個針對性測試通過, 包含釋放暫時來源後序列化、完整來源計數再取尾端的 oracle、上限、淘汰後重複 key、window 與不完整範圍欄位
+
+此變更增加受 bucket 數量限制的名稱儲存及每次觀察的暫時字串配置, 不代表固定的位元組預算、效能改善或 16 MiB 問題已解決, 執行期發布仍未切換為跨輪串流
+
+### Owned tool statistics prototype
+
+僅在測試模組建立 owned statistics prototype, 執行期仍使用原有 serializer, 不接入發布
+
+Prototype 自行保存 tool group、distinct-thread membership 與精確 duration 樣本, 沿用既有平均值與 p99 插值, 不近似或截斷樣本, 各呼叫的暫時副本可在觀察後釋放
+
+測試注入 entry 數與 key 字串位元組上限, entry 包含 group、thread membership 與 duration 樣本, 超過任一上限會清空並拒絕整個結果, 不輸出部分統計, 這些不是新增的產品限制
+
+四個針對性 statistics 測試通過, prototype 與未修改的 serializer 比較反向輸入、缺值、零 / 負耗時、巢狀 group、時間界線及停用結果, 並驗證超出預算拒絕
+
+儲存量隨實際 group、distinct-thread membership、已知 duration 樣本與 key 長度增加, entry / key 預算不包含 allocator overhead 或最終 JSON, 未宣稱整體固定記憶體、效能改善或 16 MiB 限制已解決, 高 cardinality 的發布方式仍未決定
+
+### Catalog 欄位與未知呼叫數
+
+未取得 catalog 或停用 metadata 時, thread_name、host_id、archived、project_id、project_name、project_kind 明確輸出 null, project_scope 為 unknown, has_schedule 為 false, 保留已觀察的 session 欄位
+
+只有 catalog 的列以 tool_calls: null 表示未觀察到呼叫歷史, 有 session 且沒有呼叫的列仍為 0, tools 內容不變
+
+兩項差異均以獨立 Python 暫存合成 collector 確認, Rust 回歸測試先失敗再修正, 三個針對性單元測試與既有 catalog HTTP 測試通過, 未宣稱 UI 或真實來源驗收
+
+### 跨輪發布的一致性界線
+
+唯讀檢視確認現行 Collector 在同一 worker 建立完整 Snapshots, 再以 send_replace 發布, 這不是已證實的並行 membership 競態
+
+SourceMembership 的 identity、revision、selection_epoch, 完整的 CallSelection 及來源 checkpoint signature 可界定選取階段, 既有測試已涵蓋選取變更、取消、分頁後 signature 改變與驗證階段
+
+Discovery 的 generation 本身不宜作為跨輪 reducer 的一律失效條件, 既有 recent_call_selection_resumes_past_100000_tied_headers 明確保留未變更來源的新一輪掃描進度, 否則可能無法完成大選取範圍
+
+上述訊號不足以代表完整快照版本, 未來跨輪處理仍需涵蓋同一 call ID / 時間下的回覆、錯誤與 context 更新, 以及 reference / cutoff、設定、catalog 與 history 的一致性, checkpoint_dirty 是布林值而非單調版本, 發布 version 也不是來源版本
+
+本輪未新增重複的假想 stamp 測試, 未修改執行期發布或宣稱 16 MiB 問題解決, 改用跨輪 reducer 前仍須決定各來源的版本與共同發布規格
+
+
+### 同時間事件次序的待修正差異
+
+獨立 Python 合成 collector 證實, 同時間 outgoing calls 依 z、a 插入時, agent_messages 保留 z、a, Rust 目前依 call ID 排為 a、z, 超過預覽上限時可能影響顯示成員
+
+先前 FileSummary 與 full-sort oracle 的驗證僅證明保留 Rust BTreeMap 的既有次序, 不是 Python insertion-order 相容性證明, 不應作為跨輪 reducer 的來源排序規格
+
+修正前需保留跨來源 thread / call 的首次插入位置, 同 ID 後續內容取代不移動位置, 來源內 Call.sequence 會跨來源重複, 不能單獨代表全域順序, 此項仍待完成來源與持久化規格核對
+
+### Worktree Unicode branch 欄位
+
+Branch ref 的 512 上限改依 Unicode 字元計算, 對齊 Python parse_worktrees, 保留 control 字元檢查與 1 MiB 原始輸出上限
+
+實際 Python parser 接受 512 字元並拒絕 513 字元, 分段的 512 字元 / 1,490 bytes 合成 ref 通過唯讀 git check-ref-format, Rust 邊界回歸先失敗再通過, 另通過既有 NUL records / lock reason 遮蔽測試, 未建立分支或變更 Git 狀態
+
+
+### Winner descriptor 次序規格修正
+
+測試限定的 winner descriptor 現在接受每個來源明確提供的 call 次序, 不再以 BTreeMap 或持久化 sequence 直接代表 Python 次序, 來源數、未知 ID、重複 ID 或遺漏已選 call 的次序資料會拒絕
+
+規格保留 thread 首次出現位置與 call 首次插入位置, 後續相同 call ID 僅取代 winner source, 不移動位置, Rust merge oracle 僅比較 winner 內容集合, 次序另以實際 Python fixture 的 z、a / z replacement、a、b / thread 1 再 thread 0 結果驗證
+
+獨立 Python checkpoint save / load 與重啟 collector 證實, fresh z、a 在 checkpoint restore 後變成 a、z, 因載入以 event_time DESC、call_id 排序, 因此後續移植目標保留 Python 的 fresh / restart 差異, 不自行改成跨重啟固定順序
+
+此規格仍未接入服務, 正式來源遍歷、active / overflow 串接、restore 次序來源與各事件預覽尚待移植, 不代表執行期排序差異已修正
+
+Rust 實際 Collector refresh → checkpoint Store fixture 已確認 SQL 載入順序為 a、z, 保存的原始 sequence 仍為 z 先於 a, 此單一針對性測試通過, 加上兩個 winner descriptor 測試通過, 證明順序來源不能互換, 不代表重啟後的事件預覽已修正
+
+獨立 Python 雙來源 fixture 進一步確認下列同時間事件次序, metadata 停用, 使用暫存檔與控制的 mtime, rescan 前刻意延後下一次 scan
+
+| 階段 | 來源次序 | 全域 file preview |
+|---|---|---|
+| Fresh A[z,a]、B[q] | A、B | z(A)、a、q |
+| 實際 checkpoint 儲存並重啟 | A、B | a、z(A)、q |
+| 取代 A.z、增加 A.b 與 B.z, 尚未 rescan | A、B | a、z(B)、b、q |
+| B 較新後明確 rescan | B、A | q、z(A)、a、b |
+
+兩次 checkpoint 儲存均成功, 另以兩個 thread 相同時間證實 mtime 改變但尚未 scan 時仍為 1、0, rescan 後才成為 0、1, 因此不能每次 snapshot 依目前 Session.modified 重新排序
+
+測試限定 winner descriptor 已加入上述更新與 rescan 的實測期望, 仍未串接 runtime 來源排序或改變 eviction, 正式移植需要獨立的 discovery-time rank 與 fresh / restored call 次序來源
+
+### 來源排序與容量規格的相容性阻擋點
+
+目前保留既有 Rust bounded overflow、50,000 全域 call 選取、8,192 單來源上限及 eviction 防護, 不因預覽次序差異改變來源成員
+
+Python 的相關行為分為三層, 不能用預覽排序替代
+
+- collectors.py 的 restore load 使用 50,000 減目前 retained calls 的剩餘容量, 來源處理順序受 read_cursor 輪替影響
+- session_checkpoint.py 載入以 event_time DESC、call_id 排序, 單次上限為 8,192 與剩餘容量的較小值
+- 單來源超過 8,192 時淘汰目前 dict 第一項, restore 後不等於原始 sequence 第一項, 全域超過 50,000 則另以 timestamp-or-empty、完整 path、call ID 升冪淘汰
+
+獨立 preview 次序資料可避免直接改動 eviction queue, 但仍不能宣稱 restore 成員完全對齊 Python, 既有專案文件未提供特別授權取代 Rust 容量策略的依據
+
+跨輪 provenance 設計仍需限制 source-only metadata、空 thread 及 call rank 儲存, 50,000 個已選 descriptor 不能代表全部暫存資料的記憶體界線, 未加入無上限 map 或新的 runtime 排序狀態
+
+另完成 worktree 正常 porcelain 欄位與 account 限額 / credits / usage 數值投影的有界唯讀比較, 未建立新的具體缺陷, 未執行真實 account、Codex CLI 或使用者來源查詢
+
+### Model API 控制空白分隔
+
+API 診斷欄位解析對齊 Python 的 U+001C–U+001F 空白分隔, 避免整筆事件或 token 數值被遺漏, 原有欄位白名單、數值界線與引號遮蔽維持不變
+
+獨立 Python 合成 fixture 確認四種分隔字元的預期結果, Rust 回歸先失敗再通過, Model API 模組 6 項測試全部通過, 未重跑完整套件或變更來源排序、淘汰及大型快照策略
+
+### Core / Desktop 診斷欄位與標題分界
+
+診斷解析同樣對齊 Python 的 U+001C–U+001F 空白分隔, 保留 request ID、thread ID、錯誤代碼與 HTTP 狀態, 並避免把 message 欄位中的 timeout 或 stream disconnected 誤判為標題原因
+
+實際 Python diagnostic_details 與 Desktop collector 合成案例確認四種分隔字元的結果, Rust 回歸先失敗再通過, Core / Desktop 診斷模組 13 項測試通過, 欄位白名單、憑證排除及本文不持久化界線維持不變
+
+### Web 引用的 Unicode 解析範圍
+
+Web 回傳引用解析改依 Python 的 1,048,576 字元範圍, 避免多位元組文字造成範圍內 URL 被提早排除, 30 筆去重引用上限與 URL query 遮蔽維持不變, 不保存回傳本文
+
+Python response_metadata 合成案例確認 400,000 個中文字後的 URL 仍納入, 字元範圍外 URL 排除, Rust 回歸先失敗再通過, history-store 6 項單元測試及 2 項工具錯誤 / Web 引用重啟回歸通過
+
+解析範圍最多涵蓋 4 MiB UTF-8 文字, 這是來源字元規格對齊, 未宣稱效能改善或 16 MiB 快照問題已解決
+
+### 階段提交前回歸
+
+Linux / Rust 1.100.0 執行 `cargo test --locked --offline --manifest-path rust/service/Cargo.toml`, 單元測試 291 項通過、2 項失敗, account 時限案例單獨重跑通過, 另一項 overflow metadata-only 案例的舊期望值由 0 對齊 Python 的 null 後單獨通過
+
+另以 `--test http` 執行 HTTP 測試, 201 項通過、2 項失敗, error-detail 的 503 與 retention retry 的舊快照值均在個別重跑時通過, 尚未取得整套並行測試全數通過的結果, 不將個別通過當成並行穩定性證明

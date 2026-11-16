@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 
 const BYTE_LIMIT: usize = 16 * 1024 * 1024;
 const SAMPLE: u64 = 256;
-// Version 17 includes plain execution modes, so older cursors must replay their source.
-const STATE_VERSION: u32 = 17;
+// Version 18 retains interval insertion order, so older cursors must replay their source.
+const STATE_VERSION: u32 = 18;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

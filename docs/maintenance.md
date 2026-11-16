@@ -160,7 +160,7 @@ Core 錯誤與同批 SQL 摘要一起保存, 錯誤歷史的讀寫狀態可查�
 
 以 `--codex` 啟用後, `codex.sqlite.aggregate` 及 `mcp.history_aggregate` 彙總所選時間範圍內的 SQLite 保留資料, 獨立於事件清單上限, 歷史讀取失敗時可由 `history_health` 判斷彙總不可用
 
-要核對頁面資產, 先以既有建置工具準備固定版本, 再加上 `--assets src/local_activity_monitor`, 服務會在開始監聽前核對 manifest 與雜湊, 可直接核對靜態回應, 完整快照欄位及設定端點待移植
+要核對頁面資產, 先以既有建置工具準備固定版本, 再加上 `--assets src/local_activity_monitor`, 服務會在開始監聽前核對 manifest 與雜湊, 可直接核對靜態回應, Rust 已有快照及設定端點, 端點存在不代表完整行為或平台驗收已完成, 大型選取快照的 16 MiB payload 組裝界線仍見前述限制
 
 執行 `cargo test --locked --manifest-path rust/service/Cargo.toml` 驗證 HTTP 行為, 測試使用暫存資料庫與臨時連接埠
 

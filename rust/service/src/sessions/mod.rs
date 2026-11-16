@@ -611,6 +611,7 @@ impl Monitor {
         };
                 collector.force_replay = was_active;
                 let reactivated = was_active;
+                if reactivated { collector.api_events.clear(); }
                 was_active = true;
                 let watch_failed = Arc::new(AtomicBool::new(false));
                 let worktree_dirty = Arc::new(AtomicBool::new(true));
@@ -800,6 +801,7 @@ impl Monitor {
                     collector.core.capture_api = model_api_enabled;
                     collector.desktop.set_capture_api(model_api_enabled);
                     if errors_reenabled || sqlite_reenabled || model_api_reenabled {
+                        collector.api_events.clear();
                         rescan_core_logs = true; rescan_desktop_logs = true;
                         clear_core_for_errors = true; clear_desktop_for_errors = true;
                     }
@@ -866,6 +868,8 @@ impl Monitor {
                             Arc::clone(&next_failed),
                             Some(Arc::clone(&schedule_dirty)),
                         ) {
+                            // Keep existing registrations until a complete replacement is ready.
+                            Ok(next) if next.partial_failure && schedule_watcher.is_some() => false,
                             Ok(next) => {
                                 let complete = !next.partial_failure;
                                 schedule_watcher = Some(next);
@@ -988,6 +992,8 @@ impl Monitor {
                             desktop_wake.clone(),
                             Arc::clone(&next_failed),
                         ) {
+                            // Keep existing registrations until a complete replacement is ready.
+                            Ok(next) if next.partial_failure && desktop_watcher.is_some() => false,
                             Ok(next) => {
                                 let complete = !next.partial_failure;
                                 desktop_watcher = Some(next);
@@ -1018,6 +1024,7 @@ impl Monitor {
                     let logs_changed = collector.logs_enabled != logs_enabled;
                     collector.logs_enabled = logs_enabled;
                     if logs_changed && logs_enabled {
+                        collector.api_events.clear();
                         rescan_core_logs = true;
                         rescan_desktop_logs = true;
                     }
@@ -1026,6 +1033,7 @@ impl Monitor {
                         collector.desktop.logs.clear();
                     }
                     if !model_api_enabled {
+                        collector.api_events.clear();
                         collector.core.api_events.clear();
                         collector.desktop.api_events.clear();
                     }
@@ -1049,6 +1057,7 @@ impl Monitor {
                         }
                         rescan_ready = true;
                     }
+                    model_api::collect(&mut collector.api_events, &mut collector.core.api_events, &mut collector.desktop.api_events);
                     let mut after = collector.desktop.source.clone();
                     if let Some(source) = after.as_object_mut() {
                         source.remove("checked_at");
@@ -1748,7 +1757,20 @@ fn same_metadata_reports(left: &[Value], right: &[Value]) -> bool {
 
 fn apply_thread_metadata(row: &mut Value, metadata: Option<&Value>, metadata_only: bool) {
     row["metadata_only"] = json!(metadata_only);
-    let Some(metadata) = metadata else { return };
+    if metadata_only {
+        row["tool_calls"] = Value::Null;
+    }
+    let Some(metadata) = metadata else {
+        // Python emits catalog defaults even when metadata is disabled or unmatched.
+        for key in [
+            "thread_name", "host_id", "archived", "project_id", "project_name", "project_kind",
+        ] {
+            row[key] = Value::Null;
+        }
+        row["project_scope"] = json!("unknown");
+        row["has_schedule"] = json!(false);
+        return;
+    };
     row["thread_name"] = metadata["name"].clone();
     let thread_name = metadata["name"].clone();
     if let Some(messages) = row["agent_messages"].as_array_mut() {
@@ -2468,6 +2490,7 @@ struct Collector {
     error_history_read_error: Option<&'static str>,
     core: core_logs::Core,
     desktop: desktop::DesktopCollector,
+    api_events: std::collections::VecDeque<Value>,
     schedules: Value,
     plugins: Value,
     plugin_report: Option<Value>,
@@ -2807,6 +2830,7 @@ impl Collector {
             error_history_read_error: None,
             core: core_logs::Core::new(enabled),
             desktop: desktop::DesktopCollector::default(),
+            api_events: std::collections::VecDeque::new(),
             schedules: json!({"items":[],"health":if enabled {"waiting"} else {"disabled"}}),
             plugins: json!({"items":[],"health":if enabled {"waiting"} else {"disabled"}}),
             plugin_report: None,
@@ -4715,7 +4739,7 @@ impl Collector {
             }
         }
         let sql_events = sqlite::identified(sql_events);
-        let api_events = model_api::merge(&self.core.api_events, &self.desktop.api_events);
+        let api_events = &self.api_events;
         let mut all_mcp = mcp::summary(&mcp_events, None, self.activity_history_health);
         if let Some(rows) = all_mcp["servers"].as_array_mut() {
             for server in &observed_servers {
@@ -5036,7 +5060,7 @@ impl Collector {
                 core_source["health"] = json!("disabled");
             }
             let mut model_api =
-                model_api::summary(&api_events, boundary, model_api_enabled, core_source);
+                model_api::summary(api_events, boundary, model_api_enabled, core_source);
             if let Some(sources) = model_api["sources"].as_array_mut() {
                 let mut desktop_source = self.desktop.source.clone();
                 if !model_api_enabled {
@@ -5428,6 +5452,33 @@ impl Drop for Collector {
 #[cfg(test)]
 mod log_tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_call_order_retains_python_restore_provenance() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        let path = root.join(format!("rollout-{id}.jsonl"));
+        let mut lines = vec![json!({"timestamp":"2026-11-13T01:00:00Z","type":"session_meta","payload":{"id":id}}).to_string()];
+        for call_id in ["z", "a"] {
+            lines.push(json!({"timestamp":"2026-11-13T01:00:01Z","type":"response_item","payload":{"type":"function_call","name":"fixture_tool","call_id":call_id,"arguments":"{}"}}).to_string());
+        }
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let mut collector = Collector::new(root.join("monitoring"), true, None);
+        let stopped = AtomicBool::new(false);
+        for _ in 0..4 {
+            let (_, pending, _) = collector.refresh(&root, &stopped, true, false, CommandSwitches::default());
+            if !pending { break; }
+        }
+        let key = checkpoint::key(&root, &path).unwrap();
+        let mut store = lam_history_store::Store::open(&root.join("monitoring"), lam_history_store::Access::ReadOnly).unwrap().unwrap();
+        let restored = store.checkpoint(&key, 10).unwrap().unwrap();
+        // Actual Python save/load fixture uses this SQL order after restart,
+        // distinct from the fresh z,a insertion order encoded by sequence.
+        assert_eq!(restored.calls.iter().map(|call| call.call_id.as_str()).collect::<Vec<_>>(), ["a", "z"]);
+        let payloads: Vec<Value> = restored.calls.iter().map(|call| serde_json::from_str(&call.payload).unwrap()).collect();
+        assert!(payloads[0]["sequence"].as_u64().unwrap() > payloads[1]["sequence"].as_u64().unwrap());
+    }
 
     #[test]
     fn snapshot_payload_pages_coalesce_metadata_and_reject_stale_or_cancelled_stage() {
@@ -6961,7 +7012,7 @@ mod log_tests {
             .find(|row| row["thread_id"] == id)
             .unwrap();
         assert_eq!(stale_row["metadata_only"], true);
-        assert_eq!(stale_row["tool_calls"], 0);
+        assert!(stale_row["tool_calls"].is_null());
         assert_eq!(stale["codex"]["usage"]["limits"][0]["used_percent"], 80);
         let mut writer = lam_history_store::Store::open(&root.join("monitoring"), lam_history_store::Access::ReadWrite).unwrap().unwrap();
         writer.save_checkpoints(std::slice::from_ref(&replayed.cursor), &replayed.calls, &[]).unwrap();
@@ -7349,6 +7400,36 @@ mod log_tests {
         assert!(!serde_json::to_string(&projection)
             .unwrap()
             .contains("newly_trimmed_calls"));
+    }
+
+    #[test]
+    fn absent_catalog_metadata_preserves_explicit_row_shape() {
+        let original = json!({"thread_id":"fixture","model":"session-model","status":"running","status_updated_at":"2026-01-01T00:00:00Z","environment":"local","tokens":{"total_tokens":7},"execution":{"sandbox_policy":"workspace-write"},"tool_calls":1});
+        let mut row = original.clone();
+        apply_thread_metadata(&mut row, None, false);
+        for key in [
+            "thread_name", "host_id", "archived", "project_id", "project_name", "project_kind",
+        ] {
+            assert!(row.as_object().unwrap().contains_key(key), "missing {key}");
+            assert!(row[key].is_null(), "non-null {key}");
+        }
+        assert_eq!(row["project_scope"], "unknown");
+        assert_eq!(row["has_schedule"], false);
+        assert_eq!(row["metadata_only"], false);
+        for (key, value) in original.as_object().unwrap() {
+            assert_eq!(&row[key], value, "changed observed {key}");
+        }
+    }
+
+    #[test]
+    fn catalog_metadata_only_tool_calls_are_unknown_not_zero() {
+        let metadata = json!({"name":"catalog fixture","status":"idle"});
+        for metadata_only in [false, true] {
+            let mut row = json!({"tool_calls":0,"tools":{},"environment":"local"});
+            apply_thread_metadata(&mut row, Some(&metadata), metadata_only);
+            assert_eq!(row["tool_calls"], if metadata_only { Value::Null } else { json!(0) });
+            assert_eq!(row["tools"], json!({}));
+        }
     }
 
     #[test]

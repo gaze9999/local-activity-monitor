@@ -12,6 +12,10 @@ static PARENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-fA-F0-9-]{36}
 static AGENT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^/root(?:/[a-zA-Z0-9_.-]{1,160}){0,12}$").unwrap());
 
+fn bounded_json(text: &str) -> bool {
+    text.chars().take(4097).count() <= 4096
+}
+
 fn fields(values: &Value) -> Map<String, Value> {
     let mut result = Map::new();
     for key in [
@@ -49,7 +53,7 @@ fn fields(values: &Value) -> Map<String, Value> {
         let mut value = values.get(source).cloned().unwrap_or(Value::Null);
         if let Some(text) = value
             .as_str()
-            .filter(|text| text.starts_with('{') && text.len() <= 4096)
+            .filter(|text| text.starts_with('{') && bounded_json(text))
         {
             value = serde_json::from_str(text).unwrap_or(Value::Null);
         }
@@ -97,7 +101,7 @@ pub(super) fn execution(values: &Value) -> Value {
     let spawn = values
         .get("source")
         .and_then(Value::as_str)
-        .filter(|value| value.len() <= 4096)
+        .filter(|value| bounded_json(value))
         .and_then(|value| serde_json::from_str::<Value>(value).ok());
     let mut result = spawn
         .as_ref()
@@ -141,6 +145,11 @@ fn selected(value: &JsonValue<'_>) -> Map<String, Value> {
         "parent_thread_id",
         "agent_path",
     ] {
+        // A present invalid canonical value suppresses its alias in Python.
+        // Keep only presence, never the rejected source value.
+        if matches!(key, "approval_policy" | "model_provider") && field(value, key).is_some() {
+            values.insert(key.into(), Value::Null);
+        }
         if let Some(JsonValue::Str(text)) = field(value, key) {
             if text.len() <= 4096 {
                 values.insert(key.into(), json!(text.as_ref()));
@@ -159,7 +168,7 @@ fn selected(value: &JsonValue<'_>) -> Map<String, Value> {
                     }
                 }
             }
-            Some(JsonValue::Str(text)) if text.len() <= 4096 => {
+            Some(JsonValue::Str(text)) if bounded_json(text) => {
                 values.insert(key.into(), json!(text.as_ref()));
             }
             _ => {}
@@ -179,7 +188,7 @@ pub(super) fn session(value: &JsonValue<'_>, include_spawn: bool) -> Map<String,
                     result.extend(selected(spawn));
                 }
             }
-            Some(JsonValue::Str(source)) if source.len() <= 4096 => {
+            Some(JsonValue::Str(source)) if bounded_json(source) => {
                 if let Ok(source) = serde_json::from_str::<Value>(source) {
                     if let Some(spawn) = source
                         .get("subagent")
@@ -227,6 +236,56 @@ pub(super) fn valid_checkpoint(values: &std::collections::BTreeMap<String, Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structured_metadata_limits_count_characters_like_python() {
+        for (key, structured, output) in [
+            ("sandbox_policy", json!({"type":"workspace-write","ignored":""}), json!({"sandbox_mode":"workspace-write"})),
+            ("collaboration_mode", json!({"mode":"default","ignored":""}), json!({"collaboration_mode":"default"})),
+            ("source", json!({"subagent":{"thread_spawn":{"agent_role":"worker"}},"ignored":""}), json!({"agent_role":"worker"})),
+        ] {
+            let empty_length = structured.to_string().chars().count();
+            for length in [4096, 4097] {
+                let mut structured = structured.clone();
+                structured["ignored"] = json!("中".repeat(length - empty_length));
+                let encoded = structured.to_string();
+                assert_eq!(encoded.chars().count(), length);
+                assert!(encoded.len() > 4096);
+                let payload = json!({(key):encoded});
+                let expected = if length == 4096 { output.clone() } else { json!({}) };
+                assert_eq!(execution(&payload), expected, "key={key}, length={length}");
+                let bytes = serde_json::to_vec(&payload).unwrap();
+                let parsed = JsonValue::parse(&bytes, false).unwrap();
+                assert_eq!(Value::Object(session(&parsed, true)), expected);
+                assert!(!expected.to_string().contains('中'));
+            }
+        }
+    }
+
+    #[test]
+    fn session_aliases_preserve_invalid_canonical_presence() {
+        for (canonical, alias) in [("approval_policy", "approval_mode"),
+                                   ("model_provider", "model_provider_id")] {
+            for primary in [None, Some(Value::Null), Some(json!(false)), Some(json!({"private":"PRIVATE"})),
+                            Some(json!("x".repeat(4097))), Some(json!("canonical"))] {
+                let mut payload = json!({(alias):"fallback"});
+                if let Some(value) = &primary { payload[canonical] = value.clone(); }
+                let expected = if primary.is_none() { json!({(canonical):"fallback"}) }
+                    else if primary == Some(json!("canonical")) { json!({(canonical):"canonical"}) }
+                    else { json!({}) };
+                let bytes = serde_json::to_vec(&payload).unwrap();
+                let parsed = JsonValue::parse(&bytes, false).unwrap();
+                assert_eq!(Value::Object(session(&parsed, false)), expected, "{canonical} {primary:?}");
+                assert_eq!(execution(&payload), expected);
+                let spawn = json!({"subagent":{"thread_spawn":payload}});
+                for source in [spawn.clone(), json!(spawn.to_string())] {
+                    let bytes = serde_json::to_vec(&json!({"source":source})).unwrap();
+                    let parsed = JsonValue::parse(&bytes, false).unwrap();
+                    assert_eq!(Value::Object(session(&parsed, true)), expected);
+                }
+            }
+        }
+    }
 
     #[test]
     fn execution_preserves_plain_and_structured_modes_without_private_fields() {

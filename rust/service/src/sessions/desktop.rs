@@ -399,6 +399,9 @@ impl DesktopWatcher {
         failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> io::Result<()> {
         let replacement = Self::new(sources, wake, failed)?;
+        if replacement.partial_failure {
+            return Err(io::Error::other("Desktop watch enrollment incomplete"));
+        }
         *self = replacement;
         Ok(())
     }
@@ -970,16 +973,11 @@ impl DesktopCollector {
                 }
             }
             if let Some(api) = event.api.as_ref().filter(|_| batch.capture_api) {
-                if !self
-                    .api_events
-                    .iter()
-                    .any(|item| item["observation_id"] == api["observation_id"])
-                {
-                    self.api_events.push(api.clone());
-                }
+                // Global retention must see every arrival before deduplication or eviction.
+                self.api_events.push(api.clone());
             }
         }
-        for values in [&mut self.logs, &mut self.errors, &mut self.api_events] {
+        for values in [&mut self.logs, &mut self.errors] {
             values.sort_by(|left, right| {
                 right["timestamp"].as_str().cmp(&left["timestamp"].as_str())
             });
@@ -1126,6 +1124,79 @@ mod tests {
             1
         );
         assert!(history.iter().all(|event| event.severity.is_none()));
+    }
+
+    #[test]
+    fn desktop_api_cap_keeps_new_equal_timestamp_arrivals_like_python() {
+        let folder = tempfile::tempdir().unwrap();
+        let now = lam_history_store::parse_utc_stamp("2026-11-12T01:00:00Z").unwrap();
+        let mut checkpoints = super::super::checkpoint::Checkpoints::new(folder.path().join("monitoring"), true);
+        let mut collector = super::DesktopCollector::default();
+        let mut retained = std::collections::VecDeque::new();
+        let mut core = std::collections::VecDeque::new();
+        let event = |id: usize, stamp: &str| {
+            let line = format!("{stamp} INFO [codex_otel.log_only] event.name=codex.api_request request_id=req{id}");
+            super::core_logs::project_desktop_line(&line, "fixture.log", id as u64).unwrap()
+        };
+        collector.pending = Some(super::DesktopBatch {
+            history: (0..1001).map(|id| event(id, "2026-11-12T00:00:00Z")).collect(),
+            capture_api: true,
+            ..Default::default()
+        });
+        collector.commit(&mut checkpoints, now).unwrap().unwrap();
+        super::super::model_api::collect(&mut retained, &mut core, &mut collector.api_events);
+        assert_eq!(retained.len(), 1000);
+        assert_eq!(retained.front().unwrap()["request_id"], "req1");
+        assert_eq!(retained.back().unwrap()["request_id"], "req1000");
+        collector.pending = Some(super::DesktopBatch {
+            history: vec![event(1000, "2026-11-12T00:00:00Z"), event(1001, "2026-11-11T23:59:59Z")],
+            capture_api: true,
+            ..Default::default()
+        });
+        collector.commit(&mut checkpoints, now).unwrap().unwrap();
+        super::super::model_api::collect(&mut retained, &mut core, &mut collector.api_events);
+        assert_eq!(retained.len(), 1000);
+        assert_eq!(retained.front().unwrap()["request_id"], "req1");
+        assert_eq!(retained.back().unwrap()["request_id"], "req1000");
+        collector.pending = Some(super::DesktopBatch {
+            history: vec![event(1002, "2026-11-12T00:00:01Z")],
+            capture_api: true,
+            ..Default::default()
+        });
+        collector.commit(&mut checkpoints, now).unwrap().unwrap();
+        super::super::model_api::collect(&mut retained, &mut core, &mut collector.api_events);
+        assert_eq!(retained.len(), 1000);
+        assert_eq!(retained.front().unwrap()["request_id"], "req2");
+        assert_eq!(retained.back().unwrap()["request_id"], "req1002");
+    }
+
+    #[test]
+    fn desktop_api_batch_keeps_reappearing_ids_for_global_retention() {
+        let folder = tempfile::tempdir().unwrap();
+        let now = lam_history_store::parse_utc_stamp("2026-11-12T01:00:00Z").unwrap();
+        let mut checkpoints = super::super::checkpoint::Checkpoints::new(folder.path().join("monitoring"), true);
+        let mut collector = super::DesktopCollector::default();
+        let mut retained = std::collections::VecDeque::new();
+        let mut core = std::collections::VecDeque::new();
+        let event = |id: usize| {
+            let line = format!("2026-11-12T00:00:00Z INFO [codex_otel.log_only] event.name=codex.api_request request_id=req{id}");
+            super::core_logs::project_desktop_line(&line, "fixture.log", id as u64).unwrap()
+        };
+        collector.pending = Some(super::DesktopBatch {
+            history: (0..1000).map(event).collect(), capture_api: true, ..Default::default()
+        });
+        collector.commit(&mut checkpoints, now).unwrap().unwrap();
+        super::super::model_api::collect(&mut retained, &mut core, &mut collector.api_events);
+        collector.pending = Some(super::DesktopBatch {
+            history: vec![event(0), event(1000), event(0)], capture_api: true, ..Default::default()
+        });
+        collector.commit(&mut checkpoints, now).unwrap().unwrap();
+        assert_eq!(collector.api_events.len(), 3);
+        super::super::model_api::collect(&mut retained, &mut core, &mut collector.api_events);
+        assert_eq!(retained.len(), 1000);
+        assert_eq!(retained.front().unwrap()["request_id"], "req2");
+        assert_eq!(retained[998]["request_id"], "req1000");
+        assert_eq!(retained.back().unwrap()["request_id"], "req0");
     }
 
     #[test]
@@ -1296,7 +1367,7 @@ mod tests {
         let folder = tempfile::tempdir().unwrap();
         let logs = folder.path().join("logs");
         std::fs::create_dir(&logs).unwrap();
-        let line = b"2026-11-12T01:02:03Z ERROR [codex] failure\n";
+        let line = b"2026-11-12T01:02:03Z ERROR [codex_otel.log_only] event.name=codex.api_request success=false\n";
         for index in 0..5 {
             let mut bytes = line.to_vec();
             bytes.resize(256 * 1024, b'x');
@@ -1316,17 +1387,26 @@ mod tests {
         assert_eq!(first.live.len(), 4);
         let mut checkpoints = super::super::checkpoint::Checkpoints::new(monitoring, true);
         assert!(collector.commit(&mut checkpoints, now).is_err());
+        assert!(collector.api_events.is_empty());
         let retry = collector.refresh(&[source(&logs)], now);
         assert!(retry.live_pending);
         assert_eq!(retry.live.len(), 4);
         db.execute_batch("DROP TRIGGER reject_errors").unwrap();
         let committed = collector.commit(&mut checkpoints, now).unwrap().unwrap();
         assert!(committed.live_pending);
+        let mut retained = std::collections::VecDeque::new();
+        let mut core = std::collections::VecDeque::new();
+        assert_eq!(collector.api_events.len(), 4);
+        super::super::model_api::collect(&mut retained, &mut core, &mut collector.api_events);
+        assert_eq!(retained.len(), 4);
         let remaining = collector.refresh(&[source(&logs)], now);
         assert_eq!(remaining.live.len(), 1);
         assert!(!remaining.live_pending);
         collector.commit(&mut checkpoints, now).unwrap();
         assert_eq!(collector.errors.len(), 5);
+        super::super::model_api::collect(&mut retained, &mut core, &mut collector.api_events);
+        assert_eq!(retained.len(), 5);
+        assert!(collector.api_events.is_empty());
     }
 
     #[test]

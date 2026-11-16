@@ -483,7 +483,7 @@ pub(super) fn parse(output: &[u8]) -> Vec<Worktree> {
             }
             "branch"
                 if value.starts_with("refs/heads/")
-                    && value.len() <= 512
+                    && value.chars().take(513).count() <= 512
                     && !value.chars().any(char::is_control) =>
             {
                 item.branch = Some(value[11..].to_owned())
@@ -647,6 +647,18 @@ fn git_list_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn branch_limit_counts_unicode_characters_like_python() {
+        let branch = format!("{}/{}", vec!["界".repeat(40); 12].join("/"), "界".repeat(9));
+        assert_eq!(format!("refs/heads/{branch}").chars().count(), 512);
+        for (suffix, accepted) in [("", true), ("界", false)] {
+            let name = format!("{branch}{suffix}");
+            let raw = format!("worktree /tmp/fixture\0branch refs/heads/{name}\0\0");
+            let items = parse(raw.as_bytes());
+            assert_eq!(items[0].branch.as_deref(), accepted.then_some(name.as_str()));
+        }
+    }
+
     #[test]
     fn parses_nul_records_without_exposing_lock_reasons() {
         let hash = "a".repeat(40);

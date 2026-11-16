@@ -764,10 +764,10 @@ impl Observed {
                 encoded = output.to_string();
                 &encoded
             };
-            let mut end = raw.len().min(1024 * 1024);
-            while !raw.is_char_boundary(end) {
-                end -= 1;
-            }
+            let end = raw
+                .char_indices()
+                .nth(OUTPUT_CHARACTER_LIMIT)
+                .map_or(raw.len(), |(index, _)| index);
             let raw = &raw[..end];
             self.result.insert(
                 "references".into(),
@@ -1083,6 +1083,21 @@ fn valid_result(server: &str, key: &str, value: &Value) -> bool {
                         .any(|part| matches!(part, "tokens" | "credits"));
             has_unit && number(value, NUMBER_LIMIT) || FLAG.is_match(key) && value.is_boolean()
         }
+    }
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+
+    #[test]
+    fn web_reference_limit_counts_unicode_characters() {
+        let mut observed = Observed::new("web.run", None).unwrap();
+        observed.complete(&json!(format!("{} https://example.com/path?secret=PRIVATE", "漢".repeat(400_000))));
+        assert_eq!(observed.result["references"], json!(["https://example.com/path"]));
+        assert!(!json!(observed.result).to_string().contains("PRIVATE"));
+        observed.complete(&json!(format!("{} https://example.com/path", "漢".repeat(OUTPUT_CHARACTER_LIMIT))));
+        assert_eq!(observed.result["references"], json!([]));
     }
 }
 

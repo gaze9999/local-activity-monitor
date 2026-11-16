@@ -33,20 +33,20 @@ static UUID: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$").expect("thread id")
 });
 static PAIR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"\b([a-zA-Z_][a-zA-Z0-9_]*)[=:]\s*("(?:\\.|[^"\\])*"|\S+)"#)
+    Regex::new(r#"\b([a-zA-Z_][a-zA-Z0-9_]*)[=:][\s\x1c-\x1f]*("(?:\\.|[^"\\])*"|[^\s\x1c-\x1f]+)"#)
         .expect("diagnostic pair")
 });
 static DESKTOP_PAIR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"\b([a-zA-Z_][a-zA-Z0-9_]*)=("(?:\\.|[^"\\])*"|[^\s]+)"#)
+    Regex::new(r#"\b([a-zA-Z_][a-zA-Z0-9_]*)=("(?:\\.|[^"\\])*"|[^\s\x1c-\x1f]+)"#)
         .expect("desktop diagnostic pair")
 });
 static DESKTOP_IDENTIFIER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-zA-Z0-9_./:-]{1,160}$").expect("desktop diagnostic identifier")
 });
 static DESKTOP_HEADING: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\s[a-zA-Z_][a-zA-Z0-9_]*=").expect("desktop diagnostic heading"));
+    LazyLock::new(|| Regex::new(r"[\s\x1c-\x1f][a-zA-Z_][a-zA-Z0-9_]*=").expect("desktop diagnostic heading"));
 static HEADING: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\s[a-zA-Z_][a-zA-Z0-9_]*[=:]").expect("diagnostic heading"));
+    LazyLock::new(|| Regex::new(r"[\s\x1c-\x1f][a-zA-Z_][a-zA-Z0-9_]*[=:]").expect("diagnostic heading"));
 static QUOTED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#""(?:\\.|[^"\\])*""#).expect("quoted text"));
 static HTTP: LazyLock<Regex> = LazyLock::new(|| {
@@ -423,24 +423,8 @@ impl Core {
                 push(&mut self.errors, value, LOG_LIMIT);
             }
         }
-        for value in batch.api_events.into_iter().filter(|_| self.capture_api) {
-            if !self
-                .api_events
-                .iter()
-                .any(|event| event["observation_id"] == value["observation_id"])
-            {
-                self.api_events.push_back(value);
-                if self.api_events.len() > LOG_LIMIT {
-                    if let Some((index, _)) =
-                        self.api_events.iter().enumerate().min_by_key(|(_, event)| {
-                            event["timestamp"].as_str().unwrap_or_default()
-                        })
-                    {
-                        self.api_events.remove(index);
-                    }
-                }
-            }
-        }
+        // Preserve each batch arrival, including IDs evicted earlier in the shared queue.
+        self.api_events.extend(batch.api_events.into_iter().filter(|_| self.capture_api));
         if self.capture_sql {
             for value in batch.sql {
                 push(&mut self.sql, value.clone(), SQL_LIMIT);
@@ -864,7 +848,8 @@ pub(super) fn project_desktop_line(line: &str, file: &str, offset: u64) -> Optio
         "fatal" | "critical" | "error" => Some("error"),
         _ => None,
     };
-    let api = model_api::project(parsed.module, parsed.body).map(|mut fields| {
+    let api = model_api::project(parsed.module, parsed.body).map(|projected| {
+        let mut fields = Map::new();
         for key in [
             "timestamp",
             "source",
@@ -875,6 +860,7 @@ pub(super) fn project_desktop_line(line: &str, file: &str, offset: u64) -> Optio
         ] {
             fields.insert(key.into(), event[key].clone());
         }
+        fields.extend(projected);
         fields.insert("observation_id".into(), content_id.into());
         Value::Object(fields)
     });
@@ -1043,6 +1029,23 @@ pub(super) fn details(body: &str) -> Map<String, Value> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn diagnostic_control_whitespace_preserves_fields_and_heading_boundary() {
+        for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let body = format!("observed{separator}request_id={separator}safe{separator}status=429{separator}message=timeout");
+            let value = super::details(&body);
+            assert_eq!(value.get("request_id"), Some(&serde_json::json!("safe")));
+            assert_eq!(value.get("http_status"), Some(&serde_json::json!(429)));
+            assert!(!value.contains_key("cause"));
+            let line = format!("2026-11-12T01:02:03Z ERROR [codex] observed{separator}threadId=12345678-1234-1234-1234-123456789abc{separator}errorCode=SAFE{separator}message=stream disconnected");
+            let event = super::project_desktop_line(&line, "fixture.log", 7).unwrap().log;
+            assert_eq!(event["thread_id"], "12345678-1234-1234-1234-123456789abc");
+            assert_eq!(event["code"], "SAFE");
+            assert_eq!(event["reason"], "codex_diagnostic");
+            assert!(event.get("cause").is_none());
+        }
+    }
+
+    #[test]
     fn diagnostic_status_matches_python_unicode_decimals() {
         for (body, expected) in [
             ("HTTP/１.１ ４２９", Some(429)),
@@ -1138,6 +1141,27 @@ mod tests {
         assert!(api.get("record_hash").is_none());
         assert_eq!(api["record_offset"], 7);
         assert!(api["observation_id"].is_string());
+    }
+
+    #[test]
+    fn desktop_api_thread_aliases_override_diagnostic_context_like_python() {
+        let projected = "00000000-0000-4000-8000-000000000001";
+        let context = "00000000-0000-4000-8000-000000000002";
+        for field in ["thread.id", "conversation.id", "thread_id"] {
+            for context_field in [String::new(), format!(" conversationId={context}")] {
+                let line = format!("2026-11-12T01:02:03Z INFO [codex_otel.log_only] event.name=\"codex.api_request\" {field}=\"{projected}\"{context_field} prompt=\"PRIVATE_BODY\"");
+                let result = super::project_desktop_line(&line, "fixture.log", 7).unwrap();
+                let api = result.api.unwrap();
+                assert_eq!(api["thread_id"], projected, "{field}{context_field}");
+                assert_eq!(api["source"], "codex_desktop");
+                assert_eq!(api["record_offset"], 7);
+                assert_eq!(api["observation_id"], result.log["content_id"]);
+                assert!(!api.to_string().contains("PRIVATE_BODY"));
+            }
+        }
+        let line = format!("2026-11-12T01:02:03Z INFO [codex_otel.log_only] event.name=\"codex.api_request\" thread.id=\"invalid\" conversationId={context}");
+        let api = super::project_desktop_line(&line, "fixture.log", 7).unwrap().api.unwrap();
+        assert_eq!(api["thread_id"], context);
     }
 
     #[test]

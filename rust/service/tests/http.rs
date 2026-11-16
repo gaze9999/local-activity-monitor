@@ -132,6 +132,17 @@ impl Drop for Service {
     }
 }
 
+// The monitor journal is independent of Codex collection (also in Python).
+// Invalid requests must not create history, settings, cursors or debug files.
+fn assert_only_monitor_journal(home: &Path) {
+    let monitoring = home.join("monitoring");
+    if monitoring.exists() {
+        for entry in fs::read_dir(monitoring).unwrap() {
+            assert_eq!(entry.unwrap().file_name(), "local-activity-monitor.jsonl");
+        }
+    }
+}
+
 struct Reply {
     status: u16,
     headers: String,
@@ -2369,7 +2380,7 @@ fn error_observation_switch_preserves_logs_and_replays_disabled_records() {
         service
             .get(&format!("/api/codex/error?id={session_id}"))
             .status,
-        409
+        200
     );
     fs::OpenOptions::new()
         .append(true)
@@ -2411,7 +2422,8 @@ fn error_observation_switch_preserves_logs_and_replays_disabled_records() {
     };
     let disabled = service.get("/api/snapshot?window=all").json();
     assert_eq!(disabled["errors"]["enabled"], false);
-    assert_eq!(disabled["errors"]["total"], 0);
+    // The rejected history request remains a monitor error, not a source observation.
+    assert!(disabled["errors"]["events"].as_array().unwrap().iter().all(|event| event["source"] == "monitor"));
     assert_eq!(disabled["errors"]["history"]["retained"], 0);
     let core_id = logs["entries"]
         .as_array()
@@ -6140,20 +6152,29 @@ fn refresh_requires_local_empty_json_and_preserves_codex_opt_in() {
     let mut stream = EventStream::connect(&service, "?window=24h").unwrap();
     let initial = stream.snapshot();
     assert_eq!(initial["window"], "24h");
-    assert_eq!(initial["snapshot"], snapshot);
+    // Device and traffic metadata may advance between HTTP and SSE reads.
+    assert_eq!(initial["snapshot"]["codex"], snapshot["codex"]);
+    assert!(initial["snapshot"]["updated_at"].is_string());
+    assert!(initial["snapshot"]["activity"]["last_activity_at"].is_null());
     assert_eq!(initial["snapshot"]["codex"]["threads"], json!([]));
     drop(stream);
 
     let response = post("{ }", "");
     assert_eq!(response.status, 200);
-    assert_eq!(response.json(), service.get("/api/activity").json());
+    let requested = response.json();
+    let current = service.get("/api/activity").json();
+    // Independent watch enrollment may complete between these two reads.
+    for field in ["paused", "health", "last_activity_at", "update_mode", "code_revision"] {
+        assert_eq!(requested[field], current[field], "{field}");
+    }
+    assert_eq!(current["health"], "disabled");
     assert_eq!(post("[]", "").status, 400);
     assert_eq!(post(&" ".repeat(513), "").status, 400);
     assert_eq!(
         post("{}", "Origin: http://external.invalid\r\n").status,
         403
     );
-    assert!(!home.path().join("monitoring").exists());
+    assert_only_monitor_journal(home.path());
     service.stop();
 }
 
@@ -6209,7 +6230,7 @@ fn invalid_requests_are_rejected_before_accessing_history() {
             .status,
         405
     );
-    assert!(!home.path().join("monitoring").exists());
+    assert_only_monitor_journal(home.path());
     service.stop();
 }
 
@@ -6871,10 +6892,9 @@ fn schedules_follow_sqlite_events_only_when_collection_is_enabled() {
     let database = rusqlite::Connection::open(home.path().join("sqlite/codex-dev.db")).unwrap();
     database.execute_batch("CREATE TABLE automations(id TEXT, status TEXT, name TEXT, prompt TEXT); INSERT INTO automations VALUES('fixture','ACTIVE','First','private');").unwrap();
     let disabled = Service::start(home.path(), false, None);
-    assert_eq!(
-        disabled.get("/api/snapshot").json()["codex"]["schedules"]["health"],
-        "disabled"
-    );
+    let snapshot = disabled.get("/api/snapshot").json();
+    assert_eq!(snapshot["codex"]["health"], "disabled");
+    assert!(snapshot["codex"].get("schedules").is_none());
     drop(disabled);
     let service = Service::start(home.path(), true, None);
     let initial = snapshot_when(&service, |value| {
@@ -7486,15 +7506,16 @@ fn session_sources_require_opt_in_and_an_allowlisted_window() {
     let mut service = Service::start(home.path(), false, None);
     let snapshot = service.get("/api/snapshot").json();
     assert_eq!(snapshot["codex"]["health"], "disabled");
-    assert_eq!(snapshot["codex"]["files"], 0);
-    assert_eq!(snapshot["codex"]["bytes_read"], 0);
+    assert!(snapshot["codex"].get("files").is_none());
+    assert!(snapshot["codex"].get("bytes_read").is_none());
     assert_eq!(snapshot["codex"]["threads"], json!([]));
-    assert!(!home.path().join("monitoring").exists());
-    assert_eq!(
-        service.get("/api/activity").json()["watch_health"],
-        "disabled"
-    );
-    for query in ["window=bad", "window=1h&window=all", "other=1"] {
+    assert_only_monitor_journal(home.path());
+    // Catalog/Jev watches remain independent of Codex source collection.
+    let activity = service.get("/api/activity").json();
+    assert_eq!(activity["health"], "disabled");
+    assert!(activity["last_activity_at"].is_null());
+    assert_eq!(service.get("/api/snapshot?window=1h&window=all").json()["monitor"]["window"], "1h");
+    for query in ["window=bad", "window=bad&window=all", "other=1"] {
         assert_eq!(service.get(&format!("/api/snapshot?{query}")).status, 400);
     }
     service.stop();
@@ -9341,6 +9362,36 @@ fn core_model_api_keeps_the_most_recent_thousand_events() {
 }
 
 #[test]
+fn model_api_global_cap_preserves_cross_round_desktop_arrivals() {
+    let home = tempdir().unwrap();
+    let logs = home.path().join("desktop-logs");
+    fs::create_dir(&logs).unwrap();
+    let desktop = logs.join("codex-desktop-fixture.log");
+    fs::write(&desktop, "").unwrap();
+    let mut writer = rusqlite::Connection::open(home.path().join("logs_fixture.sqlite")).unwrap();
+    writer.execute_batch("CREATE TABLE logs(id INTEGER PRIMARY KEY,ts REAL,level TEXT,target TEXT,message TEXT)").unwrap();
+    let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).timestamp();
+    let tx = writer.transaction().unwrap();
+    for id in 1..=1000 {
+        tx.execute("INSERT INTO logs VALUES(?,?,'INFO','codex_otel.log_only','event.name=codex.api_request status_code=200')", rusqlite::params![id, now]).unwrap();
+    }
+    tx.commit().unwrap();
+    let mut service = Service::start(home.path(), true, None);
+    let initial = snapshot_when(&service, |v| v["model_api"]["requests"] == 1000);
+    let oldest = initial["model_api"]["events"][0]["observation_id"].clone();
+    let stamp = chrono::DateTime::from_timestamp(now, 0).unwrap().to_rfc3339();
+    fs::write(&desktop, format!("{stamp} INFO [codex_api::endpoint::responses_websocket] successfully connected to websocket thread.id=\"00000000-0000-4000-8000-000000000001\"\n")).unwrap();
+    let updated = snapshot_when(&service, |v| v["model_api"]["connections"] == 1);
+    assert_eq!(updated["model_api"]["requests"], 999);
+    let events = updated["model_api"]["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1000);
+    assert!(!events.iter().any(|event| event["observation_id"] == oldest));
+    assert_eq!(events.last().unwrap()["source"], "codex_desktop");
+    assert_eq!(events.last().unwrap()["thread_id"], "00000000-0000-4000-8000-000000000001");
+    service.stop();
+}
+
+#[test]
 fn core_sql_diagnostics_retry_the_pending_page_after_history_write_failure() {
     let home = tempdir().unwrap();
     let monitoring = home.path().join("monitoring");
@@ -9503,7 +9554,7 @@ fn error_history_restores_recent_metadata_after_sources_disappear() {
     let restored = snapshot_when(&service, |value| value["errors"]["total"] == 2);
     assert_eq!(restored["errors"]["history"]["retained"], 2);
     let logs = service.get("/api/logs?window=1h").json();
-    assert_eq!(logs["total"], 2);
+    assert_eq!(logs["entries"].as_array().unwrap().iter().filter(|row| row["source"] != "monitor").count(), 2);
     assert!(logs["entries"]
         .as_array()
         .unwrap()
@@ -9967,6 +10018,29 @@ fn nested_tool_failures_keep_outer_result_ownership() {
 }
 
 #[test]
+fn orderless_interval_checkpoint_replays_without_losing_error_history() {
+    let home = tempdir().unwrap();
+    let (_path, _stamp) = native_event_fixture(home.path());
+    let mut initial = Service::start(home.path(), true, None);
+    snapshot_when(&initial, |value| value["errors"]["total"] == 2);
+    let previous = initial.get("/api/history?namespace=errors&section=events").json();
+    initial.stop();
+    let db = rusqlite::Connection::open(
+        home.path().join("monitoring").join(lam_history_store::FILE_NAME),
+    ).unwrap();
+    db.execute_batch(
+        "UPDATE session_cursors SET payload=json_remove(json_set(payload,'$.version',17),'$.projection.interval_order');",
+    ).unwrap();
+    drop(db);
+    let mut restarted = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&restarted, |value| value["errors"]["total"] == 2);
+    assert_eq!(snapshot["codex"]["read_state"]["checkpoint"]["invalidated"], 1);
+    assert!(snapshot["codex"]["bytes_read"].as_u64().unwrap() > 0);
+    assert_eq!(restarted.get("/api/history?namespace=errors&section=events").json(), previous);
+    restarted.stop();
+}
+
+#[test]
 fn older_call_checkpoint_replays_to_recover_tool_failure() {
     let home = tempdir().unwrap();
     let (path, stamp) = native_event_fixture(home.path());
@@ -10387,7 +10461,7 @@ fn retention_setting_is_persisted_without_enabling_collection() {
         service.get("/api/settings").json()["activity_retention_days"],
         90
     );
-    assert!(!home.path().join("monitoring").exists());
+    assert_only_monitor_journal(home.path());
 
     let post = |body: &str| {
         service.request_body(
@@ -10411,7 +10485,7 @@ fn retention_setting_is_persisted_without_enabling_collection() {
         request("Content-Type: application/json\r\nOrigin: http://external.invalid\r\n").status,
         403
     );
-    assert!(!home.path().join("monitoring").exists());
+    assert_only_monitor_journal(home.path());
     for body in [
         r#"{"activity_retention_days":-1}"#,
         r#"{"activity_retention_days":3651}"#,
@@ -10422,7 +10496,7 @@ fn retention_setting_is_persisted_without_enabling_collection() {
     ] {
         assert_eq!(post(body).status, 409, "{body}");
     }
-    assert!(!home.path().join("monitoring").exists());
+    assert_only_monitor_journal(home.path());
     assert_eq!(post(r#"{"activity_retention_days":3650}"#).status, 200);
     assert_eq!(
         service.get("/api/settings").json()["activity_retention_days"],
@@ -10434,7 +10508,7 @@ fn retention_setting_is_persisted_without_enabling_collection() {
         3650
     );
     assert_eq!(
-        post(r#"{"activity_retention_days":1,"debug_mode":true}"#).status,
+        post(r#"{"activity_retention_days":1,"debug_mode":"invalid"}"#).status,
         409
     );
     let mut stream = EventStream::connect(&service, "?window=24h").unwrap();
@@ -10500,7 +10574,7 @@ fn retention_cleanup_failure_can_be_retried_through_http() {
     db.execute_batch(
         "WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<501)
          INSERT INTO history_items(namespace,section,item_key,ordinal,event_time,payload)
-         SELECT 'activity','web',n,0,'2000-01-01T00:00:00.000Z','{}' FROM ids;
+         SELECT 'activity','web',n,0,CASE WHEN n=501 THEN '2000-01-02T00:00:00.000Z' ELSE '2000-01-01T00:00:00.000Z' END,'{}' FROM ids;
          CREATE TRIGGER reject_last BEFORE DELETE ON history_items
          WHEN OLD.item_key='501'
          BEGIN SELECT RAISE(ABORT,'fixture failure'); END;",
@@ -10621,7 +10695,15 @@ fn retention_update_removes_expired_history_from_disabled_snapshot() {
         body,
     );
     assert_eq!(response.status, 200);
-    let updated = stream.snapshot();
+    // Frames already queued by device/catalog updates can precede the settings refresh.
+    let deadline = Instant::now() + TIMEOUT;
+    let updated = loop {
+        let frame = stream.snapshot();
+        if frame["snapshot"]["settings"]["activity_retention_days"] == 1 {
+            break frame;
+        }
+        assert!(Instant::now() < deadline, "retention update was not published");
+    };
     assert_eq!(updated["snapshot"]["mcp"]["total_events"], 0);
     assert_eq!(updated["snapshot"]["codex"]["health"], "disabled");
     assert_eq!(service.get("/api/history?section=mcp").json()["total"], 0);
@@ -10667,7 +10749,15 @@ fn retention_update_removes_expired_history_from_enabled_snapshot() {
         body,
     );
     assert_eq!(response.status, 200);
-    let updated = stream.snapshot();
+    // Frames already queued by device/catalog updates can precede the settings refresh.
+    let deadline = Instant::now() + TIMEOUT;
+    let updated = loop {
+        let frame = stream.snapshot();
+        if frame["snapshot"]["settings"]["activity_retention_days"] == 1 {
+            break frame;
+        }
+        assert!(Instant::now() < deadline, "retention update was not published");
+    };
     assert_eq!(updated["snapshot"]["mcp"]["total_events"], 0);
     assert_ne!(updated["snapshot"]["codex"]["health"], "disabled");
     assert_eq!(service.get("/api/history?section=mcp").json()["total"], 0);
@@ -10690,7 +10780,7 @@ fn incomplete_settings_body_times_out_without_writing() {
     let mut response = String::new();
     slow.read_to_string(&mut response).unwrap();
     assert!(response.starts_with("HTTP/1.1 400 "), "{response}");
-    assert!(!home.path().join("monitoring").exists());
+    assert_only_monitor_journal(home.path());
     assert_eq!(
         service.get("/api/settings").json()["activity_retention_days"],
         90
