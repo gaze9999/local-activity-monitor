@@ -359,6 +359,29 @@ fn journal_reload_preserves_raw_line_counts_in_logs_api() {
 }
 
 #[test]
+fn journal_reload_decodes_encoded_raw_rows_in_logs_api() {
+    let home = tempdir().unwrap();
+    fs::create_dir(home.path().join("monitoring")).unwrap();
+    let row = json!({"application":"local-activity-monitor","version":1,"timestamp":"2026-01-01T00:00:00Z","kind":"encoded_fixture","error_type":null,"secret":"PRIVATE"}).to_string();
+    let mut raw = b"\xff\xfe\0\0".to_vec();
+    for unit in row.chars().map(u32::from) {
+        raw.extend(unit.to_le_bytes());
+    }
+    raw.extend(b"\r\n\n");
+    let path = home.path().join("monitoring/local-activity-monitor.jsonl");
+    fs::write(&path, &raw).unwrap();
+    let service = Service::start(home.path(), false, None);
+    let response = service.get("/api/logs?window=all");
+    assert_eq!(response.status, 200);
+    let logs = response.json();
+    let source = logs["sources"].as_array().unwrap().iter().find(|row| row["source"] == "monitor").unwrap();
+    assert_eq!(source["unsupported_lines"], 1);
+    assert_eq!(logs["entries"].as_array().unwrap().iter().filter(|row| row["kind"] == "encoded_fixture").count(), 1);
+    assert!(!logs.to_string().contains("PRIVATE"));
+    assert!(fs::read(path).unwrap().starts_with(&raw));
+}
+
+#[test]
 fn log_setting_stops_disk_writes_and_hides_entries_until_reenabled() {
     let home = tempdir().unwrap();
     let service = Service::start(home.path(), false, None);

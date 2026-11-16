@@ -231,7 +231,7 @@ impl Journal {
                 lines.next();
             }
             for line in lines {
-                match serde_json::from_slice::<Value>(line).ok().and_then(project) {
+                match crate::json_bytes::parse(line).and_then(project) {
                     Some(event) => self.push(event),
                     None => self.skipped += 1,
                 }
@@ -417,6 +417,80 @@ mod tests {
 
     fn fixture_row(kind: &str) -> Vec<u8> {
         json!({"application":"local-activity-monitor","version":1,"timestamp":"2026-01-01T00:00:00Z","kind":kind,"error_type":null,"secret":"PRIVATE"}).to_string().into_bytes()
+    }
+
+    fn encoded_row(text: &str, width: usize, big_endian: bool, bom: bool) -> Vec<u8> {
+        let mut raw = Vec::new();
+        if bom {
+            raw.extend(match (width, big_endian) {
+                (1, _) => b"\xef\xbb\xbf".as_slice(),
+                (2, false) => b"\xff\xfe",
+                (2, true) => b"\xfe\xff",
+                (4, false) => b"\xff\xfe\0\0",
+                (4, true) => b"\0\0\xfe\xff",
+                _ => unreachable!(),
+            });
+        }
+        match width {
+            1 => raw.extend(text.as_bytes()),
+            2 => for unit in text.encode_utf16() {
+                raw.extend(if big_endian { unit.to_be_bytes() } else { unit.to_le_bytes() });
+            },
+            4 => for unit in text.chars().map(u32::from) {
+                raw.extend(if big_endian { unit.to_be_bytes() } else { unit.to_le_bytes() });
+            },
+            _ => unreachable!(),
+        }
+        raw
+    }
+
+    #[test]
+    fn reload_decodes_each_raw_row_without_transcoding_line_boundaries() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("local-activity-monitor.jsonl");
+        let row = String::from_utf8(fixture_row("started")).unwrap();
+        for (width, big_endian) in [(1, false), (2, false), (2, true), (4, false), (4, true)] {
+            for bom in [false, true] {
+                for separator in [vec![], b"\n".to_vec(), b"\r".to_vec(), b"\r\n".to_vec(), encoded_row("\n", width, big_endian, false)] {
+                    let raw = [encoded_row(&row, width, big_endian, bom), separator.clone()].concat();
+                    fs::write(&path, &raw).unwrap();
+                    let journal = Journal::new(home.path());
+                    let encoded_separator = width != 1 && separator == encoded_row("\n", width, big_endian, false);
+                    assert_eq!(journal.entries().len(), usize::from(!(encoded_separator && big_endian)), "{width} {big_endian} {bom} {separator:?}");
+                    assert_eq!(journal.source()["unsupported_lines"], usize::from(encoded_separator));
+                    assert_eq!(journal.source()["bytes"], raw.len());
+                    assert_eq!(journal.source()["health"], "ok");
+                    assert!(!json!(journal.entries()).to_string().contains("PRIVATE"));
+                    assert_eq!(fs::read(&path).unwrap(), raw);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn encoded_journal_rows_preserve_tail_cut_and_invalid_scalar_rejection() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("local-activity-monitor.jsonl");
+        let row = String::from_utf8(fixture_row("started")).unwrap();
+        let encoded = encoded_row(&row, 4, false, true);
+        let raw = [vec![b'x'; LIMIT as usize], b"\n".to_vec(), encoded.clone(), b"\r\n".to_vec(), encoded].concat();
+        fs::write(&path, &raw).unwrap();
+        let journal = Journal::new(home.path());
+        assert_eq!(journal.entries().len(), 2);
+        assert_eq!(journal.source()["unsupported_lines"], 0);
+        assert_eq!(fs::read(&path).unwrap(), raw);
+        for extra in ["\u{010a}", "\u{010d}"] {
+            let text = row.replace("PRIVATE", extra);
+            fs::write(&path, encoded_row(&text, 2, false, false)).unwrap();
+            let journal = Journal::new(home.path());
+            assert!(journal.entries().is_empty());
+            assert_eq!(journal.source()["unsupported_lines"], 2);
+        }
+        let text = row.replace("PRIVATE", r"\ud800");
+        fs::write(&path, encoded_row(&text, 2, false, true)).unwrap();
+        let journal = Journal::new(home.path());
+        assert!(journal.entries().is_empty());
+        assert_eq!(journal.source()["unsupported_lines"], 1);
     }
 
     #[test]

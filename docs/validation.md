@@ -1012,3 +1012,19 @@ Rust 原本僅以 LF 分行並略過空白列, 本輪改為私有 iterator 處�
 保留前輪 idle refresh 失敗與後續測試基準修正的各自證據, 不宣稱歷史原因已確認, HTTP 503 / WouldBlock、數字呈現、其他 Unicode 與平台驗收限制仍保留
 
 Linux / Rust 1.100.0 的完整 service 單輪 373 項通過 (63.73 秒), 完整 serial HTTP 單輪 221 項通過 (132.51 秒)
+
+### Monitor journal 的逐列 JSON 編碼
+
+依 LAM main `5c03daf` 的 `MonitorState.load_journal`, 每個原始資料列交給 `json.loads(bytes)`, 不是先將整份日誌轉碼再分行
+
+Rust journal 改用既有私有 JSON bytes decoder, 支援 UTF-8 BOM 及有 / 無 BOM 的 UTF-16、UTF-32 LE / BE, 解碼仍在 64 KiB 原始讀取上限、CR / LF / CRLF 分行及超限首列丟棄之後, 不更改輪替、寫入、保留筆數或白名單投影
+
+Python 原始 reader 的 50 組編碼 / 分隔符 fixture 通過, 另核對 2 組內嵌 CR / LF byte 與 1 組超限尾段, 編碼後的換行仍依原始 byte 切開: LE 留下無效零值片段, BE 使前列長度無效, 不擴大為整檔轉碼
+
+新回歸先重現 UTF-8 BOM 資料列遺漏, 修正後 journal 10 項通過, 涵蓋編碼、空白列、tail 上限、來源 bytes 不變及未知欄位排除
+
+另核對 Python 接受未成對 surrogate 的差異, Rust 仍維持既有嚴格 scalar 驗證, 本輪未放寬, 歷史 HTTP 503 / WouldBlock、idle refresh 原因未明、數字呈現與平台驗收限制保留
+
+新增 `/api/logs?window=all` 的 UTF-32 LE BOM fixture, 驗證投影與 unsupported_lines, 沒有新增 endpoint、參數、來源讀取次數或寫入格式
+
+Linux / Rust 1.100.0 的完整 service 單輪 375 項通過 (75.20 秒), 完整 serial HTTP 單輪 222 項通過 (128.63 秒), 使用既有固定 WBUI `e9741c6` 資產且離線驗證通過
