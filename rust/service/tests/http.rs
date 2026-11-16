@@ -894,6 +894,53 @@ fn debug_collection_reports_only_measured_phase_metrics() {
 }
 
 #[test]
+fn metadata_only_thread_ties_follow_catalog_order_and_order_only_refresh() {
+    let home = tempdir().unwrap();
+    fs::create_dir(home.path().join("sqlite")).unwrap();
+    fs::write(home.path().join(".codex-global-state.json"), "{}").unwrap();
+    let mut db = rusqlite::Connection::open(home.path().join("sqlite/codex-dev.db")).unwrap();
+    db.execute_batch("CREATE TABLE local_thread_catalog(host_id TEXT,thread_id TEXT,display_title TEXT,source_created_at REAL,source_updated_at REAL,source_kind TEXT,thread_source TEXT,project_id TEXT);").unwrap();
+    let ids = [
+        "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "00000000-0000-4000-8000-000000000001",
+    ];
+    let replace = |db: &mut rusqlite::Connection, order: &[&str]| {
+        let tx = db.transaction().unwrap();
+        tx.execute("DELETE FROM local_thread_catalog", []).unwrap();
+        for id in order {
+            tx.execute("INSERT INTO local_thread_catalog VALUES('local',?1,'Same',0,1700000000,'cli','user',NULL)", [id]).unwrap();
+        }
+        tx.commit().unwrap();
+    };
+    replace(&mut db, &ids);
+    let service = Service::start(home.path(), true, None);
+    let initial = snapshot_when(&service, |value| {
+        value["codex"]["threads"]
+            .as_array()
+            .is_some_and(|rows| rows.len() == 2)
+    });
+    let rows = initial["codex"]["threads"].as_array().unwrap();
+    assert_eq!(rows[0]["thread_id"], ids[0]);
+    assert_eq!(rows[1]["thread_id"], ids[1]);
+    assert!(rows
+        .iter()
+        .all(|row| row["metadata_only"] == true && row["tool_calls"].is_null()));
+    replace(&mut db, &[ids[1], ids[0]]);
+    let updated = snapshot_when(&service, |value| {
+        value["codex"]["threads"][0]["thread_id"] == ids[1]
+    });
+    assert_eq!(updated["codex"]["threads"][1]["thread_id"], ids[0]);
+    assert_eq!(
+        updated["codex"]["schedules"]["remote_activities"],
+        initial["codex"]["schedules"]["remote_activities"]
+    );
+    assert_eq!(
+        updated["codex"]["dots"]["computers"],
+        initial["codex"]["dots"]["computers"]
+    );
+}
+
+#[test]
 fn dots_query_limits_metadata_filters_windows_and_honors_settings() {
     let home = tempdir().unwrap();
     let now =

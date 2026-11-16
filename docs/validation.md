@@ -583,3 +583,25 @@ Core timestamp 現在分開整秒與小數微秒捨入, 保留年份、型別及
 原始 Python SQLite REAL 3 個正負 epoch 案例通過, 新 Rust 回歸修正前失敗, 修正後核對正確時間可讀 detail、錯誤時間被拒絕、SQLite ts 不變, Core 單元 14 項通過, 完整 service 330 項通過 (110.88 秒), 完整 serial HTTP 單輪 218 項通過 (150.14 秒)
 
 Python error_records 共 21 項, 18 項通過、3 項因復原環境缺少 generated frontend manifest 而 error, 標準 verify-offline 頁面建置因無法取得或準備固定 WBUI 版本而失敗, 未變更 pin 或認證, 兩份記錄保留, 不宣稱 Python 全套通過, 先前獨立 HTTP / WouldBlock / 唯讀 503 問題與 cleanup 警告仍保留
+
+### 復原固定 WBUI 資產並完成 Python 參考驗證
+
+以獨立 clean checkout 核對 consumer pin `e9741c60590894fa8362f71bd0d4e8197caf4e5c` 與官方 origin 後, 使用標準 build_frontend --source / --verify-offline 建置成功, 未更新 pin、原始碼或 Git 認證, 本機 clone 最初的來源路徑 origin 曾被既有驗證拒絕, 完成來源核對並修正該獨立 clone 的 remote metadata 後才通過, 未略過檢查
+
+原先缺少 frontend manifest 的 Python error_records 重新執行 21 項全部通過 (1.687 秒), 既有 frontend build 18 項通過 (1.071 秒), 先前 18 通過 / 3 errors 與失敗建置 log 仍保留, 此阻礙確認為已修復的復原環境前置條件, 不混同先前仍未解決的 HTTP / WouldBlock / 唯讀 503
+
+僅恢復被忽略的 generated _web / _workbench, 沒有 runtime 原始碼變更, 私有 checkpoint 保存資產與 manifest 供再次復原, 本輪未重跑已通過的 Rust 330 / 218 檢查, 不宣稱跨平台或 live UI 驗收
+
+### 暫時 thread metadata 的來源順序
+
+基底 `9388b89` 與來源 main 比較未變, 原始 Python dict 保留 catalog、state 與 session_index 首次讀取順序, 重複更新不改位置, Rust HashMap 原先使相同時間的 metadata-only threads 與 remote activities 順序不穩定, Dots background 另轉為 BTreeMap 而依 ID 重排
+
+僅將 thread metadata 與 session_index title 暫存改用既有 serde_json::Map, Dots 接續相同順序, metadata 更新比較明確納入順序以發布只有排列改變的 snapshot, Cargo feature tree 已確認 preserve_order 由現有 history-store / session-core 相依套件啟用, 沒有改 Cargo.toml、Cargo.lock、feature 或新增相依套件
+
+公開輸出仍逐欄位投影, 沒有新增內部欄位或改變資料格式, 既有查詢、排序條件、ID 批次、數量上限與持久化 schema 均未變, 暫時容器配置形態改變但保留同一批 metadata, 不需資料 migration
+
+OverflowWorkdirScan 的 staging HashMap、winner、cursor、budget 與保存策略未修改, 其 metadata 併入處只配合目標型別, 本輪不宣稱 overflow 衍生 metadata-only 順序與 Python 相同, 既有容量與資料完整性限制仍保留
+
+32 筆同時間 catalog 的原始 Python fixture 驗證 metadata / remote schedules / Dots hosts 順序與重複值優先序, 新 Rust 回歸修正前實際失敗, 修正後通過, 另驗證 state reader 與 index 最新 title / 首次位置, 新 HTTP 回歸驗證 metadata-only thread 順序與只有資料列排列改變時的重新發布, Dots computers 與 schedules 值保持不變
+
+Rust schedules 單元 12 項通過, 新 HTTP 回歸通過, 原始 Python schedules 5、subagent sources 2、desktop activity 8 項通過, 完整 service 332 項通過 (103.62 秒), 完整 serial HTTP 單輪 219 項通過 (153.39 秒), 原始失敗與 cleanup 警告仍保留, 本輪一併保留前述固定資產復原驗證

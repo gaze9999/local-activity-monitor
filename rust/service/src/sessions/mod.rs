@@ -39,7 +39,7 @@ use lam_history_store::{ObservationView, StoreError, ERROR_PREVIEW_HOURS, ERROR_
 use lam_session_core::LINE_LIMIT;
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use project::{now, stamp, Projection, SessionError, FILE_CALL_LIMIT};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, Metadata};
@@ -906,7 +906,7 @@ impl Monitor {
                         collector.thread_metadata.clear();
                         let previous_workdirs = std::mem::take(&mut collector.overflow_thread_workdirs);
                         if command_switches.worktrees {
-                            let mut scratch = HashMap::new();
+                            let mut scratch = Map::new();
                             if collector.populate_overflow_workdirs(&root, &mut scratch) { schedule_dirty.store(true, Ordering::Release); let _ = events.try_send(()); }
                             collector.overflow_thread_workdirs = scratch.into_iter().filter_map(|(id,entry)| entry["_cwd"].as_str().map(|cwd| (id,cwd.to_owned()))).collect();
                         } else { collector.overflow_workdirs.clear(); collector.overflow_workdir_scan = None; }
@@ -940,7 +940,7 @@ impl Monitor {
                         let changed = !same_metadata_reports(&metadata_reports, &collector.metadata_reports) || schedules != collector.schedules
                             || plugins != collector.plugins || collector.plugin_report.as_ref() != Some(&plugin_report)
                             || dots != collector.dots
-                            || metadata != collector.thread_metadata
+                            || !metadata.iter().eq(collector.thread_metadata.iter())
                             || projects != collector.project_details
                             || roots_status != collector.project_roots_status
                             || collector.schedule_report.as_ref().is_none_or(|previous| {
@@ -2497,7 +2497,7 @@ struct Collector {
     plugins: Value,
     plugin_report: Option<Value>,
     dots: [Value; 4],
-    thread_metadata: HashMap<String, Value>,
+    thread_metadata: Map<String, Value>,
     project_details: BTreeMap<String, Value>,
     project_roots_status: projects::RootStatus,
     worktrees: worktrees::Collector,
@@ -2541,7 +2541,7 @@ impl Collector {
     fn discovered_file_count(&self) -> usize {
         self.discovered_files.unwrap_or(self.files.len())
     }
-    fn related_lifecycle(&mut self, root: &Path, metadata: &mut HashMap<String, Value>) -> Value {
+    fn related_lifecycle(&mut self, root: &Path, metadata: &mut Map<String, Value>) -> Value {
         const TAIL: usize = 65_536;
         let selected: BTreeSet<_> = metadata
             .iter()
@@ -2842,7 +2842,7 @@ impl Collector {
             ),
             schedule_report: None,
             metadata_reports: Vec::new(),
-            thread_metadata: HashMap::new(),
+            thread_metadata: Map::new(),
             project_details: BTreeMap::new(),
             project_roots_status: projects::RootStatus::default(),
             worktrees: worktrees::Collector::new(catalog_home.clone()),
@@ -3963,7 +3963,7 @@ impl Collector {
     fn populate_overflow_workdirs(
         &mut self,
         root: &Path,
-        metadata: &mut HashMap<String, Value>,
+        metadata: &mut Map<String, Value>,
     ) -> bool {
         const CACHE_LIMIT: usize = 16 * 1024 * 1024;
         self.populate_overflow_workdirs_with_limit(root, metadata, CACHE_LIMIT)
@@ -3972,7 +3972,7 @@ impl Collector {
     fn populate_overflow_workdirs_with_limit(
         &mut self,
         root: &Path,
-        metadata: &mut HashMap<String, Value>,
+        metadata: &mut Map<String, Value>,
         cache_limit: usize,
     ) -> bool {
         if self.discovery.is_some() {
@@ -6004,7 +6004,7 @@ mod log_tests {
                 assert!(collector.overflow_projections(0).1);
                 assert_eq!(collector.overflow_projections(0).0.len(), 1);
             }
-            let mut metadata = HashMap::new();
+            let mut metadata = Map::new();
             assert!(collector.populate_overflow_workdirs_with_limit(&root, &mut metadata, 0));
             assert!(metadata.is_empty(), "do not publish a partial scan");
             assert!(collector.overflow_workdir_scan.as_ref().unwrap().retained.len() <= 64);
@@ -6027,7 +6027,7 @@ mod log_tests {
             assert!(collector.overflow_workdirs.is_empty());
             assert!(collector.overflow_workdir_scan.is_none());
             // A writer changing an already staged source invalidates publication.
-            let mut stale_metadata = HashMap::new();
+            let mut stale_metadata = Map::new();
             assert!(collector.populate_overflow_workdirs_with_limit(&root, &mut stale_metadata, 0));
             let key = collector.overflow_workdir_scan.as_ref().unwrap().retained.first_key_value().unwrap().0.clone();
             let mut changed = store.checkpoint(&key, 0).unwrap().unwrap().cursor;
@@ -7276,13 +7276,13 @@ mod log_tests {
         let (mut metadata, mut reports) =
             schedules::background_metadata(&root, &identities, false, false);
         let (projects, _) = projects::read(&root, &mut metadata, false, &mut reports);
-        let mut uncached_metadata = HashMap::new();
+        let mut uncached_metadata = Map::new();
         assert!(!collector.populate_overflow_workdirs_with_limit(&root, &mut uncached_metadata, 0));
         assert_eq!(uncached_metadata[&id]["_cwd"], "/fixture/private-workdir");
         assert!(collector.overflow_workdirs.is_empty());
         assert!(!collector.populate_overflow_workdirs(&root, &mut metadata));
         assert_eq!(metadata[&id]["_cwd"], "/fixture/private-workdir");
-        let mut cached_metadata = HashMap::new();
+        let mut cached_metadata = Map::new();
         assert!(!collector.populate_overflow_workdirs(&root, &mut cached_metadata));
         assert_eq!(cached_metadata[&id]["_cwd"], "/fixture/private-workdir");
         collector.thread_metadata = metadata;
@@ -7342,7 +7342,7 @@ mod log_tests {
             .unwrap();
         drop(writer);
         assert!(detail_index.select_call(&id, "outside-call").is_none());
-        let mut stale_metadata = HashMap::new();
+        let mut stale_metadata = Map::new();
         collector.populate_overflow_workdirs(&root, &mut stale_metadata);
         assert!(stale_metadata.get(&id).is_none());
         let stale = collector.snapshots("partly_unavailable", "ok", 2);
@@ -7464,7 +7464,7 @@ mod log_tests {
         collector.session_paths.insert(id.to_owned(), path);
         let original =
             json!({"execution":{"parent_thread_id":"00000000-0000-4000-8000-000000000001"}});
-        let mut metadata = HashMap::from([(id.to_owned(), original.clone())]);
+        let mut metadata = Map::from_iter([(id.to_owned(), original.clone())]);
         let pending = collector.related_lifecycle(&root, &mut metadata);
         assert_eq!(pending["pending_files"], 1);
         assert!(metadata[id].get("status").is_none());
@@ -7474,7 +7474,7 @@ mod log_tests {
         assert_eq!(report["rows_read"], 2);
         assert_eq!(metadata[id]["status"], "completed");
         assert_eq!(metadata[id]["status_source"], "session_lifecycle");
-        let mut next = HashMap::from([(id.to_owned(), original)]);
+        let mut next = Map::from_iter([(id.to_owned(), original)]);
         let cached = collector.related_lifecycle(&root, &mut next);
         assert_eq!(cached["bytes_read"], 0);
         assert_eq!(next[id]["status"], "completed");
@@ -7495,7 +7495,7 @@ mod log_tests {
         let mut collector = Collector::new(root.join("monitoring"), true, None);
         collector.session_paths.insert(id.to_owned(), path);
         collector.related_budget = 65536;
-        let mut metadata = HashMap::from([(
+        let mut metadata = Map::from_iter([(
             id.to_owned(),
             json!({"execution":{"parent_thread_id":"00000000-0000-4000-8000-000000000001"}}),
         )]);

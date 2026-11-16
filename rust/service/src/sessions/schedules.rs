@@ -80,8 +80,8 @@ fn timestamp(value: ValueRef<'_>) -> Value {
     })
 }
 
-fn catalog_entries(home: &Path) -> (HashMap<String, Value>, Value) {
-    let mut entries = HashMap::new();
+fn catalog_entries(home: &Path) -> (Map<String, Value>, Value) {
+    let mut entries = Map::new();
     let path = home.join("sqlite/codex-dev.db");
     let checked = DateTime::<Utc>::from(std::time::SystemTime::now())
         .to_rfc3339_opts(SecondsFormat::Secs, false);
@@ -373,7 +373,7 @@ pub(super) fn state_files(home: &Path) -> Vec<PathBuf> {
 
 fn merge_state_database(
     home: &Path,
-    entries: &mut HashMap<String, Value>,
+    entries: &mut Map<String, Value>,
     observed: &BTreeSet<String>,
     include_workdirs: bool,
     select_recent: bool,
@@ -741,7 +741,7 @@ fn merge_state_database(
     reports
 }
 
-pub(crate) fn merge_remote_state(home: &Path, entries: &mut HashMap<String, Value>) {
+pub(crate) fn merge_remote_state(home: &Path, entries: &mut Map<String, Value>) {
     let Some(state) = crate::dots::read_state(home) else {
         return;
     };
@@ -857,7 +857,7 @@ pub(crate) fn merge_remote_state(home: &Path, entries: &mut HashMap<String, Valu
 
 fn merge_session_index(
     home: &Path,
-    entries: &mut HashMap<String, Value>,
+    entries: &mut Map<String, Value>,
     observed: &BTreeSet<String>,
 ) -> Value {
     const LIMIT: u64 = 1024 * 1024;
@@ -902,7 +902,7 @@ fn merge_session_index(
     if offset > 0 {
         lines.next();
     }
-    let mut titles = HashMap::new();
+    let mut titles = Map::new();
     for line in lines {
         let Ok(value) = serde_json::from_slice::<Value>(line) else {
             continue;
@@ -922,13 +922,13 @@ fn merge_session_index(
         else {
             continue;
         };
-        titles.insert(id.to_owned(), title.chars().take(512).collect::<String>());
+        titles.insert(id.to_owned(), json!(title.chars().take(512).collect::<String>()));
     }
     let matched = titles.len();
     for (id, title) in titles {
         let entry=entries.entry(id.clone()).or_insert_with(||json!({"thread_id":id,"name":null,"host_id":null,"environment":"unknown","kind":"unknown","last_run_at":null,"status":null}));
         if entry["name"].is_null() {
-            entry["name"] = json!(title);
+            entry["name"] = title;
         }
     }
     report("ok", Some(matched))
@@ -939,7 +939,7 @@ pub(crate) fn background_metadata(
     observed: &BTreeSet<String>,
     include_workdirs: bool,
     select_recent: bool,
-) -> (HashMap<String, Value>, Vec<Value>) {
+) -> (Map<String, Value>, Vec<Value>) {
     let (mut entries, catalog_report) = catalog_entries(home);
     let state_reports = merge_state_database(
         home,
@@ -955,7 +955,7 @@ pub(crate) fn background_metadata(
     (entries, reports)
 }
 
-fn project_remote_activities(entries: &HashMap<String, Value>) -> Vec<Value> {
+fn project_remote_activities(entries: &Map<String, Value>) -> Vec<Value> {
     let mut result: Vec<_> = entries
         .values()
         .filter(|item| {
@@ -1130,7 +1130,7 @@ fn read_database(
 pub(super) fn read(
     home: &Path,
     checked_at: DateTime<Utc>,
-    metadata: &HashMap<String, Value>,
+    metadata: &Map<String, Value>,
 ) -> (Value, Value) {
     let path = home.join("sqlite/codex-dev.db");
     let mut items = Vec::new();
@@ -1156,6 +1156,78 @@ pub(super) fn read(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn state_and_index_metadata_keep_reader_order_and_replacement_slots() {
+        let ids = [
+            "ffffffff-ffff-4fff-8fff-ffffffffffff",
+            "00000000-0000-4000-8000-000000000001",
+        ];
+        let observed = ids.iter().map(|id| id.to_string()).collect();
+        let home = tempfile::tempdir().unwrap();
+        let db = rusqlite::Connection::open(home.path().join("state_1.sqlite")).unwrap();
+        db.execute_batch("CREATE TABLE threads(id TEXT,title TEXT,updated_at REAL);")
+            .unwrap();
+        for id in ids {
+            db.execute("INSERT INTO threads VALUES(?1,'State',1700000000)", [id])
+                .unwrap();
+        }
+        let (state, _) = super::background_metadata(home.path(), &observed, false, false);
+        assert_eq!(state.keys().map(String::as_str).collect::<Vec<_>>(), ids);
+        let index_home = tempfile::tempdir().unwrap();
+        let lines = [(ids[0], "First"), (ids[1], "Second"), (ids[0], "Latest")]
+            .into_iter()
+            .map(|(id, title)| serde_json::json!({"id":id,"thread_name":title}).to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(index_home.path().join("session_index.jsonl"), lines).unwrap();
+        let (index, _) = super::background_metadata(index_home.path(), &observed, false, false);
+        assert_eq!(index.keys().map(String::as_str).collect::<Vec<_>>(), ids);
+        assert_eq!(index[ids[0]]["name"], "Latest");
+        assert_eq!(index[ids[1]]["name"], "Second");
+    }
+
+    #[test]
+    fn catalog_ties_preserve_encounter_order_across_metadata_consumers() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join("sqlite")).unwrap();
+        std::fs::write(home.path().join(".codex-global-state.json"), "{}").unwrap();
+        let db = rusqlite::Connection::open(home.path().join("sqlite/codex-dev.db")).unwrap();
+        db.execute_batch("CREATE TABLE local_thread_catalog(host_id TEXT,thread_id TEXT,display_title TEXT,source_created_at REAL,source_updated_at REAL,source_kind TEXT,thread_source TEXT,project_id TEXT);").unwrap();
+        let ids: Vec<_> = (0..32)
+            .rev()
+            .map(|i| format!("00000000-0000-4000-8000-{i:012}"))
+            .collect();
+        for (index, id) in ids.iter().enumerate() {
+            db.execute("INSERT INTO local_thread_catalog VALUES(?1,?2,?3,0,1700000000,'cli','schedule',NULL)",rusqlite::params![format!("remote-control:h{index:02}"),id,format!("Thread{index}")]).unwrap();
+        }
+        db.execute("INSERT INTO local_thread_catalog VALUES('remote-control:ignored',?1,'Later equal duplicate',0,1700000000,'cli','schedule',NULL)", [&ids[0]]).unwrap();
+        let (entries, _) = super::background_metadata(
+            home.path(),
+            &std::collections::BTreeSet::new(),
+            false,
+            false,
+        );
+        assert_eq!(entries.keys().cloned().collect::<Vec<_>>(), ids);
+        assert_eq!(entries[&ids[0]]["name"], "Thread0");
+        let activities = super::project_remote_activities(&entries);
+        assert_eq!(
+            activities
+                .iter()
+                .map(|row| row["thread_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ids.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        let dots = crate::dots::background(
+            home.path(),
+            &entries,
+            chrono::DateTime::from_timestamp(1700000001, 0).unwrap(),
+        );
+        let computers = dots[3]["computers"].as_array().unwrap();
+        assert_eq!(computers.len(), 32);
+        for (index, computer) in computers.iter().enumerate() {
+            assert_eq!(computer["host_id"], format!("remote-control:h{index:02}"));
+        }
+    }
     #[test]
     fn preload_selects_recent_state_threads_only_when_requested() {
         let home = tempfile::tempdir().unwrap();
@@ -1195,7 +1267,7 @@ mod tests {
         )
         .unwrap();
         symlink(&path, home.path().join(".codex-global-state.json")).unwrap();
-        let mut entries = HashMap::from([(id.to_owned(), json!({"kind":"user"}))]);
+        let mut entries = Map::from_iter([(id.to_owned(), json!({"kind":"user"}))]);
         merge_remote_state(home.path(), &mut entries);
         assert_eq!(entries[id]["kind"], "user");
     }
@@ -1290,7 +1362,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("session_index.jsonl");
         std::fs::write(path, b"{\"id\":\"one\",\"thread_name\":\"First\"}\n{\"id\":\"one\",\"thread_name\":\" Latest \"}\n{\"id\":\"two\",\"thread_name\":\"Hidden\"}\n").unwrap();
-        let mut entries = HashMap::from([
+        let mut entries = Map::from_iter([
             ("one".to_owned(), json!({"name":null})),
             ("two".to_owned(), json!({"name":null})),
         ]);
@@ -1320,7 +1392,7 @@ mod tests {
         use std::os::unix::fs::symlink;
         let home = tempfile::tempdir().unwrap();
         let root = home.path().canonicalize().unwrap();
-        let mut entries = HashMap::new();
+        let mut entries = Map::new();
         let observed = BTreeSet::new();
         assert_eq!(
             merge_session_index(&root, &mut entries, &observed)["health"],
@@ -1380,7 +1452,7 @@ mod tests {
         let (result, report) = read(
             home.path(),
             DateTime::from_timestamp(0, 0).unwrap(),
-            &HashMap::new(),
+            &Map::new(),
         );
         assert_eq!(result["health"], "ok");
         assert_eq!(result["items"].as_array().unwrap().len(), 1);

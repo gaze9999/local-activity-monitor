@@ -1,5 +1,5 @@
 use chrono::{DateTime, Datelike, Duration, SecondsFormat, Utc};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Read;
@@ -118,19 +118,19 @@ pub fn read(home: &Path, window: &str, now: DateTime<Utc>) -> Value {
     let Some(state) = read_state(home) else {
         return json!({"health":"error","checked_at":now.to_rfc3339_opts(SecondsFormat::Secs,false),"source":"desktop_cache","window":window});
     };
-    project(&state, window, now, BTreeMap::new())
+    project(&state, window, now, Map::new())
 }
 
 pub fn background(
     home: &Path,
-    metadata: &std::collections::HashMap<String, Value>,
+    metadata: &Map<String, Value>,
     now: DateTime<Utc>,
 ) -> [Value; 4] {
     let windows = ["1h", "24h", "7d", "all"];
     let Some(state) = read_state(home) else {
         return windows.map(|window| json!({"window":window,"activity_items_scope":"latest_loaded_snapshot","activity":[]}));
     };
-    let entries: BTreeMap<_,_> = metadata.iter().map(|(id,value)| {
+    let entries: Map<_,_> = metadata.iter().map(|(id,value)| {
         (id.clone(), json!({"host_id":value["host_id"],"timestamp":value["last_run_at"],"trigger":value["kind"],"environment":value["environment"]}))
     }).collect();
     windows.map(|window| {
@@ -152,7 +152,7 @@ fn project(
     state: &Value,
     window: &str,
     now: DateTime<Utc>,
-    mut entries: BTreeMap<String, Value>,
+    mut entries: Map<String, Value>,
 ) -> Value {
     let mut result = json!({"health":"error","checked_at":now.to_rfc3339_opts(SecondsFormat::Secs,false),"source":"desktop_cache","window":window});
     if state
@@ -425,7 +425,7 @@ mod tests {
                 &json!({"electron-persisted-atom-state":atom}),
                 "all",
                 now,
-                BTreeMap::from([("thread".into(), json!({"host_id":"local","trigger":"dot"}))]),
+                Map::from_iter([("thread".into(), json!({"host_id":"local","trigger":"dot"}))]),
             );
             assert_eq!(value["health"], "ok");
             assert_eq!(value["activity"], json!([]));
@@ -434,7 +434,7 @@ mod tests {
             assert!(value.get("computers").is_none());
         }
         assert_eq!(
-            project(&json!({}), "all", now, BTreeMap::new())["computers"],
+            project(&json!({}), "all", now, Map::new())["computers"],
             json!([])
         );
     }
@@ -487,7 +487,7 @@ mod tests {
             &state,
             "all",
             DateTime::from_timestamp(101, 0).unwrap(),
-            BTreeMap::new(),
+            Map::new(),
         );
         let activity = value["activity"].as_array().unwrap();
         assert_eq!(activity.len(), 2);
@@ -503,7 +503,7 @@ mod tests {
             "hostId":format!("remote-control:host-{index:03}")
         })).collect();
         let state = json!({"electron-persisted-atom-state":{"orbit-activity-snapshots-v1":[{"data":rows}]}});
-        let value = project(&state, "all", DateTime::from_timestamp(2, 0).unwrap(), BTreeMap::new());
+        let value = project(&state, "all", DateTime::from_timestamp(2, 0).unwrap(), Map::new());
         let computers = value["computers"].as_array().unwrap();
         assert_eq!(computers.len(), 100);
         assert_eq!(computers[0]["host_id"], "remote-control:host-100");
@@ -519,7 +519,7 @@ mod tests {
             "artifact":{"type":"text","producedAtMs":1000}
         })).collect();
         let state = json!({"electron-persisted-atom-state":{"orbit-outputs-v1":outputs}});
-        let value = project(&state, "all", DateTime::from_timestamp(2, 0).unwrap(), BTreeMap::new());
+        let value = project(&state, "all", DateTime::from_timestamp(2, 0).unwrap(), Map::new());
         assert_eq!(value["total"], 501);
         assert_eq!(value["events"].as_array().unwrap().len(), 500);
         assert_eq!(value["activity"].as_array().unwrap().len(), 500);

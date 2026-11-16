@@ -1,7 +1,7 @@
 use super::schedules::{columns, seconds_timestamp, state_files, string, trim_text};
 use rusqlite::{types::ValueRef, Connection, OpenFlags};
-use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -68,7 +68,7 @@ fn allowed(value: &str) -> bool {
 
 fn database(
     home: &Path,
-    entries: &mut HashMap<String, Value>,
+    entries: &mut Map<String, Value>,
     projects: &mut BTreeMap<String, Value>,
     include_roots: bool,
     root_budget: Duration,
@@ -394,7 +394,7 @@ fn database(
 
 pub(super) fn read(
     home: &Path,
-    entries: &mut HashMap<String, Value>,
+    entries: &mut Map<String, Value>,
     include_roots: bool,
     reports: &mut Vec<Value>,
 ) -> (BTreeMap<String, Value>, RootStatus) {
@@ -410,7 +410,7 @@ pub(super) fn read(
 #[cfg(test)]
 fn read_with_budget(
     home: &Path,
-    entries: &mut HashMap<String, Value>,
+    entries: &mut Map<String, Value>,
     include_roots: bool,
     root_budget: Duration,
 ) -> (BTreeMap<String, Value>, RootStatus) {
@@ -419,7 +419,7 @@ fn read_with_budget(
 
 fn read_internal(
     home: &Path,
-    entries: &mut HashMap<String, Value>,
+    entries: &mut Map<String, Value>,
     include_roots: bool,
     root_budget: Duration,
     mut reports: Option<&mut Vec<Value>>,
@@ -759,7 +759,7 @@ mod tests {
         db.execute_batch("CREATE TABLE threads(id TEXT,title TEXT); CREATE VIEW projects AS SELECT id,name FROM missing_project_table;").unwrap();
         let mut reports =
             vec![json!({"location":path.to_string_lossy(),"health":"ok","fields":["id","title"]})];
-        read(home.path(), &mut HashMap::new(), false, &mut reports);
+        read(home.path(), &mut Map::new(), false, &mut reports);
         assert_eq!(reports[0]["health"], "unavailable");
     }
     #[test]
@@ -770,7 +770,7 @@ mod tests {
         db.execute_batch("CREATE TABLE threads(id TEXT,title TEXT,project_id TEXT); CREATE TABLE projects(id TEXT,name TEXT); INSERT INTO projects VALUES('p','Project'); CREATE TABLE project_roots(project_id TEXT,path TEXT); INSERT INTO project_roots VALUES('p','/fixture/root');").unwrap();
         let mut reports =
             vec![json!({"location":path.to_string_lossy(),"health":"ok","fields":["id","title"]})];
-        read(home.path(), &mut HashMap::new(), true, &mut reports);
+        read(home.path(), &mut Map::new(), true, &mut reports);
         assert_eq!(reports[0]["project_rows"], 1);
         assert_eq!(reports[0]["project_root_rows"], 1);
         assert!(reports[0]["fields"]
@@ -782,12 +782,12 @@ mod tests {
     fn app_state_report_distinguishes_missing_invalid_and_loaded() {
         let home = tempfile::tempdir().unwrap();
         let mut reports = Vec::new();
-        read(home.path(), &mut HashMap::new(), false, &mut reports);
+        read(home.path(), &mut Map::new(), false, &mut reports);
         assert_eq!(reports[0]["health"], "missing");
         let path = home.path().join(".codex-global-state.json");
         std::fs::write(&path, "[]").unwrap();
         reports.clear();
-        read(home.path(), &mut HashMap::new(), false, &mut reports);
+        read(home.path(), &mut Map::new(), false, &mut reports);
         assert_eq!(reports[0]["health"], "unsupported");
         std::fs::write(
             path,
@@ -795,7 +795,7 @@ mod tests {
         )
         .unwrap();
         reports.clear();
-        read(home.path(), &mut HashMap::new(), false, &mut reports);
+        read(home.path(), &mut Map::new(), false, &mut reports);
         assert_eq!(reports[0]["health"], "ok");
         assert_eq!(reports[0]["loaded_projects"], 1);
     }
@@ -814,7 +814,7 @@ mod tests {
         std::fs::write(home.path().join(".codex-global-state.json"), json!({
             "local-projects":{"p":{"name":space,"rootPaths":[space]}}
         }).to_string()).unwrap();
-        let mut entries = HashMap::from([(id.to_owned(),json!({"thread_id":id,"name":"Thread"}))]);
+        let mut entries = Map::from_iter([(id.to_owned(),json!({"thread_id":id,"name":"Thread"}))]);
         let (projects, status) = read(home.path(), &mut entries, true, &mut Vec::new());
         assert!(status.complete);
         assert_eq!(entries[id]["project_id"], "p");
@@ -838,7 +838,7 @@ mod tests {
             state.to_string(),
         )
         .unwrap();
-        let mut entries = HashMap::new();
+        let mut entries = Map::new();
         let (projects, status) = read(home.path(), &mut entries, true, &mut Vec::new());
         assert!(status.complete);
         for id in ["a", "b"] {
@@ -847,7 +847,7 @@ mod tests {
         }
         assert_eq!(projects["a"]["_folders"], json!(["/database/alpha"]));
         assert_eq!(projects["b"]["_folders"], json!(["/local/beta"]));
-        let (disabled, _) = read(home.path(), &mut HashMap::new(), false, &mut Vec::new());
+        let (disabled, _) = read(home.path(), &mut Map::new(), false, &mut Vec::new());
         assert!(disabled
             .values()
             .all(|project| project.get("_folders").is_none()));
@@ -860,13 +860,13 @@ mod tests {
         db.execute_batch("CREATE TABLE threads(id TEXT,title TEXT); CREATE TABLE projects(id TEXT,name TEXT); INSERT INTO projects VALUES('a','Alpha'); CREATE TABLE project_roots(project_id TEXT,path TEXT); INSERT INTO project_roots VALUES('a','/fixture/root');").unwrap();
         let (previous, status) = read_with_budget(
             home.path(),
-            &mut HashMap::new(),
+            &mut Map::new(),
             true,
             Duration::from_secs(1),
         );
         assert!(status.complete);
         let (mut current, status) =
-            read_with_budget(home.path(), &mut HashMap::new(), true, Duration::ZERO);
+            read_with_budget(home.path(), &mut Map::new(), true, Duration::ZERO);
         assert!(!status.complete);
         assert!(current["a"].get("_folders").is_none());
         preserve_roots(&mut current, &previous);
@@ -880,7 +880,7 @@ mod tests {
         db.execute_batch("CREATE TABLE threads(id TEXT,title TEXT); CREATE TABLE projects(id TEXT,name TEXT); INSERT INTO projects VALUES('a','Alpha'); CREATE TABLE project_roots(project_id TEXT,path TEXT); WITH RECURSIVE items(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM items WHERE n<5001) INSERT INTO project_roots SELECT 'a','/fixture/'||n FROM items;").unwrap();
         let (projects, status) = read_with_budget(
             home.path(),
-            &mut HashMap::new(),
+            &mut Map::new(),
             true,
             Duration::from_secs(2),
         );
