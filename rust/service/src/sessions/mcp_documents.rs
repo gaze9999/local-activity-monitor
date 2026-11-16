@@ -117,7 +117,7 @@ pub(crate) fn configuration(
         return None;
     }
     let text = std::str::from_utf8(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes)).ok()?;
-    let value = text.parse::<toml::Value>().ok()?;
+    let value = super::mcp::parse_configuration(text).ok()?;
     let servers = value.get("mcp_servers")?.as_table()?;
     let (name, table) = servers
         .iter()
@@ -171,8 +171,7 @@ pub(crate) fn documents(table: &toml::map::Map<String, toml::Value>) -> Vec<Valu
         let filename = path
             .file_name()
             .and_then(|value| value.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
+            .unwrap_or("");
         let js = filename.ends_with("config.js")
             || filename.ends_with("config.cjs")
             || filename.ends_with("rc.js")
@@ -524,6 +523,24 @@ pub(crate) fn write_document(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn javascript_config_candidates_match_python_case_sensitive_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let names = ["settings.json", "settings.JSON", "settings.Yaml", "config.js", "CONFIG.JS", "config.JS"];
+        let mut args = Vec::new();
+        for name in names {
+            let path = root.join(name);
+            fs::write(&path, "{}").unwrap();
+            args.push(toml::Value::String(path.to_string_lossy().into_owned()));
+        }
+        let table = toml::map::Map::from_iter([("args".into(), toml::Value::Array(args))]);
+        let rows = documents(&table);
+        let mut found = rows.iter().map(|row| row["name"].as_str().unwrap()).collect::<Vec<_>>();
+        found.sort();
+        assert_eq!(found, vec!["config.js", "settings.JSON", "settings.Yaml", "settings.json"]);
+    }
 
     #[test]
     fn environment_document_budget_uses_declaration_order() {

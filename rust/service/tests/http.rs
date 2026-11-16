@@ -2724,7 +2724,7 @@ fn mcp_catalog_description_budget_follows_declaration_order() {
         config.push_str(&format!("[mcp_servers.middle_{index:02}]\nenabled=false\n"));
     }
     config.push_str("[mcp_servers.a_last]\ndescription='Outside purpose budget'\n");
-    fs::write(home.path().join("config.toml"), config).unwrap();
+    fs::write(home.path().join("config.toml"), config.replace('\n', "\r")).unwrap();
     let service = Service::start(home.path(), false, None);
     let snapshot = snapshot_when(&service, |value| value["mcp"]["configuration"]["configured_sources"] == 2);
     let rows = snapshot["mcp"]["servers"].as_array().unwrap();
@@ -3776,14 +3776,17 @@ fn mcp_documents_only_exposes_configured_local_files_and_masks_secrets() {
         std::os::unix::fs::symlink(root.join("README.md"), root.join("config-link.md")).unwrap();
         fs::hard_link(root.join("terms.yml"), root.join("rules-hardlink.yml")).unwrap();
     }
+    fs::write(root.join("CONFIG.JS"), "'uppercase-only.json'").unwrap();
+    fs::write(root.join("uppercase-only.json"), "{}").unwrap();
     let config = format!(
-        "[mcp_servers.fixture]\ncommand = \"node\"\nargs = [{}, {}, {}, {}]\n",
+        "[mcp_servers.fixture]\ncommand = \"node\"\nargs = [{}, {}, {}, {}, {}]\n",
         serde_json::to_string(root.join("src/server.mjs").to_str().unwrap()).unwrap(),
         serde_json::to_string(root.join(".textlintrc.cjs").to_str().unwrap()).unwrap(),
         serde_json::to_string(root.join("settings.json").to_str().unwrap()).unwrap(),
-        serde_json::to_string(root.join("credentials.json").to_str().unwrap()).unwrap()
+        serde_json::to_string(root.join("credentials.json").to_str().unwrap()).unwrap(),
+        serde_json::to_string(root.join("CONFIG.JS").to_str().unwrap()).unwrap()
     );
-    fs::write(home.path().join("config.toml"), config).unwrap();
+    fs::write(home.path().join("config.toml"), config.replace('\n', "\r")).unwrap();
     let service = Service::start(home.path(), true, None);
     let list = service.get("/api/mcp/files?server=fixture").json();
     let files = list["files"].as_array().unwrap();
@@ -3791,6 +3794,8 @@ fn mcp_documents_only_exposes_configured_local_files_and_masks_secrets() {
         .iter()
         .filter_map(|file| file["name"].as_str())
         .collect();
+    assert!(!names.contains(&"CONFIG.JS"));
+    assert!(!names.contains(&"uppercase-only.json"));
     assert!(names.contains(&"README.md") && names.contains(&"settings.json"));
     assert!(
         !names.contains(&"credentials.json")

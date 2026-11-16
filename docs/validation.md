@@ -277,3 +277,15 @@ preserve_order 使用面檢閱涵蓋 service 全部 4 個 TOML 消費模組, 來
 核對目前鎖定 toml / indexmap 的 PartialEq 實作, 仍依 key / value 比較而非插入順序, 文件提交前的設定值衝突檢查未因功能旗標失效, 這是原始碼檢閱證據, 不宣稱新增平台或競態驗收
 
 上述使用面檢閱後, 以 Linux / Rust 1.100.0 執行完整 `--locked --offline` 單執行緒回歸, service binary 301 項全數通過 (104.58 秒), HTTP 204 項全數通過 (158.29 秒), 未將單執行緒結果延伸為並行穩定性或跨平台驗收
+
+### MCP 設定換行相容性
+
+MCP config 解析對齊 Python Path.read_text 的 universal newline 行為, 在既有 1 MiB 有界讀取後, 僅於記憶體將 CRLF / CR 轉為 LF, 修正 CR-only 設定導致來源與按需文件全部遺漏, 多行描述同樣保留 Python 換行值, 不改寫來源設定或放寬 TOML 語法
+
+來源清單與 `/api/mcp/files` 共用同一解析入口, 一般文件本文的 TOML parser 不變, Python 合成 fixture 確認 LF / CRLF / CR 的內容及原始 bytes 不變, Rust 回歸先失敗後通過, MCP / documents 14 項與 HTTP MCP 21 項通過, CR-only 文件列舉 / 遮蔽 / 拒絕連結回歸另行通過
+
+本段基底為 e009f30, LAM main 仍為 5c03daf, workspace main 4616074 相對前次只有報告工具與文件變更, 不影響本段 Python 來源或 WBUI pin, 既有容量、來源事件順序與大型快照待辦不變
+
+同批 MCP 文件發現流程對齊 Python 的 JavaScript 設定檔名稱比對, 不再把 CONFIG.JS / config.JS 當成 config.js 並讀取其參照文件, 一般資料副檔名仍保持大小寫不敏感, 未擴大讀取來源
+
+Python documents 合成 fixture 確認兩種規則, Rust documents 模組 6 項通過, HTTP 文件列舉回歸確認排除大寫 JavaScript 設定與其參照, 同時保留 CR-only 設定、合法文件、遮蔽及連結拒絕, 初版測試誤把資料副檔名也視為大小寫敏感, 已依原始 Python 修正期望, 未修改原有資料副檔名規則

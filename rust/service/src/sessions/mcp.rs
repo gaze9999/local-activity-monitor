@@ -82,6 +82,16 @@ pub fn disabled_server(server: &str) -> Value {
     row
 }
 
+// Python config loading uses Path.read_text with universal newline translation.
+// Normalize only the bounded configuration text, never rewrite the source file.
+pub(super) fn parse_configuration(content: &str) -> Result<toml::Value, toml::de::Error> {
+    if content.contains('\r') {
+        content.replace("\r\n", "\n").replace('\r', "\n").parse()
+    } else {
+        content.parse()
+    }
+}
+
 /// Read only configured source identities and bounded descriptions.
 pub fn discover(home: &Path) -> BTreeMap<String, Option<super::source_introduction::Description>> {
     let mut found = BTreeMap::new();
@@ -109,7 +119,7 @@ pub fn discover(home: &Path) -> BTreeMap<String, Option<super::source_introducti
     else {
         return found;
     };
-    let Ok(config) = content.parse::<toml::Value>() else {
+    let Ok(config) = parse_configuration(content) else {
         return found;
     };
     if let Some(servers) = config.get("mcp_servers").and_then(toml::Value::as_table) {
@@ -412,6 +422,20 @@ pub fn scoped_summary(events: &[Value], cutoff: DateTime<Utc>, health: &str, all
 #[cfg(test)]
 mod connection_tests {
     use super::*;
+    #[test]
+    fn configuration_matches_python_universal_newlines() {
+        let home = tempfile::tempdir().unwrap();
+        for newline in ["\n", "\r\n", "\r"] {
+            let config = format!("[mcp_servers.fixture]{newline}description=\"\"\"First{newline}Second\"\"\"{newline}");
+            std::fs::write(home.path().join("config.toml"), &config).unwrap();
+            let sources = discover(home.path());
+            assert_eq!(sources["fixture"].as_ref().unwrap().text, "First\nSecond");
+            let table = super::super::mcp_documents::configuration(home.path(), "fixture").unwrap();
+            assert_eq!(table["description"].as_str(), Some("First\nSecond"));
+            assert_eq!(std::fs::read_to_string(home.path().join("config.toml")).unwrap(), config);
+        }
+    }
+
     #[test]
     fn configured_descriptions_use_first_64_declared_entries() {
         let home = tempfile::tempdir().unwrap();
