@@ -379,3 +379,13 @@ Python 實際 save/load 確認 incoming 優先、fresh z,a / restore a,z, HTTP �
 Python 實際 save/load 確認各種 fresh z,a / restore a,z, HTTP 回歸先失敗後通過, 合成 operation 只供靜態辨識, 未執行工具或讀取檔案本文, snapshot 無合成本文, 250 calls / 750 operations 的單元回歸確認上限、index、總量與停用行為
 
 本批完整單執行緒 `--locked --offline` 回歸通過: service binary 314 項 (104.34 秒), HTTP 208 項 (159.93 秒), Linux / Rust 1.100.0 合成資料, 全域 file_activity / 其他預覽、overflow、restore 容量與大型快照、原生平台驗收仍待完成
+
+### 完整 working set 的全域 file_activity 預覽順序
+
+沿用首次發現 thread 的順序與 call 呈現序號, 對齊 Python `threads.values()` / `calls.items()` 收集後的穩定 timestamp 排序, 保留 timestamp 優先與 call 內 operation index, 只在完整來源集合啟用
+
+重用既有 error source 的 thread 順序索引, 不新增來源讀取或查詢, 不改 API、欄位來源、1000 筆預覽上限、操作統計、篩選、停用、row 預覽或 incomplete / overflow fallback, 容量與 eviction 不變
+
+Python 實際 save/load 確認較晚修改來源的 thread 優先, live call 為 z,a、restore 為 a,z, 跨 thread HTTP 先失敗後通過, 2400 operations 的單元測試驗證 1000 筆上限與索引順序, 既有 canonical fallback 測試保留
+
+本批完整單執行緒 `--locked --offline` 回歸通過: service binary 315 項 (109.51 秒), HTTP 209 項 (149.02 秒), Linux / Rust 1.100.0 合成資料, 基底 c8e8a4f 已核對遠端一致, 其他全域預覽、overflow、restore 容量、大型快照與原生平台驗收仍待完成

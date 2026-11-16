@@ -918,10 +918,11 @@ pub struct Projection {
 /// Valid source file fields retain their existing limits.
 pub(super) struct FileSummary {
     presentation_order: bool,
+    thread_order: usize,
     limit: usize,
     total: usize,
     operations: BTreeMap<String, usize>,
-    preview: BTreeMap<(std::cmp::Reverse<Option<String>>, Option<String>, u64, String, usize), Value>,
+    preview: BTreeMap<(std::cmp::Reverse<Option<String>>, usize, Option<String>, u64, String, usize), Value>,
 }
 
 struct FilePreview<'a> {
@@ -951,12 +952,18 @@ impl FilePreview<'_> {
 
 impl FileSummary {
     pub(super) fn new(limit: usize) -> Self {
-        Self { presentation_order: false, limit, total: 0, operations: BTreeMap::new(), preview: BTreeMap::new() }
+        Self { presentation_order: false, thread_order: 0, limit, total: 0, operations: BTreeMap::new(), preview: BTreeMap::new() }
+    }
+
+    /// Enable source-order ties only after the caller verifies complete discovery.
+    pub(super) fn ordered_thread(&mut self, ordinal: usize) {
+        self.presentation_order = true;
+        self.thread_order = ordinal;
     }
 
     /// Feed each resolved (thread, call) winner exactly once, in any order.
-    /// Global summaries retain canonical thread/call ties. Complete-source row
-    /// previews may use presentation ordinals within the already selected thread.
+    /// Canonical thread/call ties remain the fallback. Complete-source previews
+    /// may use verified thread and call presentation ordinals.
     /// Calls must already be deduplicated; counts are not reversible.
     /// read_filter None includes all operations, Some(true) reads only.
     pub(super) fn observe(&mut self, projection: &Projection, boundary: Option<Time>, enabled: bool, read_filter: Option<bool>) {
@@ -971,7 +978,7 @@ impl FileSummary {
                     *self.operations.entry(operation.to_owned()).or_default() += 1;
                 }
                 if self.limit == 0 { continue; }
-                let rank = (std::cmp::Reverse(timestamp.clone()), projection.id.clone(),
+                let rank = (std::cmp::Reverse(timestamp.clone()), self.thread_order, projection.id.clone(),
                     if self.presentation_order { call.presentation_sequence } else { 0 }, id.clone(), index);
                 if self.preview.len() == self.limit && self.preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { continue; }
                 if self.preview.len() == self.limit { self.preview.pop_last(); }
@@ -3008,6 +3015,31 @@ mod snapshot_merge_tests {
             disabled.observe(&projection, None, false, Some(read));
             assert_eq!(disabled.finish(), (Vec::new(), 0, BTreeMap::new()));
         }
+    }
+
+    #[test]
+    fn global_file_summary_keeps_source_ties_bounded_across_reversed_threads() {
+        let mut summary = FileSummary::new(1000);
+        for (thread, rank) in [("a", 1), ("z", 0)] {
+            let mut projection = Projection::for_id(Some(thread.into()));
+            for index in 0..600 {
+                let mut value = call("fixture", Some("2026-11-13T01:00:00Z"));
+                value.presentation_sequence = 599 - index;
+                value.files = (0..2).map(|operation| json!({"operation":"read",
+                    "path":format!("{thread}/{index}/{operation}"),"tool":"fixture","nested":false})).collect();
+                projection.calls.insert(format!("call-{index:03}"), value);
+            }
+            summary.ordered_thread(rank);
+            summary.observe(&projection, None, true, None);
+            assert!(summary.preview.len() <= 1000);
+        }
+        let (events, total, operations) = summary.finish();
+        assert_eq!(total, 2400);
+        assert_eq!(operations["read"], 2400);
+        assert_eq!(events.len(), 1000);
+        let expected: Vec<_> = (100..600).rev().flat_map(|index|
+            (0..2).map(move |operation| format!("z/{index}/{operation}"))).collect();
+        assert_eq!(events.iter().map(|event| event["path"].as_str().unwrap()).collect::<Vec<_>>(), expected);
     }
 
     #[test]

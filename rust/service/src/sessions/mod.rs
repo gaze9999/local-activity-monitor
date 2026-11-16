@@ -4875,10 +4875,10 @@ impl Collector {
         }
         all_mcp["configuration"] = json!({"location":self.catalog_home.join("config.toml").to_string_lossy(),"configured_sources":self.mcp_catalog.len()});
         let mut error_sources = self.ordered_working_sources();
-        if self.has_complete_source_order() {
+        let mut thread_order = BTreeMap::new();
+        if complete_source_order {
             // Python groups each thread at its first discovered source, then
             // appends that thread's source errors in discovery order.
-            let mut thread_order = BTreeMap::new();
             for (_, state) in &error_sources {
                 if let Some(id) = state.projection.id.as_deref() {
                     let next = thread_order.len();
@@ -5021,6 +5021,9 @@ impl Collector {
             });
             let mut file_summary = project::FileSummary::new(1000);
             for (thread, _) in threads.values() {
+                if complete_source_order {
+                    file_summary.ordered_thread(thread.id.as_deref().and_then(|id| thread_order.get(id)).copied().unwrap_or(usize::MAX));
+                }
                 file_summary.observe(thread, boundary, files_enabled, None);
             }
             let (mut file_events, file_total, file_counts) = file_summary.finish();
