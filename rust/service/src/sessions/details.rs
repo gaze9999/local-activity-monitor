@@ -355,14 +355,16 @@ impl Index {
 }
 
 const CONTEXT_LIMIT: u64 = 1024 * 1024;
+// Retain existing boundaries and add only non-letter/number Rust word prefixes.
+// Preserve the captured prefix; Unicode version differences remain separate.
 static TOKEN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bBearer[\s\x1c-\x1f]+[A-Za-z0-9._~+/-]+=*|\bsk-[A-Za-z0-9_-]{12,}").unwrap()
+    Regex::new(r"(?i)(?:\b|(?P<prefix>[\w&&[^\p{L}\p{N}_]]))(?:Bearer[\s\x1c-\x1f]+[A-Za-z0-9._~+/-]+=*|sk-[A-Za-z0-9_-]{12,})").unwrap()
 });
 static SECRET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b[A-Za-z0-9_.-]*(?:api[_-]?key|password|secret|authorization|token|credential|cookie|headers?)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)"#).unwrap()
+    Regex::new(r#"(?i)(?:\b|(?P<prefix>[\w&&[^\p{L}\p{N}_]]))[A-Za-z0-9_.-]*(?:api[_-]?key|password|secret|authorization|token|credential|cookie|headers?)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)"#).unwrap()
 });
 static DIAGNOSTIC_SECRET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b(?:api[_-]?key|password|secret|authorization|access[_-]?token|token)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*(?:"[^"]*"|'[^']*'|[^\s\x1c-\x1f,;]+)"#).unwrap()
+    Regex::new(r#"(?i)(?:\b|(?P<prefix>[\w&&[^\p{L}\p{N}_]]))(?:api[_-]?key|password|secret|authorization|access[_-]?token|token)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*(?:"[^"]*"|'[^']*'|[^\s\x1c-\x1f,;]+)"#).unwrap()
 });
 static SQL_INSERT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?is)(\bINSERT\s+(?:OR\s+\w+\s+)?INTO\s+[\w."`\[\]]+\s*\(([^()]*)\)\s*VALUES\s*)((?:\((?:'(?:''|[^'])*'|[^'()])*\)\s*,?\s*)+)"#).unwrap()
@@ -381,7 +383,7 @@ static DIAGNOSTIC_SQL: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .collect()
 });
 static STRUCTURED_SECRET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b[A-Za-z0-9_.-]*(?:api[_-]?key|password|secret|authorization|token|credential|cookie|headers?)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*[\[{]"#).unwrap()
+    Regex::new(r#"(?i)(?:\b|(?P<prefix>[\w&&[^\p{L}\p{N}_]]))[A-Za-z0-9_.-]*(?:api[_-]?key|password|secret|authorization|token|credential|cookie|headers?)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*[\[{]"#).unwrap()
 });
 fn sensitive(key: &str) -> bool {
     let normalized: String = key
@@ -436,8 +438,8 @@ fn text_value(text: &str, masked: bool, depth: usize) -> serde_json::Value {
     if structured_sensitive || STRUCTURED_SECRET.is_match(text) {
         return json!("[已隱藏]");
     }
-    let first = TOKEN.replace_all(text, "[已隱藏]");
-    json!(SECRET.replace_all(&first, "[已隱藏]").into_owned())
+    let first = TOKEN.replace_all(text, "${prefix}[已隱藏]");
+    json!(SECRET.replace_all(&first, "${prefix}[已隱藏]").into_owned())
 }
 
 pub(super) fn redact_description(text: &str) -> String {
@@ -518,9 +520,9 @@ pub(super) fn diagnostic_redact(text: &str, depth: usize) -> String {
             return result;
         }
     }
-    let token = TOKEN.replace_all(text, "[已隱藏]");
+    let token = TOKEN.replace_all(text, "${prefix}[已隱藏]");
     DIAGNOSTIC_SECRET
-        .replace_all(&token, "[已隱藏]")
+        .replace_all(&token, "${prefix}[已隱藏]")
         .into_owned()
 }
 
@@ -1790,6 +1792,43 @@ impl DetailFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn credential_masking_adds_nonletter_boundaries_without_losing_prefixes() {
+        for prefix in ['\u{301}', '\u{200c}', '\u{200d}', '\u{203f}'] {
+            for credential in ["Bearer SYNTHETIC_TOKEN", "sk-SYNTHETIC_TOKEN", "api_key=SYNTHETIC_VALUE", "password='SYNTHETIC_VALUE'", "access_token=\"SYNTHETIC_VALUE\""] {
+                let source = format!("{prefix}{credential}");
+                let expected = format!("{prefix}[已隱藏]");
+                assert_eq!(diagnostic_redact(&source, 0), expected, "{source:?}");
+                assert_eq!(text_value(&source, true, 0), json!(expected), "{source:?}");
+                assert_eq!(text_value(&source, false, 0), json!(source));
+            }
+            for credential in ["cookie=SYNTHETIC_VALUE", "headers=SYNTHETIC_VALUE", "service.credential=SYNTHETIC_VALUE"] {
+                let source = format!("{prefix}{credential}");
+                assert_eq!(text_value(&source, true, 0), json!(format!("{prefix}[已隱藏]")));
+            }
+            let source = format!("{prefix}headers={{ordinary: 'SYNTHETIC_VALUE'}}");
+            assert_eq!(text_value(&source, true, 0), json!("[已隱藏]"));
+            let source = format!("{prefix}api_key=one,{prefix}token=two; public");
+            assert_eq!(diagnostic_redact(&source, 0), format!("{prefix}[已隱藏],{prefix}[已隱藏]; public"));
+        }
+        for source in ["ordinary nonsecret text", "ABearer SYNTHETIC_TOKEN", "中Bearer SYNTHETIC_TOKEN", "_Bearer SYNTHETIC_TOKEN", "ⅠBearer SYNTHETIC_TOKEN", "Bearerish SYNTHETIC_TOKEN"] {
+            assert_eq!(diagnostic_redact(source, 0), source);
+            assert_eq!(text_value(source, true, 0), json!(source));
+        }
+        for (source, expected) in [
+            (" .api_key=SYNTHETIC_VALUE", " .[已隱藏]"),
+            (" -api_key=SYNTHETIC_VALUE", " -[已隱藏]"),
+            ("\u{301}.api_key=SYNTHETIC_VALUE", "\u{301}[已隱藏]"),
+            ("\u{301}Bearer FIRST\u{200c}Bearer SECOND", "\u{301}[已隱藏]\u{200c}[已隱藏]"),
+            ("Bearer FIRST=Bearer SECOND", "[已隱藏][已隱藏]"),
+        ] {
+            assert_eq!(text_value(source, true, 0), json!(expected), "{source:?}");
+        }
+        // Preserve the existing conservative match even where Python treats the prefix as a word.
+        assert_eq!(diagnostic_redact("²Bearer SYNTHETIC_TOKEN", 0), "²[已隱藏]");
+        assert_eq!(diagnostic_redact("Bearer FIRST Bearer SECOND", 0), "[已隱藏] [已隱藏]");
+    }
+
     #[test]
     fn credential_masking_recognizes_python_control_whitespace() {
         for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {

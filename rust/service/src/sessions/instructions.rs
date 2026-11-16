@@ -12,12 +12,14 @@ use std::time::{Duration, Instant};
 const READ_LIMIT: usize = 64 * 1024;
 const TOTAL_LIMIT: usize = 256 * 1024;
 const DOCUMENT_LIMIT: usize = 64;
+// Retain existing boundaries and add only non-letter/number Rust word prefixes.
+// Preserve the captured prefix; Unicode version differences remain separate.
 static TOKENS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bBearer[\s\x1c-\x1f]+[A-Za-z0-9._~+/-]+=*|\bsk-[A-Za-z0-9_-]{12,}")
+    Regex::new(r"(?i)(?:\b|(?P<prefix>[\w&&[^\p{L}\p{N}_]]))(?:Bearer[\s\x1c-\x1f]+[A-Za-z0-9._~+/-]+=*|sk-[A-Za-z0-9_-]{12,})")
         .expect("token pattern")
 });
 static ASSIGNMENTS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b(?:api[_-]?key|password|secret|authorization|access[_-]?token|token)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*(?:"[^"]*"|'[^']*'|[^\s\x1c-\x1f,;]+)"#).expect("assignment pattern")
+    Regex::new(r#"(?i)(?:\b|(?P<prefix>[\w&&[^\p{L}\p{N}_]]))(?:api[_-]?key|password|secret|authorization|access[_-]?token|token)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*(?:"[^"]*"|'[^']*'|[^\s\x1c-\x1f,;]+)"#).expect("assignment pattern")
 });
 
 fn safe(path: &Path) -> io::Result<bool> {
@@ -288,8 +290,8 @@ fn read_file(root: &Path, path: &Path, remaining: &mut usize) -> Option<Value> {
                     }
                     *remaining -= bytes.len();
                     let original = String::from_utf8_lossy(&bytes);
-                    let first = TOKENS.replace_all(&original, "[已隱藏]");
-                    let redacted = ASSIGNMENTS.replace_all(&first, "[已隱藏]").into_owned();
+                    let first = TOKENS.replace_all(&original, "${prefix}[已隱藏]");
+                    let redacted = ASSIGNMENTS.replace_all(&first, "${prefix}[已隱藏]").into_owned();
                     let modified = meta.modified().ok().map(|time| {
                         DateTime::<Utc>::from(time).to_rfc3339_opts(SecondsFormat::Millis, true)
                     });
@@ -349,6 +351,22 @@ pub(crate) fn read(roots: &[PathBuf]) -> Value {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instruction_masking_adds_nonletter_boundaries_without_writes() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let path = root.join("AGENTS.md");
+        for prefix in ['\u{301}', '\u{200c}', '\u{200d}', '\u{203f}'] {
+            let source = format!("{prefix}Bearer SYNTHETIC_TOKEN\n{prefix}sk-SYNTHETIC_TOKEN\n{prefix}api_key=one,{prefix}token='two'; public\n中Bearer public\nordinary text\n²Bearer SYNTHETIC_TOKEN");
+            fs::write(&path, &source).unwrap();
+            let value = read(&[root.clone()]);
+            assert_eq!(value["documents"][0]["health"], "ok");
+            assert_eq!(value["documents"][0]["text"], format!("{prefix}[已隱藏]\n{prefix}[已隱藏]\n{prefix}[已隱藏],{prefix}[已隱藏]; public\n中Bearer public\nordinary text\n²[已隱藏]"));
+            assert_eq!(value["documents"][0]["read_bytes"], source.len());
+            assert_eq!(fs::read_to_string(&path).unwrap(), source);
+        }
+    }
 
     #[test]
     fn instruction_masking_recognizes_python_control_whitespace_without_writes() {

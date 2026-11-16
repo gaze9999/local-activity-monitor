@@ -775,3 +775,19 @@ heartbeat 測試只等 health=ok / device_ready, 讀取首個 SSE 後寫入 igno
 僅修改測試 setup: 以明確 18 秒 deadline、最多 64 個經驗證且 version 遞增的初始 snapshot 等到第一個 quiet heartbeat, 以最後一份合法 snapshot 作 baseline, 再寫 ignored.txt, 原本 treatment 後的下一個 heartbeat 與完整 codex equality assertion 不變, treatment 後 read timeout 仍為 18 秒, 不略過 treatment 後的新 snapshot
 
 focused heartbeat 1 項通過 (30.19 秒), 完整 serial HTTP 單輪 219 項通過 (134.57 秒), runtime 未改動而未重跑前次 343 項通過的 service, 所有原始 heartbeat / SSE 失敗、control / treatment / controlled gap 記錄保留, 此次通過不代表所有排程或歷史 metadata 503 / WouldBlock / 唯讀 GET 503 已解決
+
+### 憑證遮蔽的保守 Unicode 邊界補足
+
+來源 LAM main `5c03daf`、workspace main `4616074` 核對未變, Python 3.12.14 使用 Unicode 15.0.0, 既有 regex 1.13.1 / regex-syntax 0.8.11 使用 Unicode 16.0.0, 原始 Python 會遮蔽 U+0301、U+200C、U+200D、U+203F 後的 Bearer、sk- 與 api_key, Rust 的 Unicode word boundary 原先將這些前綴視為 word 而漏遮蔽
+
+完整 Unicode scalar 分類比較顯示原 Rust word 集合比 Python 多 7646、少 915 個字元, 直接改成 Letter / Number / underscore 仍有 5004 個版本差異, 不採全面替換, 既有 superscript 等較保守遮蔽亦不得移除, 本輪僅在原 boundary 之外補上 Rust word 中非 Letter / Number / underscore 的 2642 個字元, 本次分類比較沒有新增 Python word 字元, 不代表所有 Unicode 版本或 regex case folding 完全等價
+
+合成測試顯示初版使用所有非 Letter / Number / underscore 前綴會使泛用 SECRET 提前吃掉 ` .api_key` 的句點, 因此限縮為兩個字元集合的交集, 保留原邊界的標點行為, 此中間版本與修正前兩項失敗記錄保留, 不作最終接受證據
+
+僅調整憑證相關的六個 pattern 與取代字串, 新增匹配會保留前綴, 結構型 secret 仍整段隱藏, SQL 語法 pattern、無遮蔽請求、資料讀取數量、來源檔案、schema、相依套件與保存 / 容量界線不變, 受影響的資料仍來自既有按需 detail / diagnostic / MCP 文件 / instruction 來源, 沒有新增 endpoint、查詢參數或網路請求
+
+新命中的遮蔽文字與其內容 revision 會隨輸出變更, 分頁 offset / hash 演算法及無遮蔽輸出不變, 合成 overlap audit 共 3584 組 pattern 案例, 原先 1988 個匹配範圍全部仍被遮蔽, 此為有界 fixture 證據而非所有輸入的證明
+
+最終限縮版本 focused 2 項通過 (0.10 秒), 完整 service 345 項通過 (129.21 秒), 完整 serial HTTP 單輪 219 項通過 (135.93 秒), 原始 Python 合成 fixture 24 組、instruction 7 項與 payload 12 項通過, instruction 測試確認來源 bytes 未改寫, 中間版本另有 service 345 / HTTP 219 通過記錄, 不混用為最終版本證據
+
+初始合成 probe 的 Unicode escape 位數錯誤與 overlap probe 缺少括號各在執行前失敗, 修正 probe 後取得上述稽核結果, 未影響主 runtime, 記錄保留, 仍有 5004 個 Unicode 版本邊界差異及原先 915 個較保守案例, 不宣稱完整 Unicode 等價, 歷史 metadata POST 503 / WouldBlock、唯讀 GET 503、Unicode digit、數字頁面格式與其他待辦保留
