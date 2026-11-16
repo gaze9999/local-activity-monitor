@@ -10928,21 +10928,53 @@ fn startup_resumes_incomplete_retention_cleanup() {
 }
 
 #[test]
+fn retention_cleanup_prior_policy_can_roll_back_a_later_failed_setting() {
+    let home = tempdir().unwrap();
+    let service = Service::start(home.path(), false, None);
+    let monitoring = home.path().join("monitoring");
+    let mut store = Store::open(&monitoring, Access::ReadWrite).unwrap().unwrap();
+    let db = rusqlite::Connection::open(monitoring.join(lam_history_store::FILE_NAME)).unwrap();
+    db.execute_batch("BEGIN IMMEDIATE; WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<501)
+        INSERT INTO history_items(namespace,section,item_key,ordinal,event_time,payload)
+        SELECT 'activity','web',n,0,CASE WHEN n=501 THEN '2000-01-02T00:00:00.000Z' ELSE '2000-01-01T00:00:00.000Z' END,'{}' FROM ids;
+        CREATE TRIGGER reject_last BEFORE DELETE ON history_items WHEN OLD.item_key='501'
+        BEGIN SELECT RAISE(ABORT,'fixture failure'); END; COMMIT;").unwrap();
+    // Reproduce the same bounded cleanup the background worker may run first.
+    // It may already have won this race, so confirm the resulting state either way.
+    let result = store.continue_retention_cleanup(90, std::time::SystemTime::now().into());
+    assert!(result.is_err() || result.is_ok_and(|removed| removed == 500));
+    assert_eq!(db.query_row("SELECT count(*) FROM history_items", [], |row| row.get::<_,i64>(0)).unwrap(), 1);
+    assert_eq!(store.activity_retention().unwrap(), 90);
+    let body = r#"{"activity_retention_days":1}"#;
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),body).status, 503);
+    assert_eq!(service.get("/api/settings").json()["activity_retention_days"], 90);
+    assert_eq!(db.query_row("SELECT count(*) FROM history_items", [], |row| row.get::<_,i64>(0)).unwrap(), 1);
+}
+
+#[test]
 fn retention_cleanup_failure_can_be_retried_through_http() {
     let home = tempdir().unwrap();
     let mut service = Service::start(home.path(), false, None);
     let monitoring = home.path().join("monitoring");
     drop(Store::open(&monitoring, Access::ReadWrite).unwrap());
     let db = rusqlite::Connection::open(monitoring.join(lam_history_store::FILE_NAME)).unwrap();
-    db.execute_batch(
+    // Expired under the requested one-day policy, but not under the current
+    // ninety-day policy. Background cleanup must not consume the first batch.
+    let now: chrono::DateTime<chrono::Utc> = std::time::SystemTime::now().into();
+    let older = (now - chrono::Duration::days(3)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let newer = (now - chrono::Duration::days(2)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    db.execute(
         "WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<501)
          INSERT INTO history_items(namespace,section,item_key,ordinal,event_time,payload)
-         SELECT 'activity','web',n,0,CASE WHEN n=501 THEN '2000-01-02T00:00:00.000Z' ELSE '2000-01-01T00:00:00.000Z' END,'{}' FROM ids;
-         CREATE TRIGGER reject_last BEFORE DELETE ON history_items
+         SELECT 'activity','web',n,0,CASE WHEN n=501 THEN ?2 ELSE ?1 END,'{}' FROM ids",
+        [&older, &newer],
+    ).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_last BEFORE DELETE ON history_items
          WHEN OLD.item_key='501'
-         BEGIN SELECT RAISE(ABORT,'fixture failure'); END;",
-    )
-    .unwrap();
+         BEGIN SELECT RAISE(ABORT,'fixture failure'); END;").unwrap();
+    let mut current_policy = Store::open(&monitoring, Access::ReadWrite).unwrap().unwrap();
+    assert_eq!(current_policy.continue_retention_cleanup(90, now).unwrap(), 0);
+    drop(current_policy);
     let post = || {
         service.request_body(
         &format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: 29\r\n", service.port),
@@ -11252,8 +11284,11 @@ fn source_update_recovers_unreadable_aggregate() {
             json!({"type":"function_call","name":"fixture","call_id":"recover"}),
         )],
     );
+    // Repairing aggregate metadata can publish before the new source is read.
+    // Wait for both conditions that this recovery scenario asserts below.
     let recovered = snapshot_when(&service, |value| {
         value["codex"]["sqlite"]["history_health"] == "ok"
+            && value["codex"]["observed_tool_calls"] == 1
     });
     assert!(recovered["codex"]["sqlite"]["aggregate"].is_object());
     assert!(recovered["mcp"]["history_aggregate"].is_object());

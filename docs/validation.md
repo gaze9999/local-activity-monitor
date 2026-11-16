@@ -457,3 +457,17 @@ Linux / Rust 1.100.0 合成資料, 基底 5265a3d 已核對遠端一致, overflo
 Python 原始 sources 方法以合成依賴執行確認, 單元先失敗後通過, HTTP 補驗 native reader 的 checked_at 欄位存在且為 null, 沒有新增或推測實際檢查時間, 不變更 checkpoint 的 location、保存流程、健康狀態來源、容量或 retention
 
 本批完整單執行緒 `--locked --offline` service binary 321 項 (106.84 秒)、HTTP 215 項 (161.79 秒) 通過, Linux / Rust 1.100.0 合成資料, 基底 9c0f44c 已核對遠端一致, 先前偶發 retention retry 與其他待辦仍保留
+
+### Retention retry fixture 的背景清理競爭條件
+
+針對先前 90 / 1 設定差異, 依現有 `main.rs` 背景 cleanup 與 history-store transaction 語意建立明確交錯回歸: 2000 年 fixture 同時符合預設 90 天清理, 若先刪前 500 筆而剩下 trigger 保護的 1 筆, 後續 1 天設定在第一個 transaction 就失敗回滾, 因而回 503 且設定維持 90
+
+已實際重現相同結果, 新增獨立回歸保留此行為, fixture 建立與 trigger 安裝採同一測試 transaction, 原 retry 測試改用 2-3 天前的合成資料, 明確驗證 90 天清理為 0 筆, 再保留原有 1 天清理 partial commit、失敗及 retry 成功斷言
+
+僅修改測試資料與回歸, 沒有修改產品 retention、刪除、容量或 transaction 行為, 原始失敗 log 保留, 已確認可產生該症狀的競爭條件, 但原始那次執行沒有交錯 trace, 不宣稱回溯證明其實際排程
+
+同輪完整 HTTP 首次另有 `source_update_recovers_unreadable_aggregate` 失敗, history_health 已恢復 ok 但 observed_tool_calls 仍為 0, 單項原程式重跑也重現, 測試原先只等待 health 就斷言來源已收集, 現在等待 health 與原本要驗證的 calls=1 同時成立, 原有 aggregate / history_aggregate / calls 斷言完整保留, 不修改 runtime, 另存這次全套與單項失敗證據
+
+兩項 retention 測試連續 20 輪通過, aggregate 測試另連續 20 輪通過, 修正後第二次完整 HTTP 又遇獨立的 `read_only_history_rejects_retention_update_without_changing_data` GET settings 503 / 200 差異, 單項原程式重跑通過 (0.59 秒), 該測試與產品程式碼未改, 原因尚未確認, 未歸類為相同競爭條件
+
+最後完整單執行緒 `--locked --offline` HTTP 216 項通過 (158.81 秒), 前兩次全套各為 215 通過 / 1 失敗, 分別保留 aggregate 與唯讀錯誤證據, service 321 項為前一批已驗證且 runtime 未變的結果, 本輪未重跑, Linux / Rust 1.100.0 合成資料, 基底 d290a24 已核對遠端一致
