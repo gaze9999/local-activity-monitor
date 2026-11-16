@@ -671,3 +671,27 @@ Cloud text 改用既有 schedules::trim_text, 只影響 /api/codex/cloud 與共�
 新回歸修正前於 key 分隔案例實際失敗, 原始 Python 6 組 scalar / sequence / comment 案例、3 組拒絕與敏感欄位遮蔽通過, Rust structured 12、MCP documents 6、Python payload_detail 12 項通過, 完整 service 339 項通過 (113.92 秒), 完整 serial HTTP 單輪 219 項通過 (147.88 秒)
 
 Unicode digit escape 待辦未修改, 歷史獨立 HTTP / WouldBlock / 唯讀 503、cleanup 警告及 overflow 排除範圍仍保留, 不宣稱所有 YAML grammar 完全相同
+
+### Paged content 數值文字與 revision 的待辦差異
+
+基底 `bee04b0` 與來源 main 核對未變, 原始 content_page 使用 Python json.dumps(indent=2, ensure_ascii=False, allow_nan=False), Rust 使用 serde_json pretty 與既有 arbitrary_precision, 實測 15 組輸入確認並非只有 exponent 補零差異
+
+例如 1e-7 的 Python 文字為 1e-07, 1e0 為 1.0, 1E0005 為 100000.0, 過長小數由 Python float 捨入但 Rust 保留原數字, 1e400 在 Python page 拒絕非有限值, Rust 可輸出數字, 1e-400 在 Python 為 0.0, 大整數與一般字串案例一致
+
+此差異影響現有 page_tool 所選 request / response / output / text / sql 的非字串 JSON 分頁文字、字元總數與 revision hash, 原始文字頁不需經此 JSON formatter, 修正數值文字必然改變受影響內容的 offsets / hash, 不可沿用舊 revision 或以整串文字取代破壞引號內文字
+
+本輪只稽核現有來源與序列化器, 未修改 runtime、數值型別、global serializer 或依賴設定, exact Python 相容所需的數值轉換與溢位錯誤策略尚待決定, 不宣稱只是格式修正, 未重跑 Rust 全套, Unicode digit escape 與歷史獨立失敗仍保留
+
+### 憑證遮蔽的 Python 控制空白語意
+
+原始 operation_records.redact 與 project_instructions.instructions 使用 Python regex 空白, 包含 U+001C 至 U+001F, Rust regex 原先不包含這四個字元, 使 Bearer 或 assignment 的合成憑證可能未遮蔽
+
+僅補齊 detail / diagnostic / instruction 六個憑證 regex 的空白範圍, diagnostic 與 instruction 的未加引號值仍依 Python 在空白處結束, 後面的普通文字保留, detail 原有整行保守遮蔽不變, 未遮蔽模式保持原文, SQL grammar、數值 rendering、HTTP 設定流程、容量與資料保存均未修改, 不增加來源讀取或 schema
+
+兩個新回歸修正前失敗, 修正後 details 11、instructions 4 項通過, 原始 Python 四種控制空白合成 fixture、instruction_sources 7、error_records 21 項通過, instruction 原始檔案與 read_bytes 均保持, 完整 service 341 項通過 (105.57 秒)
+
+完整 serial HTTP 本輪為 218 項通過、1 項失敗 (160.68 秒), 不列為全套通過, overflow_tool_detail_uses_verified_source_and_masks_secrets 已完成初始 snapshot 與遮蔽 detail, 在 posting metadata setting 後於 read_to_end 發生 WouldBlock, 未取得可判讀的 status / body, 與歷史唯讀 GET settings 503 分開保留, 未重跑直到通過、延長 timeout 或放寬 assertion
+
+該 fixture 不含本輪新增的四種控制空白, settings / refresh / overflow 程式碼未修改, 既有 settings snapshot 等待上限與測試 socket read timeout 都是 5 秒, 僅為待診斷的時間邊界, 未證明根因或排除所有間接影響, focused 遮蔽驗證不取代完整 HTTP 接受, 本輪 patch script 的 regex 錯誤與修正前再次測試失敗記錄亦保留
+
+Unicode digit escape、paged numeric rendering、既有獨立 503 / WouldBlock、cleanup 警告與 overflow 排除範圍仍未解決

@@ -13,11 +13,11 @@ const READ_LIMIT: usize = 64 * 1024;
 const TOTAL_LIMIT: usize = 256 * 1024;
 const DOCUMENT_LIMIT: usize = 64;
 static TOKENS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*|\bsk-[A-Za-z0-9_-]{12,}")
+    Regex::new(r"(?i)\bBearer[\s\x1c-\x1f]+[A-Za-z0-9._~+/-]+=*|\bsk-[A-Za-z0-9_-]{12,}")
         .expect("token pattern")
 });
 static ASSIGNMENTS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b(?:api[_-]?key|password|secret|authorization|access[_-]?token|token)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)"#).expect("assignment pattern")
+    Regex::new(r#"(?i)\b(?:api[_-]?key|password|secret|authorization|access[_-]?token|token)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*(?:"[^"]*"|'[^']*'|[^\s\x1c-\x1f,;]+)"#).expect("assignment pattern")
 });
 
 fn safe(path: &Path) -> io::Result<bool> {
@@ -349,6 +349,25 @@ pub(crate) fn read(roots: &[PathBuf]) -> Value {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instruction_masking_recognizes_python_control_whitespace_without_writes() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let path = root.join("AGENTS.md");
+        for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let source = format!("Bearer{separator}SYNTHETIC_TOKEN\napi_key{separator}={separator}SYNTHETIC_VALUE\nordinary text");
+            fs::write(&path, &source).unwrap();
+            let value = read(&[root.clone()]);
+            assert_eq!(value["documents"][0]["health"], "ok");
+            assert_eq!(
+                value["documents"][0]["text"],
+                "[已隱藏]\n[已隱藏]\nordinary text"
+            );
+            assert_eq!(value["documents"][0]["read_bytes"], source.len());
+            assert_eq!(fs::read_to_string(&path).unwrap(), source);
+        }
+    }
 
     #[test]
     fn rejects_redirected_root_without_reading_instruction_body() {

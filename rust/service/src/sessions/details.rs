@@ -356,13 +356,13 @@ impl Index {
 
 const CONTEXT_LIMIT: u64 = 1024 * 1024;
 static TOKEN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*|\bsk-[A-Za-z0-9_-]{12,}").unwrap()
+    Regex::new(r"(?i)\bBearer[\s\x1c-\x1f]+[A-Za-z0-9._~+/-]+=*|\bsk-[A-Za-z0-9_-]{12,}").unwrap()
 });
 static SECRET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b[A-Za-z0-9_.-]*(?:api[_-]?key|password|secret|authorization|token|credential|cookie|headers?)["']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)"#).unwrap()
+    Regex::new(r#"(?i)\b[A-Za-z0-9_.-]*(?:api[_-]?key|password|secret|authorization|token|credential|cookie|headers?)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)"#).unwrap()
 });
 static DIAGNOSTIC_SECRET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b(?:api[_-]?key|password|secret|authorization|access[_-]?token|token)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)"#).unwrap()
+    Regex::new(r#"(?i)\b(?:api[_-]?key|password|secret|authorization|access[_-]?token|token)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*(?:"[^"]*"|'[^']*'|[^\s\x1c-\x1f,;]+)"#).unwrap()
 });
 static SQL_INSERT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?is)(\bINSERT\s+(?:OR\s+\w+\s+)?INTO\s+[\w."`\[\]]+\s*\(([^()]*)\)\s*VALUES\s*)((?:\((?:'(?:''|[^'])*'|[^'()])*\)\s*,?\s*)+)"#).unwrap()
@@ -381,7 +381,7 @@ static DIAGNOSTIC_SQL: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .collect()
 });
 static STRUCTURED_SECRET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b[A-Za-z0-9_.-]*(?:api[_-]?key|password|secret|authorization|token|credential|cookie|headers?)["']?\s*[:=]\s*[\[{]"#).unwrap()
+    Regex::new(r#"(?i)\b[A-Za-z0-9_.-]*(?:api[_-]?key|password|secret|authorization|token|credential|cookie|headers?)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*[\[{]"#).unwrap()
 });
 fn sensitive(key: &str) -> bool {
     let normalized: String = key
@@ -1790,6 +1790,29 @@ impl DetailFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn credential_masking_recognizes_python_control_whitespace() {
+        for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            for source in [
+                format!("Bearer{separator}SYNTHETIC_TOKEN"),
+                format!("api_key{separator}={separator}SYNTHETIC_VALUE"),
+            ] {
+                assert_eq!(diagnostic_redact(&source, 0), "[已隱藏]");
+                assert_eq!(text_value(&source, true, 0), json!("[已隱藏]"));
+                assert_eq!(text_value(&source, false, 0), json!(source));
+            }
+            let source = format!("api_key=value{separator}public");
+            assert_eq!(
+                diagnostic_redact(&source, 0),
+                format!("[已隱藏]{separator}public")
+            );
+        }
+        assert_eq!(
+            diagnostic_redact("ordinary nonsecret text", 0),
+            "ordinary nonsecret text"
+        );
+    }
+
     #[test]
     fn wrapped_structured_payload_keeps_projection_and_masking() {
         for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
