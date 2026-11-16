@@ -41,7 +41,7 @@ pub(super) fn parse(source: &str) -> Option<Value> {
         .collect();
     let json_lines: Vec<_> = source
         .split(['\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}'])
-        .filter(|line| !line.trim().is_empty())
+        .filter(|line| !super::schedules::trim_text(line).is_empty())
         .collect();
     if json_lines.len() > 1
         && json_lines
@@ -117,7 +117,7 @@ pub(super) fn parse_document(source: &str, format: &str) -> Option<(Value, &'sta
     }
     let json_lines: Vec<_> = source
         .split(['\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}'])
-        .filter(|line| !line.trim().is_empty())
+        .filter(|line| !super::schedules::trim_text(line).is_empty())
         .collect();
     if json_lines.len() > 1
         && json_lines
@@ -627,6 +627,20 @@ fn yaml(source: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jsonl_ignores_python_control_whitespace_only_lines() {
+        let expected = json!([{"a":1},{"b":2}]);
+        for blank in ["\u{1f}", " \u{1f}\t "] {
+            let source = format!("{{\"a\":1}}\n{blank}\n{{\"b\":2}}");
+            assert_eq!(parse(&source), Some(expected.clone()));
+            assert_eq!(parse_document(&source, "jsonl"), Some((expected.clone(), "JSONL")));
+        }
+        let invalid = "{\"a\":1}\n\u{1f}{\"b\":2}";
+        assert!(parse(invalid).is_none());
+        assert!(parse_document(invalid, "jsonl").is_none());
+    }
+
     #[test]
     fn yaml_non_line_separator_whitespace_preserves_scalar_types() {
         for (source, expected) in [

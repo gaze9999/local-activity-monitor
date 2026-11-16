@@ -727,3 +727,13 @@ collector 在 projections 階段讀取 metadata atomic, disabled 分支仍維持
 JEV 欄位重用稽核: health 為生成的固定狀態字串, checked_at 為生成時間, source_registry 不改寫 JEV, snapshot serializer 只特別處理 codex, 但既有 snapshot_json::field 仍先對完整 window 做 Checked 深度 / 語法驗證, 遇 reserved serde key 或 Unicode escape 採原 Value fallback, 直接重用 descriptor 會略過其他欄位造成的拒絕邊界
 
 本輪決定不實作 cached descriptor 或改寫 selector parser, 保留完整驗證後再重用只能省去第二次 RawValue traversal, 收益尚未量測且會增加 caller 與序列化結果一致性的要求, 新 single-pass selector 另需 duplicate-last、非 object、數字、深度與 legacy reserved-key 等價證據, HTTP 失敗保持未解決, 不以跳過驗證換取速度
+
+### JSONL 空白行的 Python 控制字元語意
+
+來源 main 與 workspace main 核對未變, 原始 parse_text 會忽略只含 U+001F 或 space / U+001F / tab 的空白行, Rust 原先保留該行而無法辨識 JSONL, 本輪僅將 parse / parse_document 的兩處 JSONL blank-line filter 改用既有 trim_text, 不修整非空行的 JSON 內容, 不更動 CSV、bytes / lines 上限或持久化
+
+新回歸修正前失敗, 修正後 structured 全家族 13、MCP documents 6、Python payload_detail 12 與直接來源 fixture 通過, U+001F 前綴的非空 JSON 行仍拒絕, 完整 service 342 項通過 (130.70 秒)
+
+完整 serial HTTP 單輪為 217 通過、2 失敗 (107.36 秒), overflow fixture 本輪通過但不代表舊問題解決, 新失敗分別為 stdin_control_pauses_resumes_and_stops_the_owned_service 預期 terminal chunk 0 卻讀到 7551, 以及 stream_and_http_publish_matching_window_snapshots_and_session_logs 的 checked_at 欄位不同, desktop 為 .031 / .054、session / JEV 為 .031 / .055, 畫面列出的 entries / counts 相同, 完整記錄保留, 尚未判定根因或改動 assertion
+
+本輪不列為完整 HTTP 接受, 不重試直到通過, 舊 WouldBlock、metadata POST 503、唯讀 GET settings 503、cleanup 警告、Unicode digit 與 numeric rendering 待辦均保留
