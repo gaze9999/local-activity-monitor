@@ -2717,6 +2717,25 @@ fn mcp_catalog_extracts_python_module_docstring_without_execution() {
 }
 
 #[test]
+fn mcp_catalog_description_budget_follows_declaration_order() {
+    let home = tempdir().unwrap();
+    let mut config = String::from("[mcp_servers.z_first]\ndescription='First purpose'\n");
+    for index in 0..63 {
+        config.push_str(&format!("[mcp_servers.middle_{index:02}]\nenabled=false\n"));
+    }
+    config.push_str("[mcp_servers.a_last]\ndescription='Outside purpose budget'\n");
+    fs::write(home.path().join("config.toml"), config).unwrap();
+    let service = Service::start(home.path(), false, None);
+    let snapshot = snapshot_when(&service, |value| value["mcp"]["configuration"]["configured_sources"] == 2);
+    let rows = snapshot["mcp"]["servers"].as_array().unwrap();
+    let first = rows.iter().find(|row| row["server"] == "z_first").unwrap();
+    let last = rows.iter().find(|row| row["server"] == "a_last").unwrap();
+    assert_eq!(first["description"], "First purpose");
+    assert_ne!(last["description"], "Outside purpose budget");
+    assert!(!snapshot.to_string().contains("Outside purpose budget"));
+}
+
+#[test]
 fn mcp_catalog_reads_bounded_package_and_readme_introductions() {
     let home = tempdir().unwrap();
     native_event_fixture(home.path());

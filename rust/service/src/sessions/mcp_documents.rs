@@ -526,6 +526,25 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn environment_document_budget_uses_declaration_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let first = root.join("first.json");
+        let last = root.join("last.json");
+        fs::write(&first, "{}").unwrap();
+        fs::write(&last, "{}").unwrap();
+        let mut source = format!("[env]\nz_first={}\n", serde_json::to_string(&first.to_string_lossy()).unwrap());
+        for index in 0..63 {
+            source.push_str(&format!("middle_{index:02}='not-a-path'\n"));
+        }
+        source.push_str(&format!("a_last={}\n", serde_json::to_string(&last.to_string_lossy()).unwrap()));
+        let parsed: toml::Value = source.parse().unwrap();
+        let rows = documents(parsed.as_table().unwrap());
+        assert!(rows.iter().any(|row| row["path"] == first.to_string_lossy().as_ref()));
+        assert!(!rows.iter().any(|row| row["path"] == last.to_string_lossy().as_ref()));
+    }
+
+    #[test]
     fn yaml_validation_uses_existing_parser_and_stops_timeout() {
         let folder = tempfile::tempdir().unwrap();
         let root = folder.path().canonicalize().unwrap();

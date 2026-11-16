@@ -254,3 +254,26 @@ MCP 設定、套件 metadata 與 README 簡介對齊 Python 的 U+001C–U+001F 
 Python source_description 合成 fixture 確認設定修剪、套件正規化及 README 回退, Rust 簡介回歸先失敗後通過, source_introduction 2 項、設定描述 1 項及 HTTP 套件 / README 簡介回歸通過, 遮蔽、400 字元上限、來源根目錄限制與快取策略不變
 
 本輪核對 LAM main 5c03daf 與 workspace main 9e606e0 未變, 保留 Plugin 同批未提交變更, 未查詢真實來源或重跑完整平台驗收
+
+### TOML 宣告順序與 MCP 選取界線
+
+啟用既有 toml 0.8.23 的 preserve_order, 對齊 Python 前 64 筆設定宣告與 env 候選順序, 修正字母排序讓後段來源擠掉前段來源簡介或按需文件的情況, disabled 項目仍占用原始設定的位置, 第 65 筆有效來源仍列為 configured, 但不讀取其簡介或文件設定
+
+相依套件版本與 checksum 不變, lockfile 只新增 toml 對既有 indexmap 的依賴邊, 未下載或安裝新套件, TOML 來源設定不改寫, 讀取數量與安全界線不變, 結構化 TOML 仍透過既有 JSON 投影, 簡介快取鍵隨原始順序產生但保留原有容量與期限
+
+Python discover_sources / documents 合成 fixture 確認宣告順序, Rust 前 64 筆回歸先失敗後通過, MCP / documents 模組 12 項、env 候選 1 項、structured 8 項及 HTTP MCP 21 項通過, 包含簡介、文件、遮蔽、設定更新與歷史回歸, 未執行真實來源或完整原生平台驗收
+
+本段基底為 645d1c1, LAM main 5c03daf 與 workspace main 9e606e0 未變, 來源事件排序、restore 容量與大型快照待辦仍保留
+
+preserve_order 使用面檢閱涵蓋 service 全部 4 個 TOML 消費模組, 來源與文件選取之外的影響如下
+
+| 使用面 | 實際影響與保留條件 |
+| --- | --- |
+| mcp | 前 64 筆依宣告順序選取簡介, 最終來源 map 仍依既有鍵排序, 不增加設定檔讀取 |
+| mcp_documents | 已觀測來源的設定及 env 候選依宣告順序限制, `/api/mcp/files` 路由、來源名稱驗證、SHA 衝突檢查與原子寫入不變 |
+| source_introduction | 根目錄及描述欄位皆按名稱查找, 不受 map 迭代順序影響, 宣告重排可能產生另一快取鍵, 仍受既有 256 筆 / 60 秒限制 |
+| structured | 完整 TOML 解析後轉既有 JSON map, JSON 欄位排序、日期檢查、深度限制及遮蔽不變 |
+
+核對目前鎖定 toml / indexmap 的 PartialEq 實作, 仍依 key / value 比較而非插入順序, 文件提交前的設定值衝突檢查未因功能旗標失效, 這是原始碼檢閱證據, 不宣稱新增平台或競態驗收
+
+上述使用面檢閱後, 以 Linux / Rust 1.100.0 執行完整 `--locked --offline` 單執行緒回歸, service binary 301 項全數通過 (104.58 秒), HTTP 204 項全數通過 (158.29 秒), 未將單執行緒結果延伸為並行穩定性或跨平台驗收

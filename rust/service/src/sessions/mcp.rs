@@ -413,6 +413,23 @@ pub fn scoped_summary(events: &[Value], cutoff: DateTime<Utc>, health: &str, all
 mod connection_tests {
     use super::*;
     #[test]
+    fn configured_descriptions_use_first_64_declared_entries() {
+        let home = tempfile::tempdir().unwrap();
+        let mut config = String::from("[mcp_servers.z_first]\ndescription='First purpose'\n");
+        for index in 0..63 {
+            config.push_str(&format!("[mcp_servers.middle_{index:02}]\nenabled=false\n"));
+        }
+        config.push_str("[mcp_servers.a_last]\ndescription='Outside purpose budget'\n");
+        std::fs::write(home.path().join("config.toml"), config).unwrap();
+        let sources = discover(home.path());
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources["z_first"].as_ref().unwrap().text, "First purpose");
+        assert!(sources["a_last"].is_none());
+        assert!(super::super::mcp_documents::configuration(home.path(), "z_first").is_some());
+        assert!(super::super::mcp_documents::configuration(home.path(), "a_last").is_none());
+    }
+
+    #[test]
     fn configured_description_matches_python_control_whitespace() {
         let home = tempfile::tempdir().unwrap();
         for escape in ["001c", "001d", "001e", "001f"] {
