@@ -205,3 +205,22 @@ Python response_metadata 合成案例確認 400,000 個中文字後的 URL 仍�
 Linux / Rust 1.100.0 執行 `cargo test --locked --offline --manifest-path rust/service/Cargo.toml`, 單元測試 291 項通過、2 項失敗, account 時限案例單獨重跑通過, 另一項 overflow metadata-only 案例的舊期望值由 0 對齊 Python 的 null 後單獨通過
 
 另以 `--test http` 執行 HTTP 測試, 201 項通過、2 項失敗, error-detail 的 503 與 retention retry 的舊快照值均在個別重跑時通過, 尚未取得整套並行測試全數通過的結果, 不將個別通過當成並行穩定性證明
+
+### MCP 結果投影界線與空白相容性
+
+Web 結果先為 references 保留一個投影欄位, 再套用 Python 的 40 欄 metric / credits 界線, 避免多保留一筆指標或 credits, 非 Web 結果與後續 written 等欄位規則維持不變
+
+Python response_metadata 的 38–41 筆合成指標確認邊界, Rust 回歸先失敗再通過, HTTP 合成回歸確認即時快照、session checkpoint 重啟與 Web 歷史投影
+
+Web 歷史依 Python activity_history 規格只保存引用與允許的狀態, 不保存即時結果中的任意指標, 初版測試錯把兩者當成相同投影, 依來源修正期望後通過, 未變更歷史保存欄位或新增來源查詢
+
+本輪比對 LAM main 5c03daf 與 workspace main 9e606e0, Rust 基底 3cab348, 未重跑整套 service 或平台驗收, 來源排序、容量與大型快照的既有阻擋點維持待辦
+
+同批 Web 引用解析補齊 Python 的 U+001C–U+001F 分隔, 避免兩個 URL 被當成單一含控制字元的無效引用而全部遺漏, 仍拒絕 URL 本身的控制字元、不公開的位址與憑證, 維持 query / fragment 排除及 30 筆去重上限
+
+實際 Python fixture 確認四種控制空白、tab、NBSP、em space 與重複引用上限, Rust 針對性回歸先失敗後通過, Web 引用歷史重啟案例通過
+
+
+工具結束碼記錄同樣接受 Python 的四種尾端控制空白, 避免漏報非零結束碼, 仍排除 0 與未結束的記錄文字, 不保存工具本文
+
+Python tool_error 合成案例與 Rust 先失敗後通過回歸確認正數、負 Unicode 數字及零值, 最終 history-store 完整套件 53 項通過, 工具錯誤 HTTP 快照、歷史與重啟回歸通過, 既有數值、字元讀取上限與欄位白名單不變

@@ -8342,6 +8342,10 @@ fn native_mcp_and_web_events_reach_history_and_survive_session_removal() {
     assert_eq!(service.get("/api/history?section=mcp").json()["total"], 1);
     assert_eq!(service.get("/api/history?section=web").json()["total"], 1);
 
+    let mut web_output: serde_json::Map<String, Value> = (0..40)
+        .map(|n| (format!("field_{n}_count"), json!(n)))
+        .collect();
+    web_output.insert("text".into(), json!("Found https://example.org/page?secret=PRIVATE_WEB_OUTPUT#hash and http://127.0.0.1/PRIVATE_LOCAL"));
     append_records(
         &path,
         &[
@@ -8356,7 +8360,7 @@ fn native_mcp_and_web_events_reach_history_and_survive_session_removal() {
                 &stamp,
                 "response_item",
                 json!({"type":"function_call_output","call_id":"web",
-            "output":"Found https://example.org/page?secret=PRIVATE_WEB_OUTPUT#hash and http://127.0.0.1/PRIVATE_LOCAL"}),
+            "output":web_output}),
             ),
         ],
     );
@@ -8386,7 +8390,12 @@ fn native_mcp_and_web_events_reach_history_and_survive_session_removal() {
         web["result"]["references"],
         json!(["https://example.org/page"])
     );
+    assert_eq!(web["result"].as_object().unwrap().len(), 40);
+    assert_eq!(web["result"]["field_38_count"], 38);
+    assert!(web["result"].get("field_39_count").is_none());
     assert!(!completed.to_string().contains("PRIVATE_"));
+    let web_history = service.get("/api/history?section=web").json();
+    assert_eq!(web_history["items"][0]["result"], json!({"references":web["result"]["references"]}));
     let history = service.get("/api/history?section=mcp").json();
     assert_eq!(history["total"], 1);
     assert_eq!(history["items"][0]["result"], mcp["result"]);
@@ -8398,6 +8407,9 @@ fn native_mcp_and_web_events_reach_history_and_survive_session_removal() {
     });
     assert_eq!(restored["codex"]["bytes_read"], 0);
     assert_eq!(restored["mcp"]["total_events"], 2);
+    let restored_web = restored["mcp"]["events"].as_array().unwrap().iter()
+        .find(|event| event["server"] == "web").unwrap();
+    assert_eq!(restored_web["result"], web["result"]);
     assert!(restored["mcp"]["events"]
         .as_array()
         .unwrap()
@@ -9830,7 +9842,7 @@ fn observed_tool_failure_reaches_snapshot_history_and_restart() {
                 &stamp,
                 "response_item",
                 json!({"type":"function_call_output",
-            "call_id":"process","output":"Process exited with code 7\n"}),
+            "call_id":"process","output":"Process exited with code 7\u{1c}\u{1d}\u{1e}\u{1f}\nPRIVATE_PROCESS_BODY"}),
             ),
         ],
     );

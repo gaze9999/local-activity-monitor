@@ -318,6 +318,11 @@ fn response(server: &str, input: Option<&Object>) -> Object {
     };
     let value = decoded(input);
     let mut result = Object::new();
+    // Web references consume one slot before metric and credit projection.
+    // Observed::complete replaces this placeholder with the bounded URL list.
+    if server == "web" {
+        result.insert("references".into(), json!([]));
+    }
     let status = if value.get("isError").and_then(Value::as_bool) == Some(true)
         || value.get("error").is_some_and(truth)
     {
@@ -540,7 +545,7 @@ fn credits(value: &Object, result: &mut Object) {
 }
 
 static LINKS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"https?://[^\s<>"\]\)]+"#).expect("reference pattern"));
+    LazyLock::new(|| Regex::new(r#"https?://[^\s\x1c-\x1f<>"\]\)]+"#).expect("reference pattern"));
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -806,7 +811,7 @@ fn output_object(output: &Value) -> Option<std::borrow::Cow<'_, Object>> {
 }
 
 static EXIT_CODE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^Process exited with code (-?\d{1,6})\s*$").expect("exit code pattern")
+    Regex::new(r"(?m)^Process exited with code (-?\d{1,6})[\s\x1c-\x1f]*$").expect("exit code pattern")
 });
 
 static DECIMAL_DIGIT: LazyLock<Regex> =
@@ -1091,6 +1096,65 @@ mod reference_tests {
     use super::*;
 
     #[test]
+    fn web_references_share_the_python_metric_and_credit_budget() {
+        for count in [38, 39, 40, 41] {
+            let mut input: Object = (0..count)
+                .map(|n| (format!("field_{n}_count"), json!(n)))
+                .collect();
+            input.insert("credits".into(), json!({"balance":3,"used":2}));
+            for tool in ["web.run", "mcp__fixture__inspect"] {
+                let mut observed = Observed::new(tool, None).unwrap();
+                observed.complete(&Value::Object(input.clone()));
+                assert_eq!(observed.result.len(), 40, "{tool} {count}");
+                let metric_limit = if tool == "web.run" { 39 } else { 40 };
+                for n in 0..count {
+                    assert_eq!(observed.result.contains_key(&format!("field_{n}_count")), n < metric_limit);
+                }
+                assert_eq!(observed.result.contains_key("credits_balance"), count < metric_limit);
+                assert_eq!(observed.result.contains_key("credits_used"), count + 1 < metric_limit);
+                assert!(observed.valid_for(tool));
+                let restored: Observed = serde_json::from_value(json!(observed)).unwrap();
+                assert_eq!(restored.result, observed.result);
+                assert!(restored.valid_for(tool));
+            }
+        }
+        // Fields projected after the metric budget retain Python's separate rules.
+        let mut input: Object = (0..40)
+            .map(|n| (format!("field_{n}_count"), json!(n)))
+            .collect();
+        input.insert("written".into(), json!(true));
+        let mut observed = Observed::new("web.run", None).unwrap();
+        observed.complete(&Value::Object(input));
+        assert_eq!(observed.result.len(), 41);
+        assert_eq!(observed.result["written"], true);
+        assert_eq!(observed.result["references"], json!([]));
+    }
+
+    #[test]
+    fn web_references_split_python_control_whitespace() {
+        for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}', '\t', '\u{a0}', '\u{2003}'] {
+            let mut observed = Observed::new("web.run", None).unwrap();
+            observed.complete(&json!(format!(
+                "https://example.com/first?secret=PRIVATE{separator}https://example.org/second#PRIVATE"
+            )));
+            assert_eq!(observed.result["references"], json!([
+                "https://example.com/first", "https://example.org/second"
+            ]), "{separator:?}");
+            assert!(observed.valid_for("web.run"));
+            assert!(!json!(observed.result).to_string().contains("PRIVATE"));
+        }
+        let links = (0..35).flat_map(|n| [
+            format!("https://example.com/{n}?secret=PRIVATE"),
+            format!("https://example.com/{n}#PRIVATE"),
+        ]).collect::<Vec<_>>().join("\u{1c}");
+        let mut observed = Observed::new("web.run", None).unwrap();
+        observed.complete(&json!(links));
+        assert_eq!(observed.result["references"], json!((0..30)
+            .map(|n| format!("https://example.com/{n}")).collect::<Vec<_>>()));
+        assert!(observed.valid_for("web.run"));
+    }
+
+    #[test]
     fn web_reference_limit_counts_unicode_characters() {
         let mut observed = Observed::new("web.run", None).unwrap();
         observed.complete(&json!(format!("{} https://example.com/path?secret=PRIVATE", "漢".repeat(400_000))));
@@ -1104,6 +1168,25 @@ mod reference_tests {
 #[cfg(test)]
 mod exit_decimal_tests {
     use super::*;
+
+    #[test]
+    fn process_exit_accepts_python_trailing_control_whitespace() {
+        for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            for (code, expected) in [("7", Some(7)), ("-٣", Some(-3)), ("0", None)] {
+                let output = json!(format!("Process exited with code {code}{separator}\nother"));
+                let result = output_error(&output, |_| Object::new());
+                assert_eq!(result.as_ref().and_then(|item| item["exit_code"].as_i64()), expected, "{output}");
+                if let Some(result) = result {
+                    assert_eq!(result, Object::from_iter([
+                        ("code".into(), json!("process_exit")),
+                        ("exit_code".into(), json!(expected)),
+                    ]));
+                }
+                let not_a_suffix = json!(format!("Process exited with code {code}{separator}other"));
+                assert!(output_error(&not_a_suffix, |_| Object::new()).is_none());
+            }
+        }
+    }
 
     #[test]
     fn process_exit_matches_python_unicode_decimals() {

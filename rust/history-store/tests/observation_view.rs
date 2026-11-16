@@ -632,3 +632,22 @@ fn tool_failure_projects_fields_without_retaining_response() {
     let unicode_json = json!({"status":"failed","padding":"漢".repeat(512 * 1024)}).to_string();
     assert!(output_failed(&json!(unicode_json)));
 }
+
+#[test]
+fn projected_control_separated_web_references_survive_restart() {
+    let directory = tempdir().unwrap();
+    let now = parse_utc_stamp("2026-11-12T10:00:00Z").unwrap();
+    let mut observed = lam_history_store::mcp::Observed::new("web.run", None).unwrap();
+    observed.complete(&json!("https://example.com/first?secret=PRIVATE\u{1c}https://example.org/second#PRIVATE"));
+    let event = json!({"timestamp":"2026-11-12T10:00:00Z","server":"web","tool":"run","call_id":"web-controls","metadata":observed.metadata,"result":observed.result});
+    let mut store = ObservationStore::open(directory.path(), Access::ReadWrite).unwrap().unwrap();
+    store.save_diagnostics(&[event], &[], now).unwrap();
+    drop(store);
+    let mut store = ObservationStore::open(directory.path(), Access::ReadWrite).unwrap().unwrap();
+    let view = store.read(now, &[None; 4]).unwrap();
+    assert_eq!(view.events.len(), 1);
+    assert_eq!(view.events[0]["result"]["references"], json!([
+        "https://example.com/first", "https://example.org/second"
+    ]));
+    assert!(!json!(view.events.as_ref()).to_string().contains("PRIVATE"));
+}
