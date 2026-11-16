@@ -9,6 +9,26 @@ const LIMIT: u64 = 64 * 1024;
 const RECORDS: usize = 1000;
 const EVENTS: usize = 200;
 
+// Match Python bytes.splitlines: CR/LF only, CRLF as one separator, no trailing phantom row.
+fn byte_lines(mut bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    std::iter::from_fn(move || {
+        if bytes.is_empty() {
+            return None;
+        }
+        let end = bytes.iter().position(|byte| matches!(byte, b'\r' | b'\n')).unwrap_or(bytes.len());
+        let line = &bytes[..end];
+        let next = if end == bytes.len() {
+            end
+        } else if bytes[end] == b'\r' && bytes.get(end + 1) == Some(&b'\n') {
+            end + 2
+        } else {
+            end + 1
+        };
+        bytes = &bytes[next..];
+        Some(line)
+    })
+}
+
 pub(crate) fn safe(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(meta) => {
@@ -206,11 +226,11 @@ impl Journal {
             file.seek(SeekFrom::Start(size.saturating_sub(LIMIT)))?;
             let mut bytes = Vec::new();
             file.take(LIMIT).read_to_end(&mut bytes)?;
-            let mut lines = bytes.split(|byte| *byte == b'\n');
+            let mut lines = byte_lines(&bytes);
             if size > LIMIT {
                 lines.next();
             }
-            for line in lines.filter(|line| !line.is_empty()) {
+            for line in lines {
                 match serde_json::from_slice::<Value>(line).ok().and_then(project) {
                     Some(event) => self.push(event),
                     None => self.skipped += 1,
@@ -375,6 +395,96 @@ impl Journal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_lines_match_python_byte_boundaries() {
+        for (raw, expected) in [
+            (b"".as_slice(), vec![]),
+            (b"\r\n".as_slice(), vec![b"".as_slice()]),
+            (b"\r\n\r".as_slice(), vec![b"".as_slice(), b"".as_slice()]),
+            (b"a\r\nb\n\n".as_slice(), vec![b"a".as_slice(), b"b".as_slice(), b"".as_slice()]),
+            (b"a\rb".as_slice(), vec![b"a".as_slice(), b"b".as_slice()]),
+            (b"a\xc2\x85b".as_slice(), vec![b"a\xc2\x85b".as_slice()]),
+        ] {
+            assert_eq!(byte_lines(raw).collect::<Vec<_>>(), expected);
+        }
+        for byte in 0..=255u8 {
+            let raw = [b'a', byte, b'b'];
+            let expected = if matches!(byte, b'\r' | b'\n') { vec![b"a".as_slice(), b"b".as_slice()] } else { vec![raw.as_slice()] };
+            assert_eq!(byte_lines(&raw).collect::<Vec<_>>(), expected, "{byte}");
+        }
+    }
+
+    fn fixture_row(kind: &str) -> Vec<u8> {
+        json!({"application":"local-activity-monitor","version":1,"timestamp":"2026-01-01T00:00:00Z","kind":kind,"error_type":null,"secret":"PRIVATE"}).to_string().into_bytes()
+    }
+
+    #[test]
+    fn reload_matches_python_cr_lf_and_empty_row_counts() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("local-activity-monitor.jsonl");
+        let a = fixture_row("started");
+        let b = fixture_row("stopped");
+        for (raw, kinds, skipped) in [
+            (Vec::new(), vec![], 0),
+            (b"\n".to_vec(), vec![], 1),
+            (b"\r".to_vec(), vec![], 1),
+            (b"\r\n".to_vec(), vec![], 1),
+            (b"\n\n".to_vec(), vec![], 2),
+            ([a.as_slice(), b"\r", &b, b"\r\n\n"].concat(), vec!["started", "stopped"], 1),
+            ([a.as_slice(), b"\r\n", &b].concat(), vec!["started", "stopped"], 0),
+        ] {
+            fs::write(&path, &raw).unwrap();
+            let journal = Journal::new(home.path());
+            assert_eq!(journal.entries().iter().map(|row| row["kind"].as_str().unwrap()).collect::<Vec<_>>(), kinds);
+            assert_eq!(journal.source()["unsupported_lines"], skipped);
+            assert_eq!(journal.source()["bytes"], raw.len());
+            assert_eq!(journal.source()["health"], "ok");
+            assert!(journal.events().is_empty());
+            assert!(!json!(journal.entries()).to_string().contains("PRIVATE"));
+            assert_eq!(fs::read(&path).unwrap(), raw);
+        }
+        let previous = home.path().join("local-activity-monitor.jsonl.1");
+        let previous_raw = [a.as_slice(), b"\r\n"].concat();
+        let current_raw = [b"\r".as_slice(), &b, b"\n\n"].concat();
+        fs::write(&previous, &previous_raw).unwrap();
+        fs::write(&path, &current_raw).unwrap();
+        let journal = Journal::new(home.path());
+        assert_eq!(journal.entries().iter().map(|row| row["kind"].as_str().unwrap()).collect::<Vec<_>>(), ["started", "stopped"]);
+        assert_eq!(journal.source()["unsupported_lines"], 2);
+        assert_eq!(journal.source()["bytes"], previous_raw.len() + current_raw.len());
+        assert_eq!(fs::read(previous).unwrap(), previous_raw);
+        assert_eq!(fs::read(path).unwrap(), current_raw);
+    }
+
+    #[test]
+    fn reload_tail_discards_exact_first_raw_line_including_empty_rows() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("local-activity-monitor.jsonl");
+        let a = fixture_row("started");
+        let b = fixture_row("stopped");
+        for (first_empty, prefix) in [(false, b"".as_slice()), (false, b"prefix\n"), (true, b""), (true, b"prefix\n")] {
+            let mut tail = if first_empty { b"\r\n".to_vec() } else { Vec::new() };
+            tail.extend([a.as_slice(), b"\r", &b, b"\n"].concat());
+            tail.resize(LIMIT as usize, b'x');
+            let raw = [prefix, &tail].concat();
+            fs::write(&path, &raw).unwrap();
+            let journal = Journal::new(home.path());
+            let expected = if first_empty || prefix.is_empty() { vec!["started", "stopped"] } else { vec!["stopped"] };
+            assert_eq!(journal.entries().iter().map(|row| row["kind"].as_str().unwrap()).collect::<Vec<_>>(), expected);
+            assert_eq!(journal.source()["unsupported_lines"], 1 + usize::from(first_empty && prefix.is_empty()));
+            assert_eq!(journal.source()["bytes"], raw.len());
+            assert_eq!(fs::read(&path).unwrap(), raw);
+        }
+        let mut tail = [b"\n".as_slice(), &a, b"\r", &b, b"\n"].concat();
+        tail.resize(LIMIT as usize, b'x');
+        let raw = [b"x\r".as_slice(), &tail].concat();
+        fs::write(&path, &raw).unwrap();
+        let journal = Journal::new(home.path());
+        assert_eq!(journal.entries().len(), 2);
+        assert_eq!(journal.source()["unsupported_lines"], 1);
+        assert_eq!(fs::read(path).unwrap(), raw);
+    }
 
     #[test]
     fn live_events_are_bounded_and_exclude_reloaded_log_history() {

@@ -995,3 +995,20 @@ Linux / Rust 1.100.0 的完整 service 370 項通過 (62.11 秒), 完整 serial 
 修改測試起始條件後的完整 serial HTTP 單輪 220 項通過 (130.51 秒)
 
 不以重跑未修改測試取得綠燈, 原失敗與合成基準失敗記錄均保留, 歷史 HTTP 503 / WouldBlock、其他 race、數字呈現、surrogate 與平台驗收限制仍保留
+
+
+### Monitor journal 的原始換行與空白列計數
+
+LAM main `5c03daf`、workbench-workspace main `4616074` 再次核對未變, 依 `MonitorState.load_journal`, 每個檔案先讀取最後 64 KiB 原始 bytes, 使用 `bytes.splitlines()` 分行, 超過上限時無條件丟棄第一列, 不是整檔文字解碼
+
+Rust 原本僅以 LF 分行並略過空白列, 本輪改為私有 iterator 處理 CR、LF、CRLF, CRLF 視為單一分隔符, 空白實體列計入 unsupported, 空檔與尾端分隔符不產生額外資料列, Python 3.12 原始 reader 的 12 組 fixture 與 256 種單一 byte 分類通過
+
+兩項 reload 回歸修正前失敗, 修正後 journal 全家族 8 項通過 (0.01 秒), 涵蓋 CR / LF 混合、連續空白列、前一份與目前檔案順序、剛好 64 KiB 與多出前綴、首列為空白時的丟棄、CRLF 跨 tail 起點、來源 bytes 不變與未知欄位排除
+
+新增 `/api/logs?window=all` fixture 1 項通過 (0.03 秒), 兩筆 bare-CR / CRLF 分隔記錄皆保留且 unsupported_lines 精確為 1, 私密欄位不外露, 啟動正常附加事件但未改寫既有前綴
+
+不改變原始讀取上限、保留筆數、events 上限、輪替或寫入格式, JSON 解碼仍為既有 serde reader, journal 的 BOM / UTF-16 / UTF-32 與 surrogate 差異並未在本輪補齊, 不新增 endpoint、查詢參數或讀取次數
+
+保留前輪 idle refresh 失敗與後續測試基準修正的各自證據, 不宣稱歷史原因已確認, HTTP 503 / WouldBlock、數字呈現、其他 Unicode 與平台驗收限制仍保留
+
+Linux / Rust 1.100.0 的完整 service 單輪 373 項通過 (63.73 秒), 完整 serial HTTP 單輪 221 項通過 (132.51 秒)
