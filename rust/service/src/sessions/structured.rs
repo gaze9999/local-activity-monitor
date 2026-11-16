@@ -500,7 +500,9 @@ fn pair(body: &str) -> Option<(String, &str)> {
                     text
                 }
             } else {
-                value.to_string()
+                let integer = value.to_string();
+                // Python converts the JSON integer -0 to int(0) before str(key).
+                if integer == "-0" { "0".into() } else { integer }
             }
         },
         _ => return None,
@@ -837,6 +839,29 @@ mod tests {
 #[cfg(test)]
 mod yaml_key_tests {
     use super::*;
+
+    #[test]
+    fn yaml_integer_negative_zero_key_matches_python_without_changing_values() {
+        for (source, expected) in [
+            ("-0: zero", json!({"0": "zero"})),
+            ("'-0': quoted", json!({"-0": "quoted"})),
+            ("-0.0: float", json!({"-0.0": "float"})),
+            ("-0e0: float", json!({"-0.0": "float"})),
+            ("-0: integer\n'-0': quoted", json!({"0": "integer", "-0": "quoted"})),
+            ("18446744073709551616: large", json!({"18446744073709551616": "large"})),
+        ] {
+            assert_eq!(yaml(source), Some(expected.clone()), "{source}");
+            assert_eq!(parse_document(source, "yaml"), Some((expected, "YAML subset")), "{source}");
+        }
+        for source in ["0: first\n-0: second", "-0: first\n0: second", "items:\n  - -0: first\n    0: second"] {
+            assert!(yaml(source).is_none(), "{source}");
+            assert!(parse(source).is_none(), "{source}");
+            assert!(parse_document(source, "yaml").is_none(), "{source}");
+        }
+        // This key-only correction does not change numeric value serialization.
+        assert_eq!(yaml("value: -0").unwrap()["value"].to_string(), "-0");
+        assert_eq!(parse("-0: zero\nother: value"), Some(json!({"0": "zero", "other": "value"})));
+    }
 
     #[test]
     fn numeric_keys_match_python_string_labels() {

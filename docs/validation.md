@@ -791,3 +791,11 @@ focused heartbeat 1 項通過 (30.19 秒), 完整 serial HTTP 單輪 219 項通�
 最終限縮版本 focused 2 項通過 (0.10 秒), 完整 service 345 項通過 (129.21 秒), 完整 serial HTTP 單輪 219 項通過 (135.93 秒), 原始 Python 合成 fixture 24 組、instruction 7 項與 payload 12 項通過, instruction 測試確認來源 bytes 未改寫, 中間版本另有 service 345 / HTTP 219 通過記錄, 不混用為最終版本證據
 
 初始合成 probe 的 Unicode escape 位數錯誤與 overlap probe 缺少括號各在執行前失敗, 修正 probe 後取得上述稽核結果, 未影響主 runtime, 記錄保留, 仍有 5004 個 Unicode 版本邊界差異及原先 915 個較保守案例, 不宣稱完整 Unicode 等價, 歷史 metadata POST 503 / WouldBlock、唯讀 GET 503、Unicode digit、數字頁面格式與其他待辦保留
+
+### YAML 整數負零 key 與重複鍵判定
+
+來源 LAM main `5c03daf`、workspace main `4616074` 核對未變, Python 先將 JSON 整數 `-0` 解析為 `0` 再以 str 生成 mapping key, Rust arbitrary_precision 原先保留 `-0` 字串而產生不同 key, 使 `0` / `-0` 重複鍵未被拒絕
+
+僅在 YAML pair 的非浮點數 key 分支將精確 `-0` 正規化為 `0`, 引號中的 `'-0'` 仍為獨立字串 key, `-0.0` / `-0e0` 保持浮點負零 key, 大整數名稱與原始 numeric scalar 不變, 不改寫數字序列化、分頁 offset / hash 演算法、相依套件或容量界線, 非字串頁面的完整數字呈現差異仍待設計
+
+新增直接 parser / parse_document / 自動辨識回歸, 涵蓋頂層與 sequence mapping 的重複鍵拒絕、quoted / floating / large integer 保留及 scalar 值不變, 原始 Python 8 組 fixture 通過, 新 Rust 回歸修正前失敗記錄保留, 修正後 structured 全家族 14 項通過 (1.01 秒), 完整 service 346 項通過 (133.49 秒), 完整 serial HTTP 單輪 219 項通過 (134.67 秒), 歷史 503 / WouldBlock 與 Unicode 差異仍未宣告解決
