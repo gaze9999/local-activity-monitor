@@ -908,3 +908,18 @@ Python 另接受無 BOM UTF-16 與 unpaired surrogate, Rust 本輪不支援且�
 Linux / Rust 1.100.0 的完整 service 362 項通過 (77.54 秒), 完整 serial HTTP 單輪 219 項通過 (117.73 秒)
 
 沒有新增 endpoint、查詢參數、來源範圍或保存內容, 不外露 MCP runtime arguments, 歷史 metadata POST 503 / WouldBlock、唯讀 GET 503、數字呈現及其他 Unicode / 平台限制仍保留
+
+
+### Plugin JSON 的無 BOM UTF-16 判定
+
+來源 LAM main `5c03daf`、workbench-workspace main `4616074` 再次核對未變, 依 `_json_metadata` 與本輪 Python 3.12.14 `json.detect_encoding` 原始實作, Plugin JSON 可由最初 4 bytes 的零位元組位置或精確 2-byte 短輸入判定 UTF-16 LE / BE, 不要求 BOM, 新回歸先重現無 BOM `{}` 被拒絕
+
+本輪只補上 Python 的 UTF-16 前綴判定分支, 延用前輪嚴格 decoder, 明確 UTF-8 / UTF-16 BOM 優先順序與原始 byte-budget 檢查不變, UTF-32 前綴不作 UTF-16 接受, 不變更其他 JSON 呼叫
+
+新增回歸涵蓋 LE / BE、前置 JSON 空白、中文 / surrogate pair、2-byte 不完整 JSON、malformed / 非 object / 奇數 bytes 拒絕、64 KiB 精確界線與跨來源剩餘預算, 無 BOM UTF-32 仍拒絕, Plugin 全家族 14 項通過 (0.03 秒), 先前的無 BOM 拒絕預期由此明確的 source-backed 接受範圍取代
+
+HTTP fixture 延續 UTF-8 與有 BOM UTF-16 BE 的更新後, 以無 BOM UTF-16 LE 檔案進行替換, watcher 正確更新第三個 MCP server 且來源 bytes 不變, 原有 metadata 停用 / 重啟檢查保留, focused HTTP 1 項通過 (0.27 秒), Python 原始 reader 的 22 組解碼 / byte-budget fixture 通過
+
+Linux / Rust 1.100.0 的完整 service 363 項通過 (66.51 秒), 完整 serial HTTP 單輪 219 項通過 (115.87 秒)
+
+UTF-32 與 unpaired surrogate 仍未支援, Python 可接受的部分 surrogate 字串仍由 Rust 拒絕, Plugin 以外 JSON 來源的 UTF-16 支援未擴張, 沒有新增 endpoint、查詢參數、讀取次數、資料範圍、保存內容或容量, 歷史 HTTP、數字呈現及其他 Unicode / 平台限制繼續保留

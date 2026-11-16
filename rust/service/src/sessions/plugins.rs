@@ -148,10 +148,20 @@ fn read(home: &Path, path: &Path, budget: &mut Budget) -> (Option<Value>, &'stat
     if bytes.len() > MANIFEST || bytes.len() == remaining {
         return (None, "truncated");
     }
-    // Decode only after raw byte accounting. UTF-16 requires an explicit BOM;
-    // unpaired surrogates, no-BOM UTF-16 and UTF-32 remain unsupported.
+    // Decode only after raw byte accounting. Match Python's UTF-16 prefix
+    // detection; unpaired surrogates and UTF-32 remain unsupported.
     let utf16 = bytes.strip_prefix(b"\xff\xfe").map(|raw| (raw, false))
-        .or_else(|| bytes.strip_prefix(b"\xfe\xff").map(|raw| (raw, true)));
+        .or_else(|| bytes.strip_prefix(b"\xfe\xff").map(|raw| (raw, true)))
+        .or_else(|| {
+            let big_endian = match bytes.as_slice() {
+                [0, second, _, _, ..] if *second != 0 => true,
+                [first, 0, third, fourth, ..] if *first != 0 && (*third != 0 || *fourth != 0) => false,
+                [0, _] => true,
+                [_, 0] => false,
+                _ => return None,
+            };
+            Some((bytes.as_slice(), big_endian))
+        });
     let value = if let Some((raw, big_endian)) = utf16 {
         if raw.len() % 2 != 0 {
             None
@@ -501,6 +511,51 @@ mod tests {
     }
 
     #[test]
+    fn plugin_json_detects_utf16_without_bom_from_initial_bytes() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("plugin.json");
+        for big_endian in [false, true] {
+            for (text, expected) in [
+                ("{}", Some(json!({}))),
+                (" \t\r\n{\"name\":\"中文😀\"}", Some(json!({"name":"中文😀"}))),
+                (" ", None), ("{", None), ("[]", None), ("{bad}", None),
+            ] {
+                let raw = utf16_json(text, big_endian)[2..].to_vec();
+                fs::write(&path, &raw).unwrap();
+                let mut budget = Budget::default();
+                let (value, status) = read(home.path(), &path, &mut budget);
+                assert_eq!(value, expected, "{big_endian}: {text}");
+                assert_eq!(status, if expected.is_some() { "available" } else { "unavailable" });
+                assert_eq!(budget.bytes, raw.len());
+                assert_eq!(fs::read(&path).unwrap(), raw);
+            }
+            for (extra, expected) in [(0, "available"), (1, "truncated")] {
+                let raw = utf16_json(&format!("{{}}{}", " ".repeat((MANIFEST - 4) / 2 + extra)), big_endian)[2..].to_vec();
+                fs::write(&path, &raw).unwrap();
+                let mut budget = Budget::default();
+                assert_eq!(read(home.path(), &path, &mut budget).1, expected);
+                assert_eq!(budget.bytes, raw.len().min(MANIFEST + 1));
+            }
+            let raw = utf16_json("{}", big_endian)[2..].to_vec();
+            fs::write(&path, &raw).unwrap();
+            for (remaining, expected) in [(raw.len(), "truncated"), (raw.len() + 1, "available")] {
+                let before = BYTES - remaining;
+                let mut budget = Budget { bytes: before, ..Budget::default() };
+                assert_eq!(read(home.path(), &path, &mut budget).1, expected);
+                assert_eq!(budget.bytes, before + raw.len());
+            }
+            let mut odd = raw;
+            odd.push(0);
+            fs::write(&path, odd).unwrap();
+            assert_eq!(read(home.path(), &path, &mut Budget::default()).1, "unavailable");
+        }
+        for raw in [vec![0x7b, 0, 0, 0, 0x7d, 0, 0, 0], vec![0, 0, 0, 0x7b, 0, 0, 0, 0x7d]] {
+            fs::write(&path, raw).unwrap();
+            assert_eq!(read(home.path(), &path, &mut Budget::default()).1, "unavailable");
+        }
+    }
+
+    #[test]
     fn plugin_json_decodes_utf16_bom_without_changing_sources() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("plugin.json");
@@ -524,7 +579,7 @@ mod tests {
             let mut surrogate = utf16_json("{\"name\":\"", big_endian);
             surrogate.extend(if big_endian { [0xd8, 0] } else { [0, 0xd8] });
             surrogate.extend(&utf16_json("\"}", big_endian)[2..]);
-            for raw in [odd, surrogate, utf16_json("{}", big_endian)[2..].to_vec(), vec![0xff, 0xfe, 0, 0, 0x7b, 0, 0, 0, 0x7d, 0, 0, 0], vec![0, 0, 0xfe, 0xff, 0, 0, 0, 0x7b, 0, 0, 0, 0x7d]] {
+            for raw in [odd, surrogate, vec![0xff, 0xfe, 0, 0, 0x7b, 0, 0, 0, 0x7d, 0, 0, 0], vec![0, 0, 0xfe, 0xff, 0, 0, 0, 0x7b, 0, 0, 0, 0x7d]] {
                 fs::write(&path, &raw).unwrap();
                 assert_eq!(read(home.path(), &path, &mut Budget::default()).1, "unavailable");
             }

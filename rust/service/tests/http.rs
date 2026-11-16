@@ -802,11 +802,13 @@ fn plugin_metadata_appears_in_snapshot_and_obeys_metadata_switch() {
         value["codex"]["plugins"]["items"][0]["skills_count"] == 2
     });
     let replacement = path.join("staged.tmp");
-    fs::write(&replacement,r#"{"version":"1.0.0","skills":"./skills","mcpServers":{"demo":{},"second":{},"third":{}}}"#).unwrap();
+    let utf16_no_bom: Vec<_> = r#"{"version":"1.0.0","skills":"./skills","mcpServers":{"demo":{},"second":{},"third":{}}}"#.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    fs::write(&replacement, &utf16_no_bom).unwrap();
     fs::rename(replacement, path.join("plugin.json")).unwrap();
     snapshot_when(&service, |value| {
         value["codex"]["plugins"]["items"][0]["mcp_count"] == 3
     });
+    assert_eq!(fs::read(path.join("plugin.json")).unwrap(), utf16_no_bom);
     fs::write(
         home.path().join("config.toml"),
         "[plugins.\"fixture@provider\"]\renabled = false\r",
