@@ -241,7 +241,7 @@ impl Rpc {
             .map_err(|_| RpcError::Protocol)?
             .map_err(|_| RpcError::Protocol)?;
             self.read += count;
-            if count == 0 || self.read > LIMIT || !line.ends_with(b"\n") {
+            if count == 0 || self.read > LIMIT {
                 return Err(RpcError::Protocol);
             }
             let value: Value = serde_json::from_slice(&line).map_err(|_| RpcError::Protocol)?;
@@ -633,6 +633,48 @@ done"#;
         assert_eq!(value["account_usage"]["summary"]["lifetimeTokens"], 0);
         assert!(!value.to_string().contains("private@example.test"));
         assert!(!value.to_string().contains("PRIVATE"));
+    }
+    #[tokio::test]
+    async fn final_rpc_response_accepts_eof_without_relaxing_byte_limit() {
+        let prefix = [
+            b"{\"id\":0,\"result\":{}}\n".as_slice(),
+            b"{\"id\":1,\"result\":{\"account\":{\"planType\":\"pro\"}}}\n".as_slice(),
+            b"{\"id\":2,\"result\":{}}\n".as_slice(),
+        ];
+        let base = br#"{"id":3,"result":{"summary":{"lifetimeTokens":42}}}"#;
+        let mut cr = base.to_vec();
+        cr.push(b'\r');
+        let mut exact = base.to_vec();
+        exact.resize(LIMIT - prefix.iter().map(|row| row.len()).sum::<usize>(), b' ');
+        let mut oversized = exact.clone();
+        oversized.push(b' ');
+        let cases = [
+            (base.to_vec(), "ok"), (cr, "ok"),
+            (base[..base.len() - 1].to_vec(), "partial"), (Vec::new(), "partial"),
+            (exact, "ok"), (oversized, "partial"),
+        ];
+        for (index, (body, health)) in cases.into_iter().enumerate() {
+            let (home, path) = fake(r#"while IFS= read -r line; do
+case "$line" in
+*'"id":0'*) cat "$CODEX_HOME/0" ;;
+*'"id":1'*) cat "$CODEX_HOME/1" ;;
+*'"id":2'*) cat "$CODEX_HOME/2" ;;
+*'"id":3'*) cat "$CODEX_HOME/3"; exit 0 ;;
+esac
+done"#);
+            for (index, row) in prefix.iter().enumerate() {
+                std::fs::write(home.path().join(index.to_string()), row).unwrap();
+            }
+            std::fs::write(home.path().join("3"), body).unwrap();
+            let value = read_from(&path, home.path(), Duration::from_secs(10)).await;
+            assert_eq!(value["health"], health, "fixture {index}: {value}");
+            assert_eq!(value["plan_type"], "pro");
+            assert_eq!(value["methods"]["account/usage/read"]["health"],
+                if health == "ok" { "ok" } else { "error" });
+            if health == "ok" {
+                assert_eq!(value["account_usage"]["summary"]["lifetimeTokens"], 42);
+            }
+        }
     }
     #[tokio::test]
     async fn raw_rpc_order_selects_primary_account_bucket() {

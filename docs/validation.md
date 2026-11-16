@@ -1114,3 +1114,19 @@ Rust 新回歸先失敗後通過, related_lifecycle 3 項通過, 新 snapshot HT
 `/api/snapshot` 的 thread status / status_updated_at / status_source 與 metadata_sources.rows_read 仍來自既有選取尾段, 不新增 endpoint、參數、檔案讀取或保存欄位, surrogate、歷史失敗與其他限制保留
 
 Linux / Rust 1.100.0 的完整 service 單輪 383 項通過 (66.43 秒), 完整 serial HTTP 單輪 226 項通過 (131.49 秒)
+
+### Account JSON-RPC 的最後一列
+
+固定 LAM main `5c03daf` 的 `codex_account.py` 與本機檔案 blob 相同, 原始 reader 的 readline 允許 EOF 前最後一列沒有 LF, Rust 移除額外的 LF 必要條件, 完整 JSON 仍須通過物件、request id 與 result 驗證
+
+Python 原始 source 與 Rust 合成 app-server 各驗證 6 組 fixture, 涵蓋無 LF、CR 尾碼、截斷 JSON、空 EOF、累計剛好 1 MiB 及超出 1 byte, 無效回應仍保留前面成功結果並標示 partial
+
+Rust 新回歸先重現 partial 而非 ok, 修正後 account 12 項通過 (0.51 秒), 累計原始輸出限制、時限、來源欄位順序、子程序清理與快取不變
+
+此輪沒有變更 JSON 編碼 decoder, 未宣稱 UTF-16/32 account protocol 相容, 沒有啟動真實 Codex 或使用帳戶憑證, read-only account 方法、參數、次數與投影白名單不變, 跨平台驗收與歷史限制保留
+
+完整 service 首輪 383 項通過、此新 fixture 1 項失敗, 回報 error 而非 ok, 尚未證明原因, 後續加入 fixture 編號與結果診斷, 並將此測試的 3 秒期限對齊正式 reader 原有的 10 秒, 未改動正式時限
+
+完整 serial HTTP 單輪 226 項通過 (127.49 秒), 執行起始與首輪 service 部分重疊, 不將此輪當成獨立效能基準
+
+最終測試設定的完整 service 單輪 384 項通過 (64.74 秒), 不消除首輪失敗的未明原因
