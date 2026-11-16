@@ -4731,6 +4731,31 @@ fn jev_telemetry_snapshot_reads_configured_database_by_window() {
 }
 
 #[test]
+fn replacement_sql_call_preserves_existing_tool_failure_result() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    append_records(&path, &[
+        event(&stamp, "response_item", json!({"type":"function_call","name":"exec_command","call_id":"reused","arguments":{"cmd":"fixture"}})),
+        event(&stamp, "response_item", json!({"type":"function_call_output","call_id":"reused","output":{"exit_code":2,"output":"fixture failure"}})),
+        event(&stamp, "response_item", json!({"type":"function_call","name":"exec_command","call_id":"reused","arguments":{"cmd":"sqlite3 fixture.db 'SELECT 1'"}})),
+    ]);
+    for _ in 0..2 {
+        let service = Service::start(home.path(), true, None);
+        let value = snapshot_when(&service, |value| value["codex"]["sqlite"]["total"] == 2);
+        assert_eq!(value["codex"]["sqlite"]["events"][0]["result"], "failed");
+        assert_eq!(value["codex"]["sqlite"]["events"][0]["call_id"], "reused");
+        assert!(!home.path().join("fixture.db").exists());
+    }
+    append_records(&path, &[event(&stamp, "response_item", json!({"type":"function_call_output",
+        "call_id":"reused","output":{"exit_code":0,"output":"fixture success"}}))]);
+    let service = Service::start(home.path(), true, None);
+    let value = snapshot_when(&service, |value| value["codex"]["sqlite"]["events"].as_array().is_some_and(|events|
+        events.len() == 2 && events.iter().all(|event| event["result"] == "returned")));
+    assert_eq!(value["codex"]["sqlite"]["total"], 2);
+
+}
+
+#[test]
 fn retained_skill_preview_uses_current_call_tool_without_new_skill_read() {
     let home = tempdir().unwrap();
     let (path, stamp) = native_event_fixture(home.path());

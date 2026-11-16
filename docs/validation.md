@@ -419,3 +419,13 @@ Python thread 列表以 updated_at 穩定排序, 同時間保留首次來源順�
 Python 實際 save/load 與修改來源 mtime 後重啟確認 [3,2,1] / [3,1,2], 較新 updated_at 的 thread3 始終優先, HTTP 先失敗後通過, 單元測試另覆蓋 discovered count 不完整與缺少來源順序的 fallback, 未宣稱 metadata-only 來源順序或 overflow 全域順序已對齊
 
 本批完整單執行緒 `--locked --offline` service binary 318 項 (111.83 秒)、HTTP 212 項 (162.97 秒) 通過, Linux / Rust 1.100.0 合成資料, 基底 0ea2399 已核對遠端一致, 其他既有待辦保留
+
+### 重複 call 的 SQLite result 欄位來源
+
+Python 相同 call ID 的後續請求保留既有 error, 即使前次請求不是 SQLite, 後續 SQLite 事件仍應顯示 failed, Rust 原先只檢查 sql_failed 而顯示 returned, 現在投影時同時採用已存在的 failure metadata, 未新增錯誤保存或變更 checkpoint flag
+
+Python 實際 save/load 與 HTTP 先失敗後通過, 重啟後維持 failed, 後續成功輸出恢復 returned, 合成 SQLite 指令只供靜態辨識, 未執行 SQL 或建立來源資料庫, 單元涵蓋已知 failure、sql_failed、completed 組合且序列化 checkpoint 不變
+
+此範圍只使用已存在的錯誤證據, 未補蒐集原先停用或未保存的 failure, 不改查詢、事件數、保留策略、容量或 eviction, SQLite 觀測仍依既有流程發布與保存 result
+
+本批完整單執行緒 `--locked --offline` service binary 319 項 (108.93 秒)、HTTP 213 項 (160.94 秒) 通過, Linux / Rust 1.100.0 合成資料, 基底 2f2d3c1 已核對遠端一致, 其他既有待辦保留

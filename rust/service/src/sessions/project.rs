@@ -614,7 +614,9 @@ impl Call {
         let completed = self.completed.map(stamp);
         let sql_timestamp = timestamp.clone();
         let sql_completed = completed.clone();
-        let result = if self.sql_failed {
+        // A duplicate call may become SQL after an earlier non-SQL failure.
+        // Python retains that call error; project it without changing stored flags.
+        let result = if self.sql_failed || self.failure.is_some() {
             "failed"
         } else if self.completed.is_some() {
             "returned"
@@ -2398,6 +2400,27 @@ mod snapshot_merge_tests {
                         &mut BTreeMap::new(), false, false, false, false);
                     assert_eq!(row["task_runs"], json!((!durations.is_empty()).then_some(durations.len())));
                     assert_eq!(row["task_duration_ms"], json!((!durations.is_empty()).then(|| durations.iter().sum::<i64>())));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sql_result_projection_uses_known_failure_without_changing_checkpoint_flags() {
+        for sql_failed in [false, true] {
+            for failed in [false, true] {
+                for completed in [false, true] {
+                    let mut value = call("exec_command", Some("2026-11-13T01:00:00Z"));
+                    value.sqlite.observe("exec_command", json!({"cmd":"sqlite3 fixture.db 'SELECT 1'"}).as_object(), false);
+                    value.sql_failed = sql_failed;
+                    value.failure = failed.then(|| tool_failure(&json!({"exit_code":2,"output":"fixture"})).unwrap());
+                    value.completed = completed.then_some(value.time.unwrap());
+                    let before = serde_json::to_value(&value).unwrap();
+                    let events: Vec<_> = value.activities("thread", "call").collect();
+                    assert_eq!(events.len(), 2);
+                    let expected = if failed || sql_failed { "failed" } else if completed { "returned" } else { "unknown" };
+                    assert!(events.iter().all(|event| event["result"] == expected));
+                    assert_eq!(serde_json::to_value(&value).unwrap(), before);
                 }
             }
         }
