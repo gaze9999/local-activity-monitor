@@ -130,7 +130,7 @@ pub fn discover(home: &Path) -> BTreeMap<String, Option<super::source_introducti
             let description = (index < 64)
                 .then(|| table.get("description").and_then(toml::Value::as_str))
                 .flatten()
-                .map(str::trim)
+                .map(super::schedules::trim_text)
                 .filter(|text| !text.is_empty())
                 .map(|text| super::source_introduction::Description {
                     text: super::details::redact_description(
@@ -412,6 +412,18 @@ pub fn scoped_summary(events: &[Value], cutoff: DateTime<Utc>, health: &str, all
 #[cfg(test)]
 mod connection_tests {
     use super::*;
+    #[test]
+    fn configured_description_matches_python_control_whitespace() {
+        let home = tempfile::tempdir().unwrap();
+        for escape in ["001c", "001d", "001e", "001f"] {
+            std::fs::write(home.path().join("config.toml"), format!("[mcp_servers.fixture]\ndescription=\"\\u{escape}Config purpose\\u{escape}\"\n")).unwrap();
+            let sources = discover(home.path());
+            let description = sources["fixture"].as_ref().unwrap();
+            assert_eq!(description.text, "Config purpose");
+            assert_eq!(description.source, "config");
+        }
+    }
+
     #[test]
     fn snapshot_event_preview_matches_full_collection() {
         let time = parse_utc_stamp("2026-11-13T01:00:00Z").unwrap();

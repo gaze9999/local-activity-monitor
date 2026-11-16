@@ -238,3 +238,19 @@ Python tool_error 合成案例與 Rust 先失敗後通過回歸確認正數、�
 Python 專案來源 fixture、Rust 先失敗後通過回歸、projects 模組 7 項測試與 HTTP 專案快照 / detail 回歸通過, 覆蓋 canonical mapping、名稱與路徑修剪、來源優先、metadata 停用及未知專案 / 任意路徑拒絕, 未增加查詢或改變來源範圍
 
 此 metadata 段落另執行完整 service 單執行緒回歸, `cargo test --locked --offline --manifest-path rust/service/Cargo.toml --bin local-activity-monitor -- --test-threads=1` 的 295 項與 `--test http -- --test-threads=1` 的 203 項全部通過, 這是 Linux 單執行緒測試證據, 不取代前次並行波動的穩定性驗證或原生平台驗收
+
+### Plugin 設定分行與 metadata 缺值
+
+Plugin 設定讀取對齊 Python splitlines 與空白辨識, 修正 CR-only 等分行格式漏掉 enabled 的情況, 保持進入其他 section 時重設歸屬, 這是既有唯讀 metadata parser 的相容性處理, 不改寫設定或啟用 Plugin
+
+Manifest 的空白版本改回退到快取資料夾版本, 顯示名稱與描述沿用 Python 文字修剪, 字元上限、目錄名稱白名單、符號連結拒絕、讀取預算及版本排序規則不變
+
+Python read_plugins 合成檔確認 11 種分行與 U+001F 空白、版本回退及文字欄位, Rust 兩項回歸先失敗後通過, plugins 模組 8 項與 HTTP 快照、來源更新及 metadata 開關回歸通過, 未執行實際 Plugin 或讀取帳號來源, 本段基底為 2db42b0
+
+### MCP 來源簡介空白與回退
+
+MCP 設定、套件 metadata 與 README 簡介對齊 Python 的 U+001C–U+001F 空白語意, 空白設定與套件描述不再阻止有效來源回退, README 標題與空白段落仍排除, 套件與 README 描述中的連續空白收斂為單一空格
+
+Python source_description 合成 fixture 確認設定修剪、套件正規化及 README 回退, Rust 簡介回歸先失敗後通過, source_introduction 2 項、設定描述 1 項及 HTTP 套件 / README 簡介回歸通過, 遮蔽、400 字元上限、來源根目錄限制與快取策略不變
+
+本輪核對 LAM main 5c03daf 與 workspace main 9e606e0 未變, 保留 Plugin 同批未提交變更, 未查詢真實來源或重跑完整平台驗收

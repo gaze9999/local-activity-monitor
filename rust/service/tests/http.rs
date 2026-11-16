@@ -757,13 +757,13 @@ fn plugin_metadata_appears_in_snapshot_and_obeys_metadata_switch() {
     let home = tempdir().unwrap();
     fs::write(
         home.path().join("config.toml"),
-        "[plugins.\"fixture@provider\"]\nenabled = true\n",
+        "\u{1f}[plugins.\"fixture@provider\"]\r\u{1f}enabled = true\r",
     )
     .unwrap();
     let path = home.path().join("plugins/cache/provider/fixture/1.0.0");
     fs::create_dir_all(path.join("skills/example")).unwrap();
     fs::write(path.join("skills/example/SKILL.md"), "PRIVATE_SKILL_BODY").unwrap();
-    fs::write(path.join("plugin.json"),r#"{"version":"1.0.0","skills":"./skills","mcpServers":{"demo":{"command":"PRIVATE_COMMAND"}}}"#).unwrap();
+    fs::write(path.join("plugin.json"),r#"{"version":"\u001c\u001f","description":"\u001eFixture\u001f","interface":{"displayName":"\u001cName\u001d"},"skills":"./skills","mcpServers":{"demo":{"command":"PRIVATE_COMMAND"}}}"#).unwrap();
     let service = Service::start(home.path(), true, None);
     let found = snapshot_when(&service, |value| {
         value["codex"]["plugins"]["items"]
@@ -772,6 +772,9 @@ fn plugin_metadata_appears_in_snapshot_and_obeys_metadata_switch() {
     });
     let item = &found["codex"]["plugins"]["items"][0];
     assert_eq!(item["enabled"], true);
+    assert_eq!(item["version"], "1.0.0");
+    assert_eq!(item["display_name"], "Name");
+    assert_eq!(item["description"], "Fixture");
     assert_eq!(item["skills_count"], 1);
     assert_eq!(item["mcp_servers"], json!(["demo"]));
     assert!(!found.to_string().contains("PRIVATE_COMMAND"));
@@ -807,7 +810,7 @@ fn plugin_metadata_appears_in_snapshot_and_obeys_metadata_switch() {
     });
     fs::write(
         home.path().join("config.toml"),
-        "[plugins.\"fixture@provider\"]\nenabled = false\n",
+        "[plugins.\"fixture@provider\"]\renabled = false\r",
     )
     .unwrap();
     snapshot_when(&service, |value| {
@@ -2725,7 +2728,7 @@ fn mcp_catalog_reads_bounded_package_and_readme_introductions() {
     fs::write(package.join("server.py"), "PRIVATE_SCRIPT").unwrap();
     fs::write(
         package.join("package.json"),
-        r#"{"description":"Package purpose api_key=PRIVATE_KEY"}"#,
+        r#"{"description":"\u001cPackage\u001d purpose api_key=PRIVATE_KEY\u001f"}"#,
     )
     .unwrap();
     fs::write(
@@ -2736,13 +2739,13 @@ fn mcp_catalog_reads_bounded_package_and_readme_introductions() {
     fs::write(readme.join("server.py"), "PRIVATE_SCRIPT").unwrap();
     fs::write(
         readme.join("README.md"),
-        "# Title\n\nProvides [local indexes](https://example.invalid)\n\n```\nPRIVATE_CODE\n```\n",
+        "\u{1c}# Title\n\u{1d}\nProvides\u{1e} [local indexes](https://example.invalid)\u{1f}\n\n```\nPRIVATE_CODE\n```\n",
     )
     .unwrap();
     let package_script =
         serde_json::to_string(&package.join("server.py").to_string_lossy()).unwrap();
     let readme_script = serde_json::to_string(&readme.join("server.py").to_string_lossy()).unwrap();
-    fs::write(home.path().join("config.toml"), format!("[mcp_servers.package]\nargs=[{package_script}]\n[mcp_servers.readme]\nargs=[{readme_script}]\n")).unwrap();
+    fs::write(home.path().join("config.toml"), format!("[mcp_servers.package]\nargs=[{package_script}]\ndescription=\"\\u001c\\u001f\"\n[mcp_servers.readme]\nargs=[{readme_script}]\n")).unwrap();
     let service = Service::start(home.path(), true, None);
     let snapshot = snapshot_when(&service, |value| {
         value["mcp"]["configuration"]["configured_sources"] == 2

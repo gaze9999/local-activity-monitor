@@ -23,7 +23,7 @@ static CODE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)```.*?```|~~~.*?~~~|<!--.*?-->").unwrap());
 static FRONT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)^---\n.*?\n---\n").unwrap());
 static LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\([^)]*\)").unwrap());
-static PARAGRAPH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n\s*\n").unwrap());
+static PARAGRAPH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n[\s\x1c-\x1f]*\n").unwrap());
 static MODULE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$").unwrap());
 static CACHE: LazyLock<Mutex<BTreeMap<String, (Instant, Option<Description>)>>> =
@@ -202,7 +202,11 @@ fn read(path: &Path, exact_limit: bool) -> Option<String> {
 }
 
 fn result(text: &str, source: &str, path: &Path) -> Description {
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = text
+        .split(|character: char| character.is_whitespace() || matches!(character, '\u{1c}'..='\u{1f}'))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     Description {
         text: super::details::redact_description(&normalized.chars().take(400).collect::<String>()),
         source: source.into(),
@@ -236,7 +240,7 @@ fn extract(table: &toml::map::Map<String, toml::Value>) -> Option<Description> {
                         .map(str::to_owned)
                 })
             };
-            if let Some(text) = text.filter(|text| !text.trim().is_empty()) {
+            if let Some(text) = text.filter(|text| !super::schedules::trim_text(text).is_empty()) {
                 return Some(result(&text, name, &path));
             }
         }
@@ -274,7 +278,7 @@ fn extract(table: &toml::map::Map<String, toml::Value>) -> Option<Description> {
             let body = FRONT.replace(&body, "");
             let body = CODE.replace_all(&body, "");
             for paragraph in PARAGRAPH.split(&body) {
-                let paragraph = paragraph.trim();
+                let paragraph = super::schedules::trim_text(paragraph);
                 if paragraph.is_empty()
                     || ["#", "!", "[![", "|", "- ", "* ", ">", "<"]
                         .iter()
@@ -322,6 +326,22 @@ pub(super) fn introduction(table: &toml::map::Map<String, toml::Value>) -> Optio
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn introductions_match_python_control_whitespace_and_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let table = toml::map::Map::from_iter([("cwd".into(), toml::Value::String(root.to_string_lossy().into_owned()))]);
+        fs::write(root.join("package.json"), r#"{"description":"\u001cPackage\u001d purpose\u001e\u001f"}"#).unwrap();
+        let description = extract(&table).unwrap();
+        assert_eq!(description.text, "Package purpose");
+        assert_eq!(description.source, "package.json");
+        fs::write(root.join("package.json"), r#"{"description":"\u001c\u001d\u001e\u001f"}"#).unwrap();
+        fs::write(root.join("README.md"), "\u{1c}# Heading\n\u{1d}\n\u{1e}Provides\u{1f} local indexes\u{1c}\n").unwrap();
+        let description = extract(&table).unwrap();
+        assert_eq!(description.text, "Provides local indexes");
+        assert_eq!(description.source, "README.md");
+    }
 
     #[test]
     fn local_introduction_rejects_symlink_and_private_names() {

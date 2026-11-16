@@ -16,10 +16,10 @@ static NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_.-]{1,1
 static VERSION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[0-9]+(?:\.[0-9]+)*(?:[-+][A-Za-z0-9_.-]+)?$").unwrap());
 static HEADER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"^\s*\[plugins\.\"([A-Za-z0-9_.-]+)@([A-Za-z0-9_.-]+)\"\]\s*(?:#.*)?$"#).unwrap()
+    Regex::new(r#"^[\s\x1c-\x1f]*\[plugins\.\"([A-Za-z0-9_.-]+)@([A-Za-z0-9_.-]+)\"\][\s\x1c-\x1f]*(?:#.*)?$"#).unwrap()
 });
 static ENABLED: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\s*enabled\s*=\s*(true|false)\s*(?:#.*)?$").unwrap());
+    LazyLock::new(|| Regex::new(r"^[\s\x1c-\x1f]*enabled[\s\x1c-\x1f]*=[\s\x1c-\x1f]*(true|false)[\s\x1c-\x1f]*(?:#.*)?$").unwrap());
 #[derive(Default)]
 struct Budget {
     bytes: usize,
@@ -154,7 +154,7 @@ fn read(home: &Path, path: &Path, budget: &mut Budget) -> (Option<Value>, &'stat
     }
 }
 fn text(value: &Value, max: usize) -> Option<String> {
-    let value = value.as_str()?.trim();
+    let value = super::schedules::trim_text(value.as_str()?);
     (!value.is_empty()).then(|| value.chars().take(max).collect())
 }
 fn version_key(value: &str) -> Vec<&str> {
@@ -322,8 +322,8 @@ fn configured(home: &Path, budget: &mut Budget) -> Vec<((String, String), Option
         return result;
     };
     let mut current = None;
-    for line in data.lines() {
-        if line.trim_start().starts_with('[') {
+    for line in data.split(['\n', '\r', '\u{b}', '\u{c}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2028}', '\u{2029}']) {
+        if super::schedules::trim_text(line).starts_with('[') {
             current = HEADER
                 .captures(line)
                 .map(|c| (c[2].to_owned(), c[1].to_owned()));
@@ -473,6 +473,37 @@ pub(super) fn scan(home: &Path) -> (Value, Value, Vec<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn configuration_matches_python_line_boundaries_and_section_resets() {
+        let home = tempfile::tempdir().unwrap();
+        for separator in ["\n", "\r\n", "\r", "\u{b}", "\u{c}", "\u{1c}", "\u{1d}", "\u{1e}", "\u{85}", "\u{2028}", "\u{2029}"] {
+            let config = ["[plugins.\"fixture@provider\"]", "enabled = false", "[unrelated]", "enabled = true", "[plugins.\"second@provider\"]", "enabled = true"].into_iter().map(|line| format!("\u{1f}{line}\u{1f}")).collect::<Vec<_>>().join(separator);
+            fs::write(home.path().join("config.toml"), &config).unwrap();
+            let mut budget = Budget::default();
+            assert_eq!(configured(home.path(), &mut budget), vec![
+                (("provider".into(),"fixture".into()), Some(false)),
+                (("provider".into(),"second".into()), Some(true)),
+            ], "{separator:?}");
+            assert_eq!(budget.bytes, config.len());
+        }
+    }
+
+    #[test]
+    fn manifest_empty_control_whitespace_preserves_directory_version() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("plugins/cache/provider/fixture/1.2.0");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("plugin.json"), json!({
+            "version":"\u{1c}\u{1d}\u{1e}\u{1f}", "description":"\u{1e}說明\u{1f}",
+            "interface":{"displayName":"\u{1c}名稱\u{1d}"}, "unknown":"PRIVATE"
+        }).to_string()).unwrap();
+        let (result, _, _) = scan(home.path());
+        assert_eq!(result["items"][0]["version"], "1.2.0");
+        assert_eq!(result["items"][0]["display_name"], "名稱");
+        assert_eq!(result["items"][0]["description"], "說明");
+        assert!(!result.to_string().contains("PRIVATE"));
+    }
+
     #[test]
     fn scans_first_observed_equal_numeric_version() {
         let home = tempfile::tempdir().unwrap();
