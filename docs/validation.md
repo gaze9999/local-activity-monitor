@@ -289,3 +289,15 @@ MCP config 解析對齊 Python Path.read_text 的 universal newline 行為, 在�
 同批 MCP 文件發現流程對齊 Python 的 JavaScript 設定檔名稱比對, 不再把 CONFIG.JS / config.JS 當成 config.js 並讀取其參照文件, 一般資料副檔名仍保持大小寫不敏感, 未擴大讀取來源
 
 Python documents 合成 fixture 確認兩種規則, Rust documents 模組 6 項通過, HTTP 文件列舉回歸確認排除大寫 JavaScript 設定與其參照, 同時保留 CR-only 設定、合法文件、遮蔽及連結拒絕, 初版測試誤把資料副檔名也視為大小寫敏感, 已依原始 Python 修正期望, 未修改原有資料副檔名規則
+
+### MCP Python 模組名稱辨識
+
+本機模組來源名稱對齊 Python regex 的字元集合, 保留 ASCII 開頭及各段分界, 接受後續 Unicode 字母、數字與底線, 排除 Rust `\w` 額外納入的組合符號與連接控制字元, 同時修正漏掉 superscript 數字名稱的來源
+
+Python source_roots 合成 fixture 核對字母、數字、底線、組合符號及 join control, Rust 回歸先失敗後通過, source_introduction 3 項與含 Unicode 模組路徑的 HTTP docstring 回歸通過, runtime fixture 不可執行, 未執行模組或其程式碼, 路徑安全檢查、16 筆根目錄上限及 metadata 讀取界線不變
+
+本段基底 07cf188, LAM main 5c03daf 與 workspace main 4616074 已核對, 未變更既有來源事件排序、restore 容量與大型快照待辦
+
+同批模組簡介加入 Python ast.get_docstring / inspect.cleandoc 的縮排清理, 單行全空白 docstring 不再擋住 README 回退, 保留 Python 對多行殘留空白的來源選取差異, tab 以 8 欄展開, Unicode 縮排依字元計算
+
+已核對 helper 僅由來源簡介呼叫, 保留原有 65,536-byte 來源上限、語法解析與禁止執行界線, Python ast / source_description 合成 fixture 通過, Rust docstring 回歸先失敗後通過, session-core sqlite-python 完整 33 項、source_introduction 4 項及 HTTP catalog 5 項通過

@@ -2684,7 +2684,7 @@ fn mcp_catalog_extracts_python_module_docstring_without_execution() {
     native_event_fixture(home.path());
     let real_home = home.path().canonicalize().unwrap();
     let runtime = real_home.join("venv/bin/python");
-    let module = real_home.join("venv/lib/python3.14/site-packages/example_pkg");
+    let module = real_home.join("venv/lib/python3.14/site-packages/example_pkg²");
     fs::create_dir_all(runtime.parent().unwrap()).unwrap();
     fs::create_dir_all(&module).unwrap();
     fs::write(&runtime, "not executable").unwrap();
@@ -2692,7 +2692,7 @@ fn mcp_catalog_extracts_python_module_docstring_without_execution() {
     let runtime = serde_json::to_string(&runtime.to_string_lossy()).unwrap();
     fs::write(
         home.path().join("config.toml"),
-        format!("[mcp_servers.example]\ncommand={runtime}\nargs=['-m','example_pkg.runner']\n"),
+        format!("[mcp_servers.example]\ncommand={runtime}\nargs=['-m','example_pkg².runner']\n"),
     )
     .unwrap();
     let service = Service::start(home.path(), true, None);

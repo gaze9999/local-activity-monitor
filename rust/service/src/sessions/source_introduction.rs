@@ -25,7 +25,7 @@ static FRONT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)^---\n.*?\n---
 static LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\([^)]*\)").unwrap());
 static PARAGRAPH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n[\s\x1c-\x1f]*\n").unwrap());
 static MODULE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$").unwrap());
+    LazyLock::new(|| Regex::new(r"^[A-Za-z_][\p{L}\p{N}_]*(?:\.[A-Za-z_][\p{L}\p{N}_]*)*$").unwrap());
 static CACHE: LazyLock<Mutex<BTreeMap<String, (Instant, Option<Description>)>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
@@ -326,6 +326,43 @@ pub(super) fn introduction(table: &toml::map::Map<String, toml::Value>) -> Optio
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blank_module_docstring_uses_python_readme_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let table = toml::map::Map::from_iter([
+            ("cwd".into(), toml::Value::String(root.to_string_lossy().into_owned())),
+            ("args".into(), toml::Value::Array(vec![toml::Value::String("-m".into()), toml::Value::String("runner".into())])),
+        ]);
+        fs::write(root.join("README.md"), "README purpose").unwrap();
+        fs::write(root.join("runner.py"), "'   '\nraise RuntimeError('DO_NOT_RUN')\n").unwrap();
+        let description = extract(&table).unwrap();
+        assert_eq!(description.source, "README.md");
+        assert_eq!(description.text, "README purpose");
+        fs::write(root.join("runner.py"), "'\\n   '\n").unwrap();
+        let description = extract(&table).unwrap();
+        assert_eq!(description.source, "runner.py");
+        assert_eq!(description.text, "");
+    }
+
+    #[test]
+    fn module_roots_match_python_identifier_characters() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        fs::create_dir(root.join("bin")).unwrap();
+        let runtime = root.join("bin/python");
+        fs::write(&runtime, "NOT_EXECUTABLE").unwrap();
+        for (module, valid) in [("demoé", true), ("demo²", true), ("demo_1", true), ("demo\u{301}", false), ("demo\u{200c}", false)] {
+            let package = root.join("Lib/site-packages").join(module);
+            fs::create_dir_all(&package).unwrap();
+            let table = toml::map::Map::from_iter([
+                ("command".into(), toml::Value::String(runtime.to_string_lossy().into_owned())),
+                ("args".into(), toml::Value::Array(vec![toml::Value::String("-m".into()), toml::Value::String(module.into())])),
+            ]);
+            assert_eq!(roots(&table).contains(&package), valid, "{module:?}");
+        }
+    }
 
     #[test]
     fn introductions_match_python_control_whitespace_and_fallback() {

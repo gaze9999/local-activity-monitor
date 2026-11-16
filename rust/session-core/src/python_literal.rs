@@ -307,7 +307,40 @@ fn convert(expr: &Expr, depth: usize, nodes: &mut usize) -> Option<Value> {
     }
 }
 
-/// Extract a module's first literal string without executing the module.
+// Match inspect.cleandoc as used by ast.get_docstring, without evaluation.
+fn clean_docstring(text: &str) -> String {
+    let whitespace = |character: char| character.is_whitespace() || matches!(character, '\u{1c}'..='\u{1f}');
+    let mut expanded = String::new();
+    let mut column = 0;
+    for character in text.chars() {
+        if character == '\t' {
+            let spaces = 8 - column % 8;
+            expanded.extend(std::iter::repeat_n(' ', spaces));
+            column += spaces;
+        } else {
+            expanded.push(character);
+            column = if matches!(character, '\n' | '\r') { 0 } else { column + 1 };
+        }
+    }
+    let mut lines = expanded.split('\n').collect::<Vec<_>>();
+    let margin = lines.iter().skip(1).filter_map(|line| {
+        let content = line.trim_start_matches(whitespace);
+        (!content.is_empty()).then(|| line.chars().count() - content.chars().count())
+    }).min();
+    if let Some(first) = lines.first_mut() {
+        *first = first.trim_start_matches(whitespace);
+    }
+    if let Some(margin) = margin {
+        for line in lines.iter_mut().skip(1) {
+            *line = line.char_indices().nth(margin).map_or("", |(offset, _)| &line[offset..]);
+        }
+    }
+    let start = lines.iter().position(|line| !line.is_empty()).unwrap_or(lines.len());
+    let end = lines.iter().rposition(|line| !line.is_empty()).map_or(start, |index| index + 1);
+    lines[start..end].join("\n")
+}
+
+/// Extract a module's cleaned first literal string without executing the module.
 pub fn python_module_docstring(source: &str) -> Option<String> {
     if source.len() > 65536 || excessive_integer(source) {
         return None;
@@ -335,7 +368,8 @@ pub fn python_module_docstring(source: &str) -> Option<String> {
     let Constant::Str(text) = &value.value else {
         return None;
     };
-    (!text.is_empty()).then(|| text.clone())
+    let text = clean_docstring(text);
+    (!text.is_empty()).then_some(text)
 }
 
 pub fn parse_python_literal(source: &str) -> Option<Value> {
@@ -369,10 +403,23 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn module_docstring_matches_python_indentation_and_empty_values() {
+        for (literal, expected) in [
+            ("'   '", None),
+            ("'\\u001c\\u001f'", None),
+            ("'\\n   '", Some("   ")),
+            ("'\\tTitle\\n\\t\\tDetail\\n'", Some("Title\nDetail")),
+            ("'Title\\n  中\\n    文'", Some("Title\n中\n  文")),
+        ] {
+            assert_eq!(python_module_docstring(literal).as_deref(), expected, "{literal}");
+        }
+    }
+
+    #[test]
     fn module_docstring_requires_valid_source_and_literal_first_statement() {
         assert_eq!(
             python_module_docstring("# comment\n'''Purpose\n  details'''\nvalue = 1\n").as_deref(),
-            Some("Purpose\n  details")
+            Some("Purpose\ndetails")
         );
         assert!(python_module_docstring("value = 'not a docstring'\n").is_none());
         assert!(python_module_docstring("f'{danger()}'\n").is_none());
