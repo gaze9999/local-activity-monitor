@@ -779,11 +779,9 @@ fn plugin_metadata_appears_in_snapshot_and_obeys_metadata_switch() {
     assert_eq!(item["mcp_servers"], json!(["demo"]));
     assert!(!found.to_string().contains("PRIVATE_COMMAND"));
     assert!(!found.to_string().contains("PRIVATE_SKILL_BODY"));
-    fs::write(
-        path.join("plugin.json"),
-        r#"{"version":"1.0.0","skills":"./skills","mcpServers":{"demo":{},"second":{}}}"#,
-    )
-    .unwrap();
+    let mut utf16_manifest = vec![0xfe, 0xff];
+    utf16_manifest.extend(r#"{"version":"1.0.0","skills":"./skills","mcpServers":{"demo":{},"second":{}}}"#.encode_utf16().flat_map(u16::to_be_bytes));
+    fs::write(path.join("plugin.json"), &utf16_manifest).unwrap();
     let changed = snapshot_when(&service, |value| {
         value["codex"]["plugins"]["items"]
             .as_array()
@@ -797,6 +795,7 @@ fn plugin_metadata_appears_in_snapshot_and_obeys_metadata_switch() {
         changed["codex"]["plugins"]["items"][0]["mcp_servers"],
         json!(["demo", "second"])
     );
+    assert_eq!(fs::read(path.join("plugin.json")).unwrap(), utf16_manifest);
     fs::create_dir_all(path.join("skills/new_skill")).unwrap();
     fs::write(path.join("skills/new_skill/SKILL.md"), "private content").unwrap();
     snapshot_when(&service, |value| {
