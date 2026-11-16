@@ -3652,17 +3652,20 @@ impl Collector {
             })
             .collect();
         drop(journal);
+        let complete_source_order = self.has_complete_source_order();
         let tool_errors: Vec<_> = threads
             .iter()
             .flat_map(|(thread, (projection, _))| {
-                projection.calls.iter().filter_map(move |(id, call)| {
+                let calls = if complete_source_order { projection.ordered_calls() }
+                    else { projection.calls.iter().collect() };
+                calls.into_iter().filter_map(move |(id, call)| {
                     call.failure_event(thread, id).map(|event| (call.time, event))
                 })
             })
             .collect();
         let mut live_errors: Vec<_> = session.iter().map(|event| (false, None, event))
             .chain(tool_errors.iter().map(|(start, event)| (true, *start, event))).collect();
-        if self.has_complete_source_order() {
+        if complete_source_order {
             let mut thread_order = BTreeMap::new();
             for (_, state) in self.ordered_working_sources() {
                 if let Some(id) = state.projection.id.as_deref() {
@@ -5512,6 +5515,48 @@ impl Drop for Collector {
 #[cfg(test)]
 mod log_tests {
     use super::*;
+
+    #[test]
+    fn tool_failure_order_preserves_live_insertion_and_checkpoint_restore_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        let path = root.join(format!("rollout-{id}.jsonl"));
+        let mut records = vec![json!({"type":"session_meta","timestamp":"2026-11-13T00:00:00Z","payload":{"id":id}})];
+        for (call, time) in [("z", "2026-11-13T00:10:00Z"), ("a", "2026-11-13T00:10:00Z"), ("b", "2026-11-13T00:20:00Z"), ("z", "2026-11-13T00:10:00Z")] {
+            records.push(json!({"type":"response_item","timestamp":time,"payload":{"type":"function_call","name":"exec_command","call_id":call,"arguments":"{}"}}));
+            records.push(json!({"type":"response_item","timestamp":"2026-11-13T01:00:00Z","payload":{"type":"function_call_output","call_id":call,"output":{"exit_code":2,"output":"fixture failure"}}}));
+        }
+        std::fs::write(&path, records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")+"\n").unwrap();
+        for restart in [false, true] {
+            let mut collector = Collector::new(root.join("monitoring"), true, None);
+            for _ in 0..4 { collector.refresh(&root, &AtomicBool::new(false), true, true, CommandSwitches::default()); }
+            collector.error_history.clear();
+            let snapshots = collector.snapshots("ok", "ok", 1);
+            let value: Value = serde_json::from_slice(&snapshots.window_bytes(3)).unwrap();
+            let ids: Vec<_> = value["errors"]["events"].as_array().unwrap().iter().filter(|event| event["source"] == "tool_result")
+                .map(|event| event["call_id"].as_str().unwrap()).collect();
+            assert_eq!(ids, if restart { vec!["b", "a", "z"] } else { vec!["z", "a", "b"] });
+            if restart {
+                assert!(value["codex"]["read_state"]["checkpoint"]["restored"].as_u64().unwrap() > 0);
+                let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+                for call in ["q", "a"] {
+                    let records = [
+                        json!({"type":"response_item","timestamp":"2026-11-13T00:05:00Z","payload":{"type":"function_call","name":"exec_command","call_id":call,"arguments":"{}"}}),
+                        json!({"type":"response_item","timestamp":"2026-11-13T01:00:00Z","payload":{"type":"function_call_output","call_id":call,"output":{"exit_code":7,"output":"fixture replacement"}}}),
+                    ];
+                    std::io::Write::write_all(&mut file, (records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")+"\n").as_bytes()).unwrap();
+                }
+                for _ in 0..4 { collector.refresh(&root, &AtomicBool::new(false), true, true, CommandSwitches::default()); }
+                collector.error_history.clear();
+                let snapshots = collector.snapshots("ok", "ok", 2);
+                let value: Value = serde_json::from_slice(&snapshots.window_bytes(3)).unwrap();
+                let events: Vec<_> = value["errors"]["events"].as_array().unwrap().iter().filter(|event| event["source"] == "tool_result").collect();
+                assert_eq!(events.iter().map(|event| event["call_id"].as_str().unwrap()).collect::<Vec<_>>(), ["b", "a", "z", "q"]);
+                assert_eq!(events[1]["exit_code"], 7);
+            }
+        }
+    }
 
     #[test]
     fn checkpoint_call_order_retains_python_restore_provenance() {

@@ -341,3 +341,15 @@ Python CodexCollector 隔離 fixture 確認原始來源順序、mtime rescan、�
 Python 原始 fixture 與先失敗後通過回歸確認 z,a,tool,m, 四窗測試另確認 1h 排除開始時間在窗外的 call failure, 即使完成時間仍在窗內, logs 僅針對 session / tool_result 比較順序, 不排除原有 monitor 啟動事件, 初版測試誤含窗外 call 並把 monitor 訊息納入期望, 已修正測試而非改動 runtime 篩選
 
 最終版本以 Linux / Rust 1.100.0 執行完整 `--locked --offline` 單執行緒回歸, service binary 308 項全數通過 (91.28 秒), HTTP 205 項全數通過 (142.64 秒), 保留並行、原生平台與真實資料驗收限制
+
+### 完整 working set 的 tool-result call 插入順序
+
+工具錯誤預覽改用獨立的記憶體呈現序號, fresh parse 保持 call 首次插入位置, 同 call 更新只替換內容, 跨來源合併保持首次位置與後來源內容, checkpoint 載入依既有 reader 資料列順序重建, 還原後新 call 接在尾端
+
+Python checkpoint 的實際規則是 `event_time DESC, call_id`, 只有 timestamp 相同才依 call ID 排序, 此前相同時間 fixture 的字母排序不能推廣為一般還原規則, 已以不同時間合成資料確認 live z,a,b 與 restore b,a,z, 還原後新增 q 並更新 a 為 b,a,z,q
+
+呈現序號不寫入 call / cursor payload, 不取代原本 eviction sequence, 不增加保存欄位、保留數量、讀取來源或調整 50,000 / 8,192 等容量, `/api/snapshot` 參數、欄位來源與 detail 不變, 只有完整 working set 的 tool-result errors 使用新順序, 其他預覽與 overflow 全域順序仍待完成
+
+基底 b5c9601, LAM main 5c03daf / workspace main 4616074 已核對未變, Python 實際 save/load/append fixture 與 Rust 回歸先失敗後通過, 新增跨來源選取 / 重複覆蓋 / 序號不持久化檢查, snapshot merge 20 項、HTTP checkpoint 22 項及 HTTP error 20 項通過, 最終含還原後 append 的回歸另行通過, 本段未重跑全套
+
+提交前已完成本批全套單執行緒 `--locked --offline` 回歸: service binary 310 項全數通過 (109.93 秒), HTTP 205 項全數通過 (151.96 秒), Linux / Rust 1.100.0, 未變更 eviction / capacity, 保留其他預覽、overflow 與原生平台驗收缺口

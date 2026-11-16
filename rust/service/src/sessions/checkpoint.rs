@@ -92,10 +92,14 @@ pub fn snapshot_projection(checkpoint: Checkpoint, calls_incomplete: bool) -> Op
     let calls = checkpoint
         .calls
         .into_iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(index, row)| {
             serde_json::from_str::<Call>(&row.payload)
                 .ok()
-                .map(|call| (row.call_id, call))
+                .map(|mut call| {
+                    call.presentation_sequence = index as u64;
+                    (row.call_id, call)
+                })
         })
         .collect::<Option<BTreeMap<_, _>>>()?;
     if calls.values().any(|call| {
@@ -346,10 +350,14 @@ impl Checkpoints {
             let calls = checkpoint
                 .calls
                 .into_iter()
-                .map(|row| {
+                .enumerate()
+                .map(|(index, row)| {
                     serde_json::from_str::<Call>(&row.payload)
                         .ok()
-                        .map(|value| (row.call_id, value))
+                        .map(|mut value| {
+                            value.presentation_sequence = index as u64;
+                            (row.call_id, value)
+                        })
                 })
                 .collect::<Option<BTreeMap<_, _>>>()?;
             if calls.values().any(|call| {

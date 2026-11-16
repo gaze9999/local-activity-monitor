@@ -256,6 +256,10 @@ pub struct Call {
     pub time: Option<Time>,
     completed: Option<Time>,
     sequence: u64,
+    // Presentation only: live insertion and checkpoint row order differ.
+    // Never reuse the persisted eviction sequence or serialize this rank.
+    #[serde(skip)]
+    pub(super) presentation_sequence: u64,
     #[serde(default)]
     observation: Option<Observed>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -892,6 +896,8 @@ pub struct Projection {
     pub pending_errors: Vec<SessionError>,
     next_sequence: u64,
     #[serde(skip)]
+    next_presentation_sequence: u64,
+    #[serde(skip)]
     call_order: VecDeque<String>,
     #[serde(skip)]
     pub dirty_calls: BTreeSet<String>,
@@ -1185,6 +1191,12 @@ impl Projection {
         self.call_order.retain(|id| self.calls.contains_key(id));
     }
 
+    pub(super) fn ordered_calls(&self) -> Vec<(&String, &Call)> {
+        let mut calls: Vec<_> = self.calls.iter().collect();
+        calls.sort_by_key(|(id, call)| (call.presentation_sequence, *id));
+        calls
+    }
+
     pub fn restore_calls(&mut self, calls: BTreeMap<String, Call>) -> bool {
         if self.id.as_deref().is_some_and(|id| !uuid(id))
             || self
@@ -1308,6 +1320,8 @@ impl Projection {
         let mut order: Vec<_> = calls.iter().map(|(id, call)| (call.sequence, id)).collect();
         order.sort_unstable();
         self.call_order = order.into_iter().map(|(_, id)| id.clone()).collect();
+        self.next_presentation_sequence = calls.values().map(|call| call.presentation_sequence)
+            .max().map_or(0, |last| last.saturating_add(1));
         self.calls = calls;
         true
     }
@@ -1780,6 +1794,12 @@ impl Projection {
                         self.next_sequence = self.next_sequence.saturating_add(1);
                         (None, sequence, false, None, None)
                     };
+                let presentation_sequence = self.calls.get(&id).map(|call| call.presentation_sequence)
+                    .unwrap_or_else(|| {
+                        let next = self.next_presentation_sequence;
+                        self.next_presentation_sequence = next.saturating_add(1);
+                        next
+                    });
                 self.dirty_calls.insert(id.clone());
                 self.retired_calls.remove(&id);
                 self.calls.insert(
@@ -1789,6 +1809,7 @@ impl Projection {
                         time: when,
                         completed,
                         sequence,
+                        presentation_sequence,
                         observation,
                         nested,
                         commands,
@@ -1912,9 +1933,19 @@ impl Projection {
             else { other.agent_incoming[ordinal - existing].clone() }
         }).collect();
         self.merge_metadata_fields(other);
-        self.calls.extend(other.calls.iter()
+        for (id, call) in other.ordered_calls().into_iter()
             .filter(|(id, _)| selected.is_none_or(|ids| ids.contains(*id)))
-            .map(|(id, call)| (id.clone(), call.clone())));
+        {
+            let presentation_sequence = self.calls.get(id).map(|call| call.presentation_sequence)
+                .unwrap_or_else(|| {
+                    let next = self.next_presentation_sequence;
+                    self.next_presentation_sequence = next.saturating_add(1);
+                    next
+                });
+            let mut call = call.clone();
+            call.presentation_sequence = presentation_sequence;
+            self.calls.insert(id.clone(), call);
+        }
     }
 
     /// Apply cursor metadata exactly once per source, never once per payload
@@ -2345,6 +2376,33 @@ mod snapshot_merge_tests {
 
     fn call(tool: &str, time: Option<&str>) -> Call {
         serde_json::from_value(json!({"tool":tool,"time":time,"completed":null,"sequence":1})).unwrap()
+    }
+
+    #[test]
+    fn snapshot_call_presentation_keeps_first_slot_and_later_value_without_persistence() {
+        let mut first = Projection::for_id(Some("00000000-0000-4000-8000-000000000001".into()));
+        let mut second = Projection::for_id(first.id.clone());
+        for (projection, ids, tool) in [(&mut first, ["z", "a"], "old"), (&mut second, ["b", "z"], "new")] {
+            for (index, id) in ids.into_iter().enumerate() {
+                let mut value = call(tool, Some("2026-11-13T01:00:00Z"));
+                value.presentation_sequence = index as u64;
+                projection.calls.insert(id.to_owned(), value);
+            }
+        }
+        let mut merged = Projection::for_id(first.id.clone());
+        merged.merge_snapshot(&first, None, &[None; 4]);
+        merged.merge_snapshot(&second, None, &[None; 4]);
+        assert_eq!(merged.ordered_calls().iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["z", "a", "b"]);
+        assert_eq!(merged.calls["z"].tool, "new");
+        assert_eq!(merged.calls["z"].sequence, 1);
+        assert!(!serde_json::to_value(&merged).unwrap().as_object().unwrap().contains_key("next_presentation_sequence"));
+        for value in merged.calls.values() {
+            assert!(!serde_json::to_value(value).unwrap().as_object().unwrap().contains_key("presentation_sequence"));
+        }
+        let mut selected = Projection::for_id(first.id.clone());
+        selected.merge_snapshot(&first, Some(&BTreeSet::from(["a".into()])), &[None; 4]);
+        selected.merge_snapshot(&second, Some(&BTreeSet::from(["z".into()])), &[None; 4]);
+        assert_eq!(selected.ordered_calls().iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["a", "z"]);
     }
 
     #[test]
