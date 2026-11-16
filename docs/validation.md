@@ -923,3 +923,20 @@ HTTP fixture 延續 UTF-8 與有 BOM UTF-16 BE 的更新後, 以無 BOM UTF-16 L
 Linux / Rust 1.100.0 的完整 service 363 項通過 (66.51 秒), 完整 serial HTTP 單輪 219 項通過 (115.87 秒)
 
 UTF-32 與 unpaired surrogate 仍未支援, Python 可接受的部分 surrogate 字串仍由 Rust 拒絕, Plugin 以外 JSON 來源的 UTF-16 支援未擴張, 沒有新增 endpoint、查詢參數、讀取次數、資料範圍、保存內容或容量, 歷史 HTTP、數字呈現及其他 Unicode / 平台限制繼續保留
+
+
+### Plugin JSON 的 UTF-32 解碼
+
+來源 LAM main `5c03daf`、workbench-workspace main `4616074` 再次核對未變, 依 `_json_metadata` 與 Python 3.12.14 `json.detect_encoding` / `json.loads(bytes)`, UTF-32 LE / BE 可帶 BOM 或由前 4 bytes 判定, 新 byte-budget 回歸先重現有效 UTF-32 object 被拒絕
+
+僅在 Plugin 私有 reader 中, 於原始 byte 檢查後先辨識 UTF-32, 再沿用既有 UTF-16 / UTF-8 路徑, 避免 UTF-32 LE BOM 被當成 UTF-16, 每 4 bytes 嚴格轉成有效 Unicode scalar 才解析 object, 不足 4 bytes、surrogate 或超出 U+10FFFF 的值仍拒絕
+
+核對 production caller 僅為兩種 Plugin manifest 路徑與 `.mcp.json`, 其他 JSON 來源沒有改動, 64 KiB manifest 與 2 MiB 跨來源預算仍計算原始 bytes, 白名單、symlink 防護、讀取次數與來源 bytes 不變, 不保存或外露 MCP runtime arguments
+
+新增兩項回歸涵蓋 LE / BE、有 / 無 BOM、中文與 supplementary scalar、字串內 BOM、double BOM / malformed / 非 object / 不完整 scalar 拒絕、精確 byte 上限與剩餘預算, 兩種 manifest 路徑及 MCP 白名單皆驗證, Plugin 全家族 16 項通過 (0.03 秒)
+
+HTTP fixture 延續原 UTF-8 / UTF-16 更新, 再寫入 UTF-32 LE BOM manifest, watcher 正確發布第四個 MCP server 且來源 bytes 不變, metadata 開關檢查保留, focused HTTP 1 項通過 (0.37 秒), Python 原始 reader 44 組解碼 / byte-budget fixture 通過
+
+Linux / Rust 1.100.0 的完整 service 365 項通過 (65.90 秒), 完整 serial HTTP 單輪 219 項通過 (125.53 秒)
+
+先前 Plugin UTF-32 不支援範圍由本輪明確接受條件取代, Python 另有 4 組有 / 無 BOM 的 unpaired surrogate fixture 可讀, Rust 保持拒絕, 不宣稱完整 JSON 或 Unicode 等價, 其他 JSON 呼叫的 UTF-16/32、歷史 HTTP 503 / WouldBlock、數字呈現與平台限制仍保留

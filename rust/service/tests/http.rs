@@ -809,6 +809,13 @@ fn plugin_metadata_appears_in_snapshot_and_obeys_metadata_switch() {
         value["codex"]["plugins"]["items"][0]["mcp_count"] == 3
     });
     assert_eq!(fs::read(path.join("plugin.json")).unwrap(), utf16_no_bom);
+    let mut utf32_manifest = vec![0xff, 0xfe, 0, 0];
+    utf32_manifest.extend(r#"{"version":"1.0.0","skills":"./skills","mcpServers":{"demo":{},"second":{},"third":{},"fourth":{}}}"#.chars().flat_map(|character| (character as u32).to_le_bytes()));
+    fs::write(path.join("plugin.json"), &utf32_manifest).unwrap();
+    snapshot_when(&service, |value| {
+        value["codex"]["plugins"]["items"][0]["mcp_count"] == 4
+    });
+    assert_eq!(fs::read(path.join("plugin.json")).unwrap(), utf32_manifest);
     fs::write(
         home.path().join("config.toml"),
         "[plugins.\"fixture@provider\"]\renabled = false\r",
