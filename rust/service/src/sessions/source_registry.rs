@@ -43,7 +43,10 @@ pub(super) fn augment(snapshot: &mut Value, home: &Path, core: &Value, desktop: 
         .unwrap_or_default();
     limits.insert("read_bytes".into(), codex["bytes_read"].clone());
     limits.insert("unsupported_lines".into(), codex["malformed_lines"].clone());
-    snapshot["sources"]["session"] = json!({"name":"Codex session","features":["codex","tools","git","workflow","skills","checks","files","sqlite","mcp","web","errors","logs","usage","dots"],"scope":"recent_tail_and_incremental_metadata","locations":[home.join("sessions").to_string_lossy()],"mode":"read_only","fields":[],"limits":limits,"readers":[],"health":codex["health"],"observations":enabled,"checked_at":updated,"display_window":window});
+    let mut session_locations = vec![home.join("sessions").to_string_lossy().into_owned()];
+    session_locations.extend(read["locations"].as_array().into_iter().flatten()
+        .filter_map(Value::as_str).take(super::SOURCE_LOCATION_LIMIT).map(str::to_owned));
+    snapshot["sources"]["session"] = json!({"name":"Codex session","features":["codex","tools","git","workflow","skills","checks","files","sqlite","mcp","web","errors","logs","usage","dots"],"scope":"recent_tail_and_incremental_metadata","locations":session_locations,"mode":"read_only","fields":[],"limits":limits,"readers":[],"health":codex["health"],"observations":enabled,"checked_at":updated,"display_window":window});
     let readers = codex["metadata_sources"]
         .as_array()
         .cloned()

@@ -429,3 +429,15 @@ Python 實際 save/load 與 HTTP 先失敗後通過, 重啟後維持 failed, 後
 此範圍只使用已存在的錯誤證據, 未補蒐集原先停用或未保存的 failure, 不改查詢、事件數、保留策略、容量或 eviction, SQLite 觀測仍依既有流程發布與保存 result
 
 本批完整單執行緒 `--locked --offline` service binary 319 項 (108.93 秒)、HTTP 213 項 (160.94 秒) 通過, Linux / Rust 1.100.0 合成資料, 基底 2f2d3c1 已核對遠端一致, 其他既有待辦保留
+
+### 完整 working set 的已載入來源路徑清單
+
+對照 Python `SOURCE_LOCATION_LIMIT = 20` 與 `server.py` 的 session source registry, 完整來源集合在 `codex.read_state.locations` 列出前 20 個來源路徑、`listed_file_limit = 20`, 並加入 `sources.session.locations` 的 session 根資料夾之後
+
+重用現有已排序來源清單, 每次 snapshot 組只建立一次最多 20 個路徑, 不額外讀檔或查詢, 清單是顯示上限而非收集或保留上限, incomplete / 缺少來源順序維持原先不提供路徑清單的 fallback, 停用仍僅顯示原有根資料夾
+
+Python 實際 save/load 驗證 25 個來源只列前 20 個且依發現順序, HTTP 先失敗後通過並涵蓋 restart / disabled, 既有單元補驗不完整與缺少來源順序時不發布清單, overflow 路徑列舉未宣稱完成, 容量與 eviction 不變
+
+完整單執行緒 `--locked --offline` service binary 319 項通過 (111.16 秒), 首次 HTTP 為 213 通過 / 1 失敗, 既有 retention cleanup retry 測試讀到設定 90 而非 1, 原程式未修改 retention 或該測試, 單項重跑通過 (0.46 秒)、完整 HTTP 重跑 214 項通過 (155.80 秒), 原始失敗證據保留, 未宣稱已查明偶發失敗根因
+
+Linux / Rust 1.100.0 合成資料, 基底 5265a3d 已核對遠端一致, overflow、容量、大型快照與原生平台待辦保留

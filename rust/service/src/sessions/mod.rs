@@ -53,6 +53,7 @@ use std::time::SystemTime;
 use tokio::sync::watch;
 use walkdir::WalkDir;
 
+const SOURCE_LOCATION_LIMIT: usize = 20;
 const FILE_LIMIT: usize = 5000;
 const WALK_LIMIT: usize = 40_000;
 const ROUND_LIMIT: usize = 8 * 1024 * 1024;
@@ -4875,6 +4876,8 @@ impl Collector {
         }
         all_mcp["configuration"] = json!({"location":self.catalog_home.join("config.toml").to_string_lossy(),"configured_sources":self.mcp_catalog.len()});
         let mut error_sources = self.ordered_working_sources();
+        let source_locations: Vec<_> = error_sources.iter().filter(|_| complete_source_order)
+            .take(SOURCE_LOCATION_LIMIT).map(|(path, _)| path.to_string_lossy().into_owned()).collect();
         let mut thread_order = BTreeMap::new();
         if complete_source_order {
             // Python groups each thread at its first discovered source, then
@@ -5176,6 +5179,10 @@ impl Collector {
             snapshot["logs"] = logs_overview.clone();
             if let Some(read_state) = snapshot["codex"]["read_state"].as_object_mut() {
                 read_state.extend(json!({"initial_pending_files":initial_pending,"history_pending_files":0,"history_pending_bytes":0,"error_pending_files":0,"error_pending_bytes":0,"working_file_limit":FILE_LIMIT,"working_files":self.files.len(),"outside_working_set":outside_working_set,"discovery_pending":self.discovery.is_some(),"source_index_ready":source_index_ready,"source_index_unverified":source_index_unverified,"source_index_materialized":source_index_materialized,"overflow_snapshot_sources":overflow.len(),"overflow_snapshot_incomplete":overflow_incomplete,"overflow_details_pending":overflow_details_pending.len()}).as_object().expect("read state fields").clone());
+            }
+            if complete_source_order {
+                snapshot["codex"]["read_state"]["locations"] = json!(source_locations);
+                snapshot["codex"]["read_state"]["listed_file_limit"] = json!(SOURCE_LOCATION_LIMIT);
             }
             if health == "waiting" && version == 0 {
                 snapshot["initial_sections"] = json!(["catalog", "runtime"]);
@@ -6472,11 +6479,19 @@ mod log_tests {
         let expected = |numbers: &[u64]| numbers.iter().map(|number| format!("00000000-0000-4000-8000-{number:012}")).collect::<Vec<_>>();
         assert!(collector.has_complete_source_order());
         assert_eq!(ids(&collector), expected(&[2,1]));
+        let locations = |collector: &Collector| {
+            let snapshots = collector.snapshots("ok", "ok", 1);
+            let value: Value = serde_json::from_slice(&snapshots.window_bytes(3)).unwrap();
+            value["codex"]["read_state"]["locations"].clone()
+        };
+        assert_eq!(locations(&collector).as_array().unwrap().len(), 2);
         collector.discovered_files = Some(3);
+        assert!(locations(&collector).is_null());
         assert!(!collector.has_complete_source_order());
         assert_eq!(ids(&collector), expected(&[1,2]));
         collector.discovered_files = Some(2);
         collector.snapshot_source_order.clear();
+        assert!(locations(&collector).is_null());
         assert_eq!(ids(&collector), expected(&[1,2]));
     }
 

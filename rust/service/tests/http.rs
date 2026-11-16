@@ -1326,6 +1326,37 @@ fn session_execution_metadata_is_selected_and_survives_checkpoint_restore() {
 }
 
 #[test]
+fn complete_source_locations_are_discovery_ordered_and_bounded() {
+    let home = tempdir().unwrap();
+    let sessions = home.path().join("sessions");
+    fs::create_dir(&sessions).unwrap();
+    let mut paths = Vec::new();
+    for number in 0..25 {
+        let id = format!("00000000-0000-4000-8000-{number:012}");
+        let path = sessions.join(format!("rollout-{id}.jsonl"));
+        fs::write(&path, event("2026-11-13T01:00:00Z", "session_meta", json!({"id":id}))+"\n").unwrap();
+        fs::File::options().write(true).open(&path).unwrap().set_times(fs::FileTimes::new().set_modified(
+            std::time::UNIX_EPOCH + Duration::from_secs(100 + number))).unwrap();
+        paths.push(path.to_string_lossy().into_owned());
+    }
+    paths.reverse();
+    paths.truncate(20);
+    for _ in 0..2 {
+        let service = Service::start(home.path(), true, None);
+        let value = snapshot_when(&service, |value| value["codex"]["threads"].as_array().is_some_and(|rows| rows.len() == 25));
+        assert_eq!(value["codex"]["read_state"]["locations"], json!(paths));
+        assert_eq!(value["codex"]["read_state"]["listed_file_limit"], 20);
+        let mut registered = vec![sessions.to_string_lossy().into_owned()];
+        registered.extend(paths.clone());
+        assert_eq!(value["sources"]["session"]["locations"], json!(registered));
+    }
+    let service = Service::start(home.path(), false, None);
+    let value = service.get("/api/snapshot?window=all").json();
+    assert!(value["codex"]["read_state"]["locations"].is_null());
+    assert_eq!(value["sources"]["session"]["locations"], json!([sessions.to_string_lossy()]));
+}
+
+#[test]
 fn thread_rows_preserve_source_ties_but_prioritize_updated_time() {
     let home = tempdir().unwrap();
     let sessions = home.path().join("sessions");
