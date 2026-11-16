@@ -643,3 +643,21 @@ Cloud text 改用既有 schedules::trim_text, 只影響 /api/codex/cloud 與共�
 第一次從 service manifest 指定相依套件 feature 的命令被 Cargo 拒絕, 未執行該項檢查, 改用 session-core manifest 與既有 lockfile 執行 sqlite-python feature 後 34 項通過 (0.93 秒), 兩份記錄均保留, 未更動 manifest / lockfile
 
 本次完成前述內部 U+001F 的已確認差異, 不移除原始假設失敗記錄, 不宣稱所有 literal grammar 完全相同, 歷史 HTTP / WouldBlock / 唯讀 503、cleanup 警告與 overflow 排除範圍仍保留
+
+### Object literal 非 ASCII digit escape 的待辦差異
+
+基底 `2f06372` 與來源 main 核對未變, 原始 literal string 在 escape 字元或 ASCII 0 後使用 Python isdigit 判定, 會拒絕 Arabic、superscript、circled digit, 但 Roman numeral 與 fraction 不是 digit, 仍保留為文字, Rust 現行只有 ASCII digit 判定, 非 ASCII 案例仍待處理
+
+已實測原始 Python 3.12.14 / Unicode 15 的 12 組案例, 現有 regex 的 Numeric_Type=Digit / Decimal 解析被拒絕, Decimal_Number 單獨不足以涵蓋 superscript / circled digit, regex 資料為 Unicode 16、Rust char 資料為 Unicode 18, 既有 unic identifier 資料為 Unicode 10, 不可視為相同版本或相同屬性
+
+本輪僅調查與保存證據, 未修改 parser、相依套件或 lockfile, 不以 is_numeric 擴大拒絕 Roman numeral / fraction, 不新增手動維護 Unicode table 或執行 Python subprocess, exact Digit 的生成來源與版本策略尚待決定, 未重跑 Rust 全套, 前次 core 34 / service 337 / HTTP 219 不代表此差異已修復
+
+### YAML subset 的換行與縮排來源語意
+
+原始 parse_yaml 使用 Python splitlines, 以 ASCII space 計算縮排, 另檢查前置空白中是否含 tab, Rust 原先只分割一般換行並把其他 Unicode 空白視為縮排, 使 CR / Unicode 換行漏讀, 或把同層 key 誤判為巢狀內容
+
+僅調整 YAML candidate / YAML line 預處理, 支援來源既有 10 種換行字元, 以 ASCII space 計算縮排, 保留前置 tab 拒絕與空白 / comment 略過, U+001F 不當成換行, 既有 1 MiB、20000 行、深度、遮蔽與保存界線不變, 不影響 JSONL 分割或新增來源讀取
+
+新回歸在修正前於 CR 案例實際失敗, 原始 Python 換行、同層 key、空 parent、comment、tab / 非換行 / 行數拒絕 fixture 通過, Rust structured 11、MCP documents 6、Python payload_detail 12 項通過, 完整 service 338 項通過 (124.25 秒), 完整 serial HTTP 單輪 219 項通過 (151.34 秒)
+
+本輪合併前述 Unicode digit escape 稽核記錄, 該差異仍未修改, 其他 YAML scalar / grammar 完整相容性不由本輪推定, 歷史獨立 HTTP / WouldBlock / 唯讀 503、cleanup 警告與 overflow 排除範圍保留

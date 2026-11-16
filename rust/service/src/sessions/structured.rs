@@ -172,9 +172,15 @@ pub(super) fn parse_document(source: &str, format: &str) -> Option<(Value, &'sta
     yaml_candidate(source).map(|value| (value, "YAML subset"))
 }
 
+fn yaml_lines(source: &str) -> impl Iterator<Item = &str> {
+    source.split([
+        '\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}',
+    ])
+}
+
 fn yaml_candidate(source: &str) -> Option<Value> {
-    if source.lines().count() > 1 {
-        let first = source.lines().next().unwrap_or("").trim_start();
+    if yaml_lines(source).count() > 1 {
+        let first = yaml_lines(source).next().unwrap_or("").trim_start();
         if first.starts_with("- ") || pair(first).is_some() {
             return yaml(source);
         }
@@ -592,15 +598,23 @@ impl Yaml<'_> {
 }
 fn yaml(source: &str) -> Option<Value> {
     let mut lines = Vec::new();
-    for raw in source.lines() {
-        if raw.trim().is_empty() || raw.trim_start().starts_with('#') {
+    for raw in yaml_lines(source) {
+        let trimmed = super::schedules::trim_text(raw);
+        if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let indent = raw.len() - raw.trim_start().len();
-        if raw[..indent].contains('\t') {
+        if raw
+            .chars()
+            .take_while(|character| {
+                character.is_whitespace() || matches!(character, '\u{1c}'..='\u{1f}')
+            })
+            .any(|character| character == '\t')
+        {
             return None;
         }
-        lines.push((indent, raw.trim_start()));
+        let body = raw.trim_start_matches(' ');
+        let indent = raw.len() - body.len();
+        lines.push((indent, body));
         if lines.len() > LINES {
             return None;
         }
@@ -614,6 +628,33 @@ fn yaml(source: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn yaml_line_boundaries_and_indentation_match_python_subset() {
+        let expected = json!({"a":1,"b":2});
+        for separator in [
+            '\n', '\r', '\u{b}', '\u{c}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2028}',
+            '\u{2029}',
+        ] {
+            let source = format!("a: 1{separator}b: 2");
+            assert_eq!(parse(&source), Some(expected.clone()), "{source:?}");
+            assert_eq!(
+                parse_document(&source, "yaml"),
+                Some((expected.clone(), "YAML subset")),
+                "{source:?}"
+            );
+        }
+        assert_eq!(parse("a: 1\n\u{2003}b: 2"), Some(expected.clone()));
+        assert_eq!(
+            parse("a: 1\nb:\n\u{2003}c: 2"),
+            Some(json!({"a":1,"b":null,"c":2}))
+        );
+        assert_eq!(parse("a: 1\n\u{2003}# comment\nb: 2"), Some(expected));
+        assert!(parse_document("a: 1\n \u{2003}\tb: 2", "yaml").is_none());
+        assert!(parse_document("a: 1\u{1f}b: 2", "yaml").is_none());
+        let source = "- value\u{2028}".repeat(LINES + 1);
+        assert!(parse_document(&source, "yaml").is_none());
+    }
+
     #[test]
     fn internal_object_literal_whitespace_keeps_masked_projection() {
         for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
