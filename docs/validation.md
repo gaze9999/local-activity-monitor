@@ -315,3 +315,15 @@ Python CodexCollector 隔離 fixture 確認原始來源順序、mtime rescan、�
 本段僅完成完整 working-set 的合併 / detail 遍歷, 不代表所有排序已對齊, call 插入順序、跨 active / overflow 全域順序、其他來源預覽、restore 容量與 16 MiB 快照組裝仍待完成, 本段基底為 7b305f8
 
 最終含 detail 遍歷的版本以 Linux / Rust 1.100.0 執行完整 `--locked --offline` 單執行緒回歸, service binary 306 項全數通過 (97.56 秒), HTTP 205 項全數通過 (144.45 秒), 未延伸為並行穩定性、原生平台或真實資料驗收
+
+### 完整 working set 的同時額度選取
+
+額度 `updated_at` 相同時, 完整 working set 改取 discovery-time 順序中的第一個來源, 對齊 Python `max` 的穩定選取, 較新的額度仍優先, mtime 變更只在 rescan 後影響選取, 使用停用與收集停用仍不公開額度
+
+共用既有完整來源排序檢查, 不新增來源讀取、資料保存或容量, discovery 不完整 / overflow 維持既有 fallback, 全域來源順序仍待完成, `/api/snapshot` 查詢參數與額度欄位來源不變
+
+基底 53cefcb, LAM main 5c03daf 與 workspace main 4616074 已再次核對未變, Python CodexCollector 隔離 fixture 確認同時額度 / rescan / 路徑決勝, Rust 回歸先失敗後通過, allowance 5 項與完整來源排序 2 項通過, HTTP 啟動 / checkpoint 重啟 / rescan 回歸通過, 本段未重跑全套或原生平台驗收
+
+同批補強來源順序的 metadata 驗收: 相同 context / token timestamp 時, model、reasoning_effort、execution 與 tokens 由後來源覆蓋, 與額度的前來源決勝分別驗證, Python 原始 fixture 與 HTTP 啟動 / checkpoint 重啟 / rescan / 路徑決勝全部通過, 不需新增 runtime 修改
+
+本批最終完整單執行緒 `--locked --offline` service binary 307 項全數通過 (82.29 秒), HTTP 205 項全數通過 (155.81 秒), Linux / Rust 1.100.0 合成資料驗證, 未延伸為並行、原生平台或真實資料驗收

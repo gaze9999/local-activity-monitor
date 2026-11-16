@@ -6924,7 +6924,10 @@ fn duplicate_session_calls_follow_discovery_order_after_restart_and_rescan() {
     for (path, tool) in paths.iter().zip(["fixture_a", "fixture_z"]) {
         let records = [
             json!({"type":"session_meta","timestamp":"2026-11-13T00:00:00Z","payload":{"id":id}}),
+            json!({"type":"turn_context","timestamp":"2026-11-13T00:30:00Z","payload":{"model":tool,"reasoning_effort":if tool == "fixture_a" { "low" } else { "high" },"approval_policy":if tool == "fixture_a" { "never" } else { "on-request" }}}),
+            json!({"type":"event_msg","timestamp":"2026-11-13T00:40:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":if tool == "fixture_a" { 10 } else { 90 }}}}}),
             json!({"type":"response_item","timestamp":"2026-11-13T01:00:00Z","payload":{"type":"function_call","name":tool,"call_id":"duplicate","arguments":"{}"}}),
+            json!({"type":"event_msg","timestamp":"2026-11-13T01:00:00Z","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":if tool == "fixture_a" { 10 } else { 90 }}}}}),
         ];
         fs::write(path, records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")+"\n").unwrap();
     }
@@ -6934,20 +6937,32 @@ fn duplicate_session_calls_follow_discovery_order_after_restart_and_rescan() {
         )).unwrap();
     };
     set_time(&paths[0], 100); set_time(&paths[1], 200);
+    let assert_metadata = |service: &Service, model, effort, approval, tokens| {
+        let snapshot = service.get("/api/snapshot?window=all").json();
+        let thread = snapshot["codex"]["threads"].as_array().unwrap().iter().find(|row| row["thread_id"] == id).unwrap();
+        assert_eq!(thread["model"], model);
+        assert_eq!(thread["reasoning_effort"], effort);
+        assert_eq!(thread["execution"]["approval_policy"], approval);
+        assert_eq!(thread["tokens"]["input_tokens"], tokens);
+    };
     let service = Service::start(home.path(), true, None);
-    snapshot_when(&service, |value| value["codex"]["tools"] == json!({"fixture_a":1}));
+    snapshot_when(&service, |value| value["codex"]["tools"] == json!({"fixture_a":1}) && value["codex"]["usage"]["limits"][0]["used_percent"] == 90);
     let detail_url = format!("/api/codex/tool?thread_id={id}&call_id=duplicate");
     assert_eq!(service.get(&detail_url).json()["tool"], "fixture_z");
+    assert_metadata(&service, "fixture_a", "low", "never", 10);
     drop(service);
     let service = Service::start(home.path(), true, None);
-    snapshot_when(&service, |value| value["codex"]["tools"] == json!({"fixture_a":1}));
+    snapshot_when(&service, |value| value["codex"]["tools"] == json!({"fixture_a":1}) && value["codex"]["usage"]["limits"][0]["used_percent"] == 90);
     assert_eq!(service.get(&detail_url).json()["tool"], "fixture_z");
+    assert_metadata(&service, "fixture_a", "low", "never", 10);
     set_time(&paths[0], 300);
-    snapshot_when(&service, |value| value["codex"]["tools"] == json!({"fixture_z":1}));
+    snapshot_when(&service, |value| value["codex"]["tools"] == json!({"fixture_z":1}) && value["codex"]["usage"]["limits"][0]["used_percent"] == 10);
     assert_eq!(service.get(&detail_url).json()["tool"], "fixture_a");
+    assert_metadata(&service, "fixture_z", "high", "on-request", 90);
     set_time(&paths[1], 300);
-    snapshot_when(&service, |value| value["codex"]["tools"] == json!({"fixture_a":1}));
+    snapshot_when(&service, |value| value["codex"]["tools"] == json!({"fixture_a":1}) && value["codex"]["usage"]["limits"][0]["used_percent"] == 90);
     assert_eq!(service.get(&detail_url).json()["tool"], "fixture_z");
+    assert_metadata(&service, "fixture_a", "low", "never", 10);
 }
 
 #[test]

@@ -4593,12 +4593,15 @@ impl Collector {
         (result, incomplete)
     }
 
-    fn ordered_working_sources(&self) -> Vec<(&PathBuf, &Session)> {
-        let mut sources: Vec<_> = self.files.iter().collect();
-        if !self.snapshot_source_order.is_empty()
+    fn has_complete_source_order(&self) -> bool {
+        !self.snapshot_source_order.is_empty()
             && self.discovered_files == Some(self.files.len())
             && self.snapshot_source_order.keys().eq(self.files.keys())
-        {
+    }
+
+    fn ordered_working_sources(&self) -> Vec<(&PathBuf, &Session)> {
+        let mut sources: Vec<_> = self.files.iter().collect();
+        if self.has_complete_source_order() {
             sources.sort_by_key(|(path, _)| self.snapshot_source_order.get(*path));
         }
         sources
@@ -4683,13 +4686,20 @@ impl Collector {
             .filter(|state| health != "disabled" && state.pending())
             .filter_map(|state| state.projection.id.as_deref())
             .collect();
+        let complete_source_order = self.has_complete_source_order();
         let allowance = self
-            .files
-            .values()
-            .filter_map(|state| state.projection.allowance.as_ref())
+            .ordered_working_sources()
+            .into_iter()
+            .filter_map(|(_, state)| state.projection.allowance.as_ref())
             .chain(overflow.iter().filter_map(|item| item.projection.allowance.as_ref()))
-            .max_by_key(|value| value["updated_at"].as_str().unwrap_or_default())
-            .cloned()
+            .enumerate()
+            // Python max keeps the first equal-time source. Preserve the existing
+            // overflow fallback until its global discovery order is available.
+            .max_by_key(|(index, value)| (
+                value["updated_at"].as_str().unwrap_or_default(),
+                if complete_source_order { usize::MAX - index } else { *index },
+            ))
+            .map(|(_, value)| value.clone())
             .filter(|_| self.applied_command_switches.usage && health != "disabled");
         let source_index_ready = self.discovery.is_none()
             && self.source_membership_complete
@@ -6350,6 +6360,51 @@ mod log_tests {
         assert_eq!(detail_tool(&collector), "fixture_z");
         collector.discovered_files = Some(3);
         assert_eq!(tools(&collector), json!({"fixture_z":1}));
+    }
+
+    #[test]
+    fn complete_working_set_allowance_ties_keep_first_discovered_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        let paths = [root.join(format!("rollout-a-{id}.jsonl")), root.join(format!("rollout-z-{id}.jsonl"))];
+        for (path, used) in paths.iter().zip([10, 90]) {
+            let records = [
+                json!({"type":"session_meta","timestamp":"2026-11-13T00:00:00Z","payload":{"id":id}}),
+                json!({"type":"event_msg","timestamp":"2026-11-13T01:00:00Z","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":used}}}}),
+            ];
+            std::fs::write(path, records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")+"\n").unwrap();
+        }
+        let set_time = |path: &Path, seconds| {
+            std::fs::File::options().write(true).open(path).unwrap().set_times(
+                std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+            ).unwrap();
+        };
+        set_time(&paths[0], 100); set_time(&paths[1], 200);
+        let mut collector = Collector::new(root.join("monitoring"), true, None);
+        let stopped = AtomicBool::new(false);
+        for _ in 0..4 { collector.refresh(&root, &stopped, true, true, CommandSwitches::default()); }
+        let usage = |collector: &Collector, health| {
+            let snapshots = collector.snapshots(health, "ok", 1);
+            let value: Value = serde_json::from_slice(&snapshots.window_bytes(3)).unwrap();
+            value["codex"]["usage"].clone()
+        };
+        assert_eq!(usage(&collector, "ok")["limits"][0]["used_percent"], 90);
+        set_time(&paths[0], 300);
+        assert_eq!(usage(&collector, "ok")["limits"][0]["used_percent"], 90);
+        collector.refresh(&root, &stopped, true, true, CommandSwitches::default());
+        assert_eq!(usage(&collector, "ok")["limits"][0]["used_percent"], 10);
+        collector.discovered_files = Some(3);
+        assert_eq!(usage(&collector, "ok")["limits"][0]["used_percent"], 90);
+        collector.discovered_files = Some(2);
+        set_time(&paths[1], 300);
+        collector.refresh(&root, &stopped, true, true, CommandSwitches::default());
+        assert_eq!(usage(&collector, "ok")["limits"][0]["used_percent"], 90);
+        collector.files.get_mut(&paths[0]).unwrap().projection.allowance.as_mut().unwrap()["updated_at"] = json!("2026-11-14T01:00:00.000Z");
+        assert_eq!(usage(&collector, "ok")["limits"][0]["used_percent"], 10);
+        assert!(usage(&collector, "disabled").is_null());
+        collector.applied_command_switches.usage = false;
+        assert!(usage(&collector, "ok").is_null());
     }
 
     #[test]
