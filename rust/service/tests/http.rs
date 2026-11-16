@@ -7591,14 +7591,20 @@ fn observed_schedule_name_updates_when_session_index_changes() {
     assert_eq!(catalog["rows_read"], 1);
     assert_eq!(catalog["queries"][0]["health"], "unsupported");
     assert_eq!(catalog["queries"][1]["health"], "unsupported");
-    fs::write(
-        path,
-        format!("{}\n{}\n", json!({"id":"00000000-0000-4000-8000-000000000002","thread_name":"\u{1d}Second\u{1e}"}), json!({"id":"00000000-0000-4000-8000-000000000002","thread_name":"\u{1c}\u{1d}\u{1e}\u{1f}"})),
-    )
-    .unwrap();
+    let updated = format!("{}\n{}\n", json!({"id":"00000000-0000-4000-8000-000000000002","thread_name":"\u{1d}Second\u{1e}"}), json!({"id":"00000000-0000-4000-8000-000000000002","thread_name":"\u{1c}\u{1d}\u{1e}\u{1f}"}));
+    let utf16: Vec<_> = updated.encode_utf16().flat_map(u16::to_be_bytes).collect();
+    fs::write(&path, &utf16).unwrap();
     snapshot_when(&service, |snapshot| {
         snapshot["codex"]["schedules"]["remote_activities"][0]["name"] == "Second"
     });
+    assert_eq!(fs::read(&path).unwrap(), utf16);
+    let mut utf32 = vec![0, 0, 0xfe, 0xff];
+    utf32.extend(format!("{}\n", json!({"id":"00000000-0000-4000-8000-000000000002","thread_name":"Third"})).chars().flat_map(|character| (character as u32).to_be_bytes()));
+    fs::write(&path, &utf32).unwrap();
+    snapshot_when(&service, |snapshot| {
+        snapshot["codex"]["schedules"]["remote_activities"][0]["name"] == "Third"
+    });
+    assert_eq!(fs::read(path).unwrap(), utf32);
 }
 
 fn event(time: &str, kind: &str, payload: Value) -> String {

@@ -898,15 +898,14 @@ fn merge_session_index(
     if file.take(LIMIT).read_to_end(&mut bytes).is_err() {
         return report("unavailable", None);
     }
-    let mut lines = bytes.split(|byte| *byte == b'\n');
+    let mut lines = bytes.split_inclusive(|byte| *byte == b'\n');
     if offset > 0 {
         lines.next();
     }
     let mut titles = Map::new();
     for line in lines {
         // Python parses each raw index line independently with json.loads(bytes).
-        let line = line.strip_prefix(b"\xef\xbb\xbf").unwrap_or(line);
-        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+        let Some(value) = crate::json_bytes::parse(line) else {
             continue;
         };
         let Some(id) = value
@@ -1357,6 +1356,97 @@ mod tests {
         }}).to_string()).unwrap();
         merge_remote_state(home.path(), &mut entries);
         assert_eq!(entries[first]["name"], "遠端");
+    }
+
+    fn encoded_index(text: &str, width: usize, big_endian: bool, bom: bool) -> Vec<u8> {
+        let text = format!("{}{text}", if bom { "\u{feff}" } else { "" });
+        if width == 2 {
+            text.encode_utf16().flat_map(|unit| if big_endian { unit.to_be_bytes() } else { unit.to_le_bytes() }).collect()
+        } else {
+            text.chars().flat_map(|character| if big_endian { (character as u32).to_be_bytes() } else { (character as u32).to_le_bytes() }).collect()
+        }
+    }
+
+    #[test]
+    fn session_index_encoded_lines_keep_raw_byte_lf_framing() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("session_index.jsonl");
+        let observed = BTreeSet::from(["one".into()]);
+        for width in [2, 4] {
+            for big_endian in [false, true] {
+                for bom in [false, true] {
+                    for newline in ["", "\n"] {
+                        let text = format!("{}{newline}", json!({"id":"one","thread_name":"Latest"}));
+                        let raw = encoded_index(&text, width, big_endian, bom);
+                        std::fs::write(&path, &raw).unwrap();
+                        let mut entries = Map::new();
+                        let report = merge_session_index(home.path(), &mut entries, &observed);
+                        let accepted = newline.is_empty() || big_endian;
+                        assert_eq!(report["matched_threads"], usize::from(accepted), "{width}/{big_endian}/{bom}/{newline:?}");
+                        if accepted { assert_eq!(entries["one"]["name"], "Latest"); }
+                        else { assert!(!entries.contains_key("one")); }
+                        assert_eq!(std::fs::read(&path).unwrap(), raw);
+                    }
+                    let title = if big_endian { "Ċ" } else { "਀" };
+                    let raw = encoded_index(&format!("{}\n", json!({"id":"one","thread_name":title})), width, big_endian, bom);
+                    std::fs::write(&path, &raw).unwrap();
+                    let mut entries = Map::new();
+                    assert_eq!(merge_session_index(home.path(), &mut entries, &observed)["matched_threads"], 0);
+                    assert!(!entries.contains_key("one"));
+                    let escaped = format!(r#"{{"id":"one","thread_name":"\u{:04x}"}}"#, if big_endian { 0x010a } else { 0x0a00 });
+                    let raw = encoded_index(&escaped, width, big_endian, bom);
+                    std::fs::write(&path, &raw).unwrap();
+                    merge_session_index(home.path(), &mut entries, &observed);
+                    assert_eq!(entries["one"]["name"], title);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn session_index_encoded_tail_preserves_exact_first_line_discard() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("session_index.jsonl");
+        let observed = BTreeSet::from(["one".into(), "discard".into()]);
+        for width in [2, 4] {
+            let text = format!("{}\n{}\n", json!({"id":"discard","thread_name":"Discard"}), json!({"id":"one","thread_name":"Latest"}));
+            let mut tail = encoded_index(&text, width, true, false);
+            tail.resize(1024 * 1024, b' ');
+            for prefix in [b"".as_slice(), b"garbage\n"] {
+                let mut raw = prefix.to_vec();
+                raw.extend(&tail);
+                std::fs::write(&path, &raw).unwrap();
+                let mut entries = Map::new();
+                let report = merge_session_index(home.path(), &mut entries, &observed);
+                assert_eq!(report["matched_threads"], if prefix.is_empty() { 2 } else { 1 });
+                assert_eq!(report["tail_bytes"], 1024 * 1024);
+                assert_eq!(entries["one"]["name"], "Latest");
+                assert_eq!(entries.contains_key("discard"), prefix.is_empty());
+                assert_eq!(std::fs::read(&path).unwrap(), raw);
+            }
+        }
+    }
+
+    #[test]
+    fn session_index_mixed_encodings_keep_selection_title_limit_and_precedence() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("session_index.jsonl");
+        let mut raw = b"{\"id\":\"one\",\"thread_name\":\"First\"}\n".to_vec();
+        for (id, title, width) in [("one", "Latest".to_owned(), 2), ("long", "x".repeat(513), 4), ("hidden", "Hidden".to_owned(), 2)] {
+            raw.extend(encoded_index(&format!("{}\n", json!({"id":id,"thread_name":title,"unknown":"PRIVATE"})), width, true, true));
+        }
+        std::fs::write(&path, &raw).unwrap();
+        let observed = BTreeSet::from(["one".into(), "long".into()]);
+        let mut entries = Map::new();
+        assert_eq!(merge_session_index(home.path(), &mut entries, &observed)["matched_threads"], 2);
+        assert_eq!(entries["one"]["name"], "Latest");
+        assert_eq!(entries["long"]["name"], "x".repeat(512));
+        assert!(!entries.contains_key("hidden"));
+        assert!(!serde_json::to_string(&entries).unwrap().contains("PRIVATE"));
+        entries.get_mut("one").unwrap()["name"] = json!("Catalog");
+        merge_session_index(home.path(), &mut entries, &observed);
+        assert_eq!(entries["one"]["name"], "Catalog");
+        assert_eq!(std::fs::read(path).unwrap(), raw);
     }
 
     #[test]

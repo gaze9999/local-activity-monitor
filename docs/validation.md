@@ -957,3 +957,24 @@ HTTP 既有查詢 fixture 新增無 BOM UTF-16 LE 與有 BOM UTF-32 BE, events /
 Linux / Rust 1.100.0 的完整 service 367 項通過 (60.08 秒), 完整 serial HTTP 單輪 219 項通過 (126.35 秒)
 
 不新增 endpoint、查詢參數、讀取次數或保存內容, unpaired surrogate 仍不支援, 其他 JSON bytes 呼叫未自動採用新 helper, 歷史 HTTP 503 / WouldBlock、數字呈現與 Unicode / 平台限制仍保留
+
+
+### Session index 的逐行 bytes 解碼與 LF 邊界
+
+來源 LAM main `5c03daf`、workbench-workspace main `4616074` 再次核對未變, 依 `read_metadata`, session index 以 binary stream 逐行交給 `json.loads(bytes)`, 不是先將整份檔案轉成文字, 本輪將 Rust 分行改為保留原始 LF byte 的 `split_inclusive`, 並僅在每個原始資料列使用既有私有 JSON bytes decoder
+
+保留 1 MiB tail、offset 大於零時無條件丟棄第一行、observed ID 篩選、最後有效 title、catalog 優先與 512 字元限制, 不改變讀取次數或持久化欄位, byte-LF 是原始分隔符而非解碼後的換行
+
+UTF-16 / UTF-32 BE 行的換行 bytes 可完整落在同一資料列, LE 行若帶編碼後 LF 則會被 raw 0x0A 切斷並依 Python 行為拒絕, LE 無尾端換行的完整資料列仍可接受, 字元本身含 raw 0x0A 也會分行而拒絕, 相同字元以 JSON escape 表示則可接受, 未因編碼支援改用整檔轉碼或修補破碎資料列
+
+兩項 framing / tail 回歸修正前失敗, 新增三項回歸後 schedules 全家族 18 項通過 (0.10 秒), 涵蓋 LE / BE、有 / 無 BOM、raw-LF / escaped-codepoint、剛好 1 MiB 與多出前綴時的首行丟棄、混合編碼、title 上限、未知欄位排除及來源 bytes 未改寫, Python 原始 reader 的 29 組 framing / tail / selection fixture 通過
+
+HTTP fixture 保留初始 UTF-8, 更新為 UTF-16 BE 與 UTF-32 BE BOM 後 watcher 依序更新名稱, 空白 title 不覆蓋有效值且來源 bytes 不變, focused HTTP 1 項通過 (0.17 秒), 初版 HTTP fixture 因插入錯誤測試區段造成 `utf16` 未定義的編譯錯誤, 已校正至指定測試並還原無關區段, 原失敗記錄保留, 該 HTTP 中間版本未執行
+
+Linux / Rust 1.100.0 的完整 service 370 項通過 (62.11 秒), 完整 serial HTTP 單輪為 218 項通過、1 項失敗 (115.29 秒), 未重跑至綠燈
+
+新觀察到的失敗為未修改的 `idle_snapshot_and_new_stream_report_current_uptime`, 等待 1.2 秒後 refreshes 為 3 而預期 2, 並非 uptime 比較失敗, 該測試停用 Codex, 原始碼的停用路徑不執行本輪 session-index reader
+
+原始碼另可見 device completion 先標記 ready 再排入 refresh wake, 因此 ready 不必然表示所有啟動 wake 已處理完畢, 這是可疑競態而非本次事件的已確認原因, 尚缺觸發來源追蹤, 本輪不修改 idle assertion、計數或排程, 此項 HTTP 失敗保留待處理
+
+其他 JSONL 呼叫不自動採用此 decoder, unpaired surrogate、歷史 HTTP 503 / WouldBlock、數字呈現與其他 Unicode / 平台限制保留, 不新增 endpoint、查詢參數、容量或保存內容
