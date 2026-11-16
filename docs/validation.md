@@ -399,3 +399,15 @@ Python 實際 save/load 確認 thread2 優先, live call 為 z,a、restore 為 a
 每種 1200 operations 的單元測試確認 500 筆上限、thread / call 順序、Git index 與統計, 既有 fallback 回歸保留, 首次全套新增 fixture 缺少 sequence 而失敗, 補齊 fixture 後 targeted 2 項與完整單執行緒 `--locked --offline` service binary 316 項 (83.25 秒)、HTTP 210 項 (157.17 秒) 通過
 
 驗證為 Linux / Rust 1.100.0 合成資料, 基底 83159ec 已核對遠端一致, 其他全域預覽、overflow、restore 容量、大型快照與原生平台驗收仍待完成
+
+### Retained skill 的目前工具欄位來源
+
+Python `collectors.py` 在合併 retained skills 時, 若目前 thread / call 存在且符合時間窗, 以目前 `call.tool` 更新回應中的 `tool`, 即使該 call 已不含相同 skill, Rust 改為相同行為, 未修改 retained timestamp、has_document 或其他欄位
+
+HTTP 合成 fixture 原先 `tool` 為 null, 修正後顯示 replacement tool, Python 實際 refresh 與 HTTP 先失敗後通過, 單元驗證過期或不存在的 call 不覆蓋 retained tool、停用與輸入 history 不變, 只在既有最多 500 筆 history 索引暫存工具名稱, 不改查詢、API 路徑、保存、容量、eviction、預覽排序或上限
+
+Skill 全域排序仍待完成, 原始保留插入順序與 SQLite `event_time DESC, item_key DESC LIMIT 500` 之間的差異涉及保留集合, 未藉此工作變更保留策略
+
+本批 targeted 2 項及完整單執行緒 `--locked --offline` service binary 317 項 (95.94 秒)、HTTP 211 項 (145.30 秒) 通過, Linux / Rust 1.100.0 合成資料, 基底 59e6cd6 已核對遠端一致, overflow、restore 容量、大型快照與原生平台驗收仍待完成
+
+同批補齊實際 checkpoint restart 證據: Python 與 Rust 重啟後仍由目前 call 補入 tool, SQLite retained skill payload 不新增 tool, timestamp / has_document 保留, 最新 skill HTTP 9 項通過 (3.72 秒), 此補充只擴充測試, runtime 未再修改, 上述完整回歸仍為補充前的已驗證結果

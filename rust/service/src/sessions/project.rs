@@ -1002,7 +1002,7 @@ fn retain_preview<K: Ord, V>(preview: &mut BTreeMap<K, V>, rank: K, value: V, li
 /// projection IDs, as constructed by Collector::snapshots. The history index borrows the
 /// existing retained history, whose production query is limited to 500 rows.
 struct SkillSummary<'a> {
-    historical: BTreeMap<(&'a str, &'a str, &'a str), (&'a str, &'a Value)>,
+    historical: BTreeMap<(&'a str, &'a str, &'a str), (&'a str, &'a Value, Option<String>)>,
     preview: BTreeMap<(std::cmp::Reverse<Option<String>>, String, String, String), Value>,
     counts: BTreeMap<String, usize>,
     total: usize,
@@ -1020,7 +1020,7 @@ impl<'a> SkillSummary<'a> {
                 ) else { continue; };
                 if !names.contains_key(thread) || boundary.is_some_and(|cutoff|
                     lam_history_store::parse_utc_stamp(time).is_none_or(|time| time < cutoff)) { continue; }
-                historical.insert((thread, id, skill), (time, event));
+                historical.insert((thread, id, skill), (time, event, None));
             }
         }
         Self { historical, preview: BTreeMap::new(), counts: BTreeMap::new(), total: 0, boundary, enabled }
@@ -1037,6 +1037,13 @@ impl<'a> SkillSummary<'a> {
 
     fn observe(&mut self, lookup_thread: &str, thread: Option<&str>, id: &str, call: &Call) {
         if !self.enabled || !self.boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff)) { return; }
+        // Retained skills may no longer occur on this call. Python still uses
+        // the eligible current call's tool without replacing retained metadata.
+        for ((retained_thread, retained_call, _), (_, _, tool)) in &mut self.historical {
+            if *retained_thread == lookup_thread && *retained_call == id {
+                *tool = Some(call.tool.clone());
+            }
+        }
         // Source validation limits this per-call set to 40 skill names.
         for skill in call.skills.iter().map(String::as_str).collect::<BTreeSet<_>>() {
             if let Some(key) = self.historical.keys().find(|(t, i, s)| *t == lookup_thread && *i == id && *s == skill).copied() {
@@ -1052,8 +1059,12 @@ impl<'a> SkillSummary<'a> {
     }
 
     fn finish(mut self, names: &std::collections::HashMap<String, Value>) -> (Vec<Value>, usize, BTreeMap<String, usize>) {
-        for ((thread, id, skill), (time, event)) in std::mem::take(&mut self.historical) {
-            self.admit(thread, id, skill, Some(time.to_owned()), || event.clone());
+        for ((thread, id, skill), (time, event, tool)) in std::mem::take(&mut self.historical) {
+            self.admit(thread, id, skill, Some(time.to_owned()), || {
+                let mut event = event.clone();
+                if let Some(tool) = tool { event["tool"] = tool.into(); }
+                event
+            });
         }
         let events = self.preview.into_values().map(|mut event| {
             if let Some(name) = event["thread_id"].as_str().and_then(|id| names.get(id)) {
@@ -2592,6 +2603,29 @@ mod snapshot_merge_tests {
     }
 
     #[test]
+    fn retained_skill_tool_uses_only_eligible_current_call_without_mutating_history() {
+        let time = timestamp(Some("2026-11-13T01:00:00Z")).unwrap();
+        let mut projection = Projection::for_id(Some("thread".into()));
+        projection.calls.insert("call".into(), call("replacement", Some("2026-11-13T00:00:00Z")));
+        let threads = BTreeMap::from([("thread", (projection, false))]);
+        let names = std::collections::HashMap::from([("thread".into(), json!("Current name"))]);
+        let history = vec![json!({"thread_id":"thread","call_id":"call","skill":"retained",
+            "timestamp":stamp(time),"tool":"old","has_document":false,"marker":"preserved"})];
+        let original = history.clone();
+        let (events, total, _) = skill_summary(&threads, &history, &names, None, true);
+        assert_eq!(total, 1);
+        assert_eq!(events[0]["tool"], "replacement");
+        assert_eq!(events[0]["has_document"], false);
+        assert_eq!(events[0]["timestamp"], stamp(time));
+        assert_eq!(events[0]["marker"], "preserved");
+        assert_eq!(events[0]["thread_name"], "Current name");
+        assert_eq!(skill_summary(&threads, &history, &names, Some(time), true).0[0]["tool"], "old");
+        assert_eq!(skill_summary(&BTreeMap::new(), &history, &names, None, true).0[0]["tool"], "old");
+        assert_eq!(skill_summary(&threads, &history, &names, None, false).1, 0);
+        assert_eq!(history, original);
+    }
+
+    #[test]
     fn snapshot_skill_summary_matches_history_precedence_and_full_event_sort() {
         let time = timestamp(Some("2026-11-13T01:00:00Z")).unwrap();
         let mut threads = BTreeMap::new();
@@ -2692,6 +2726,12 @@ mod snapshot_merge_tests {
                         (thread.to_owned(), call.to_owned(), skill.to_owned()),
                         event.clone(),
                     );
+                }
+                for ((thread, id, _), event) in &mut merged_skills {
+                    if let Some(call) = threads.get(thread.as_str()).and_then(|(projection, _)| projection.calls.get(id))
+                        .filter(|call| boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff))) {
+                        event["tool"] = call.tool.clone().into();
+                    }
                 }
                 for event in current_skills {
                     if let (Some(thread), Some(call), Some(skill)) = (

@@ -4702,6 +4702,35 @@ fn jev_telemetry_snapshot_reads_configured_database_by_window() {
 }
 
 #[test]
+fn retained_skill_preview_uses_current_call_tool_without_new_skill_read() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    append_records(&path, &[event(&stamp, "response_item", json!({"type":"function_call",
+        "name":"exec_command","call_id":"skill","arguments":{"cmd":"cat /tmp/fixture/SKILL.md"}}))]);
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| value["codex"]["skills"]["total"] == 1
+        && value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok");
+    append_records(&path, &[event(&stamp, "response_item", json!({"type":"function_call",
+        "name":"fixture_replacement","call_id":"skill","arguments":{}}))]);
+    let value = snapshot_when(&service, |value| value["codex"]["tools"]["fixture_replacement"] == 1);
+    assert_eq!(value["codex"]["skills"]["events"][0]["tool"], "fixture_replacement");
+    assert_eq!(value["codex"]["skills"]["total"], 1);
+    assert_eq!(value["codex"]["skills"]["events"][0]["skill"], "fixture");
+    assert_eq!(value["codex"]["skills"]["events"][0]["has_document"], false);
+    drop(service);
+    let db = rusqlite::Connection::open(home.path().join("monitoring").join(lam_history_store::FILE_NAME)).unwrap();
+    let raw: String = db.query_row("SELECT payload FROM history_items WHERE namespace='threads' AND section='skills'", [], |row| row.get(0)).unwrap();
+    let retained: Value = serde_json::from_str(&raw).unwrap();
+    assert!(retained.get("tool").is_none());
+    let service = Service::start(home.path(), true, None);
+    let value = snapshot_when(&service, |value| value["codex"]["tools"]["fixture_replacement"] == 1);
+    assert_eq!(value["codex"]["skills"]["events"][0]["tool"], "fixture_replacement");
+    assert_eq!(value["codex"]["skills"]["events"][0]["timestamp"], retained["timestamp"]);
+    assert_eq!(value["codex"]["skills"]["events"][0]["has_document"], false);
+    assert_eq!(value["codex"]["skills"]["total"], 1);
+}
+
+#[test]
 fn retained_skill_detail_reads_observed_session_tail_after_call_retired() {
     let home = tempdir().unwrap();
     let outside = tempdir().unwrap();
