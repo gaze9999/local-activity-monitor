@@ -1056,3 +1056,17 @@ Python 原始來源的 40 組 header、50 組資料列、2 組原始 byte 上限
 header 的 JSON 與 Unicode 解碼錯誤仍沿用 Rust 的 ValueError 分類, 未對齊 Python 的細部分類, 未成對 surrogate 仍嚴格拒絕, 不改變輪替、寫入、endpoint、參數或讀取次數, 歷史失敗與其他驗收限制保留
 
 Linux / Rust 1.100.0 的完整 service 單輪 379 項通過 (60.98 秒), 完整 serial HTTP 單輪 224 項通過 (126.25 秒)
+
+### Codex Cloud CLI 的 stdout 編碼
+
+依 LAM main `5c03daf` 的 `CodexCloudSource._read`, CLI stdout 為 bytes, 成功結束且未超過 1 MiB 才交給 `json.loads`, 本輪 Rust 對應呼叫改用既有私有 JSON bytes decoder
+
+以隔離的合成 CLI 驗證 UTF-8 BOM 與有 / 無 BOM 的 UTF-16、UTF-32 LE / BE, Python 原始 subprocess reader 的 10 組編碼、剛好 1 MiB 與超出 2 bytes fixture 通過, 未呼叫實際 Codex 或雲端帳戶
+
+新增回歸先重現編碼輸出無法解析, 修正後 cloud 10 項通過, 同時驗證原始 byte 上限、失敗退出碼與截斷編碼仍拒絕, 保留 cursor、選定資料目錄及私密欄位排除
+
+新增 `/api/codex/cloud` 的 UTF-32 BE stdout fixture, 核對實際 endpoint 投影及同頁快取不重啟子程序, 不改變 60 秒快取、最多 10 頁、20 筆投影上限、逾時或程序清理
+
+此結果僅涵蓋合成 CLI 與本機 HTTP, 不代表實際帳戶或跨平台認證驗收, 未成對 surrogate 與既有歷史失敗、其他驗收限制保留, 不新增 endpoint、參數或請求次數
+
+Linux / Rust 1.100.0 的完整 service 單輪 380 項通過 (62.28 秒), 完整 serial HTTP 單輪 225 項通過 (137.47 秒)

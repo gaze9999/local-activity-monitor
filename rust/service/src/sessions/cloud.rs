@@ -106,7 +106,7 @@ async fn read(
         if raw.len() > LIMIT || !child.wait().await.ok()?.success() {
             return None;
         }
-        project(&serde_json::from_slice::<Value>(&raw).ok()?)
+        project(&crate::json_bytes::parse(&raw)?)
     })
     .await
     .ok()
@@ -236,6 +236,55 @@ mod tests {
             "cloud list --json --limit 20 -c analytics.enabled=false --cursor abc+/="
         );
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bounded_child_decodes_json_bytes_after_output_cap_and_exit_check() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let executable = home.path().join("codex");
+        let output = home.path().join("output");
+        std::fs::write(&executable, "#!/bin/sh\n/bin/cat \"$CODEX_HOME/output\"\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let row = br#"{"tasks":[{"id":"task_1","title":"Example","secret":"PRIVATE"}],"cursor":"next"}"#;
+        for (width, big_endian, prefix) in [
+            (1, false, b"\xef\xbb\xbf".as_slice()),
+            (2, false, b"\xff\xfe"), (2, true, b"\xfe\xff"),
+            (4, false, b"\xff\xfe\0\0"), (4, true, b"\0\0\xfe\xff"),
+        ] {
+            for bom in [false, true] {
+                let mut raw = if bom { prefix.to_vec() } else { Vec::new() };
+                for byte in row {
+                    match width {
+                        1 => raw.push(*byte),
+                        2 => raw.extend(if big_endian { u16::from(*byte).to_be_bytes() } else { u16::from(*byte).to_le_bytes() }),
+                        4 => raw.extend(if big_endian { u32::from(*byte).to_be_bytes() } else { u32::from(*byte).to_le_bytes() }),
+                        _ => unreachable!(),
+                    }
+                }
+                std::fs::write(&output, &raw).unwrap();
+                let value = read(&executable, home.path(), Some("next"), Duration::from_secs(2)).await.unwrap();
+                assert_eq!(value["items"][0]["id"], "task_1");
+                assert_eq!(value["cursor"], "next");
+                assert!(!value.to_string().contains("PRIVATE"));
+                assert_eq!(std::fs::read(&output).unwrap(), raw);
+            }
+        }
+        let mut raw = b"\xff\xfe".to_vec();
+        for byte in row { raw.extend(u16::from(*byte).to_le_bytes()); }
+        while raw.len() < LIMIT { raw.extend(b" \0"); }
+        assert_eq!(raw.len(), LIMIT);
+        std::fs::write(&output, &raw).unwrap();
+        assert!(read(&executable, home.path(), None, Duration::from_secs(2)).await.is_some());
+        raw.extend(b" \0");
+        std::fs::write(&output, &raw).unwrap();
+        assert!(read(&executable, home.path(), None, Duration::from_secs(2)).await.is_none());
+        std::fs::write(&output, b"\xff\xfe{").unwrap();
+        assert!(read(&executable, home.path(), None, Duration::from_secs(2)).await.is_none());
+        std::fs::write(&output, row).unwrap();
+        std::fs::write(&executable, "#!/bin/sh\n/bin/cat \"$CODEX_HOME/output\"\nexit 1\n").unwrap();
+        assert!(read(&executable, home.path(), None, Duration::from_secs(2)).await.is_none());
+    }
+
     #[test]
     fn projection_trims_python_whitespace_before_character_limits() {
         for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}', '\u{2003}'] {

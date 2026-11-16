@@ -3999,6 +3999,31 @@ fn cloud_endpoint_validates_cursor_and_caches_each_page() {
     assert_eq!(fs::read_to_string(home.path().join("count")).unwrap(), "xx");
 }
 
+#[cfg(unix)]
+#[test]
+fn cloud_endpoint_decodes_encoded_stdout_and_reuses_page_cache() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempdir().unwrap();
+    let bin = tempdir().unwrap();
+    let executable = bin.path().join("codex");
+    fs::write(&executable, "#!/bin/sh\nprintf x >> \"$CODEX_HOME/count\"\n/bin/cat \"$CODEX_HOME/output\"\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let row = br#"{"tasks":[{"id":"task_1","title":"Example","secret":"PRIVATE"}],"cursor":"next"}"#;
+    let mut raw = b"\0\0\xfe\xff".to_vec();
+    for byte in row { raw.extend(u32::from(*byte).to_be_bytes()); }
+    fs::write(home.path().join("output"), &raw).unwrap();
+    let service = Service::start_with_path(home.path(), false, None, Some(bin.path()));
+    assert!(!home.path().join("count").exists());
+    let first = service.get("/api/codex/cloud").json();
+    assert_eq!(first["health"], "ok");
+    assert_eq!(first["items"][0]["id"], "task_1");
+    assert_eq!(first["cursor"], "next");
+    assert!(!first.to_string().contains("PRIVATE"));
+    assert_eq!(service.get("/api/codex/cloud").json(), first);
+    assert_eq!(fs::read(home.path().join("count")).unwrap(), b"x");
+    assert_eq!(fs::read(home.path().join("output")).unwrap(), raw);
+}
+
 #[test]
 fn mcp_document_preview_detects_structured_text_formats() {
     let home = tempdir().unwrap();
