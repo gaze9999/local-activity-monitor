@@ -563,3 +563,13 @@ Dots 日期投影增加相同年份範圍檢查, 超出範圍保留 null, 不改
 原始 Python 的 6 個明確案例與 128 個固定正負小數 / 日曆邊界比較通過, Dots 單元 5 項、Python desktop activity 8 項通過, 完整 service 328 項通過 (110.43 秒), 完整 serial HTTP 單輪 218 項通過 (156.84 秒), 完整檢查後僅調整新測試陣列換行與本段文件, runtime 未再變更
 
 先前 HTTP 217 / 1、overflow WouldBlock 與獨立唯讀 503 的原始證據及未解決狀態持續保留
+
+### 非物件 Dots atom 的缺值語意
+
+基底 `21f504d` 已與遠端一致, LAM main `5c03daf` 與 workspace main `4616074` 未變, 原始 Python 在 electron-persisted-atom-state 明確為非物件時略過衍生電腦資料, events / activity_items 為 null, query 的 activity 為空陣列且 health 維持 ok, 欄位不存在則仍視為有效空物件
+
+Rust 原先將這兩種情況合併, 可能以既有 catalog 產生 computers, 現在只在明確非物件時提前回傳原始缺值欄位, 保留欄位不存在的行為, 不新增讀取、改動容量或保存策略
+
+原始 Python null、布林、數值、字串與陣列 5 個案例及缺少欄位比較通過, 新 Rust 回歸在修正前失敗, 修正後驗證不因既有 catalog 而產生衍生資料, Dots 單元 6 項、Python desktop activity 8 項通過, 完整 service 329 項通過 (98.38 秒), 完整 serial HTTP 單輪 218 項通過 (153.03 秒)
+
+HTTP 通過記錄仍含既有合成資料情境的 history cleanup unavailable 訊息, 完整 log 保留, 未抑制或修改儲存行為, 先前獨立 HTTP / WouldBlock / 唯讀 503 失敗仍未宣稱已解決

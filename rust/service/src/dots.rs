@@ -155,6 +155,16 @@ fn project(
     mut entries: BTreeMap<String, Value>,
 ) -> Value {
     let mut result = json!({"health":"error","checked_at":now.to_rfc3339_opts(SecondsFormat::Secs,false),"source":"desktop_cache","window":window});
+    if state
+        .get("electron-persisted-atom-state")
+        .is_some_and(|atom| !atom.is_object())
+    {
+        result["health"] = json!("ok");
+        result["events"] = Value::Null;
+        result["activity_items"] = Value::Null;
+        result["activity"] = json!([]);
+        return result;
+    }
     let empty = serde_json::Map::new();
     let atom = state
         .get("electron-persisted-atom-state")
@@ -400,6 +410,34 @@ fn project(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_atom_does_not_claim_an_empty_computer_catalog() {
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        for atom in [
+            Value::Null,
+            json!(false),
+            json!(0),
+            json!("invalid"),
+            json!([]),
+        ] {
+            let value = project(
+                &json!({"electron-persisted-atom-state":atom}),
+                "all",
+                now,
+                BTreeMap::from([("thread".into(), json!({"host_id":"local","trigger":"dot"}))]),
+            );
+            assert_eq!(value["health"], "ok");
+            assert_eq!(value["activity"], json!([]));
+            assert!(value["events"].is_null());
+            assert!(value["activity_items"].is_null());
+            assert!(value.get("computers").is_none());
+        }
+        assert_eq!(
+            project(&json!({}), "all", now, BTreeMap::new())["computers"],
+            json!([])
+        );
+    }
 
     #[test]
     fn desktop_dates_round_microseconds_before_rendering_milliseconds() {
