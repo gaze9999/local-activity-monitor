@@ -365,3 +365,17 @@ RowTools 仍只保留 100 筆預覽, 以有界排序鍵加入序號, 不建立�
 同批 JEV call preview 使用相同呈現順序開關, 保留時間優先與 call 內 operation index, 100 筆事件上限、停用與 fallback 不變, 不改 MCP 觀測或 command 解析, Python 實際 save/load 確認 fresh z,a / restore a,z, HTTP 回歸先失敗後通過, JEV HTTP 13 項及含 140 calls / 每 call 2 operations 的有界預覽測試通過
 
 本批最終完整單執行緒 `--locked --offline` 回歸通過: service binary 312 項 (99.07 秒), HTTP 206 項 (146.91 秒), Linux / Rust 1.100.0 合成資料, communication / file / 全域 overflow 順序與其他既有容量、平台待辦未宣稱完成
+
+### 完整 working set 的 agent communication 預覽順序
+
+agent_messages 的同時 outgoing calls 改用既有呈現序號, incoming 仍在相同 timestamp 的 outgoing 前面, 保留每 call 的 message index 與時間優先, 100 筆有界預覽、不保留本文及 incomplete / overflow fallback 不變
+
+Python 實際 save/load 確認 incoming 優先、fresh z,a / restore a,z, HTTP 回歸先失敗後通過, 檢查 snapshot 與 checkpoint call / cursor payload 都不含合成訊息本文, communication 單元 2 項、HTTP 2 項、snapshot merge 23 項通過, 另驗證 2 incoming + 140 calls / 每 call 2 messages 仍只保留 100 筆且 index 正確
+
+基底 6f63115, LAM main 5c03daf / workspace main 4616074 已核對未變, 未新增查詢、修改欄位來源、保存容量或 eviction, file / 其他預覽與全域 overflow 排序仍待完成, 本段未重跑全套
+
+同批 thread.file_reads / file_changes 使用呈現序號決定同時 call 順序, 保留 call 內 file-operation index, 每種 200 筆預覽、read / change 篩選、停用與總量統計不變, 全域 file_activity 仍保留既有排序, 不宣稱跨 thread 排序已完成
+
+Python 實際 save/load 確認各種 fresh z,a / restore a,z, HTTP 回歸先失敗後通過, 合成 operation 只供靜態辨識, 未執行工具或讀取檔案本文, snapshot 無合成本文, 250 calls / 750 operations 的單元回歸確認上限、index、總量與停用行為
+
+本批完整單執行緒 `--locked --offline` 回歸通過: service binary 314 項 (104.34 秒), HTTP 208 項 (159.93 秒), Linux / Rust 1.100.0 合成資料, 全域 file_activity / 其他預覽、overflow、restore 容量與大型快照、原生平台驗收仍待完成

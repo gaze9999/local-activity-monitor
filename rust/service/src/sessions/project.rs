@@ -917,10 +917,11 @@ pub struct Projection {
 /// owned previews, rendering only on admission so inputs can be released.
 /// Valid source file fields retain their existing limits.
 pub(super) struct FileSummary {
+    presentation_order: bool,
     limit: usize,
     total: usize,
     operations: BTreeMap<String, usize>,
-    preview: BTreeMap<(std::cmp::Reverse<Option<String>>, Option<String>, String, usize), Value>,
+    preview: BTreeMap<(std::cmp::Reverse<Option<String>>, Option<String>, u64, String, usize), Value>,
 }
 
 struct FilePreview<'a> {
@@ -950,12 +951,12 @@ impl FilePreview<'_> {
 
 impl FileSummary {
     pub(super) fn new(limit: usize) -> Self {
-        Self { limit, total: 0, operations: BTreeMap::new(), preview: BTreeMap::new() }
+        Self { presentation_order: false, limit, total: 0, operations: BTreeMap::new(), preview: BTreeMap::new() }
     }
 
     /// Feed each resolved (thread, call) winner exactly once, in any order.
-    /// Explicit canonical ties match the existing Rust BTreeMap traversal.
-    /// This does not establish Python insertion-order parity for timestamp ties.
+    /// Global summaries retain canonical thread/call ties. Complete-source row
+    /// previews may use presentation ordinals within the already selected thread.
     /// Calls must already be deduplicated; counts are not reversible.
     /// read_filter None includes all operations, Some(true) reads only.
     pub(super) fn observe(&mut self, projection: &Projection, boundary: Option<Time>, enabled: bool, read_filter: Option<bool>) {
@@ -970,7 +971,8 @@ impl FileSummary {
                     *self.operations.entry(operation.to_owned()).or_default() += 1;
                 }
                 if self.limit == 0 { continue; }
-                let rank = (std::cmp::Reverse(timestamp.clone()), projection.id.clone(), id.clone(), index);
+                let rank = (std::cmp::Reverse(timestamp.clone()), projection.id.clone(),
+                    if self.presentation_order { call.presentation_sequence } else { 0 }, id.clone(), index);
                 if self.preview.len() == self.limit && self.preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { continue; }
                 if self.preview.len() == self.limit { self.preview.pop_last(); }
                 self.preview.insert(rank, FilePreview { thread: projection.id.as_deref(), id, call, file }.render());
@@ -1138,15 +1140,16 @@ impl RowJev {
 /// Metadata-only preview for one thread, after outgoing call winner resolution.
 #[derive(Default)]
 struct CommunicationSummary {
+    presentation_order: bool,
     preview: BTreeMap<(std::cmp::Reverse<Option<String>>, u8,
-        std::cmp::Reverse<Option<Time>>, String, usize), Value>,
+        std::cmp::Reverse<Option<Time>>, u64, String, usize), Value>,
 }
 
 impl CommunicationSummary {
     fn incoming(&mut self, thread: &str, ordinal: usize, message: &super::agent::Incoming, boundary: Option<Time>) {
         if !boundary.is_none_or(|cutoff| message.time().is_some_and(|time| time >= cutoff)) { return; }
         let rank = (std::cmp::Reverse(message.time().map(stamp)), 0u8,
-            std::cmp::Reverse(None), String::new(), ordinal);
+            std::cmp::Reverse(None), 0, String::new(), ordinal);
         if self.preview.len() == 100 && self.preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { return; }
         if self.preview.len() == 100 { self.preview.pop_last(); }
         self.preview.insert(rank, message.render(thread));
@@ -1155,7 +1158,7 @@ impl CommunicationSummary {
     fn outgoing(&mut self, thread: &str, id: &str, call: &Call) {
         for (ordinal, message) in call.agent_messages.iter().enumerate() {
             let rank = (std::cmp::Reverse(call.time.map(stamp)), 1u8,
-                std::cmp::Reverse(call.time), id.to_owned(), ordinal);
+                std::cmp::Reverse(call.time), if self.presentation_order { call.presentation_sequence } else { 0 }, id.to_owned(), ordinal);
             if self.preview.len() == 100 && self.preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { continue; }
             if self.preview.len() == 100 { self.preview.pop_last(); }
             self.preview.insert(rank, message.render(thread, id, call.time, call.completed, call.duration_ms()));
@@ -2042,15 +2045,16 @@ impl Projection {
     }
 
     /// Match the legacy stable timestamp sort while owning at most 100
-    /// events. Explicit tie keys preserve incoming order and sorted call order
+    /// events. Explicit tie keys preserve incoming and selected call order
     /// without requiring a complete sorted call-reference array.
     /// Render metadata only on preview admission, never message contents.
     fn communication<'a>(
         &'a self,
         calls: impl IntoIterator<Item = (&'a String, &'a Call)>,
         boundary: Option<Time>,
+        presentation_order: bool,
     ) -> Vec<Value> {
-        let mut summary = CommunicationSummary::default();
+        let mut summary = CommunicationSummary { presentation_order, ..Default::default() };
         let thread = self.id.as_deref().unwrap_or("");
         for (ordinal, message) in self.agent_incoming.iter().enumerate() {
             summary.incoming(thread, ordinal, message, boundary);
@@ -2084,6 +2088,8 @@ impl Projection {
         let events: Vec<_> = preview.into_values().collect();
         let mut changes = FileSummary::new(200);
         let mut reads = FileSummary::new(200);
+        changes.presentation_order = presentation_order;
+        reads.presentation_order = presentation_order;
         changes.observe(self, boundary, files_enabled, Some(false));
         reads.observe(self, boundary, files_enabled, Some(true));
         let file_changes = changes.finish().0;
@@ -2098,7 +2104,7 @@ impl Projection {
         let tokens = self
             .tokens
             .map(|values| COUNTERS.into_iter().zip(values).collect::<BTreeMap<_, _>>());
-        let communication = self.communication(self.calls.iter().filter(|(_, call)| eligible(call)), boundary);
+        let communication = self.communication(self.calls.iter().filter(|(_, call)| eligible(call)), boundary, presentation_order);
         let jev_calls: Vec<_> = jev.preview.into_values().collect();
         json!({
             "thread_id":self.id, "created_at":self.created.map(stamp), "updated_at":self.updated.map(stamp),
@@ -2867,6 +2873,41 @@ mod snapshot_merge_tests {
     }
 
     #[test]
+    fn ordered_communication_preserves_incoming_priority_and_bounded_outgoing_indices() {
+        let time = timestamp(Some("2026-11-13T01:00:00Z")).unwrap();
+        let mut ordered = CommunicationSummary { presentation_order: true, ..Default::default() };
+        let mut fallback = CommunicationSummary::default();
+        for ordinal in 0..2 {
+            let message = super::super::agent::Incoming::parse(
+                &format!("Message Type: MESSAGE\nTask name: target-{ordinal}\nSender: sender\nPayload:\nPRIVATE_ORDER_BODY"), Some(time)).unwrap();
+            ordered.incoming("fixture", ordinal, &message, None);
+            fallback.incoming("fixture", ordinal, &message, None);
+        }
+        for index in 0..140 {
+            let mut value = call("exec", Some("2026-11-13T01:00:00Z"));
+            value.presentation_sequence = 139 - index;
+            value.agent_messages = (0..2).map(|ordinal| super::super::agent::Outgoing::new(
+                "collaboration.send_message", json!({"target":"fixture","message":"PRIVATE_ORDER_BODY"}).as_object(),
+                Some("sender"), true, ordinal, ordinal).unwrap()).collect();
+            ordered.outgoing("fixture", &format!("call-{index:03}"), &value);
+            fallback.outgoing("fixture", &format!("call-{index:03}"), &value);
+            assert!(ordered.preview.len() <= 100);
+        }
+        let ordered = ordered.finish();
+        let fallback = fallback.finish();
+        assert_eq!(ordered.len(), 100);
+        assert_eq!(ordered[..2], fallback[..2]);
+        assert!(ordered[..2].iter().all(|event| event["direction"] == "incoming"));
+        let ids = |events: &[Value]| events[2..].iter().map(|event|
+            (event["call_id"].as_str().unwrap().to_owned(), event["index"].as_u64().unwrap())).collect::<Vec<_>>();
+        assert_eq!(ids(&ordered), (91..140).rev().flat_map(|index|
+            [(format!("call-{index:03}"),0),(format!("call-{index:03}"),1)]).collect::<Vec<_>>());
+        assert_eq!(ids(&fallback), (0..49).flat_map(|index|
+            [(format!("call-{index:03}"),0),(format!("call-{index:03}"),1)]).collect::<Vec<_>>());
+        assert!(!serde_json::to_string(&ordered).unwrap().contains("PRIVATE_ORDER_BODY"));
+    }
+
+    #[test]
     fn snapshot_communication_matches_full_sort_and_preserves_metadata_only_previews() {
         let time = timestamp(Some("2026-11-13T01:00:00Z")).unwrap();
         let mut projection = Projection::for_id(Some("fixture-thread".into()));
@@ -2906,8 +2947,8 @@ mod snapshot_merge_tests {
             }
             legacy.sort_by(|left, right| right["timestamp"].as_str().cmp(&left["timestamp"].as_str()));
             legacy.truncate(100);
-            let actual = projection.communication(calls.iter().copied(), boundary);
-            assert_eq!(projection.communication(calls.iter().rev().copied(), boundary), actual);
+            let actual = projection.communication(calls.iter().copied(), boundary, false);
+            assert_eq!(projection.communication(calls.iter().rev().copied(), boundary, false), actual);
             assert!(actual.len() <= 100);
             assert_eq!(actual, legacy);
             let mut streamed = CommunicationSummary::default();
@@ -2934,10 +2975,39 @@ mod snapshot_merge_tests {
         projection.agent_incoming.truncate(1);
         projection.calls.retain(|id, _| id == "call-0000");
         let calls: Vec<_> = projection.calls.iter().collect();
-        let unknown = projection.communication(calls.iter().copied(), None);
+        let unknown = projection.communication(calls.iter().copied(), None, false);
         assert_eq!(unknown.len(), 4);
         assert_eq!(unknown[0]["direction"], "incoming");
-        assert!(projection.communication(std::iter::empty(), Some(time)).is_empty());
+        assert!(projection.communication(std::iter::empty(), Some(time), false).is_empty());
+    }
+
+    #[test]
+    fn ordered_row_file_previews_keep_operation_indices_and_two_hundred_limit() {
+        let mut projection = Projection::for_id(Some("fixture".into()));
+        for index in 0..250 {
+            let mut value = call("fixture", Some("2026-11-13T01:00:00Z"));
+            value.presentation_sequence = 249 - index;
+            value.files = (0..3).map(|operation| json!({"operation":if operation < 2 { "read" } else { "write" },
+                "path":format!("{index}-{operation}"),"tool":"fixture","nested":false})).collect();
+            projection.calls.insert(format!("call-{index:03}"), value);
+        }
+        for read in [true, false] {
+            let mut summary = FileSummary::new(200);
+            summary.presentation_order = true;
+            summary.observe(&projection, None, true, Some(read));
+            let (events, total, operations) = summary.finish();
+            assert_eq!(events.len(), 200);
+            assert_eq!(total, if read { 500 } else { 250 });
+            assert_eq!(operations[if read { "read" } else { "write" }], total);
+            let expected: Vec<_> = (0..250).rev().flat_map(|index| (0..3)
+                .filter(move |operation| (*operation < 2) == read)
+                .map(move |operation| format!("{index}-{operation}"))).take(200).collect();
+            assert_eq!(events.iter().map(|event| event["path"].as_str().unwrap()).collect::<Vec<_>>(), expected);
+            let mut disabled = FileSummary::new(200);
+            disabled.presentation_order = true;
+            disabled.observe(&projection, None, false, Some(read));
+            assert_eq!(disabled.finish(), (Vec::new(), 0, BTreeMap::new()));
+        }
     }
 
     #[test]
@@ -3116,8 +3186,8 @@ mod snapshot_merge_tests {
                 }
             }
             assert_eq!(expected.agent_incoming.len(), 2000);
-            assert_eq!(actual.communication(std::iter::empty(), cutoffs[0]).len(), 100);
-            assert!(!serde_json::to_string(&actual.communication(std::iter::empty(), None)).unwrap()
+            assert_eq!(actual.communication(std::iter::empty(), cutoffs[0], false).len(), 100);
+            assert!(!serde_json::to_string(&actual.communication(std::iter::empty(), None, false)).unwrap()
                 .contains("PRIVATE_BODY_MUST_NOT_RENDER"));
         }
     }

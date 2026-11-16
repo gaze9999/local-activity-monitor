@@ -1326,6 +1326,56 @@ fn session_execution_metadata_is_selected_and_survives_checkpoint_restore() {
 }
 
 #[test]
+fn thread_file_previews_preserve_call_ties_without_reading_file_bodies() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    let mut records = Vec::new();
+    for operation in ["read", "write"] {
+        for id in ["z", "a"] {
+            records.push(event(&stamp, "response_item", json!({"type":"function_call","name":format!("mcp__fixture__{operation}_file"),"call_id":format!("{id}-{operation}"),"arguments":{"path":format!("fixture-{id}.txt"),"content":"PRIVATE_FILE_BODY"}})));
+        }
+    }
+    append_records(&path, &records);
+    for restart in [false, true] {
+        let service = Service::start(home.path(), true, None);
+        let value = snapshot_when(&service, |value| value["codex"]["threads"][0]["file_reads"].as_array().is_some_and(|events| events.len() == 2)
+            && value["codex"]["threads"][0]["file_changes"].as_array().is_some_and(|events| events.len() == 2));
+        for (field, operation) in [("file_reads", "read"), ("file_changes", "write")] {
+            let ids: Vec<_> = value["codex"]["threads"][0][field].as_array().unwrap().iter().map(|event| event["call_id"].as_str().unwrap()).collect();
+            let expected: Vec<_> = (if restart { ["a", "z"] } else { ["z", "a"] }).iter().map(|id| format!("{id}-{operation}")).collect();
+            assert_eq!(ids, expected);
+        }
+        assert_eq!(value["codex"]["file_activity"]["total"], 4);
+        assert!(!value.to_string().contains("PRIVATE_FILE_BODY"));
+        assert!(!home.path().join("fixture-z.txt").exists());
+    }
+}
+
+#[test]
+fn communication_preview_preserves_incoming_and_call_order_without_message_bodies() {
+    let home = tempdir().unwrap();
+    let (path, stamp) = native_event_fixture(home.path());
+    append_records(&path, &[
+        event(&stamp, "response_item", json!({"type":"message","role":"user","content":[{"type":"input_text","text":"Message Type: MESSAGE\nTask name: /root\nSender: /root/worker\nPayload:\nPRIVATE_ORDER_BODY"}]})),
+        event(&stamp, "response_item", json!({"type":"function_call","name":"collaboration.send_message","call_id":"z","arguments":json!({"target":"/root/z","message":"PRIVATE_ORDER_BODY"}).to_string()})),
+        event(&stamp, "response_item", json!({"type":"function_call","name":"collaboration.send_message","call_id":"a","arguments":json!({"target":"/root/a","message":"PRIVATE_ORDER_BODY"}).to_string()})),
+    ]);
+    for restart in [false, true] {
+        let service = Service::start(home.path(), true, None);
+        let value = snapshot_when(&service, |value| value["codex"]["threads"][0]["agent_messages"].as_array().is_some_and(|messages| messages.len() == 3));
+        let messages = value["codex"]["threads"][0]["agent_messages"].as_array().unwrap();
+        assert_eq!(messages[0]["direction"], "incoming");
+        assert_eq!(messages[1..].iter().map(|message| message["call_id"].as_str().unwrap()).collect::<Vec<_>>(),
+            if restart { vec!["a", "z"] } else { vec!["z", "a"] });
+        assert!(!value.to_string().contains("PRIVATE_ORDER_BODY"));
+    }
+    let db = rusqlite::Connection::open(home.path().join("monitoring").join(lam_history_store::FILE_NAME)).unwrap();
+    let mut statement = db.prepare("SELECT payload FROM session_calls UNION ALL SELECT payload FROM session_cursors").unwrap();
+    let payloads = statement.query_map([], |row| row.get::<_, String>(0)).unwrap();
+    for payload in payloads { assert!(!payload.unwrap().contains("PRIVATE_ORDER_BODY")); }
+}
+
+#[test]
 fn agent_communication_metadata_is_bounded_private_and_replayed_from_old_checkpoint() {
     let home = tempdir().unwrap();
     let (path, stamp) = native_event_fixture(home.path());
