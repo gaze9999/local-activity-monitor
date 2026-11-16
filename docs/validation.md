@@ -1042,3 +1042,17 @@ Rust 原先在保留與超限首列判斷前排除空白列, 且只依 LF 分行
 首列驗證仍只以 LF 結束, 兩筆 bare-CR 相接不能變成有效 header, JSON BOM / UTF-16 / UTF-32 與 surrogate 的既有差異未在本輪擴充, 輪替、寫入與其他驗收限制保持不變
 
 Linux / Rust 1.100.0 的完整 service 單輪 377 項通過 (64.36 秒), 完整 serial HTTP 單輪 223 項通過 (127.96 秒)
+
+### PerformanceDebug 的首列與資料列編碼
+
+依同一 LAM main `5c03daf` 的 `PerformanceDebug.load`, header 與資料列都使用 `json.loads(bytes)`, 本輪將兩個 Rust parser 呼叫改用既有私有 JSON bytes decoder, decoder 本身不變
+
+支援 UTF-8 BOM 與有 / 無 BOM 的 UTF-16、UTF-32 LE / BE, 仍先套用 8,192 bytes header readline、256 KiB tail、首列丟棄及 150 個實體資料列範圍, 不先轉碼整檔
+
+Python 原始來源的 40 組 header、50 組資料列、2 組原始 byte 上限與 1 組輪替 / 目前檔案 fixture 通過, header 與 body 的分行差異明確保留: 編碼 BE 換行可通過 header 但該 body 列無效, 編碼 LE 換行在 header 即失敗
+
+兩項新增回歸修正前失敗, 修正後 PerformanceDebug 7 項通過, 新 `/api/snapshot` fixture 核對 `monitor.debug.records` 的 UTF-32 BE 前一份檔案與 UTF-32 LE 目前資料列, 維持倒序、白名單及來源 bytes 不變
+
+header 的 JSON 與 Unicode 解碼錯誤仍沿用 Rust 的 ValueError 分類, 未對齊 Python 的細部分類, 未成對 surrogate 仍嚴格拒絕, 不改變輪替、寫入、endpoint、參數或讀取次數, 歷史失敗與其他驗收限制保留
+
+Linux / Rust 1.100.0 的完整 service 單輪 379 項通過 (60.98 秒), 完整 serial HTTP 單輪 224 項通過 (126.25 秒)

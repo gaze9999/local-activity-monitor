@@ -347,8 +347,8 @@ impl PerformanceDebug {
             let mut reader = BufReader::new(file);
             let mut first = Vec::new();
             (&mut reader).take(8192).read_until(b'\n', &mut first)?;
-            let first: Value = serde_json::from_slice(&first)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid debug header"))?;
+            let first = crate::json_bytes::parse(&first)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid debug header"))?;
             if first["application"] != "local-activity-monitor"
                 || first["version"] != 1
                 || project(&first).is_none()
@@ -373,8 +373,7 @@ impl PerformanceDebug {
                 .into_iter()
                 .rev()
             {
-                if let Some(record) = serde_json::from_slice::<Value>(line)
-                    .ok()
+                if let Some(record) = crate::json_bytes::parse(line)
                     .filter(|item| {
                         item["application"] == "local-activity-monitor" && item["version"] == 1
                     })
@@ -538,6 +537,85 @@ mod tests {
     use super::*;
     fn fixture_row(value: u64) -> Vec<u8> {
         json!({"application":"local-activity-monitor","version":1,"kind":"collection","refresh_ms":value,"secret":"PRIVATE"}).to_string().into_bytes()
+    }
+
+    fn encoded(text: &[u8], width: usize, big_endian: bool, bom: bool) -> Vec<u8> {
+        let mut raw = if bom {
+            match (width, big_endian) {
+                (1, _) => b"\xef\xbb\xbf".to_vec(),
+                (2, false) => b"\xff\xfe".to_vec(),
+                (2, true) => b"\xfe\xff".to_vec(),
+                (4, false) => b"\xff\xfe\0\0".to_vec(),
+                (4, true) => b"\0\0\xfe\xff".to_vec(),
+                _ => unreachable!(),
+            }
+        } else { Vec::new() };
+        for byte in text {
+            assert!(byte.is_ascii());
+            match width {
+                1 => raw.push(*byte),
+                2 => raw.extend(if big_endian { u16::from(*byte).to_be_bytes() } else { u16::from(*byte).to_le_bytes() }),
+                4 => raw.extend(if big_endian { u32::from(*byte).to_be_bytes() } else { u32::from(*byte).to_le_bytes() }),
+                _ => unreachable!(),
+            }
+        }
+        raw
+    }
+
+    #[test]
+    fn encoded_header_retains_raw_readline_and_body_splitlines_boundaries() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("performance-debug.jsonl");
+        let row = fixture_row(2);
+        for (width, big_endian) in [(1, false), (2, false), (2, true), (4, false), (4, true)] {
+            for bom in [false, true] {
+                for separator in [vec![], b"\n".to_vec(), b"\r\n".to_vec(), encoded(b"\n", width, big_endian, false)] {
+                    let raw = [encoded(&row, width, big_endian, bom), separator.clone()].concat();
+                    fs::write(&path, &raw).unwrap();
+                    let debug = PerformanceDebug::new(folder.path(), "abcdef012345".into());
+                    let encoded_lf = width != 1 && separator == encoded(b"\n", width, big_endian, false);
+                    let invalid = width != 1 && !separator.is_empty() && !(encoded_lf && big_endian);
+                    assert_eq!(debug.invalid, invalid, "{width} {big_endian} {bom} {separator:?}");
+                    assert_eq!(debug.records.len(), usize::from(!invalid && !encoded_lf));
+                    assert_eq!(fs::read(&path).unwrap(), raw);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn encoded_body_rows_follow_valid_header_and_raw_byte_caps() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("performance-debug.jsonl");
+        let header = fixture_row(1);
+        let row = fixture_row(2);
+        for (width, big_endian) in [(1, false), (2, false), (2, true), (4, false), (4, true)] {
+            for bom in [false, true] {
+                for separator in [vec![], b"\n".to_vec(), b"\r".to_vec(), b"\r\n".to_vec(), encoded(b"\n", width, big_endian, false)] {
+                    let raw = [header.as_slice(), b"\n", &encoded(&row, width, big_endian, bom), &separator].concat();
+                    fs::write(&path, &raw).unwrap();
+                    let debug = PerformanceDebug::new(folder.path(), "abcdef012345".into());
+                    let encoded_lf = width != 1 && separator == encoded(b"\n", width, big_endian, false);
+                    assert!(!debug.invalid);
+                    assert_eq!(debug.records.len(), 1 + usize::from(!(encoded_lf && big_endian)), "{width} {big_endian} {bom} {separator:?}");
+                    assert!(!debug.snapshot().to_string().contains("PRIVATE"));
+                    assert_eq!(fs::read(&path).unwrap(), raw);
+                }
+            }
+        }
+        let raw = [header.as_slice(), b"\n", &vec![b'x'; READ_BYTES as usize], b"\r\n", &encoded(&row, 4, false, true)].concat();
+        fs::write(&path, &raw).unwrap();
+        let debug = PerformanceDebug::new(folder.path(), "abcdef012345".into());
+        assert_eq!(debug.records.len(), 1);
+        assert_eq!(debug.records[0]["refresh_ms"], 2);
+        assert_eq!(fs::read(&path).unwrap(), raw);
+        let oversized = String::from_utf8(header).unwrap().replace("PRIVATE", &"x".repeat(2200));
+        let raw = encoded(oversized.as_bytes(), 4, false, true);
+        fs::write(&path, &raw).unwrap();
+        let debug = PerformanceDebug::new(folder.path(), "abcdef012345".into());
+        assert!(debug.invalid);
+        assert!(debug.records.is_empty());
+        assert_eq!(fs::read(&path).unwrap(), raw);
     }
 
     #[test]

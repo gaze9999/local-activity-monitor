@@ -644,6 +644,33 @@ fn debug_reload_respects_physical_row_retention_in_snapshot() {
 }
 
 #[test]
+fn debug_reload_decodes_header_and_body_without_rewriting_sources() {
+    let home = tempdir().unwrap();
+    fs::create_dir(home.path().join("monitoring")).unwrap();
+    let row = |n| json!({"application":"local-activity-monitor","version":1,"kind":"collection","refresh_ms":n,"secret":"PRIVATE"}).to_string();
+    let mut previous = b"\0\0\xfe\xff".to_vec();
+    for unit in row(1).chars().map(u32::from) { previous.extend(unit.to_be_bytes()); }
+    let mut raw = row(2).into_bytes();
+    raw.extend(b"\n\xff\xfe\0\0");
+    for unit in row(3).chars().map(u32::from) { raw.extend(unit.to_le_bytes()); }
+    raw.extend(b"\r\n");
+    let path = home.path().join("monitoring/performance-debug.jsonl");
+    let previous_path = home.path().join("monitoring/performance-debug.jsonl.1");
+    fs::write(&path, &raw).unwrap();
+    fs::write(&previous_path, &previous).unwrap();
+    let service = Service::start(home.path(), false, None);
+    let response = service.get("/api/snapshot");
+    assert_eq!(response.status, 200);
+    let snapshot = response.json();
+    let debug = &snapshot["monitor"]["debug"];
+    assert_eq!(debug["enabled"], false);
+    assert_eq!(debug["records"].as_array().unwrap().iter().map(|record| record["refresh_ms"].as_u64().unwrap()).collect::<Vec<_>>(), [3, 2, 1]);
+    assert!(!debug.to_string().contains("PRIVATE"));
+    assert_eq!(fs::read(&path).unwrap(), raw);
+    assert_eq!(fs::read(&previous_path).unwrap(), previous);
+}
+
+#[test]
 fn debug_setting_records_collection_only_when_enabled() {
     let home = tempdir().unwrap();
     let service = Service::start(home.path(), false, None);
