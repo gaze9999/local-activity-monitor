@@ -904,6 +904,8 @@ fn merge_session_index(
     }
     let mut titles = Map::new();
     for line in lines {
+        // Python parses each raw index line independently with json.loads(bytes).
+        let line = line.strip_prefix(b"\xef\xbb\xbf").unwrap_or(line);
         let Ok(value) = serde_json::from_slice::<Value>(line) else {
             continue;
         };
@@ -1355,6 +1357,59 @@ mod tests {
         }}).to_string()).unwrap();
         merge_remote_state(home.path(), &mut entries);
         assert_eq!(entries[first]["name"], "遠端");
+    }
+
+    #[test]
+    fn session_index_utf8_bom_preserves_selection_and_title_precedence() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("session_index.jsonl");
+        let source = concat!(
+            "{\"id\":\"one\",\"thread_name\":\"First\"}\n",
+            "\u{feff}{\"id\":\"one\",\"thread_name\":\"Latest\",\"unknown\":\"PRIVATE\"}\n",
+            "\u{feff}\u{feff}{\"id\":\"one\",\"thread_name\":\"Double\"}\n",
+            " \u{feff}{\"id\":\"one\",\"thread_name\":\"Nonleading\"}\n",
+            "\u{feff}\n\u{feff}[]\n\u{feff}{\n",
+            "\u{feff}{\"id\":\"hidden\",\"thread_name\":\"Hidden\"}\n",
+            "\u{feff}{\"id\":\"embedded\",\"thread_name\":\"Before\u{feff}After\"}\n",
+        );
+        let mut raw = source.as_bytes().to_vec();
+        raw.extend_from_slice(b"\xef\xbb\xbf{\"id\":\"one\",\"thread_name\":\"\xff\"}\n");
+        std::fs::write(&path, &raw).unwrap();
+        let observed = BTreeSet::from(["one".into(), "embedded".into()]);
+        let mut entries = Map::new();
+        let report = merge_session_index(home.path(), &mut entries, &observed);
+        assert_eq!(report["health"], "ok");
+        assert_eq!(report["matched_threads"], 2);
+        assert_eq!(report["tail_bytes"], 1024 * 1024);
+        assert_eq!(entries["one"]["name"], "Latest");
+        assert_eq!(entries["embedded"]["name"], "Before\u{feff}After");
+        assert!(!entries.contains_key("hidden"));
+        assert!(!serde_json::to_string(&entries).unwrap().contains("PRIVATE"));
+        entries.get_mut("one").unwrap()["name"] = json!("Catalog");
+        merge_session_index(home.path(), &mut entries, &observed);
+        assert_eq!(entries["one"]["name"], "Catalog");
+        assert_eq!(std::fs::read(&path).unwrap(), raw);
+    }
+
+    #[test]
+    fn session_index_utf8_bom_keeps_tail_first_line_discard() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("session_index.jsonl");
+        let lines = "\u{feff}{\"id\":\"discard\",\"thread_name\":\"Discard\"}\n\u{feff}{\"id\":\"one\",\"thread_name\":\"Latest\"}\n";
+        let mut tail = lines.as_bytes().to_vec();
+        tail.resize(1024 * 1024, b' ');
+        let mut raw = b"garbage\n".to_vec();
+        raw.extend_from_slice(&tail);
+        std::fs::write(&path, &raw).unwrap();
+        let mut entries = Map::new();
+        let observed = BTreeSet::from(["one".into(), "discard".into()]);
+        let report = merge_session_index(home.path(), &mut entries, &observed);
+        assert_eq!(report["health"], "ok");
+        assert_eq!(report["matched_threads"], 1);
+        assert_eq!(report["tail_bytes"], 1024 * 1024);
+        assert_eq!(entries["one"]["name"], "Latest");
+        assert!(!entries.contains_key("discard"));
+        assert_eq!(std::fs::read(&path).unwrap(), raw);
     }
 
     #[test]

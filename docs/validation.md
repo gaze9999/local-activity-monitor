@@ -807,3 +807,13 @@ focused heartbeat 1 項通過 (30.19 秒), 完整 serial HTTP 單輪 219 項通�
 BOM 本身仍計入 bytes_read、單一 manifest 65536 bytes 與總計 2 MiB 上限, BOM-only、double BOM、非前置 BOM、無效 UTF-8、非 object 與 malformed JSON 仍拒絕, JSON 字串內的 U+FEFF 保留, 證據包含 source bytes 未改寫、兩種 manifest 路徑及 MCP runtime arguments 不外露
 
 Python 14 組 bytes / budget fixture 通過, 其中 UTF-16 / UTF-32 為 Python 可讀、Rust 本輪仍未支援的獨立編碼差異, 不宣稱完整 bytes decoding 等價, 新 Rust 3 項回歸修正前均失敗, 修正後 Plugin 全家族 11 項通過 (0.02 秒), Python 既有 Plugin 10 項通過, 完整 service 349 項通過 (120.31 秒), 完整 serial HTTP 單輪 219 項通過 (128.00 秒), 歷史 503、數字呈現與 Unicode 限制繼續保留
+
+### Session index 的逐行 UTF-8 BOM
+
+原始 Python 以 binary stream 逐行呼叫 json.loads, 因此每行可各自帶有單一前置 UTF-8 BOM, 本輪僅於既有 1 MiB tail 擷取與首行丟棄之後, 在 merge_session_index 的每行 JSON 解析前移除該精確前綴
+
+保留 observed ID 篩選、最新有效 title、catalog title 優先、512 字元上限與來源檔案, BOM-only、double / 非前置 BOM、malformed、無效 UTF-8 與非 object 行仍忽略, title 內 U+FEFF 不移除, tail 起點恰落在完整行開頭時仍依原行為丟棄首行, 未因 BOM 放寬讀取範圍
+
+不改動共用 global-state decoder 或其他 JSON 來源, Python 對 global-state 的專案與 Dots 呼叫分別使用文字與 bytes, 不以單一 decoder 變更推定兩者等價, UTF-16/32 仍是獨立未支援差異
+
+原始 Python 2 組完整來源 fixture 通過且 bytes 未改寫, 新 Rust 2 項回歸修正前失敗記錄保留, 修正後 schedules 全家族 15 項通過 (0.06 秒), Python 既有 subagent sources 2 項通過, 完整 service 351 項通過 (126.44 秒), 完整 serial HTTP 單輪 219 項通過 (121.07 秒), 歷史 503、數字呈現與 Unicode 限制仍保留
