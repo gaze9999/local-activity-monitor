@@ -4,10 +4,11 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 pub(super) fn augment(snapshot: &mut Value, home: &Path, core: &Value, desktop: &Value, diagnostic_locations: &[PathBuf], runtime: &Value, journal: &Value) {
-    let codex = snapshot["codex"].clone();
-    let mcp = snapshot["mcp"].clone();
-    let settings = snapshot["settings"].clone();
-    let monitor = snapshot["monitor"].clone();
+    let mut sources = json!({});
+    let codex = &snapshot["codex"];
+    let mcp = &snapshot["mcp"];
+    let settings = &snapshot["settings"];
+    let monitor = &snapshot["monitor"];
     let read = &codex["read_state"];
     let active = codex["health"] != "disabled";
     let updated = snapshot["updated_at"].clone();
@@ -19,7 +20,7 @@ pub(super) fn augment(snapshot: &mut Value, home: &Path, core: &Value, desktop: 
         .flatten()
         .map(|(name, state)| json!({"name":name,"health":state["health"]}))
         .collect();
-    snapshot["sources"]["account_api"] = json!({"name":"Codex account API","features":["usage"],"scope":"official_account_read_only","locations":[],"mode":"read_only","fields":["plan_type","limits","credits","account_usage"],"limits":{"cache_seconds":60,"timeout_seconds":10,"output_bytes":1048576},"readers":methods,"health":account["health"],"display_window":window});
+    sources["account_api"] = json!({"name":"Codex account API","features":["usage"],"scope":"official_account_read_only","locations":[],"mode":"read_only","fields":["plan_type","limits","credits","account_usage"],"limits":{"cache_seconds":60,"timeout_seconds":10,"output_bytes":1048576},"readers":methods,"health":account["health"],"display_window":window});
     let location = home
         .join("monitoring")
         .join(lam_history_store::FILE_NAME)
@@ -41,7 +42,7 @@ pub(super) fn augment(snapshot: &mut Value, home: &Path, core: &Value, desktop: 
     let mut session_locations = vec![home.join("sessions").to_string_lossy().into_owned()];
     session_locations.extend(read["locations"].as_array().into_iter().flatten()
         .filter_map(Value::as_str).take(super::SOURCE_LOCATION_LIMIT).map(str::to_owned));
-    snapshot["sources"]["session"] = json!({"name":"Codex session","features":["codex","tools","git","workflow","skills","checks","files","sqlite","mcp","web","errors","logs","usage","dots"],"scope":"recent_tail_and_incremental_metadata","locations":session_locations,"mode":"read_only","fields":[],"limits":limits,"readers":[],"health":codex["health"],"observations":enabled,"checked_at":updated,"display_window":window});
+    sources["session"] = json!({"name":"Codex session","features":["codex","tools","git","workflow","skills","checks","files","sqlite","mcp","web","errors","logs","usage","dots"],"scope":"recent_tail_and_incremental_metadata","locations":session_locations,"mode":"read_only","fields":[],"limits":limits,"readers":[],"health":codex["health"],"observations":enabled,"checked_at":updated,"display_window":window});
     let readers = codex["metadata_sources"]
         .as_array()
         .cloned()
@@ -78,7 +79,7 @@ pub(super) fn augment(snapshot: &mut Value, home: &Path, core: &Value, desktop: 
         .iter()
         .filter_map(|reader| reader["location"].as_str())
         .collect();
-    snapshot["sources"]["catalog"] = json!({"name":"Codex / ChatGPT catalog","features":["codex","usage","dots","workflow","skills","plugins"],"scope":"titles_classification_and_local_thread_metadata","locations":locations,"mode":"read_only","fields":fields,"limits":{},"readers":readers,"health":health,"display_window":window});
+    sources["catalog"] = json!({"name":"Codex / ChatGPT catalog","features":["codex","usage","dots","workflow","skills","plugins"],"scope":"titles_classification_and_local_thread_metadata","locations":locations,"mode":"read_only","fields":fields,"limits":{},"readers":readers,"health":health,"display_window":window});
     let checkpoint = &read["checkpoint"];
     let checkpoint_health = if active {
         checkpoint["write_health"]
@@ -103,7 +104,7 @@ pub(super) fn augment(snapshot: &mut Value, home: &Path, core: &Value, desktop: 
         let health = checkpoint[key].as_str().filter(|health| !health.is_empty())?;
         Some(json!({"name":format!("Checkpoint {phase}"),"health":health,"checked_at":checkpoint[time]}))
     }).collect();
-    snapshot["sources"]["thread_state"] = json!({"name":"Thread lifecycle / Skills","features":["codex","workflow","skills"],"scope":"confirmed_lifecycle_and_skill_checkpoints","locations":[location],"mode":"bounded_metadata_cache","fields":["thread_id","status","task_time","task_start","offset","skill","call_id"],"limits":checkpoint_limits,"readers":checkpoint_readers,"health":checkpoint_health,"display_window":window});
+    sources["thread_state"] = json!({"name":"Thread lifecycle / Skills","features":["codex","workflow","skills"],"scope":"confirmed_lifecycle_and_skill_checkpoints","locations":[location],"mode":"bounded_metadata_cache","fields":["thread_id","status","task_time","task_start","offset","skill","call_id"],"limits":checkpoint_limits,"readers":checkpoint_readers,"health":checkpoint_health,"display_window":window});
     let history_health = if active {
         codex["sqlite"]["history_health"]
             .as_str()
@@ -111,12 +112,12 @@ pub(super) fn augment(snapshot: &mut Value, home: &Path, core: &Value, desktop: 
     } else {
         "disabled"
     };
-    snapshot["sources"]["activity_history"] = json!({"name":"Activity history","features":["sqlite","web","mcp"],"scope":"retained_activity_metadata","locations":[location],"mode":"bounded_metadata_cache","fields":["timestamp","thread_id","call_id","operation","status","duration_ms","reference_url"],"limits":{"retention_days":settings["activity_retention_days"],"sql_records":monitor["sql_records"],"web_records":monitor["web_records"],"mcp_records":monitor["mcp_records"]},"readers":[],"health":history_health,"display_window":window});
+    sources["activity_history"] = json!({"name":"Activity history","features":["sqlite","web","mcp"],"scope":"retained_activity_metadata","locations":[location],"mode":"bounded_metadata_cache","fields":["timestamp","thread_id","call_id","operation","status","duration_ms","reference_url"],"limits":{"retention_days":settings["activity_retention_days"],"sql_records":monitor["sql_records"],"web_records":monitor["web_records"],"mcp_records":monitor["mcp_records"]},"readers":[],"health":history_health,"display_window":window});
     let worktree_limits = codex["worktrees"].as_object().map(|fields| {
         fields.iter().filter(|(_, value)| value.is_i64() || value.is_u64() || value.is_boolean())
             .map(|(key, value)| (key.clone(), value.clone())).collect::<serde_json::Map<_, _>>()
     }).unwrap_or_default();
-    snapshot["sources"]["worktrees"] = json!({"name":"Git worktrees","features":["projects","worktrees"],"scope":"loaded_project_roots_and_codex_managed_worktrees","locations":[home.join("worktrees").to_string_lossy()],"mode":"read_only","fields":["name","branch","commit","detached","locked","prunable","managed","project_ids","thread_ids","checked_at"],"limits":worktree_limits,"readers":[],"health":codex["worktrees"]["health"],"checked_at":codex["worktrees"]["checked_at"],"display_window":window});
+    sources["worktrees"] = json!({"name":"Git worktrees","features":["projects","worktrees"],"scope":"loaded_project_roots_and_codex_managed_worktrees","locations":[home.join("worktrees").to_string_lossy()],"mode":"read_only","fields":["name","branch","commit","detached","locked","prunable","managed","project_ids","thread_ids","checked_at"],"limits":worktree_limits,"readers":[],"health":codex["worktrees"]["health"],"checked_at":codex["worktrees"]["checked_at"],"display_window":window});
     let reader_enabled = active && ["errors", "logs", "sqlite", "model_api"].iter().any(|key| settings["observations"][*key] == true);
     let mut readers = vec![desktop.clone(), core.clone()];
     if !reader_enabled {
@@ -125,24 +126,72 @@ pub(super) fn augment(snapshot: &mut Value, home: &Path, core: &Value, desktop: 
         }
     }
     let locations: Vec<_> = diagnostic_locations.iter().map(|path| path.to_string_lossy()).collect();
-    snapshot["sources"]["diagnostics"] = json!({"name":"Codex diagnostics","features":["errors","logs","sqlite","model-api"],"scope":"recent_metadata_and_24h_error_backfill","locations":locations,"mode":"read_only","fields":["timestamp","severity","module","code","thread_id","call_id","request_id","trace_id","sql"],"limits":{"event_limit":super::core_logs::LOG_LIMIT,"file_limit":super::desktop::FILE_LIMIT},"readers":readers,"display_window":window});
+    sources["diagnostics"] = json!({"name":"Codex diagnostics","features":["errors","logs","sqlite","model-api"],"scope":"recent_metadata_and_24h_error_backfill","locations":locations,"mode":"read_only","fields":["timestamp","severity","module","code","thread_id","call_id","request_id","trace_id","sql"],"limits":{"event_limit":super::core_logs::LOG_LIMIT,"file_limit":super::desktop::FILE_LIMIT},"readers":readers,"display_window":window});
     if !active || ["errors", "logs", "sqlite"].iter().all(|key| settings["observations"][*key] == false) {
-        snapshot["sources"]["diagnostics"]["health"] = json!("disabled");
+        sources["diagnostics"]["health"] = json!("disabled");
     }
     let configuration = &mcp["configuration"];
     if let Some(path) = configuration["location"].as_str() {
-        snapshot["sources"]["mcp_config"] = json!({"name":"MCP configuration","features":["mcp","tools"],"scope":"configured_sources_and_purposes","locations":[path],"mode":"read_only","fields":["server","enabled","description","category","tags"],"limits":{"configured_sources":configuration["configured_sources"],"loaded_sources":mcp["servers"].as_array().map_or(0,Vec::len),"event_limit":super::mcp::EVENT_LIMIT,"tool_limit":super::mcp::TOOL_LIMIT},"readers":[],"display_window":window});
+        sources["mcp_config"] = json!({"name":"MCP configuration","features":["mcp","tools"],"scope":"configured_sources_and_purposes","locations":[path],"mode":"read_only","fields":["server","enabled","description","category","tags"],"limits":{"configured_sources":configuration["configured_sources"],"loaded_sources":mcp["servers"].as_array().map_or(0,Vec::len),"event_limit":super::mcp::EVENT_LIMIT,"tool_limit":super::mcp::TOOL_LIMIT},"readers":[],"display_window":window});
     }
     let mut runtime_fields: BTreeSet<String> = runtime.as_object().into_iter().flatten().map(|(key, _)| key.clone()).collect();
     for key in ["pid", "version", "fonts"] {
         if monitor.get(key).is_some() { runtime_fields.insert(key.to_owned()); }
     }
-    snapshot["sources"]["monitor"] = json!({"name":"Local Activity Monitor","features":["monitor","errors","logs"],"scope":"runtime_samples_and_bounded_event_metadata","locations":[home.join("monitoring/local-activity-monitor.jsonl").to_string_lossy(),location],"mode":"bounded_metadata_cache","fields":runtime_fields,"limits":{"history_limit":monitor["history_limit"],"event_limit":monitor["event_limit"],"retained_samples":monitor["history"].as_array().map_or(0,Vec::len),"retained_events":monitor["events"].as_array().map_or(0,Vec::len),"byte_limit":journal["byte_limit"],"error_history_limit":lam_history_store::ERROR_PREVIEW_LIMIT},"readers":[],"health":monitor["health"],"checked_at":updated,"display_window":window});
+    sources["monitor"] = json!({"name":"Local Activity Monitor","features":["monitor","errors","logs"],"scope":"runtime_samples_and_bounded_event_metadata","locations":[home.join("monitoring/local-activity-monitor.jsonl").to_string_lossy(),location],"mode":"bounded_metadata_cache","fields":runtime_fields,"limits":{"history_limit":monitor["history_limit"],"event_limit":monitor["event_limit"],"retained_samples":monitor["history"].as_array().map_or(0,Vec::len),"retained_events":monitor["events"].as_array().map_or(0,Vec::len),"byte_limit":journal["byte_limit"],"error_history_limit":lam_history_store::ERROR_PREVIEW_LIMIT},"readers":[],"health":monitor["health"],"checked_at":updated,"display_window":window});
+    if let Value::Object(entries) = sources {
+        for (key, value) in entries { snapshot["sources"][key] = value; }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staged_registry_preserves_unread_trees_existing_order_and_rejections() {
+        let apply = |snapshot: &mut Value| augment(snapshot, Path::new("/fixture"),
+            &json!({}), &json!({}), &[], &json!({}), &json!({}));
+        let rows = json!([{"payload":[{"nested":"unchanged"}],"tool":"fixture"}]);
+        let mut snapshot = json!({
+            "codex":{"health":"ok","threads":rows,"account":{"health":"disabled"}},
+            "mcp":{"events":rows},"settings":{"observations":{"metadata":false}},
+            "monitor":{"history":rows,"health":"ok"},"outside":{"keep":true},
+            "sources":{"unknown":{"keep":[1,2]},"monitor":"old","session":{"old":true},
+                "tail":7,"mcp_config":{"keep":"no replacement without configuration"}}
+        });
+        let original = snapshot.clone();
+        apply(&mut snapshot);
+        for field in ["codex", "mcp", "settings", "monitor", "outside"] {
+            assert_eq!(snapshot[field], original[field]);
+        }
+        for field in ["unknown", "tail", "mcp_config"] {
+            assert_eq!(snapshot["sources"][field], original["sources"][field]);
+        }
+        let keys: Vec<_> = snapshot["sources"].as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["unknown", "monitor", "session", "tail", "mcp_config", "account_api",
+            "catalog", "thread_state", "activity_history", "worktrees", "diagnostics"]);
+        assert_eq!(snapshot["sources"]["catalog"]["health"], "disabled");
+        assert_eq!(snapshot["sources"]["session"]["health"], "ok");
+        assert_eq!(snapshot["sources"]["monitor"]["limits"]["retained_samples"], 1);
+        let once = snapshot.to_string();
+        apply(&mut snapshot);
+        assert_eq!(snapshot.to_string(), once);
+        for malformed in [json!(true), json!(4), json!("invalid"), json!([]),
+            json!({"sources":true}), json!({"sources":4}), json!({"sources":"invalid"}),
+            json!({"sources":[]})] {
+            let mut value = malformed.clone();
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(||apply(&mut value))).is_err());
+            assert_eq!(value, malformed, "rejected inputs must retain original partial-mutation behavior");
+        }
+        for empty in [Value::Null, json!({}), json!({"sources":null})] {
+            let mut value = empty;
+            apply(&mut value);
+            assert_eq!(value["sources"]["session"]["health"], Value::Null);
+            assert_eq!(value["sources"]["thread_state"]["health"], "waiting");
+        }
+    }
+
 
     #[test]
     fn account_readers_follow_protocol_declaration_order() {

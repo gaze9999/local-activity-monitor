@@ -749,3 +749,17 @@ JEV 欄位重用稽核: health 為生成的固定狀態字串, checked_at 為生
 focused pause 1 項通過 (4.63 秒)、matching 1 項通過 (0.23 秒), 完整 serial HTTP 本輪 218 通過、1 失敗 (122.81 秒), 兩項同步測試通過, overflow metadata POST 於 5.003903529 秒收到 455 bytes / HTTP 503 / Settings temporarily unavailable, child 仍存活, 沒有重試直到通過, 未宣稱完整 HTTP 接受
 
 前次相同 runtime 的 service 342 項通過結果保留, 本輪只改測試而未重跑 service, 歷史兩項 SSE 失敗、controlled probe、metadata 503 / WouldBlock / 唯讀 GET 503 與其他既有待辦均保存, 不把成功同步測試視為所有 stream / shutdown 排程的證明
+
+### Source registry 改用借用輸入與分批寫回
+
+原 augment 為讀取少數來源 metadata 而複製完整 codex / mcp / settings / monitor, 包含不使用的 thread / event / history 樹, 本輪改為借用這四份輸入, 依原宣告順序生成小型 sources map, 借用結束後逐項更新既有 sources, 保留未知項目、已存在 key 的位置及缺少 configuration 時既有 mcp_config, 沒有新增來源讀取、請求、schema、parser 或保存 / 容量變更
+
+隔離副本以原函式作比較, 66 組有效 / 缺少 / null / malformed 輸入的完整序列化結果、順序及預期 panic 後的部分修改狀態一致, 原有 4 項測試亦通過, comparator 初次因 nested module 路徑錯誤未編譯, 修正 comparator 路徑後通過, 失敗記錄保留
+
+三次固定先 legacy 後 borrowed 的合成大型樹單函式量測為 64957 / 8070、1134040 / 6851、37219 / 354 微秒, 該 fixture 在 codex / mcp / monitor 各放入 5000 個合成項目, 有明顯排程與快取變異, 不以此推定實際 HTTP 加速比例
+
+正式回歸保留未讀樹、未知來源項目、順序、idempotence、缺少 / null 與 8 組 malformed 輸入拒絕及原值, focused source_registry 5 項通過, 完整 service 343 項通過 (140.43 秒), 完整 serial HTTP 本輪 218 通過、1 失敗 (91.45 秒), 新失敗 idle_stream_heartbeats_do_not_republish_the_source 預期 heartbeat 卻收到有效 snapshot version 2, 原始 frame 與記錄完整保留, 未修改該 assertion 或重跑直到通過
+
+本輪 overflow 與兩項 SSE 同步測試通過, 單次 main binary 合成 profile 的 metadata POST 於 4.895 秒回 200、5.129 秒確認新 snapshot, private workdir 不可見、detail 200 且遮蔽、child 正常退出, 不代表舊 503 / WouldBlock 或新的 heartbeat 差異已解決
+
+heartbeat 測試只等 health=ok / device_ready, 讀取首個 SSE 後寫入 ignored.txt, watcher 會被 session root 內非 access event 喚醒, 但實際發布仍受多個 collector change flag 控制, 本輪沒有記錄失敗當次是哪個 flag, 尚無法區分初始背景更新未穩定或無關檔案喚醒造成的變更, source registry 未改動上述控制流程, 不以此自動宣告與本輪時間變化無關
