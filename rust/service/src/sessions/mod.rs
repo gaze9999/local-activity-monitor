@@ -2881,6 +2881,7 @@ impl Collector {
             json!({"source":"codex_desktop","health":if enabled {"waiting"} else {"disabled"}});
         collector.known_retention_days = collector.checkpoints.activity_retention().ok();
         if !enabled {
+            collector.refresh_error_history(now());
             match collector.checkpoints.observed_history() {
                 Ok(events) => {
                     collector.activity_history = Arc::new(events);
@@ -3698,9 +3699,7 @@ impl Collector {
                     .storage_error
                     .filter(|_| !self.core.pending_errors.is_empty())
             });
-        let history_health = if health == "disabled" && self.jev_errors.is_empty() {
-            "disabled"
-        } else if error_type.is_some() {
+        let history_health = if error_type.is_some() {
             "unavailable"
         } else if self.updated.is_some() {
             "ok"
@@ -6642,6 +6641,19 @@ mod log_tests {
             assert_eq!(logs["entries"].as_array().unwrap().iter().find(|event|event["call_id"]=="a").unwrap()["exit_code"],2);
         }
         assert_eq!(snapshots.error_details[&content_id]["exit_code"],1);
+    }
+
+    #[test]
+    fn disabled_collection_preserves_error_history_storage_health() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut collector = Collector::new(directory.path().to_path_buf(), false, None);
+        let reference = now();
+        let windows = collector.error_windows("disabled", reference, &BTreeMap::new(), &[]);
+        assert_eq!(windows[3].0["history"]["health"], "ok");
+        collector.error_history_read_error = Some("fixture_read_failure");
+        let windows = collector.error_windows("disabled", reference, &BTreeMap::new(), &[]);
+        assert_eq!(windows[3].0["history"]["health"], "unavailable");
+        assert_eq!(windows[3].0["history"]["error_type"], "fixture_read_failure");
     }
 
     #[test]

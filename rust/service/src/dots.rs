@@ -41,6 +41,13 @@ fn date(seconds: Option<f64>) -> Value {
         .map(|date| json!(date.to_rfc3339_opts(SecondsFormat::Millis, true)))
         .unwrap_or(Value::Null)
 }
+type Machine = (Option<String>, usize, usize);
+
+fn machine<'a>(machines: &'a mut BTreeMap<String, Machine>, host: &str) -> &'a mut Machine {
+    let order = machines.len();
+    machines.entry(host.to_owned()).or_insert((None, 0, order))
+}
+
 fn newest(slot: &mut Option<String>, time: &Value) {
     if let Some(value) = time.as_str().filter(|value| !value.is_empty()) {
         if slot.as_deref().unwrap_or("") < value {
@@ -146,11 +153,11 @@ fn project(
         .get("electron-persisted-atom-state")
         .and_then(Value::as_object)
         .unwrap_or(&empty);
-    let mut machines: BTreeMap<String, (Option<String>, usize)> = BTreeMap::new();
+    let mut machines: BTreeMap<String, Machine> = BTreeMap::new();
     for entry in entries.values() {
         if let Some(host_id) = entry["host_id"].as_str().filter(|id| host(id)) {
             newest(
-                &mut machines.entry(host_id.to_owned()).or_default().0,
+                &mut machine(&mut machines, host_id).0,
                 &entry["timestamp"],
             );
         }
@@ -249,7 +256,7 @@ fn project(
                 })
                 .unwrap_or("unknown");
             entries.insert(id.to_owned(),json!({"host_id":host_id,"timestamp":updated,"trigger":trigger,"environment":"remote"}));
-            newest(&mut machines.entry(host_id.into()).or_default().0, &updated);
+            newest(&mut machine(&mut machines, host_id).0, &updated);
         }
     }
     if let Some(snapshots) = snapshots {
@@ -288,7 +295,7 @@ fn project(
                     activity.push(json!({"thread_id":id,"host_id":host_id,"timestamp":timestamp,"activity_type":"dot","environment":environment}));
                     if host(host_id) {
                         newest(
-                            &mut machines.entry(host_id.into()).or_default().0,
+                            &mut machine(&mut machines, host_id).0,
                             &timestamp,
                         );
                     }
@@ -310,27 +317,25 @@ fn project(
         if let Some(host_id) = host_id.filter(|id| host(id)) {
             activity.push(json!({"thread_id":id,"host_id":host_id,"timestamp":event["timestamp"],"activity_type":"output"}));
             newest(
-                &mut machines.entry(host_id.into()).or_default().0,
+                &mut machine(&mut machines, host_id).0,
                 &event["timestamp"],
             );
         }
     }
     for (id, entry) in &entries {
         if let Some(host_id) = entry["host_id"].as_str().filter(|id| host(id)) {
-            machines.entry(host_id.into()).or_default().1 += 1;
+            machine(&mut machines, host_id).1 += 1;
         }
         if matches!(entry["trigger"].as_str(), Some("dot" | "orbit")) {
             activity.push(json!({"thread_id":id,"host_id":entry["host_id"],"timestamp":entry["timestamp"],"activity_type":"dot","environment":entry["environment"]}));
         }
     }
-    let mut computers: Vec<_> = machines.into_iter().map(|(host,(last,count))|json!({"host_id":host,"last_activity_at":last,"thread_count":count,"connection_status":"unknown"})).collect();
-    computers.sort_by(|a, b| {
-        b["last_activity_at"]
-            .as_str()
-            .unwrap_or("")
-            .cmp(a["last_activity_at"].as_str().unwrap_or(""))
-    });
+    let mut computers: Vec<_> = machines.into_iter().collect();
+    computers.sort_by(|(_, a), (_, b)| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
     computers.truncate(100);
+    let computers: Vec<_> = computers.into_iter().map(|(host, (last, count, _))|
+        json!({"host_id":host,"last_activity_at":last,"thread_count":count,"connection_status":"unknown"})
+    ).collect();
     activity.sort_by(|a, b| {
         b["timestamp"]
             .as_str()
@@ -383,6 +388,21 @@ fn project(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn computer_preview_keeps_first_seen_hosts_at_undated_limit() {
+        let rows: Vec<_> = (0..101).rev().map(|index| json!({
+            "threadId":"00000000-0000-4000-8000-000000000001",
+            "hostId":format!("remote-control:host-{index:03}")
+        })).collect();
+        let state = json!({"electron-persisted-atom-state":{"orbit-activity-snapshots-v1":[{"data":rows}]}});
+        let value = project(&state, "all", DateTime::from_timestamp(2, 0).unwrap(), BTreeMap::new());
+        let computers = value["computers"].as_array().unwrap();
+        assert_eq!(computers.len(), 100);
+        assert_eq!(computers[0]["host_id"], "remote-control:host-100");
+        assert_eq!(computers[99]["host_id"], "remote-control:host-001");
+        assert!(computers.iter().all(|row| row["last_activity_at"].is_null()));
+    }
 
     #[test]
     fn output_preview_keeps_equal_time_insertion_order_and_all_event_totals() {

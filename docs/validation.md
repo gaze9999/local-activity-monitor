@@ -489,3 +489,41 @@ Python `project_dots` 先依時間排序並取既有 500 筆 output preview, 再
 Python 原始 project_dots / read_dots 與 HTTP 合成 501 筆輸入確認 total 501、events / activity 500、排除只在最舊 output 出現的電腦, HTTP 先失敗後通過並涵蓋 all / 1h、背景 snapshot 與私密內容不輸出, 單元與 Python 另確認同時間的插入順序, focused dots HTTP 4 項通過
 
 完整單執行緒 `--locked --offline` service binary 323 項 (107.11 秒)、HTTP 217 項 (167.37 秒) 通過, Linux / Rust 1.100.0 合成資料, 基底 326c15b 與遠端一致, LAM main 5c03daf / WBUIWS main 4616074 未變, 先前唯讀 settings GET 503 仍未明原因且保留原始失敗證據, 本次通過不代表已修復, 其他既有待辦不變
+
+### Dots computers 同時間的首次 host 順序
+
+Python `project_dots` 的電腦列表在相同或缺少活動時間時保留首次遇到 host 的順序, Rust 原先由 BTreeMap 名稱順序決定, 現在於既有 host 聚合記錄暫時 ordinal, 只用於相同時間的 tie-breaker, 重複 host 不改首次位置, 較新活動時間仍優先
+
+Python 與 HTTP 先重現 new / a / z 與預期 new / z / a 的差異, focused dots HTTP 5 項通過並涵蓋直接端點與背景 snapshot, Python 與單元另驗證 101 個未提供時間的 host 依首次順序保留前 100 個, 不改既有顯示上限、收集、保存容量、retention 或 eviction
+
+此工作保留目前 metadata 載入順序, 未宣稱 metadata-only 上游順序已與 Python 對齊, 不新增檔案或網路請求
+
+完整單執行緒 `--locked --offline` service binary 324 項通過 (145.41 秒), 首輪 HTTP 為 217 通過 / 1 失敗 (209.38 秒), `error_history_restores_recent_metadata_after_sources_disappear` 在停用 codex 後讀到 errors.total=2 而非 0, history health 已為 disabled, 原測試單項重跑通過 (2.99 秒), 未修改其斷言或產品行為
+
+獨立合成單筆錯誤重啟確認 disabled refresh 仍載入 error_history, summary 會發布 health=disabled / total=1 / retained=1, fixture 沒有 global-state 檔而不會進入本輪變更的 dots project, 相關 disabled refresh / error summary 原始碼未改, 因此本次排序改動沒有造成該錯誤路徑, 但完整測試未全數通過, 原始失敗與獨立重現腳本保留, 停用時 retained errors 的呈現與測試期望仍待獨立處理
+
+Linux / Rust 1.100.0 合成資料, 基底 d224a83 與遠端一致, LAM main 5c03daf / WBUIWS main 4616074 未變, 先前唯讀 GET 503 未明原因另行保留, 不將兩者視為同一問題
+
+原始 `Dashboard.snapshot` 以合成依賴實際驗證: codex=false 且 errors=true 仍顯示 retained error, total=1 / retained=1 / history.health=ok, errors=false 才隱藏 retained preview, 因此失敗測試的 codex disabled → total 0 期待不符合 Python, Rust refresh 後保留資料本身不是錯誤, 另有 history.health 直接標為 disabled 的欄位差異, 當時提出最小修正與回歸方案, 後續實作與驗證見下一節
+
+### 停用 codex 時的 retained error 顯示與儲存健康狀態
+
+依原始 Python 語意, 停用 codex 收集不會隱藏已保存的錯誤, 只由 errors observation 控制 preview, Rust 現在於停用啟動時先讀既有 bounded error preview, 並依儲存讀取狀態呈現 health, 不再強制標示 disabled, 啟動增加一次既有 error preview 有界讀取, 不讀原始來源、不新增網路請求、不刪除 SQLite 資料
+
+原測試改為確切驗證啟動後 retained 2 / total 2 / health ok, errors 關閉後 preview 為 0、重新開啟後回到 2, 各次直接比對 SQLite errors 的 item_key / payload 完全不變, 原有 restart、record hash 與完整歷史斷言保留, 新單元另驗證停用收集時真實讀取錯誤仍呈現 unavailable
+
+新增測試初版曾錯誤地在 errors 關閉時要求受限 history API 回 200, 該 400 又新增 monitor error 影響精確總數, 已移除這個非必要請求而改直接唯讀比對 SQLite, 兩次新增測試失敗 log 均保留, 沒有變更 API 權限或錯誤記錄行為, 獨立合成重啟也確認修正後直接得到 health ok / total 1 / retained 1
+
+修正後 retained error 回歸連續 10 輪通過, 新 storage health 單元通過, 完整 service binary 325 項通過 (161.26 秒), 第二輪完整 HTTP 為 217 通過 / 1 失敗 (215.36 秒), 此次為既有 `overflow_tool_detail_uses_verified_source_and_masks_secrets` 在 POST metadata=false 後收到非 200 / 202, 原斷言未記錄實際 status / body
+
+該 overflow 測試未修改, 單項原程式重跑另在 HTTP read_to_end 發生 WouldBlock / Resource temporarily unavailable (19.70 秒), metadata 單一設定原始路徑等待發布 5 秒後可能回 503 Settings temporarily unavailable, 但首次記錄不足以確認實際回應, 不將兩次失敗或先前唯讀 GET 503 視為同一原因, 不反覆重跑直到全綠, 本 checkpoint 保留失敗狀態、原始 log 與未驗收項目, 未改 overflow、timeout、容量或測試斷言
+
+目前變更可分別審查: Dots 只改暫時 host 排序, 最新獨立 dots HTTP 5 項通過 (1.35 秒), retained-history 只增加停用啟動的 bounded read 與 health 判斷, 最新單元及 10 輪 HTTP 已驗證, SQLite payload 不變, 兩範圍均無呼叫 overflow metadata 設定等待路徑的改動, 完整 HTTP 仍保留失敗結果, 下一步需獨立取得 overflow 失敗的實際 HTTP response 或 request timeout 階段, 不先假定其根因
+
+### Overflow HTTP 失敗的有界診斷
+
+獨立腳本固定執行兩輪相同 5001-source 合成情境, 第一輪採 5 秒 POST timeout、第二輪僅診斷用 12 秒 timeout, 實際均於期限內回 200 (3.668 / 3.055 秒), 已保存 status / body、各階段時間與受測程序狀態, 後續 metadata 已隱藏、工具內容遮蔽正常, 兩個受測程序均正常停止且 stderr 為空
+
+原 overflow 測試只增加階段訊息與失敗時的 status / body, 保留所有斷言、5 秒 timeout 與容量設定, 加入診斷後只執行一次, 通過 (13.43 秒), 不覆蓋先前兩份失敗記錄, 不據此改稱完整 HTTP 通過
+
+靜態呼叫路徑確認此 fixture 為 codex enabled 且沒有 global-state, 因而不執行新增的停用啟動讀取或 dots host 排序, enabled 時 history health 的結果也未變, 設定等待與 overflow 來源路徑沒有修改, 但未取得原失敗時的 HTTP response 或完整 request 階段, 尚不能斷言是環境負載或排程原因, 目前保留獨立失敗狀態, 後續自然重現時可由新增診斷辨識階段與實際回應

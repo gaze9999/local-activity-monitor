@@ -952,6 +952,28 @@ fn dots_computers_use_output_preview_without_losing_event_totals() {
 }
 
 #[test]
+fn dots_computer_ties_keep_first_host_encounter_order() {
+    let home = tempdir().unwrap();
+    let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).timestamp_millis();
+    let id = "00000000-0000-4000-8000-000000000001";
+    let rows: Vec<_> = ["remote-control:z", "remote-control:a", "remote-control:new", "remote-control:z"]
+        .iter().map(|host| json!({"threadId":id,"hostId":host,
+            "timestampMs":if *host == "remote-control:new" { now } else { now-1000 }})).collect();
+    fs::write(home.path().join(".codex-global-state.json"),
+        json!({"electron-persisted-atom-state":{"orbit-activity-snapshots-v1":[{"data":rows}]}}).to_string()).unwrap();
+    let service = Service::start(home.path(), true, None);
+    let check = |dots: &Value| {
+        let computers = dots["computers"].as_array().unwrap();
+        let hosts: Vec<_> = computers.iter().map(|row| row["host_id"].as_str().unwrap()).collect();
+        assert_eq!(hosts, ["remote-control:new", "remote-control:z", "remote-control:a"]);
+        assert!(computers.iter().all(|row| row["thread_count"] == 0));
+    };
+    check(&service.get("/api/codex/dots?window=all").json());
+    let snapshot = snapshot_when(&service, |value| value["codex"]["dots"]["computers"].as_array().is_some_and(|rows| rows.len()==3));
+    check(&snapshot["codex"]["dots"]);
+}
+
+#[test]
 fn dots_background_merges_catalog_and_updates_with_source() {
     let home = tempdir().unwrap();
     fs::create_dir(home.path().join("sqlite")).unwrap();
@@ -7468,7 +7490,9 @@ fn overflow_tool_detail_uses_verified_source_and_masks_secrets() {
         let other = format!("00000000-0000-4000-8000-{index:012}");
         fs::write(root.join(format!("rollout-{other}.jsonl")), "").unwrap();
     }
+    eprintln!("overflow diagnostic: starting service");
     let service = Service::start(home.path(), true, None);
+    eprintln!("overflow diagnostic: waiting for initial snapshot");
     let deadline = Instant::now() + Duration::from_secs(45);
     loop {
         let snapshot = service.get("/api/snapshot?window=all").json();
@@ -7489,14 +7513,17 @@ fn overflow_tool_detail_uses_verified_source_and_masks_secrets() {
         std::thread::sleep(Duration::from_millis(50));
     }
     let endpoint = format!("/api/codex/tool?thread_id={id}&call_id=outside");
+    eprintln!("overflow diagnostic: requesting initial tool detail");
     let response = service.get(&endpoint);
     assert_eq!(response.status, 200);
     let detail = response.json();
     assert_eq!(detail["tool"], "fixture_tool");
     assert!(!detail.to_string().contains("PRIVATE_VALUE"));
+    eprintln!("overflow diagnostic: posting metadata setting");
     let setting = r#"{"observations":{"metadata":false}}"#;
     let response = service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, setting.len()), setting);
-    assert!(matches!(response.status, 200 | 202));
+    assert!(matches!(response.status, 200 | 202), "metadata update status={} body={}", response.status, String::from_utf8_lossy(&response.body));
+    eprintln!("overflow diagnostic: waiting for updated snapshot");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let snapshot = service.get("/api/snapshot?window=all").json();
@@ -7515,6 +7542,7 @@ fn overflow_tool_detail_uses_verified_source_and_masks_secrets() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+    eprintln!("overflow diagnostic: requesting final tool detail");
     assert_eq!(service.get(&endpoint).status, 200);
     let key = checkpoint_key(Path::new(&format!("rollout-{id}.jsonl")));
     let mut store = Store::open(&home.path().join("monitoring"), Access::ReadWrite)
@@ -9962,9 +9990,33 @@ fn error_history_restores_recent_metadata_after_sources_disappear() {
 
     let mut disabled = Service::start(home.path(), false, None);
     let snapshot = disabled.get("/api/snapshot?window=all").json();
-    assert_eq!(snapshot["errors"]["history"]["health"], "disabled");
-    assert_eq!(snapshot["errors"]["total"], 0);
+    assert_eq!(snapshot["codex"]["health"], "disabled");
+    assert_eq!(snapshot["errors"]["history"]["health"], "ok");
+    assert_eq!(snapshot["errors"]["history"]["retained"], 2);
+    assert_eq!(snapshot["errors"]["total"], 2);
     assert_eq!(disabled.get(history_path).json(), rebuilt);
+    let stored_errors = || {
+        let db = rusqlite::Connection::open_with_flags(
+            home.path().join("monitoring").join(lam_history_store::FILE_NAME),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let mut query = db.prepare("SELECT item_key,payload FROM history_items WHERE namespace='errors' ORDER BY item_key").unwrap();
+        query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+    };
+    let stored = stored_errors();
+    let body = r#"{"observations":{"errors":false}}"#;
+    assert_eq!(disabled.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",disabled.port,body.len()),body).status,200);
+    let hidden = snapshot_when(&disabled, |value| value["errors"]["enabled"] == false);
+    assert_eq!(hidden["errors"]["total"], 0);
+    assert_eq!(hidden["errors"]["history"]["retained"], 0);
+    assert_eq!(stored_errors(), stored);
+    let body = r#"{"observations":{"errors":true}}"#;
+    assert_eq!(disabled.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",disabled.port,body.len()),body).status,200);
+    let shown = snapshot_when(&disabled, |value| value["errors"]["enabled"] == true);
+    assert_eq!(shown["errors"]["total"], 2);
+    assert_eq!(shown["errors"]["history"]["health"], "ok");
+    assert_eq!(disabled.get(history_path).json(), rebuilt);
+    assert_eq!(stored_errors(), stored);
     disabled.stop();
 }
 
