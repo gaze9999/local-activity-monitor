@@ -301,3 +301,17 @@ Python source_roots 合成 fixture 核對字母、數字、底線、組合符號
 同批模組簡介加入 Python ast.get_docstring / inspect.cleandoc 的縮排清理, 單行全空白 docstring 不再擋住 README 回退, 保留 Python 對多行殘留空白的來源選取差異, tab 以 8 欄展開, Unicode 縮排依字元計算
 
 已核對 helper 僅由來源簡介呼叫, 保留原有 65,536-byte 來源上限、語法解析與禁止執行界線, Python ast / source_description 合成 fixture 通過, Rust docstring 回歸先失敗後通過, session-core sqlite-python 完整 33 項、source_introduction 4 項及 HTTP catalog 5 項通過
+
+### 完整 working set 的來源合併順序
+
+當一次完整 discovery 的所有來源都在 working set 中, 保留 discovery-time mtime / path 倒序供 snapshot 合併與 detail index 使用, 修正重複 thread / call 被檔名字母排序選錯來源的情況, 重新掃描後若順序改變會觸發發布, 掃描前單純變更檔案 mtime 不會重排已載入快照
+
+Python 的規則分別保留: snapshot 同 call ID 由後面的來源覆蓋, tool detail 先選前面的來源, 不強制兩者取相同來源, `/api/snapshot` 與 `/api/codex/tool` 的查詢參數、欄位來源及按需讀取檢查不變
+
+新增排序記錄只涵蓋既有 FILE_LIMIT 內的路徑, 不持久化本文, discovery 不完整、來源超出 working set 或鍵集合不吻合時不套用此排序, overflow 分支、容量、淘汰及來源讀取數量維持原行為
+
+Python CodexCollector 隔離 fixture 確認原始來源順序、mtime rescan、相同時間路徑決勝, 並分別核對 snapshot 與 tool detail, Rust 回歸先失敗後通過, HTTP 確認啟動、checkpoint 重啟、來源通知重排及對應 detail
+
+本段僅完成完整 working-set 的合併 / detail 遍歷, 不代表所有排序已對齊, call 插入順序、跨 active / overflow 全域順序、其他來源預覽、restore 容量與 16 MiB 快照組裝仍待完成, 本段基底為 7b305f8
+
+最終含 detail 遍歷的版本以 Linux / Rust 1.100.0 執行完整 `--locked --offline` 單執行緒回歸, service binary 306 項全數通過 (97.56 秒), HTTP 205 項全數通過 (144.45 秒), 未延伸為並行穩定性、原生平台或真實資料驗收

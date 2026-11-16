@@ -269,7 +269,7 @@ impl Index {
         }
     }
 
-    pub(super) fn build(root: &Path, files: &BTreeMap<PathBuf, Session>) -> Self {
+    pub(super) fn build<'a>(root: &Path, files: impl IntoIterator<Item = (&'a PathBuf, &'a Session)>) -> Self {
         let mut index = Self::default();
         for (path, state) in files {
             let Some(anchor) = state.anchor.as_ref() else {

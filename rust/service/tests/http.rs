@@ -6915,6 +6915,42 @@ fn snapshot_when(service: &Service, accept: impl Fn(&Value) -> bool) -> Value {
 }
 
 #[test]
+fn duplicate_session_calls_follow_discovery_order_after_restart_and_rescan() {
+    let home = tempdir().unwrap();
+    let sessions = home.path().join("sessions");
+    fs::create_dir(&sessions).unwrap();
+    let id = "00000000-0000-4000-8000-000000000001";
+    let paths = [sessions.join(format!("rollout-a-{id}.jsonl")), sessions.join(format!("rollout-z-{id}.jsonl"))];
+    for (path, tool) in paths.iter().zip(["fixture_a", "fixture_z"]) {
+        let records = [
+            json!({"type":"session_meta","timestamp":"2026-11-13T00:00:00Z","payload":{"id":id}}),
+            json!({"type":"response_item","timestamp":"2026-11-13T01:00:00Z","payload":{"type":"function_call","name":tool,"call_id":"duplicate","arguments":"{}"}}),
+        ];
+        fs::write(path, records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")+"\n").unwrap();
+    }
+    let set_time = |path: &Path, seconds| {
+        fs::File::options().write(true).open(path).unwrap().set_times(fs::FileTimes::new().set_modified(
+            std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
+        )).unwrap();
+    };
+    set_time(&paths[0], 100); set_time(&paths[1], 200);
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| value["codex"]["tools"] == json!({"fixture_a":1}));
+    let detail_url = format!("/api/codex/tool?thread_id={id}&call_id=duplicate");
+    assert_eq!(service.get(&detail_url).json()["tool"], "fixture_z");
+    drop(service);
+    let service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| value["codex"]["tools"] == json!({"fixture_a":1}));
+    assert_eq!(service.get(&detail_url).json()["tool"], "fixture_z");
+    set_time(&paths[0], 300);
+    snapshot_when(&service, |value| value["codex"]["tools"] == json!({"fixture_z":1}));
+    assert_eq!(service.get(&detail_url).json()["tool"], "fixture_a");
+    set_time(&paths[1], 300);
+    snapshot_when(&service, |value| value["codex"]["tools"] == json!({"fixture_a":1}));
+    assert_eq!(service.get(&detail_url).json()["tool"], "fixture_z");
+}
+
+#[test]
 fn schedules_follow_sqlite_events_only_when_collection_is_enabled() {
     let home = tempdir().unwrap();
     fs::create_dir(home.path().join("sqlite")).unwrap();

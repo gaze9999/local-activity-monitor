@@ -2446,6 +2446,7 @@ struct Collector {
     backend_revision: String,
     frontend_revision: Option<String>,
     files: BTreeMap<PathBuf, Session>,
+    snapshot_source_order: BTreeMap<PathBuf, usize>,
     discovery: Option<SessionDiscovery>,
     discovered_files: Option<usize>,
     source_membership: Option<SourceMembership>,
@@ -2784,6 +2785,7 @@ impl Collector {
             catalog_home: catalog_home.clone(),
             mcp_catalog,
             files: BTreeMap::new(),
+            snapshot_source_order: BTreeMap::new(),
             discovery: None,
             discovered_files: None,
             source_membership: None,
@@ -3090,6 +3092,7 @@ impl Collector {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let changed = !self.files.is_empty();
                 self.files.clear();
+                self.snapshot_source_order.clear();
                 self.session_paths.clear();
                 self.duplicate_session_paths.clear();
                 self.discovery = None;
@@ -3104,6 +3107,7 @@ impl Collector {
             _ => {
                 let changed = !self.files.is_empty();
                 self.files.clear();
+                self.snapshot_source_order.clear();
                 self.session_paths.clear();
                 self.duplicate_session_paths.clear();
                 self.discovery = None;
@@ -3189,6 +3193,15 @@ impl Collector {
         let previous_files = self.files.len();
         let mut files = BTreeMap::new();
         let ordered: Vec<_> = paths.into_iter().map(|(_, path)| path).collect();
+        // Keep Python's completed-discovery traversal only when every source is
+        // represented here. Overflow traversal remains a separate pending path.
+        let source_order = if !discovery.incomplete && discovery.file_count <= FILE_LIMIT {
+            ordered.iter().enumerate().map(|(index, path)| (path.clone(), index)).collect()
+        } else {
+            BTreeMap::new()
+        };
+        let source_order_changed = self.snapshot_source_order != source_order;
+        self.snapshot_source_order = source_order;
         if let Some(membership) = self.source_membership.as_mut() {
             let keys: Vec<_> = ordered
                 .iter()
@@ -3208,7 +3221,7 @@ impl Collector {
             files.insert(path.clone(), state);
         }
         let mut changed =
-            saved || discovery_changed || !self.files.is_empty() || files.len() != previous_files;
+            saved || discovery_changed || source_order_changed || !self.files.is_empty() || files.len() != previous_files;
         self.files = files;
         self.overflow_files
             .retain(|path, _| !self.files.contains_key(path));
@@ -4313,7 +4326,7 @@ impl Collector {
             }
             // Retain still-selected prior positions without marking overflow ready.
             // Checkpoint and source guards remain checked by every detail read.
-            let mut index = details::Index::build(root, &self.files);
+            let mut index = details::Index::build(root, self.ordered_working_sources());
             if let Some(previous) = self.completed_detail_index.lock().unwrap_or_else(|error| error.into_inner()).as_ref() {
                 index.retain_previous_overflow(previous, &selection.calls);
             }
@@ -4322,7 +4335,7 @@ impl Collector {
             *self.selected_detail_scan.lock().unwrap_or_else(|error| error.into_inner()) = None;
             *self.completed_detail_index.lock().unwrap_or_else(|error| error.into_inner()) = None;
         }
-        let mut index = details::Index::build(root, &self.files);
+        let mut index = details::Index::build(root, self.ordered_working_sources());
         let overflow = self.overflow_projections(active_calls).0;
         let mut readiness = BTreeMap::<String, bool>::new();
         for item in &overflow {
@@ -4580,6 +4593,17 @@ impl Collector {
         (result, incomplete)
     }
 
+    fn ordered_working_sources(&self) -> Vec<(&PathBuf, &Session)> {
+        let mut sources: Vec<_> = self.files.iter().collect();
+        if !self.snapshot_source_order.is_empty()
+            && self.discovered_files == Some(self.files.len())
+            && self.snapshot_source_order.keys().eq(self.files.keys())
+        {
+            sources.sort_by_key(|(path, _)| self.snapshot_source_order.get(*path));
+        }
+        sources
+    }
+
     fn snapshots(&self, health: &str, watch_health: &str, version: u64) -> Snapshots {
         let monitor_events = self
             .journal
@@ -4628,7 +4652,7 @@ impl Collector {
         let reference = self.updated.unwrap_or(self.started);
         let cutoffs = HOURS.map(|hours| hours.map(|hours| reference - Duration::hours(hours)));
         let mut threads = BTreeMap::<&str, (Projection, bool)>::new();
-        for (path, state) in self.files.iter().filter(|_| health != "disabled") {
+        for (path, state) in self.ordered_working_sources().into_iter().filter(|_| health != "disabled") {
             if let Some(id) = state.projection.id.as_deref() {
                 let (projection, partial) = threads
                     .entry(id)
@@ -6279,6 +6303,53 @@ mod log_tests {
         assert_eq!(preview[0]["record_offset"],12);
         assert_eq!(preview[0]["record_hash"],"a".repeat(64));
         assert_eq!(preview[0]["content_id"],"b".repeat(64));
+    }
+
+    #[test]
+    fn complete_working_set_merges_duplicate_calls_in_discovery_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        let paths = [root.join(format!("rollout-a-{id}.jsonl")), root.join(format!("rollout-z-{id}.jsonl"))];
+        for (path, tool) in paths.iter().zip(["fixture_a", "fixture_z"]) {
+            let records = [
+                json!({"type":"session_meta","timestamp":"2026-11-13T00:00:00Z","payload":{"id":id}}),
+                json!({"type":"response_item","timestamp":"2026-11-13T01:00:00Z","payload":{"type":"function_call","name":tool,"call_id":"duplicate","arguments":"{}"}}),
+            ];
+            std::fs::write(path, records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")+"\n").unwrap();
+        }
+        let set_time = |path: &Path, seconds| {
+            std::fs::File::options().write(true).open(path).unwrap().set_times(
+                std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+            ).unwrap();
+        };
+        set_time(&paths[0], 100); set_time(&paths[1], 200);
+        let mut collector = Collector::new(root.join("monitoring"), true, None);
+        let stopped = AtomicBool::new(false);
+        for _ in 0..4 { collector.refresh(&root, &stopped, true, true, CommandSwitches::default()); }
+        let tools = |collector: &Collector| {
+            let snapshots = collector.snapshots("ok", "ok", 1);
+            let value: Value = serde_json::from_slice(&snapshots.window_bytes(3)).unwrap();
+            value["codex"]["tools"].clone()
+        };
+        let detail_tool = |collector: &Collector| {
+            collector.detail_index(&root).0.select_call(id, "duplicate").unwrap()
+                .tool("duplicate", true, false).unwrap()["tool"].clone()
+        };
+        assert_eq!(tools(&collector), json!({"fixture_a":1}));
+        assert_eq!(detail_tool(&collector), "fixture_z");
+        set_time(&paths[0], 300);
+        assert_eq!(tools(&collector), json!({"fixture_a":1}));
+        let (_, _, changed) = collector.refresh(&root, &stopped, true, true, CommandSwitches::default());
+        assert!(changed);
+        assert_eq!(tools(&collector), json!({"fixture_z":1}));
+        assert_eq!(detail_tool(&collector), "fixture_a");
+        set_time(&paths[1], 300);
+        collector.refresh(&root, &stopped, true, true, CommandSwitches::default());
+        assert_eq!(tools(&collector), json!({"fixture_a":1}));
+        assert_eq!(detail_tool(&collector), "fixture_z");
+        collector.discovered_files = Some(3);
+        assert_eq!(tools(&collector), json!({"fixture_z":1}));
     }
 
     #[test]
