@@ -745,11 +745,15 @@ fn timestamp(value: ValueRef<'_>) -> Option<DateTime<Utc>> {
         ValueRef::Real(value) => value,
         _ => return None,
     };
-    if !seconds.is_finite() {
+    if !seconds.is_finite() || !(-62_135_596_800.0..253_402_300_800.0).contains(&seconds) {
         return None;
     }
-    let date =
-        DateTime::<Utc>::from_timestamp_micros((seconds * 1_000_000.0).round_ties_even() as i64)?;
+    let whole = seconds.trunc() as i64;
+    let micros = (seconds.fract() * 1_000_000.0).round_ties_even() as i64;
+    let date = DateTime::<Utc>::from_timestamp(
+        whole + micros.div_euclid(1_000_000),
+        (micros.rem_euclid(1_000_000) as u32) * 1000,
+    )?;
     (1..=9999).contains(&date.year()).then_some(date)
 }
 
@@ -1028,6 +1032,49 @@ pub(super) fn details(body: &str) -> Map<String, Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn core_timestamp_preserves_fractional_precision_and_detail_identity() {
+        for (seconds, expected) in [
+            (1700000000.0009995, "2023-11-14T22:13:20.000Z"),
+            (1700000000.0019994, "2023-11-14T22:13:20.001Z"),
+            (-1699999999.9990005, "1916-02-18T01:46:40.000Z"),
+        ] {
+            assert_eq!(
+                super::timestamp(rusqlite::types::ValueRef::Real(seconds))
+                    .map(super::stamp)
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+        for seconds in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::MAX,
+            -62135596801.0,
+            253402300800.0,
+        ] {
+            assert!(super::timestamp(rusqlite::types::ValueRef::Real(seconds)).is_none());
+        }
+        assert!(super::timestamp(rusqlite::types::ValueRef::Text(b"1700000000")).is_none());
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let db = rusqlite::Connection::open(root.join("logs_fraction.sqlite")).unwrap();
+        db.execute_batch("CREATE TABLE logs(id INTEGER PRIMARY KEY,ts REAL,level TEXT,target TEXT,message TEXT); INSERT INTO logs VALUES(1,1700000000.0009995,'WARN','codex_core','Observed');").unwrap();
+        let source = super::discover(&root).unwrap().unwrap();
+        let mut event = serde_json::json!({"source":"codex_core","file":"logs_fraction.sqlite","record_id":1,"module":"codex_core","timestamp":"2023-11-14T22:13:20.000Z"});
+        assert_eq!(
+            source.error_detail(&event, true, false).unwrap()["text"],
+            "Observed"
+        );
+        event["timestamp"] = serde_json::json!("2023-11-14T22:13:20.001Z");
+        assert!(source.error_detail(&event, true, false).is_none());
+        assert_eq!(
+            db.query_row("SELECT ts FROM logs WHERE id=1", [], |row| row
+                .get::<_, f64>(0))
+                .unwrap(),
+            1700000000.0009995
+        );
+    }
     #[test]
     fn diagnostic_control_whitespace_preserves_fields_and_heading_boundary() {
         for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {

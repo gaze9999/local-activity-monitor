@@ -573,3 +573,13 @@ Rust 原先將這兩種情況合併, 可能以既有 catalog 產生 computers, �
 原始 Python null、布林、數值、字串與陣列 5 個案例及缺少欄位比較通過, 新 Rust 回歸在修正前失敗, 修正後驗證不因既有 catalog 而產生衍生資料, Dots 單元 6 項、Python desktop activity 8 項通過, 完整 service 329 項通過 (98.38 秒), 完整 serial HTTP 單輪 218 項通過 (153.03 秒)
 
 HTTP 通過記錄仍含既有合成資料情境的 history cleanup unavailable 訊息, 完整 log 保留, 未抑制或修改儲存行為, 先前獨立 HTTP / WouldBlock / 唯讀 503 失敗仍未宣稱已解決
+
+### Core SQLite 日期的小數精度與詳細資料身分
+
+基底 `d7112c7` 已與遠端一致, LAM main `5c03daf` 與 workspace main `4616074` 未變, 原始 error_records 以 datetime.fromtimestamp 解析 SQLite ts, Rust 原先將完整 epoch 秒乘上 1000000 後捨入, 在現代 epoch 會遺失小數精度, 例如 1700000000.0009995 原始 Python 為 .000, Rust 原先為 .001
+
+Core timestamp 現在分開整秒與小數微秒捨入, 保留年份、型別及非有限值驗證, 同一函式繼續供收集投影與 on-demand row timestamp 核對使用, 不新增查詢或改變查詢條件、body 讀取上限、遮蔽及檔案身分檢查, 衍生 content_id 對齊原始時間, 不重寫既有 SQLite 或 retained history, 既有錯誤捨入時間若與來源不符仍拒絕詳細資料, 不放寬核對
+
+原始 Python SQLite REAL 3 個正負 epoch 案例通過, 新 Rust 回歸修正前失敗, 修正後核對正確時間可讀 detail、錯誤時間被拒絕、SQLite ts 不變, Core 單元 14 項通過, 完整 service 330 項通過 (110.88 秒), 完整 serial HTTP 單輪 218 項通過 (150.14 秒)
+
+Python error_records 共 21 項, 18 項通過、3 項因復原環境缺少 generated frontend manifest 而 error, 標準 verify-offline 頁面建置因無法取得或準備固定 WBUI 版本而失敗, 未變更 pin 或認證, 兩份記錄保留, 不宣稱 Python 全套通過, 先前獨立 HTTP / WouldBlock / 唯讀 503 問題與 cleanup 警告仍保留
