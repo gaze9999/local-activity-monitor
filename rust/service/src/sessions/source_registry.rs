@@ -25,12 +25,7 @@ pub(super) fn augment(snapshot: &mut Value, home: &Path, core: &Value, desktop: 
         .join(lam_history_store::FILE_NAME)
         .to_string_lossy()
         .to_string();
-    let enabled: Vec<_> = settings["observations"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter_map(|(key, value)| (value == true).then_some(key.clone()))
-        .collect();
+    let enabled = read["enabled_features"].as_array().cloned().unwrap_or_default();
     let mut limits = read
         .as_object()
         .map(|values| {
@@ -143,6 +138,17 @@ pub(super) fn augment(snapshot: &mut Value, home: &Path, core: &Value, desktop: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_observations_follow_loaded_feature_list_not_global_settings() {
+        for features in [json!(["web","git"]), json!([]), Value::Null] {
+            let mut snapshot = json!({"codex":{"health":"ok","read_state":{"enabled_features":features}},
+                "settings":{"observations":{"platform_usage":true,"codex_account":true,"model_api":true,"git":false}}});
+            augment(&mut snapshot, Path::new("/fixture"), &json!({}), &json!({}), &[], &json!({}), &json!({}));
+            assert_eq!(snapshot["sources"]["session"]["observations"],
+                if features.is_array() { features } else { json!([]) });
+        }
+    }
 
     #[test]
     fn reports_observed_worktree_limits_and_disabled_diagnostics() {

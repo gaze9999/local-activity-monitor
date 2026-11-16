@@ -441,3 +441,11 @@ Python 實際 save/load 驗證 25 個來源只列前 20 個且依發現順序, H
 完整單執行緒 `--locked --offline` service binary 319 項通過 (111.16 秒), 首次 HTTP 為 213 通過 / 1 失敗, 既有 retention cleanup retry 測試讀到設定 90 而非 1, 原程式未修改 retention 或該測試, 單項重跑通過 (0.46 秒)、完整 HTTP 重跑 214 項通過 (155.80 秒), 原始失敗證據保留, 未宣稱已查明偶發失敗根因
 
 Linux / Rust 1.100.0 合成資料, 基底 5265a3d 已核對遠端一致, overflow、容量、大型快照與原生平台待辦保留
+
+### Session source 的 enabled_features 欄位來源
+
+對照 Python collector 與 `server.py` source registry, `codex.read_state.enabled_features` 只列出 session collector 已啟用功能, 依既有宣告順序, `sources.session.observations` 改取該清單, 不再把全域設定中的 account、platform 或其他來源功能誤列為 session observation
+
+不變更開關或收集行為, 不新增檔案讀取或查詢, Python synthetic collector 驗證預設與停用清單, HTTP 先失敗後通過並涵蓋設定變更與 codex disabled, 單元測試確認清單來源優先、順序及空值 fallback, 停用時 registry observations 為空
+
+本批完整單執行緒 `--locked --offline` service binary 320 項 (109.88 秒)、HTTP 215 項 (158.96 秒) 通過, Linux / Rust 1.100.0 合成資料, 基底 9c109cc 已核對遠端一致, 先前 retention retry 偶發失敗證據與未明根因仍保留, 本次通過不代表已修復該問題

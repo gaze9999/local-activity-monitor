@@ -5180,6 +5180,16 @@ impl Collector {
             if let Some(read_state) = snapshot["codex"]["read_state"].as_object_mut() {
                 read_state.extend(json!({"initial_pending_files":initial_pending,"history_pending_files":0,"history_pending_bytes":0,"error_pending_files":0,"error_pending_bytes":0,"working_file_limit":FILE_LIMIT,"working_files":self.files.len(),"outside_working_set":outside_working_set,"discovery_pending":self.discovery.is_some(),"source_index_ready":source_index_ready,"source_index_unverified":source_index_unverified,"source_index_materialized":source_index_materialized,"overflow_snapshot_sources":overflow.len(),"overflow_snapshot_incomplete":overflow_incomplete,"overflow_details_pending":overflow_details_pending.len()}).as_object().expect("read state fields").clone());
             }
+            // Report the collector's feature set in Python declaration order,
+            // not unrelated account/platform switches from global settings.
+            snapshot["codex"]["read_state"]["enabled_features"] = json!([
+                ("usage", command_switches.usage), ("metadata", self.metadata_enabled),
+                ("git", command_switches.git), ("worktrees", command_switches.worktrees),
+                ("jev_calls", command_switches.jev_calls), ("skills", command_switches.skills),
+                ("checks", command_switches.checks), ("tool_events", tool_events_enabled),
+                ("mcp", switches.mcp), ("web", switches.web), ("files", files_enabled),
+                ("errors", errors_enabled), ("sqlite", sqlite_enabled),
+            ].into_iter().filter_map(|(name, enabled)| enabled.then_some(name)).collect::<Vec<_>>());
             if complete_source_order {
                 snapshot["codex"]["read_state"]["locations"] = json!(source_locations);
                 snapshot["codex"]["read_state"]["listed_file_limit"] = json!(SOURCE_LOCATION_LIMIT);

@@ -1326,6 +1326,29 @@ fn session_execution_metadata_is_selected_and_survives_checkpoint_restore() {
 }
 
 #[test]
+fn session_registry_observations_use_only_enabled_session_features() {
+    let home = tempdir().unwrap();
+    native_event_fixture(home.path());
+    let service = Service::start(home.path(), true, None);
+    let keys = ["usage","metadata","git","worktrees","jev_calls","skills","checks","tool_events","mcp","web","files","errors","sqlite"];
+    let assert_features = |value: &Value| {
+        let expected: Vec<_> = keys.iter().filter(|key| value["settings"]["observations"][**key] == true).copied().collect();
+        assert_eq!(value["codex"]["read_state"]["enabled_features"], json!(expected));
+        assert_eq!(value["sources"]["session"]["observations"], json!(expected));
+    };
+    let value = snapshot_when(&service, |value| value["codex"]["files"] == 1);
+    assert_features(&value);
+    let body = r#"{"observations":{"git":false,"skills":false,"files":false,"metadata":false}}"#;
+    assert_eq!(service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),body).status, 200);
+    let value = snapshot_when(&service, |value| value["settings"]["observations"]["git"] == false);
+    assert_features(&value);
+    drop(service);
+    let service = Service::start(home.path(), false, None);
+    let value = service.get("/api/snapshot?window=all").json();
+    assert_eq!(value["sources"]["session"]["observations"], json!([]));
+}
+
+#[test]
 fn complete_source_locations_are_discovery_ordered_and_bounded() {
     let home = tempdir().unwrap();
     let sessions = home.path().join("sessions");
