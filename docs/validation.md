@@ -763,3 +763,15 @@ focused pause 1 項通過 (4.63 秒)、matching 1 項通過 (0.23 秒), 完整 s
 本輪 overflow 與兩項 SSE 同步測試通過, 單次 main binary 合成 profile 的 metadata POST 於 4.895 秒回 200、5.129 秒確認新 snapshot, private workdir 不可見、detail 200 且遮蔽、child 正常退出, 不代表舊 503 / WouldBlock 或新的 heartbeat 差異已解決
 
 heartbeat 測試只等 health=ok / device_ready, 讀取首個 SSE 後寫入 ignored.txt, watcher 會被 session root 內非 access event 喚醒, 但實際發布仍受多個 collector change flag 控制, 本輪沒有記錄失敗當次是哪個 flag, 尚無法區分初始背景更新未穩定或無關檔案喚醒造成的變更, source registry 未改動上述控制流程, 不以此自動宣告與本輪時間變化無關
+
+### Heartbeat 測試的初始發布穩定條件
+
+在 exact `d3fd1b0` runtime 的隔離副本加入僅輸出 publication reason 名稱的診斷, 各跑一次不寫檔 control 與寫 ignored.txt treatment, 兩者首個 SSE 都是 version 2, 下一個 heartbeat 分別在 15.020 / 15.021 秒到達, 程序正常退出, 兩次初始 version 2 原因都是 worktree_changed / requested, 本輪沒有重現失敗, 不推定無關檔案必然造成發布
+
+來源核對: font / GPU worker 先記錄 device completion, 再設定 manual refresh 與喚醒 collector, device_ready 是 snapshot 組裝時讀取 completion 所產生的欄位, 不是 render 即時補入, 因此進行中的 collection 可以先包含已完成的裝置資料, 同時另一個 requested refresh 仍待下一輪發布
+
+另一次 controlled gap 僅在隔離 worker 的 completion 與 refresh 之間加入 1 秒診斷延遲, 不寫 ignored.txt, 經原 health / device_ready 條件後首個 SSE 為 version 1, 0.956 秒後收到 version 2, reason 為 requested / worktree_changed, 隨後另一個 worker refresh 產生 version 3, logs entries 相同但 codex 有變化, 程序正常退出, 此實驗證明該交錯可成立, 不宣稱重建原始失敗排程, 主 runtime 未加入延遲或 instrumentation
+
+僅修改測試 setup: 以明確 18 秒 deadline、最多 64 個經驗證且 version 遞增的初始 snapshot 等到第一個 quiet heartbeat, 以最後一份合法 snapshot 作 baseline, 再寫 ignored.txt, 原本 treatment 後的下一個 heartbeat 與完整 codex equality assertion 不變, treatment 後 read timeout 仍為 18 秒, 不略過 treatment 後的新 snapshot
+
+focused heartbeat 1 項通過 (30.19 秒), 完整 serial HTTP 單輪 219 項通過 (134.57 秒), runtime 未改動而未重跑前次 343 項通過的 service, 所有原始 heartbeat / SSE 失敗、control / treatment / controlled gap 記錄保留, 此次通過不代表所有排程或歷史 metadata 503 / WouldBlock / 唯讀 GET 503 已解決

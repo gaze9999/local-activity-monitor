@@ -8349,7 +8349,29 @@ fn idle_stream_heartbeats_do_not_republish_the_source() {
         snapshot["codex"]["health"] == "ok" && snapshot["monitor"]["device_ready"] == true
     });
     let mut stream = EventStream::connect(&service, "").ok().unwrap();
-    let first = stream.snapshot();
+    let mut first = stream.snapshot();
+    // Device readiness can be captured before its requested refresh is published.
+    // Establish one quiet interval before testing an unrelated file event.
+    let settle_deadline = Instant::now() + Duration::from_secs(18);
+    let mut settled = false;
+    for _ in 0..64 {
+        assert!(Instant::now() < settle_deadline, "initial publications did not settle");
+        stream.0.get_ref().set_read_timeout(Some(settle_deadline.saturating_duration_since(Instant::now()))).unwrap();
+        let frame = stream.frame();
+        assert!(Instant::now() < settle_deadline, "initial quiet interval arrived too late");
+        if frame == ": heartbeat\n\n" {
+            settled = true;
+            break;
+        }
+        let mut lines = frame.lines();
+        let version = lines.next().unwrap().strip_prefix("id: ").unwrap().parse::<u64>().unwrap();
+        assert_eq!(lines.next().unwrap(), "event: snapshot");
+        let value: Value = serde_json::from_str(lines.next().unwrap().strip_prefix("data: ").unwrap()).unwrap();
+        assert_eq!(value["version"], version);
+        assert!(version > first["version"].as_u64().unwrap());
+        first = value;
+    }
+    assert!(settled, "initial publications exceeded bounded startup frames");
     fs::write(home.path().join("sessions/ignored.txt"), "unrelated").unwrap();
     stream
         .0
