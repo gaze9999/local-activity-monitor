@@ -978,3 +978,20 @@ Linux / Rust 1.100.0 的完整 service 370 項通過 (62.11 秒), 完整 serial 
 原始碼另可見 device completion 先標記 ready 再排入 refresh wake, 因此 ready 不必然表示所有啟動 wake 已處理完畢, 這是可疑競態而非本次事件的已確認原因, 尚缺觸發來源追蹤, 本輪不修改 idle assertion、計數或排程, 此項 HTTP 失敗保留待處理
 
 其他 JSONL 呼叫不自動採用此 decoder, unpaired surrogate、歷史 HTTP 503 / WouldBlock、數字呈現與其他 Unicode / 平台限制保留, 不新增 endpoint、查詢參數、容量或保存內容
+
+
+### 閒置 uptime 測試的啟動發布基準
+
+保留 `81a8f62` 的完整 HTTP 218 / 1 失敗記錄, 當時的 refreshes 3 / 2 差異尚未追蹤到確切 wake, 本輪僅修正測試起始條件, 不宣稱已證明歷史失敗的觸發來源, LAM main `5c03daf`、workbench-workspace main `4616074` 核對未變
+
+原始碼在 fonts / GPU completion 標記 ready 之後才排入 refresh wake, 因此 device_ready 不保證啟動發布已結束, 既有 heartbeat 測試已使用安靜區間處理同一前置條件, 本輪抽出原有測試 helper 共用, 保留最多 64 frames、18 秒 deadline、frame 類型 / version 驗證及單調 version 檢查
+
+服務的 heartbeat 來自 15 秒未收到 snapshot 變更, uptime 測試先等待該安靜區間, 再取新的 HTTP snapshot 作為時間基準, 額外核對 refresh count 與已穩定的 SSE snapshot 一致, 原 1.2 秒後 uptime 增加、refreshes 精確相等及新串流 uptime 不落後的 assertions 完整保留, 既有 ignored-file / heartbeat assertions 亦未放寬
+
+確定性的合成 SSE fixture 送出 ready / refreshes 2、延後的 refreshes 3 與 heartbeat, 僅取首個 ready frame 的版本先失敗, 使用安靜區間 helper 後取得 3, 此 fixture 驗證 gate 的行為, 不是對歷史失敗的觸發追蹤
+
+四項 focused HTTP 測試通過 (46.80 秒), 比對確認原 gate 除 receiver / 縮排 / 說明外相同, 原 uptime 與 heartbeat 的結果 assertions 逐字保留, 僅修改 HTTP 測試與驗證文件, runtime、device_ready 定義、refresh 計數與排程未變, service 370 項沿用前輪證據而未重跑
+
+修改測試起始條件後的完整 serial HTTP 單輪 220 項通過 (130.51 秒)
+
+不以重跑未修改測試取得綠燈, 原失敗與合成基準失敗記錄均保留, 歷史 HTTP 503 / WouldBlock、其他 race、數字呈現、surrogate 與平台驗收限制仍保留

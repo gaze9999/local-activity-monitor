@@ -6198,10 +6198,42 @@ fn monitor_samples_collection_cpu_with_debug_disabled() {
 }
 
 #[test]
+fn idle_quiet_baseline_consumes_late_ready_publication() {
+    let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let sender = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket.set_write_timeout(Some(TIMEOUT)).unwrap();
+        for version in [2, 3] {
+            let value = json!({"version":version,"snapshot":{"monitor":{"device_ready":true,"refreshes":version}}});
+            let frame = format!("id: {version}\nevent: snapshot\ndata: {value}\n\n");
+            write!(socket, "{:x}\r\n{}\r\n", frame.len(), frame).unwrap();
+        }
+        let frame = ": heartbeat\n\n";
+        write!(socket, "{:x}\r\n{}\r\n", frame.len(), frame).unwrap();
+    });
+    let socket = TcpStream::connect_timeout(&address, TIMEOUT).unwrap();
+    socket.set_read_timeout(Some(TIMEOUT)).unwrap();
+    let mut stream = EventStream(BufReader::new(socket));
+    let first = stream.snapshot();
+    assert_eq!(first["snapshot"]["monitor"]["device_ready"], true);
+    assert_eq!(first["snapshot"]["monitor"]["refreshes"], 2);
+    let settled = stream.quiet_snapshot_after(first);
+    sender.join().unwrap();
+    assert_eq!(settled["version"], 3);
+    assert_eq!(settled["snapshot"]["monitor"]["refreshes"], 3);
+}
+
+#[test]
 fn idle_snapshot_and_new_stream_report_current_uptime() {
     let home = tempdir().unwrap();
     let service = Service::start(home.path(), false, None);
-    let before = snapshot_when(&service, |value| value["monitor"]["device_ready"] == true);
+    snapshot_when(&service, |value| value["monitor"]["device_ready"] == true);
+    let mut startup = EventStream::connect(&service, "?window=all").unwrap();
+    let first = startup.snapshot();
+    let settled = startup.quiet_snapshot_after(first);
+    let before = service.get("/api/snapshot?window=all").json();
+    assert_eq!(before["monitor"]["refreshes"], settled["snapshot"]["monitor"]["refreshes"]);
     std::thread::sleep(Duration::from_millis(1200));
     let after = service.get("/api/snapshot?window=all").json();
     assert!(
@@ -8198,6 +8230,32 @@ impl EventStream {
         message
     }
 
+    fn quiet_snapshot_after(&mut self, mut first: Value) -> Value {
+        // Device readiness can be captured before its requested refresh is published.
+        // Establish one quiet interval before measuring idle behavior.
+        let settle_deadline = Instant::now() + Duration::from_secs(18);
+        let mut settled = false;
+        for _ in 0..64 {
+            assert!(Instant::now() < settle_deadline, "initial publications did not settle");
+            self.0.get_ref().set_read_timeout(Some(settle_deadline.saturating_duration_since(Instant::now()))).unwrap();
+            let frame = self.frame();
+            assert!(Instant::now() < settle_deadline, "initial quiet interval arrived too late");
+            if frame == ": heartbeat\n\n" {
+                settled = true;
+                break;
+            }
+            let mut lines = frame.lines();
+            let version = lines.next().unwrap().strip_prefix("id: ").unwrap().parse::<u64>().unwrap();
+            assert_eq!(lines.next().unwrap(), "event: snapshot");
+            let value: Value = serde_json::from_str(lines.next().unwrap().strip_prefix("data: ").unwrap()).unwrap();
+            assert_eq!(value["version"], version);
+            assert!(version > first["version"].as_u64().unwrap());
+            first = value;
+        }
+        assert!(settled, "initial publications exceeded bounded startup frames");
+        first
+    }
+
     fn snapshot(&mut self) -> Value {
         let frame = self.frame();
         let mut lines = frame.lines();
@@ -8415,29 +8473,8 @@ fn idle_stream_heartbeats_do_not_republish_the_source() {
         snapshot["codex"]["health"] == "ok" && snapshot["monitor"]["device_ready"] == true
     });
     let mut stream = EventStream::connect(&service, "").ok().unwrap();
-    let mut first = stream.snapshot();
-    // Device readiness can be captured before its requested refresh is published.
-    // Establish one quiet interval before testing an unrelated file event.
-    let settle_deadline = Instant::now() + Duration::from_secs(18);
-    let mut settled = false;
-    for _ in 0..64 {
-        assert!(Instant::now() < settle_deadline, "initial publications did not settle");
-        stream.0.get_ref().set_read_timeout(Some(settle_deadline.saturating_duration_since(Instant::now()))).unwrap();
-        let frame = stream.frame();
-        assert!(Instant::now() < settle_deadline, "initial quiet interval arrived too late");
-        if frame == ": heartbeat\n\n" {
-            settled = true;
-            break;
-        }
-        let mut lines = frame.lines();
-        let version = lines.next().unwrap().strip_prefix("id: ").unwrap().parse::<u64>().unwrap();
-        assert_eq!(lines.next().unwrap(), "event: snapshot");
-        let value: Value = serde_json::from_str(lines.next().unwrap().strip_prefix("data: ").unwrap()).unwrap();
-        assert_eq!(value["version"], version);
-        assert!(version > first["version"].as_u64().unwrap());
-        first = value;
-    }
-    assert!(settled, "initial publications exceeded bounded startup frames");
+    let first = stream.snapshot();
+    let first = stream.quiet_snapshot_after(first);
     fs::write(home.path().join("sessions/ignored.txt"), "unrelated").unwrap();
     stream
         .0
