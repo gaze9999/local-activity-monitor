@@ -876,3 +876,18 @@ Python 25 組遮蔽 / 無遮蔽路徑、4 組控制與既有 payload 12 項通�
 Linux / Rust 1.100.0 的完整 service 358 項通過 (81.60 秒), 完整 serial HTTP 單輪 219 項通過 (119.75 秒)
 
 沒有新增 endpoint、查詢參數、網路請求、資料來源或保存內容, 遮蔽文字與內容 revision 可隨新命中變更, 分頁演算法、容量界線與來源 bytes 不變, token alphabet 的 dotted / dotless I、歷史 metadata POST 503 / WouldBlock、唯讀 GET 503、數字呈現、UTF-16/32 及其他 Unicode / 平台限制保留
+
+
+### Bearer / sk- token 的 dotted / dotless I 字元集合
+
+來源 LAM main `5c03daf`、workbench-workspace main `4616074` 再次核對未變, 依 `operation_records.redact` 與 instruction 原始 pattern, Python IGNORECASE 下的 `[A-Za-z]` 包含 İ / ı, Rust 原本的 token pattern 漏遮蔽含這兩個字元的 token, 新回歸先重現 `Bearer İSYNTHETIC_TOKEN` 完全未遮蔽
+
+僅在共用 TOKEN 的 Bearer 與 sk- 兩個字元集合中加上 İ / ı, 保留原集合、大小寫規則、邊界與 prefix capture, 不放寬其他字元、Bearer padding 或 sk- 至少 12 字元的判定, credential-name、dictionary-key 與 SQL 規則不變
+
+新增兩項 focused 回歸通過 (0.05 秒), 涵蓋 token 開頭 / 中間 / 結尾、sk- 11 / 12 字元界線、padding 後一般文字及無遮蔽輸出, 168 組新舊 pattern 比較保留所有既有匹配範圍, HTTP Context fixture 驗證完整遮蔽與來源 bytes 不變, focused HTTP 1 項通過 (0.35 秒)
+
+原始 Python 18 組 token fixture 與既有 instruction 7 項通過, 新增匹配限於本輪指定字元, 不宣稱所有 Unicode 版本、word boundary 或大小寫行為等價
+
+Linux / Rust 1.100.0 的完整 service 360 項通過 (78.28 秒), 完整 serial HTTP 單輪 219 項通過 (120.44 秒)
+
+沒有新增 endpoint、查詢參數、請求數量或資料保存, 內容 revision 可因完整遮蔽而改變, 分頁演算法與容量界線不變, 歷史 metadata POST 503 / WouldBlock、唯讀 GET 503、數字呈現、UTF-16/32 及其他 Unicode / 平台限制保留

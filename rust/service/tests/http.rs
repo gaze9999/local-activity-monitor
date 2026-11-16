@@ -1845,7 +1845,8 @@ fn context_detail_projects_safe_structures_and_masks_nested_fields() {
         {"type":"input_text","text":"{'ok': True, 'secret': 'PRIVATE_PYTHON', 'items': (0, False)}"},
         {"type":"input_text","text":"a,b\n\"alpha\", 'beta'"},
         {"type":"input_text","text":"{\"apİkey\":\"PRIVATE_UNICODE\",\"cooKie\":{\"nested\":\"PRIVATE_NESTED\"},\"ordinary\":\"public\"}"},
-        {"type":"input_text","text":"apı_key=PRIVATE_CASE"}
+        {"type":"input_text","text":"apı_key=PRIVATE_CASE"},
+        {"type":"input_text","text":"Bearer İPRIVATE_TOKEN"}
     ]});
     fs::write(
         &path,
@@ -1886,6 +1887,7 @@ fn context_detail_projects_safe_structures_and_masks_nested_fields() {
     assert_eq!(content[11]["text"]["cooKie"], "[已隱藏]");
     assert_eq!(content[11]["text"]["ordinary"], "public");
     assert_eq!(content[12]["text"], "[已隱藏]");
+    assert_eq!(content[13]["text"], "[已隱藏]");
     assert!(!result.to_string().contains("PRIVATE"));
     assert_eq!(fs::read(path).unwrap(), source_bytes);
 }

@@ -358,7 +358,7 @@ const CONTEXT_LIMIT: u64 = 1024 * 1024;
 // Retain existing boundaries and add only non-letter/number Rust word prefixes.
 // Preserve the captured prefix; Unicode version differences remain separate.
 static TOKEN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(?:\b|(?P<prefix>[\w&&[^\p{L}\p{N}_]]))(?:Bearer[\s\x1c-\x1f]+[A-Za-z0-9._~+/-]+=*|sk-[A-Za-z0-9_-]{12,})").unwrap()
+    Regex::new(r"(?i)(?:\b|(?P<prefix>[\w&&[^\p{L}\p{N}_]]))(?:Bearer[\s\x1c-\x1f]+[A-Za-zİı0-9._~+/-]+=*|sk-[A-Za-zİı0-9_-]{12,})").unwrap()
 });
 static SECRET: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)(?:\b|(?P<prefix>[\w&&[^\p{L}\p{N}_]]))[A-Za-z0-9_.-]*(?:ap[iİı][_-]?key|password|secret|author[iİı]zat[iİı]on|token|credent[iİı]al|cook[iİı]e|headers?)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)"#).unwrap()
@@ -1802,6 +1802,44 @@ impl DetailFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_tokens_match_python_dotted_and_dotless_i() {
+        for dotted in ['İ', 'ı'] {
+            for token in [format!("{dotted}SYNTHETIC_TOKEN"), format!("SYNTHETIC_{dotted}_TOKEN"), format!("SYNTHETIC_TOKEN{dotted}")] {
+                for scheme in ["Bearer ", "sk-"] {
+                    let source = format!("{scheme}{token}");
+                    assert_eq!(diagnostic_redact(&source, 0), "[已隱藏]", "{source}");
+                    assert_eq!(text_value(&source, true, 0), json!("[已隱藏]"));
+                    assert_eq!(text_value(&source, false, 0), json!(source));
+                }
+            }
+            let source = format!("sk-{}", dotted.to_string().repeat(11));
+            assert_eq!(diagnostic_redact(&source, 0), source);
+            let source = format!("sk-{}", dotted.to_string().repeat(12));
+            assert_eq!(diagnostic_redact(&source, 0), "[已隱藏]");
+            let source = format!("Bearer {dotted}== public");
+            assert_eq!(diagnostic_redact(&source, 0), "[已隱藏] public");
+        }
+    }
+
+    #[test]
+    fn credential_token_case_extension_keeps_existing_match_spans() {
+        let old = Regex::new(&TOKEN.as_str().replace("A-Za-zİı", "A-Za-z")).unwrap();
+        let mut prior_matches = 0;
+        for prefix in ["", " ", "中", "²", "\u{301}", "Bearer FIRST=", "sk-FIRST_TOKEN_"] {
+            for scheme in ["Bearer ", "BEARER ", "sk-", "SK-"] {
+                for token in ["SYNTHETIC_TOKEN", "abc123._~+/-==", "SYNTHETIC_İ_TOKEN", "ıSYNTHETIC_TOKEN", "SYNTHETIC_TOKENſK", "SYNTHETIC_TOKEN public"] {
+                    let source = format!("{prefix}{scheme}{token}");
+                    for old_match in old.find_iter(&source) {
+                        prior_matches += 1;
+                        assert!(TOKEN.find_iter(&source).any(|new_match| new_match.start() <= old_match.start() && new_match.end() >= old_match.end()), "lost prior token match: {source}");
+                    }
+                }
+            }
+        }
+        assert!(prior_matches > 100);
+    }
 
     #[test]
     fn credential_text_case_extension_keeps_existing_match_spans() {
