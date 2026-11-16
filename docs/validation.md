@@ -553,3 +553,13 @@ Dots 日期投影增加相同年份範圍檢查, 超出範圍保留 null, 不改
 所有先前獨立失敗與未完成驗收仍保留, 此次修正不處理 metadata-only 上游順序、overflow、SQLite 保存或唯讀 503
 
 完整 service 327 項通過 (112.61 秒), 完整 serial HTTP 單輪 218 項通過 (154.30 秒), 兩者使用 Rust 1.100.0 與既有 lockfile 的 offline 執行, 原始失敗仍不據此宣稱已找到根因
+
+### Dots 日期的微秒捨入順序
+
+基底 `824d88c` 已與遠端一致, 原始 Python datetime 先將浮點秒數捨入至微秒, 再以毫秒輸出, Rust 原先直接向下取整毫秒, 因而將 0.9999996 秒輸出成 00.999 而非 01.000, 新回歸已在修正前重現
+
+現在分離整秒與帶正負號的小數, 微秒採 ties-even 捨入後再換算毫秒, 使用 checked arithmetic 並保留非有限值、缺值及日曆範圍的 null 行為, 不改來源讀取、preview 上限、排序方式或資料保存
+
+原始 Python 的 6 個明確案例與 128 個固定正負小數 / 日曆邊界比較通過, Dots 單元 5 項、Python desktop activity 8 項通過, 完整 service 328 項通過 (110.43 秒), 完整 serial HTTP 單輪 218 項通過 (156.84 秒), 完整檢查後僅調整新測試陣列換行與本段文件, runtime 未再變更
+
+先前 HTTP 217 / 1、overflow WouldBlock 與獨立唯讀 503 的原始證據及未解決狀態持續保留

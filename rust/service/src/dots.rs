@@ -31,13 +31,19 @@ fn identifier(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
 }
 fn date(seconds: Option<f64>) -> Value {
-    let Some(millis) = seconds
-        .map(|n| (n * 1000.0).floor())
-        .filter(|n| n.is_finite() && *n >= i64::MIN as f64 && *n < i64::MAX as f64)
+    let Some(seconds) = seconds.filter(|n| {
+        n.is_finite() && *n * 1000.0 >= i64::MIN as f64 && *n * 1000.0 < i64::MAX as f64
+    }) else {
+        return Value::Null;
+    };
+    let micros = (seconds.fract() * 1_000_000.0).round_ties_even() as i64;
+    let Some(millis) = (seconds.trunc() as i64)
+        .checked_mul(1000)
+        .and_then(|whole| whole.checked_add(micros.div_euclid(1000)))
     else {
         return Value::Null;
     };
-    DateTime::<Utc>::from_timestamp_millis(millis as i64)
+    DateTime::<Utc>::from_timestamp_millis(millis)
         .filter(|date| (1..=9999).contains(&date.year()))
         .map(|date| json!(date.to_rfc3339_opts(SecondsFormat::Millis, true)))
         .unwrap_or(Value::Null)
@@ -394,6 +400,30 @@ fn project(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_dates_round_microseconds_before_rendering_milliseconds() {
+        for (seconds, expected) in [
+            (0.9999996, "1970-01-01T00:00:01.000Z"),
+            (-0.0000004, "1970-01-01T00:00:00.000Z"),
+            (1.2349996, "1970-01-01T00:00:01.235Z"),
+            (0.0009994, "1970-01-01T00:00:00.000Z"),
+            (0.0009995, "1970-01-01T00:00:00.001Z"),
+            (-0.0009996, "1969-12-31T23:59:59.999Z"),
+        ] {
+            assert_eq!(date(Some(seconds)), expected, "seconds={seconds}");
+        }
+        for seconds in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MAX,
+            f64::MIN,
+        ] {
+            assert!(date(Some(seconds)).is_null());
+        }
+        assert!(date(None).is_null());
+    }
 
     #[test]
     fn desktop_dates_match_python_calendar_bounds() {
