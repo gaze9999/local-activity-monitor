@@ -1335,6 +1335,13 @@ fn session_registry_observations_use_only_enabled_session_features() {
         let expected: Vec<_> = keys.iter().filter(|key| value["settings"]["observations"][**key] == true).copied().collect();
         assert_eq!(value["codex"]["read_state"]["enabled_features"], json!(expected));
         assert_eq!(value["sources"]["session"]["observations"], json!(expected));
+        let readers = value["sources"]["thread_state"]["readers"].as_array().unwrap();
+        assert_eq!(readers.len(), 2);
+        for reader in readers {
+            assert!(reader.get("checked_at").is_some());
+            assert!(reader["checked_at"].is_null()); // Native report has no timing evidence.
+            assert!(reader["health"].as_str().is_some_and(|health| !health.is_empty()));
+        }
     };
     let value = snapshot_when(&service, |value| value["codex"]["files"] == 1);
     assert_features(&value);

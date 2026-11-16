@@ -449,3 +449,11 @@ Linux / Rust 1.100.0 合成資料, 基底 5265a3d 已核對遠端一致, overflo
 不變更開關或收集行為, 不新增檔案讀取或查詢, Python synthetic collector 驗證預設與停用清單, HTTP 先失敗後通過並涵蓋設定變更與 codex disabled, 單元測試確認清單來源優先、順序及空值 fallback, 停用時 registry observations 為空
 
 本批完整單執行緒 `--locked --offline` service binary 320 項 (109.88 秒)、HTTP 215 項 (158.96 秒) 通過, Linux / Rust 1.100.0 合成資料, 基底 9c109cc 已核對遠端一致, 先前 retention retry 偶發失敗證據與未明根因仍保留, 本次通過不代表已修復該問題
+
+### Checkpoint reader 描述與整數 limits
+
+對照原始 `Dashboard.sources`, 只列出 health 非空的 load / save reader, 帶入對應 checked_at, 未提供時間時明確為 null, write health 空字串時使用 load health, session limits 接受整數與布林、checkpoint limits 只接受整數, 不把浮點數列為限制值
+
+Python 原始 sources 方法以合成依賴執行確認, 單元先失敗後通過, HTTP 補驗 native reader 的 checked_at 欄位存在且為 null, 沒有新增或推測實際檢查時間, 不變更 checkpoint 的 location、保存流程、健康狀態來源、容量或 retention
+
+本批完整單執行緒 `--locked --offline` service binary 321 項 (106.84 秒)、HTTP 215 項 (161.79 秒) 通過, Linux / Rust 1.100.0 合成資料, 基底 9c0f44c 已核對遠端一致, 先前偶發 retention retry 與其他待辦仍保留

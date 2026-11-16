@@ -31,7 +31,7 @@ pub(super) fn augment(snapshot: &mut Value, home: &Path, core: &Value, desktop: 
         .map(|values| {
             values
                 .iter()
-                .filter(|(_, value)| value.is_number() || value.is_boolean())
+                .filter(|(_, value)| value.is_i64() || value.is_u64() || value.is_boolean())
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect::<serde_json::Map<_, _>>()
         })
@@ -82,8 +82,8 @@ pub(super) fn augment(snapshot: &mut Value, home: &Path, core: &Value, desktop: 
     let checkpoint = &read["checkpoint"];
     let checkpoint_health = if active {
         checkpoint["write_health"]
-            .as_str()
-            .or_else(|| checkpoint["load_health"].as_str())
+            .as_str().filter(|health| !health.is_empty())
+            .or_else(|| checkpoint["load_health"].as_str().filter(|health| !health.is_empty()))
             .unwrap_or("waiting")
     } else {
         "disabled"
@@ -93,12 +93,17 @@ pub(super) fn augment(snapshot: &mut Value, home: &Path, core: &Value, desktop: 
         .map(|values| {
             values
                 .iter()
-                .filter(|(_, value)| value.is_number())
+                .filter(|(_, value)| value.is_i64() || value.is_u64())
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect::<serde_json::Map<_, _>>()
         })
         .unwrap_or_default();
-    snapshot["sources"]["thread_state"] = json!({"name":"Thread lifecycle / Skills","features":["codex","workflow","skills"],"scope":"confirmed_lifecycle_and_skill_checkpoints","locations":[location],"mode":"bounded_metadata_cache","fields":["thread_id","status","task_time","task_start","offset","skill","call_id"],"limits":checkpoint_limits,"readers":[{"name":"Checkpoint load","health":checkpoint["load_health"]},{"name":"Checkpoint save","health":checkpoint["write_health"]}],"health":checkpoint_health,"display_window":window});
+    let checkpoint_readers: Vec<_> = [("load", "load_health", "load_checked_at"),
+        ("save", "write_health", "write_checked_at")].into_iter().filter_map(|(phase, key, time)| {
+        let health = checkpoint[key].as_str().filter(|health| !health.is_empty())?;
+        Some(json!({"name":format!("Checkpoint {phase}"),"health":health,"checked_at":checkpoint[time]}))
+    }).collect();
+    snapshot["sources"]["thread_state"] = json!({"name":"Thread lifecycle / Skills","features":["codex","workflow","skills"],"scope":"confirmed_lifecycle_and_skill_checkpoints","locations":[location],"mode":"bounded_metadata_cache","fields":["thread_id","status","task_time","task_start","offset","skill","call_id"],"limits":checkpoint_limits,"readers":checkpoint_readers,"health":checkpoint_health,"display_window":window});
     let history_health = if active {
         codex["sqlite"]["history_health"]
             .as_str()
@@ -138,6 +143,27 @@ pub(super) fn augment(snapshot: &mut Value, home: &Path, core: &Value, desktop: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_readers_preserve_reported_times_and_integer_limits() {
+        let mut snapshot = json!({"codex":{"health":"ok","read_state":{
+            "count":3,"complete":true,"fraction":1.5,"checkpoint":{
+                "load_health":"ok","load_checked_at":"2026-11-13T01:00:00Z",
+                "write_health":"","write_checked_at":"2026-11-13T02:00:00Z",
+                "restored":2,"flag":true,"fraction":0.25}}},"settings":{"observations":{}}});
+        augment(&mut snapshot, Path::new("/fixture"), &json!({}), &json!({}), &[], &json!({}), &json!({}));
+        assert_eq!(snapshot["sources"]["thread_state"]["health"], "ok");
+        assert_eq!(snapshot["sources"]["thread_state"]["readers"], json!([
+            {"name":"Checkpoint load","health":"ok","checked_at":"2026-11-13T01:00:00Z"}]));
+        assert_eq!(snapshot["sources"]["thread_state"]["limits"], json!({"restored":2}));
+        assert_eq!(snapshot["sources"]["session"]["limits"]["count"], 3);
+        assert_eq!(snapshot["sources"]["session"]["limits"]["complete"], true);
+        assert!(snapshot["sources"]["session"]["limits"].get("fraction").is_none());
+        snapshot["codex"]["read_state"]["checkpoint"] = json!({"write_health":"ok"});
+        augment(&mut snapshot, Path::new("/fixture"), &json!({}), &json!({}), &[], &json!({}), &json!({}));
+        assert_eq!(snapshot["sources"]["thread_state"]["readers"], json!([
+            {"name":"Checkpoint save","health":"ok","checked_at":null}]));
+    }
 
     #[test]
     fn session_observations_follow_loaded_feature_list_not_global_settings() {
