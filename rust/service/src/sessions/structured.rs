@@ -615,6 +615,23 @@ fn yaml(source: &str) -> Option<Value> {
 mod tests {
     use super::*;
     #[test]
+    fn internal_object_literal_whitespace_keeps_masked_projection() {
+        for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let source = format!("{{visible:1,{separator}token:{separator}\"PRIVATE\"}}");
+            let expected = json!({"visible":1,"token":"PRIVATE"});
+            assert_eq!(parse(&source), Some(expected.clone()));
+            assert_eq!(
+                parse_document(&source, ""),
+                Some((expected, "Object literal"))
+            );
+            assert_eq!(
+                super::super::details::redact_value(json!(source), true, 0),
+                json!({"visible":1,"token":"[已隱藏]"})
+            );
+        }
+    }
+
+    #[test]
     fn entry_whitespace_matches_python_without_relaxing_inner_syntax() {
         for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
             for (source, expected, kind) in [

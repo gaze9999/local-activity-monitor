@@ -631,3 +631,15 @@ Cloud text 改用既有 schedules::trim_text, 只影響 /api/codex/cloud 與共�
 新回歸修正前實際失敗, 原始 Python 12 組格式案例與遮蔽 / 非遮蔽 / nested fixture 通過, Rust 同時檢查 preview、敏感欄位遮蔽、可執行運算式拒絕及超出容量拒絕, structured 9、details 10、MCP documents 6 項通過, Python payload_detail 12 項通過, 完整 service 336 項通過 (117.39 秒), 完整 serial HTTP 單輪 219 項通過 (154.02 秒)
 
 探索時另發現原始 Python Object literal 可接受成員間 U+001F, Rust 仍拒絕, 最初期待 Python 拒絕的 fixture 假設失敗並保留記錄, 本輪未擴大語法處理, 此差異仍待完成, 原有 HTTP / WouldBlock / 唯讀 503、cleanup 警告與 overflow 排除範圍不變
+
+### Object literal 內部 Python 空白
+
+基底 `41bf964` 與來源 main 再次核對未變, 原始 operation_records.literal 的 space 使用 Python isspace, 包含 U+001C 到 U+001F, Rust session-core Literal::space 原先 trim_start 不包含這四個字元, 造成前段記錄的內部 U+001F 差異
+
+僅調整 Literal::space 的空白判定, 同時影響 standalone Object literal、已記錄 exec 的靜態 nested invocation 辨識與既有 detail / document 投影, 不執行記錄中的工具或運算式, 引號內內容、重複 key 拒絕、可執行運算式拒絕、bytes / nodes / depth 上限與資料保存不變, 沒有新增讀取、查詢或持久化欄位
+
+原始 Python 四種分隔字元的物件、陣列、nested invocation、字串保留及拒絕案例通過, 新 core 回歸修正前失敗, 修正後 core 34、service structured 10 項通過, parsed_format 與敏感欄位遮蔽另有回歸, Python payload_detail 12、MCP observation 29 項通過, 完整 service 337 項通過 (104.85 秒), 完整 serial HTTP 單輪 219 項通過 (151.66 秒)
+
+第一次從 service manifest 指定相依套件 feature 的命令被 Cargo 拒絕, 未執行該項檢查, 改用 session-core manifest 與既有 lockfile 執行 sqlite-python feature 後 34 項通過 (0.93 秒), 兩份記錄均保留, 未更動 manifest / lockfile
+
+本次完成前述內部 U+001F 的已確認差異, 不移除原始假設失敗記錄, 不宣稱所有 literal grammar 完全相同, 歷史 HTTP / WouldBlock / 唯讀 503、cleanup 警告與 overflow 排除範圍仍保留

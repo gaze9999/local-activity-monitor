@@ -188,7 +188,13 @@ impl<'a> Literal<'a> {
     }
 
     fn space(&mut self) {
-        self.offset = self.source.len() - self.rest().trim_start().len();
+        self.offset = self.source.len()
+            - self
+                .rest()
+                .trim_start_matches(|character: char| {
+                    character.is_whitespace() || matches!(character, '\u{1c}'..='\u{1f}')
+                })
+                .len();
     }
 
     fn trailing_trivia(&mut self) {
@@ -388,6 +394,32 @@ impl<'a> Literal<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn literal_whitespace_matches_python_without_changing_strings_or_expressions() {
+        for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let source = format!("{{{separator}a{separator}:{separator}1{separator},{separator}b{separator}:{separator}[{separator}true{separator},{separator}null{separator}]{separator}}}");
+            let expected = serde_json::json!({"a":1,"b":[true,null]});
+            assert_eq!(parse_data_literal(&source), Some(expected.clone()));
+            let recorded = format!("tools.example({source});");
+            let found = nested_invocations(&recorded);
+            assert!(!found.truncated);
+            assert_eq!(found.calls.len(), 1);
+            assert_eq!(found.calls[0].tool, "example");
+            assert_eq!(found.calls[0].literal, Some(expected));
+            assert_eq!(
+                parse_data_literal(&format!("{{text:\"a{separator}b\"}}")),
+                Some(serde_json::json!({"text":format!("a{separator}b")}))
+            );
+            for bad in [
+                "{a: run()}".to_owned(),
+                format!("{{a:1,{separator}a:2}}"),
+                "{a: `${secret}`}".to_owned(),
+            ] {
+                assert!(parse_data_literal(&bad).is_none(), "{bad:?}");
+            }
+        }
+    }
 
     #[test]
     fn recorded_expressions_preserve_nested_calls_and_ignore_comments() {
