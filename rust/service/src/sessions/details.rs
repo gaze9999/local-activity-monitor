@@ -1791,6 +1791,28 @@ impl DetailFile {
 mod tests {
     use super::*;
     #[test]
+    fn wrapped_structured_payload_keeps_projection_and_masking() {
+        for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let source = format!("{separator}{{\"visible\":1,\"token\":\"PRIVATE\"}}{separator}");
+            assert_eq!(
+                text_value(&source, true, 0),
+                json!({"visible":1,"token":"[已隱藏]"})
+            );
+            assert_eq!(
+                text_value(&source, false, 0),
+                json!({"visible":1,"token":"PRIVATE"})
+            );
+            assert_eq!(
+                redact_value(json!({"nested":source}), true, 0),
+                json!({"nested":{"visible":1,"token":"[已隱藏]"}})
+            );
+            let (preview, truncated) = payload(json!(source), true, false);
+            assert_eq!(preview, json!({"visible":1,"token":"[已隱藏]"}));
+            assert!(!truncated);
+        }
+    }
+
+    #[test]
     fn masks_structured_and_prefixed_credentials_without_persisting_them() {
         for input in [
             r#"client_secret = "PRIVATE VALUE""#,

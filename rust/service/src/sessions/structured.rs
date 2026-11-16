@@ -14,7 +14,7 @@ static TOML_START: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:\[[^\n]+\]|[A-Za-z_]\w*\s*=)").unwrap());
 
 pub(super) fn parse(source: &str) -> Option<Value> {
-    let source = source.trim();
+    let source = super::schedules::trim_text(source);
     if source.len() > LIMIT {
         return None;
     }
@@ -87,7 +87,7 @@ pub(super) fn parse(source: &str) -> Option<Value> {
 }
 
 pub(super) fn parse_document(source: &str, format: &str) -> Option<(Value, &'static str)> {
-    let source = source.trim();
+    let source = super::schedules::trim_text(source);
     if source.len() > LIMIT {
         return None;
     }
@@ -614,6 +614,35 @@ fn yaml(source: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn entry_whitespace_matches_python_without_relaxing_inner_syntax() {
+        for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            for (source, expected, kind) in [
+                ("{\"value\":1}", json!({"value":1}), "JSON"),
+                (
+                    "<root>value</root>",
+                    json!({"root":{"text":"value"}}),
+                    "XML",
+                ),
+                ("value = 1", json!({"value":1}), "TOML"),
+            ] {
+                let wrapped = format!("{separator}{source}{separator}");
+                assert_eq!(parse(&wrapped), Some(expected.clone()), "{wrapped:?}");
+                assert_eq!(
+                    parse_document(&wrapped, ""),
+                    Some((expected, kind)),
+                    "{wrapped:?}"
+                );
+            }
+        }
+        let invalid = "{\"value\": run()}";
+        assert!(parse(invalid).is_none());
+        assert!(parse_document(invalid, "json").is_none());
+        let oversized = format!("\u{1c}{{\"value\":\"{}\"}}\u{1f}", "a".repeat(LIMIT));
+        assert!(parse(&oversized).is_none());
+        assert!(parse_document(&oversized, "json").is_none());
+    }
+
     #[test]
     fn parses_bounded_data_without_evaluating_expressions() {
         assert_eq!(

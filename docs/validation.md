@@ -621,3 +621,13 @@ Rust Dots 單元 7 項通過, Dots HTTP 5 項通過, Python desktop_activity 8 �
 Cloud text 改用既有 schedules::trim_text, 只影響 /api/codex/cloud 與共用快取投影的 title / environment_label, 仍先修整再依 Unicode 字元取 512 / 160 個, 字串中間的分隔字元與非空白 U+200B 保留, 來源欄位、CLI 命令、授權、快取、查詢次數、schema 與資料保存未改
 
 新增回歸在修正前實際失敗, 原始 Python 驗證 5 種邊界空白、純空白、Unicode 長度與不應修整的內容, Rust Cloud 9 項、Cloud HTTP 3 項、Python Cloud 7 項通過, 合併前述 Dots regression 後完整 service 334 項通過 (114.49 秒), 完整 serial HTTP 單輪 219 項通過 (142.33 秒), 以上僅使用 synthetic fixtures, 未呼叫使用者已登入 CLI, 歷史獨立失敗與 overflow 排除範圍仍保留
+
+### 結構化內容的邊界空白
+
+基底 `44ba619` 與來源 LAM main `5c03daf`、workspace main `4616074` 核對未變, 原始 payload_detail.parse_text 先使用 Python strip, Rust parse / parse_document 原先拒絕以 U+001C 到 U+001F 包住的 JSON、XML、TOML
+
+僅於兩個解析入口沿用既有 trim_text, 影響已選取的 tool / Context payload 與 MCP document parsed 投影, 不新增來源讀取或查詢, 保留原始文字、1 MiB 解析上限、行數 / 深度限制、既有格式辨識、遮蔽與資料保存, 不修改 grammar 內部空白規則
+
+新回歸修正前實際失敗, 原始 Python 12 組格式案例與遮蔽 / 非遮蔽 / nested fixture 通過, Rust 同時檢查 preview、敏感欄位遮蔽、可執行運算式拒絕及超出容量拒絕, structured 9、details 10、MCP documents 6 項通過, Python payload_detail 12 項通過, 完整 service 336 項通過 (117.39 秒), 完整 serial HTTP 單輪 219 項通過 (154.02 秒)
+
+探索時另發現原始 Python Object literal 可接受成員間 U+001F, Rust 仍拒絕, 最初期待 Python 拒絕的 fixture 假設失敗並保留記錄, 本輪未擴大語法處理, 此差異仍待完成, 原有 HTTP / WouldBlock / 唯讀 503、cleanup 警告與 overflow 排除範圍不變
