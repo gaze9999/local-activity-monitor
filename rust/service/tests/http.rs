@@ -1326,6 +1326,35 @@ fn session_execution_metadata_is_selected_and_survives_checkpoint_restore() {
 }
 
 #[test]
+fn thread_rows_preserve_source_ties_but_prioritize_updated_time() {
+    let home = tempdir().unwrap();
+    let sessions = home.path().join("sessions");
+    fs::create_dir(&sessions).unwrap();
+    let mut paths = Vec::new();
+    for (number, modified) in [(1, 100), (2, 200), (3, 50)] {
+        let id = format!("00000000-0000-4000-8000-{number:012}");
+        let path = sessions.join(format!("rollout-{id}.jsonl"));
+        let stamp = if number == 3 { "2026-11-13T02:00:00Z" } else { "2026-11-13T01:00:00Z" };
+        fs::write(&path, event(stamp, "session_meta", json!({"id":id}))+"\n").unwrap();
+        fs::File::options().write(true).open(&path).unwrap().set_times(fs::FileTimes::new().set_modified(
+            std::time::UNIX_EPOCH + Duration::from_secs(modified))).unwrap();
+        paths.push(path);
+    }
+    let expected = |numbers: &[u64]| numbers.iter().map(|number| format!("00000000-0000-4000-8000-{number:012}")).collect::<Vec<_>>();
+    for _ in 0..2 {
+        let service = Service::start(home.path(), true, None);
+        let value = snapshot_when(&service, |value| value["codex"]["threads"].as_array().is_some_and(|rows| rows.len() == 3));
+        let ids: Vec<_> = value["codex"]["threads"].as_array().unwrap().iter().map(|row| row["thread_id"].as_str().unwrap()).collect();
+        assert_eq!(ids, expected(&[3,2,1]));
+    }
+    fs::File::options().write(true).open(&paths[0]).unwrap().set_times(fs::FileTimes::new().set_modified(
+        std::time::UNIX_EPOCH + Duration::from_secs(300))).unwrap();
+    let service = Service::start(home.path(), true, None);
+    let value = snapshot_when(&service, |value| value["codex"]["threads"].as_array().is_some_and(|rows| rows.len() == 3));
+    assert_eq!(value["codex"]["threads"].as_array().unwrap().iter().map(|row| row["thread_id"].as_str().unwrap()).collect::<Vec<_>>(), expected(&[3,1,2]));
+}
+
+#[test]
 fn global_command_previews_preserve_first_thread_and_call_order() {
     let home = tempdir().unwrap();
     let sessions = home.path().join("sessions");

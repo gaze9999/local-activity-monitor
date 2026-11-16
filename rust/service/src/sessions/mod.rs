@@ -5018,6 +5018,14 @@ impl Collector {
                 right["updated_at"]
                     .as_str()
                     .cmp(&left["updated_at"].as_str())
+                    .then_with(|| {
+                        if !complete_source_order { return std::cmp::Ordering::Equal; }
+                        // Python's stable time sort retains first-discovered thread
+                        // order. Metadata-only rows follow observed source rows.
+                        let rank = |row: &Value| row["thread_id"].as_str()
+                            .and_then(|id| thread_order.get(id)).copied().unwrap_or(usize::MAX);
+                        rank(left).cmp(&rank(right))
+                    })
             });
             let mut file_summary = project::FileSummary::new(1000);
             for (thread, _) in threads.values() {
@@ -6439,6 +6447,37 @@ mod log_tests {
         assert_eq!(detail_tool(&collector), "fixture_z");
         collector.discovered_files = Some(3);
         assert_eq!(tools(&collector), json!({"fixture_z":1}));
+    }
+
+    #[test]
+    fn thread_row_ties_retain_canonical_fallback_for_incomplete_discovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        for (number, seconds) in [(1,100),(2,200)] {
+            let id = format!("00000000-0000-4000-8000-{number:012}");
+            let path = root.join(format!("rollout-{id}.jsonl"));
+            std::fs::write(&path, json!({"type":"session_meta","timestamp":"2026-11-13T01:00:00Z","payload":{"id":id}}).to_string()+"\n").unwrap();
+            std::fs::File::options().write(true).open(path).unwrap().set_times(
+                std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds))).unwrap();
+        }
+        let mut collector = Collector::new(root.join("monitoring"), true, None);
+        let stopped = AtomicBool::new(false);
+        for _ in 0..4 { collector.refresh(&root, &stopped, true, true, CommandSwitches::default()); }
+        let ids = |collector: &Collector| {
+            let snapshots = collector.snapshots("ok", "ok", 1);
+            let value: Value = serde_json::from_slice(&snapshots.window_bytes(3)).unwrap();
+            value["codex"]["threads"].as_array().unwrap().iter().map(|row|
+                row["thread_id"].as_str().unwrap().to_owned()).collect::<Vec<_>>()
+        };
+        let expected = |numbers: &[u64]| numbers.iter().map(|number| format!("00000000-0000-4000-8000-{number:012}")).collect::<Vec<_>>();
+        assert!(collector.has_complete_source_order());
+        assert_eq!(ids(&collector), expected(&[2,1]));
+        collector.discovered_files = Some(3);
+        assert!(!collector.has_complete_source_order());
+        assert_eq!(ids(&collector), expected(&[1,2]));
+        collector.discovered_files = Some(2);
+        collector.snapshot_source_order.clear();
+        assert_eq!(ids(&collector), expected(&[1,2]));
     }
 
     #[test]

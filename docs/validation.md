@@ -411,3 +411,11 @@ Skill 全域排序仍待完成, 原始保留插入順序與 SQLite `event_time D
 本批 targeted 2 項及完整單執行緒 `--locked --offline` service binary 317 項 (95.94 秒)、HTTP 211 項 (145.30 秒) 通過, Linux / Rust 1.100.0 合成資料, 基底 59e6cd6 已核對遠端一致, overflow、restore 容量、大型快照與原生平台驗收仍待完成
 
 同批補齊實際 checkpoint restart 證據: Python 與 Rust 重啟後仍由目前 call 補入 tool, SQLite retained skill payload 不新增 tool, timestamp / has_document 保留, 最新 skill HTTP 9 項通過 (3.72 秒), 此補充只擴充測試, runtime 未再修改, 上述完整回歸仍為補充前的已驗證結果
+
+### 完整 working set 的 thread 列表同時間順序
+
+Python thread 列表以 updated_at 穩定排序, 同時間保留首次來源順序, Rust 改用既有 thread ordinal 作為完整來源集合的同時間 tie-breaker, updated_at 仍優先, incomplete 或沒有來源順序時維持原有順序, 不改 thread 選擇、欄位、分頁、查詢、保存或容量
+
+Python 實際 save/load 與修改來源 mtime 後重啟確認 [3,2,1] / [3,1,2], 較新 updated_at 的 thread3 始終優先, HTTP 先失敗後通過, 單元測試另覆蓋 discovered count 不完整與缺少來源順序的 fallback, 未宣稱 metadata-only 來源順序或 overflow 全域順序已對齊
+
+本批完整單執行緒 `--locked --offline` service binary 318 項 (111.83 秒)、HTTP 212 項 (162.97 秒) 通過, Linux / Rust 1.100.0 合成資料, 基底 0ea2399 已核對遠端一致, 其他既有待辦保留
