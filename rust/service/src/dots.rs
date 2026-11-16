@@ -153,6 +153,7 @@ fn project(
         .get("electron-persisted-atom-state")
         .and_then(Value::as_object)
         .unwrap_or(&empty);
+    let mut entry_order: Vec<String> = entries.keys().cloned().collect();
     let mut machines: BTreeMap<String, Machine> = BTreeMap::new();
     for entry in entries.values() {
         if let Some(host_id) = entry["host_id"].as_str().filter(|id| host(id)) {
@@ -255,6 +256,9 @@ fn project(
                     )
                 })
                 .unwrap_or("unknown");
+            if !entries.contains_key(id) {
+                entry_order.push(id.to_owned());
+            }
             entries.insert(id.to_owned(),json!({"host_id":host_id,"timestamp":updated,"trigger":trigger,"environment":"remote"}));
             newest(&mut machine(&mut machines, host_id).0, &updated);
         }
@@ -322,7 +326,8 @@ fn project(
             );
         }
     }
-    for (id, entry) in &entries {
+    for id in &entry_order {
+        let entry = &entries[id];
         if let Some(host_id) = entry["host_id"].as_str().filter(|id| host(id)) {
             machine(&mut machines, host_id).1 += 1;
         }
@@ -388,6 +393,30 @@ fn project(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_summary_activity_keeps_first_thread_encounter_order() {
+        let first = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+        let second = "00000000-0000-4000-8000-000000000001";
+        let state = json!({"electron-persisted-atom-state":{
+            "remote-thread-summaries-v3:local":[
+                {"conversationId":first,"updatedAt":100,"threadSource":"dot"},
+                {"conversationId":second,"updatedAt":100,"threadSource":"dot"},
+                {"conversationId":first,"updatedAt":100,"threadSource":"orbit"}
+            ]
+        }});
+        let value = project(
+            &state,
+            "all",
+            DateTime::from_timestamp(101, 0).unwrap(),
+            BTreeMap::new(),
+        );
+        let activity = value["activity"].as_array().unwrap();
+        assert_eq!(activity.len(), 2);
+        assert_eq!(activity[0]["thread_id"], first);
+        assert_eq!(activity[1]["thread_id"], second);
+        assert_eq!(value["computers"][0]["thread_count"], 2);
+    }
 
     #[test]
     fn computer_preview_keeps_first_seen_hosts_at_undated_limit() {

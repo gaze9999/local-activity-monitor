@@ -527,3 +527,19 @@ Linux / Rust 1.100.0 合成資料, 基底 d224a83 與遠端一致, LAM main 5c03
 原 overflow 測試只增加階段訊息與失敗時的 status / body, 保留所有斷言、5 秒 timeout 與容量設定, 加入診斷後只執行一次, 通過 (13.43 秒), 不覆蓋先前兩份失敗記錄, 不據此改稱完整 HTTP 通過
 
 靜態呼叫路徑確認此 fixture 為 codex enabled 且沒有 global-state, 因而不執行新增的停用啟動讀取或 dots host 排序, enabled 時 history health 的結果也未變, 設定等待與 overflow 來源路徑沒有修改, 但未取得原失敗時的 HTTP response 或完整 request 階段, 尚不能斷言是環境負載或排程原因, 目前保留獨立失敗狀態, 後續自然重現時可由新增診斷辨識階段與實際回應
+
+### Remote summary 活動的同時間順序
+
+復原後確認 LAM main `5c03daf` 與 workspace main `4616074` 未變, 原始 Python `desktop_activity` 依 entries 首次插入順序產生 dot / orbit 活動, 相同時間的 stable sort 保留此順序, Rust 原先最後依 BTreeMap thread ID 順序產生活動
+
+新增暫時 entry_order, 保留既有 metadata 順序, remote summary 首次加入時追加 ID, 重複更新保留原位置, 不改來源讀取、時間比較、preview 上限或保存策略, metadata-only 上游順序差異仍未處理
+
+原始 Python 的反向 ID、相同時間、重複更新 fixture 已驗證順序與 thread_count, 既有 desktop activity 8 項測試通過, diff whitespace 檢查通過, 新 Rust 單元涵蓋相同 fixture, 最初因工具鏈缺失而尚未執行
+
+替換工作環境最初沒有 cargo / rustc 或原相依套件快取, 已檢查既有 runtime、系統及工作區與備份, 未安裝工具或存取其他裝置, 當時 Rust 編譯、格式與單元 / HTTP 測試均未執行, 既有完整 HTTP 217 / 1、overflow socket timeout 與獨立唯讀 503 仍未解決
+
+取得安裝授權後, 已由官方 rustup 安裝獨立 Rust / Cargo 1.100.0 與 rustfmt, 依既有 Cargo.lock 取得相依套件且 lockfile 未變, 新順序單元通過, 完整 service 326 項通過 (128.90 秒), 完整 serial HTTP 單輪 218 項通過 (156.73 秒), 本輪已恢復執行驗證
+
+rustfmt check 仍回報既有 dots.rs 格式, 比對 HEAD 與目前檔案的格式修正內容完全相同, 新增呼叫已符合格式, 未為此重排既有程式碼, diff whitespace 檢查通過
+
+本輪通過不代表先前 HTTP 217 / 1、overflow WouldBlock 與唯讀 503 的根因已解決, 原始記錄全部保留, 不變更保存、容量、timeout 或斷言, 此處驗證不等同遠端交付
