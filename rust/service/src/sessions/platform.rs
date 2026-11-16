@@ -190,8 +190,7 @@ async fn apply_response(kind: Kind, request: reqwest::RequestBuilder, result: &m
                     }
                 }
                 if valid {
-                    if let Some(projected) = serde_json::from_slice::<Value>(&bytes)
-                        .ok()
+                    if let Some(projected) = crate::json_bytes::parse(&bytes)
                         .and_then(|value| project(kind, &value))
                     {
                         if let (Some(target), Some(values)) =
@@ -345,6 +344,69 @@ mod tests {
             assert!(!result.to_string().contains("synthetic-key"));
         }
     }
+    async fn apply_bytes(kind: Kind, body: &[u8]) -> Value {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+        response.extend_from_slice(body);
+        let worker = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            stream.read(&mut request).await.unwrap();
+            let _ = stream.write_all(&response).await;
+        });
+        let client = reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(2)).build().unwrap();
+        let mut result = json!({"health":"missing_credentials","items":[]});
+        apply_response(kind, client.get(format!("http://{address}/")), &mut result).await;
+        worker.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn encoded_responses_preserve_decimal_projection_and_raw_byte_limit() {
+        for (kind, body) in [
+            (Kind::Models, r#"{"data":[{"id":"model_1","secret":"PRIVATE"}]}"#),
+            (Kind::Usage, r#"{"data":[{"start_time":0,"end_time":1,"results":[{"input_tokens":9223372036854775807}]}],"has_more":false}"#),
+            (Kind::Decisions, r#"{"data":[{"start_time":0,"end_time":1,"results":[{"input_tokens":9223372036854775807}]}],"has_more":false}"#),
+            (Kind::Costs, r#"{"data":[{"start_time":0,"end_time":1,"results":[{"amount":{"value":0.123456789012345678,"currency":"usd"}}]}],"has_more":false}"#),
+        ] {
+            for (width, big_endian, prefix) in [
+                (1, false, b"\xef\xbb\xbf".as_slice()),
+                (2, false, b"\xff\xfe"), (2, true, b"\xfe\xff"),
+                (4, false, b"\xff\xfe\0\0"), (4, true, b"\0\0\xfe\xff"),
+            ] {
+                for bom in [false, true] {
+                    let mut raw = if bom { prefix.to_vec() } else { Vec::new() };
+                    for byte in body.bytes() {
+                        match width {
+                            1 => raw.push(byte),
+                            2 => raw.extend(if big_endian { u16::from(byte).to_be_bytes() } else { u16::from(byte).to_le_bytes() }),
+                            4 => raw.extend(if big_endian { u32::from(byte).to_be_bytes() } else { u32::from(byte).to_le_bytes() }),
+                            _ => unreachable!(),
+                        }
+                    }
+                    let result = apply_bytes(kind, &raw).await;
+                    assert_eq!(result["health"], "ok", "{width} {big_endian} {bom}");
+                    assert!(!result.to_string().contains("PRIVATE"));
+                    match kind {
+                        Kind::Models => assert_eq!(result["items"][0]["id"], "model_1"),
+                        Kind::Costs => assert_eq!(result["items"][0]["amounts"]["usd"], "0.123456789012345678"),
+                        _ => assert_eq!(result["items"][0]["input_tokens"], 9223372036854775807i64),
+                    }
+                }
+            }
+        }
+        let mut raw = b"\xff\xfe".to_vec();
+        for byte in b"{\"data\":[]}" { raw.extend(u16::from(*byte).to_le_bytes()); }
+        while raw.len() < 1048576 { raw.extend(b" \0"); }
+        assert_eq!(raw.len(), 1048576);
+        assert_eq!(apply_bytes(Kind::Models, &raw).await["health"], "ok");
+        raw.extend(b" \0");
+        assert_eq!(apply_bytes(Kind::Models, &raw).await["health"], "error");
+        assert_eq!(apply_bytes(Kind::Models, b"\xff\xfe{").await["health"], "error");
+    }
+
     #[test]
     fn projection_masks_and_validates() {
         let value =

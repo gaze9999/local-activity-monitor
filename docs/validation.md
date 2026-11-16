@@ -1084,3 +1084,17 @@ Python 原始 reader 的 loopback HTTP 20 組編碼與 4 組上限 fixture 通�
 此輪只驗證 loopback HTTP reader 與既有快取測試, 未連線實際固定來源, 不代表遠端服務可用性或完整外部 endpoint 驗收, surrogate 與既有歷史失敗、其他限制保留
 
 Linux / Rust 1.100.0 的完整 service 單輪 381 項通過 (65.06 秒), 完整 serial HTTP 單輪 225 項通過 (131.32 秒)
+
+### Platform 回應編碼與精確數值
+
+依 LAM main `5c03daf` 的 `OpenAIPlatformSource.query`, HTTP bytes 先受 1 MiB 限制再以 `json.loads(..., parse_float=Decimal)` 解碼, Rust 改用既有私有 JSON bytes decoder, 沿用 serde 的 arbitrary_precision 與原有金額投影
+
+Python 原始 query 以模擬 transport 驗證 models / usage / decisions / costs 共 40 組編碼與 2 組原始上限, 僅使用合成 key, 沒有外部請求且未使用真實憑證
+
+Rust loopback HTTP 回歸先失敗後通過, platform 9 項通過, 涵蓋 UTF-8 BOM、UTF-16/32 LE / BE、有 / 無 BOM、18 位小數金額與 i64 最大值計數, 剛好 1 MiB 接受、超出 2 bytes 與截斷編碼拒絕
+
+`/api/openai-platform` 的來源選擇、外部路徑、時間參數、快取、狀態分類及白名單不變, 未新增請求或放寬憑證條件
+
+此結果分別來自 Python 模擬 transport 與 Rust loopback reader, 不代表實際帳戶、外部 Platform 或跨平台認證驗收, surrogate、歷史失敗與其他限制保留
+
+Linux / Rust 1.100.0 的完整 service 單輪 382 項通過 (62.51 秒), 完整 serial HTTP 單輪 225 項通過 (129.65 秒)
