@@ -857,3 +857,22 @@ Python 25 組遮蔽 / 無遮蔽路徑、4 組控制與既有 payload 12 項通�
 先前完整 service 記錄在中斷後缺少結束結果, 保留為未完成而不計入通過, 恢復後 Linux / Rust 1.100.0 的新一輪完整 service 356 項通過 (89.44 秒), 完整 serial HTTP 單輪 219 項通過 (134.67 秒)
 
 原始純文字 regex 的 Unicode IGNORECASE dotted / dotless I 差異不在本輪字典 key 修正內, 歷史 metadata POST 503 / WouldBlock、唯讀 GET 503、數字呈現、UTF-16/32 及其他 Unicode / 平台限制仍保留
+
+
+### 憑證名稱的 dotted / dotless I 大小寫匹配
+
+來源 LAM main `5c03daf`、workbench-workspace main `4616074` 核對未變, Python `operation_records.redact`、instruction 與 SQL 憑證名稱的 IGNORECASE 可將 i / I / İ / ı 視為相同, Rust 原有 regex 未匹配後兩者, 合成 `apİ_key=SYNTHETIC_VALUE` 回歸先重現漏遮蔽
+
+僅在既有 text、diagnostic、structured secret 與 SQL secret-column 四個 pattern 中, 將憑證名稱的 literal i 擴為 `[iİı]`, 保留原大小寫與邊界規則, 不更動 SQL 語法、Bearer / sk- token 字元集合、dictionary-key normalization 或一般文字內容, 此為憑證名稱的局部補齊, 不宣稱所有 regex case folding 等價
+
+新增兩項 focused 回歸通過 (0.11 秒), 涵蓋 dotted / dotless I 的一般與結構型值、SQL 欄位、diagnostic 分隔符號保留及無遮蔽輸出, 四個新舊 pattern 的 1,120 組合成比較確認所有既有匹配範圍仍被新 pattern 包含, HTTP Context fixture 新增 dotless I key 並維持來源 bytes 不變, focused HTTP 1 項通過 (0.29 秒)
+
+原始 Python diagnostic / SQL 的 20 組合成案例通過, 既有 SQLite suite 11 項中 9 項通過、2 項因恢復環境缺少前端建置資產而出錯, 錯誤發生於 Dashboard refresh 的 asset 載入, 未修改測試或以單元結果代替這兩項端點驗收
+
+依固定 WBUI `e9741c6` 執行既有 `build_frontend.py --verify-offline` 嘗試恢復前置資產, 但 shell 的既有 Git 認證 / 網路無法取得 Workbench UI, 保留建置失敗與原始兩項測試錯誤, 未變更 pin 或建立替代資產
+
+之後透過既有已認證終端成功取得相同固定版本, 本輪重新執行 offline 驗證通過, 已生成資產與 WBUI pin 一致, SQLite suite 11 項全部通過 (0.240 秒), 前置資產恢復後才重跑, 原始建置與測試失敗仍保留
+
+Linux / Rust 1.100.0 的完整 service 358 項通過 (81.60 秒), 完整 serial HTTP 單輪 219 項通過 (119.75 秒)
+
+沒有新增 endpoint、查詢參數、網路請求、資料來源或保存內容, 遮蔽文字與內容 revision 可隨新命中變更, 分頁演算法、容量界線與來源 bytes 不變, token alphabet 的 dotted / dotless I、歷史 metadata POST 503 / WouldBlock、唯讀 GET 503、數字呈現、UTF-16/32 及其他 Unicode / 平台限制保留

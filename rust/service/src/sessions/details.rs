@@ -361,10 +361,10 @@ static TOKEN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:\b|(?P<prefix>[\w&&[^\p{L}\p{N}_]]))(?:Bearer[\s\x1c-\x1f]+[A-Za-z0-9._~+/-]+=*|sk-[A-Za-z0-9_-]{12,})").unwrap()
 });
 static SECRET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(?:\b|(?P<prefix>[\w&&[^\p{L}\p{N}_]]))[A-Za-z0-9_.-]*(?:api[_-]?key|password|secret|authorization|token|credential|cookie|headers?)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)"#).unwrap()
+    Regex::new(r#"(?i)(?:\b|(?P<prefix>[\w&&[^\p{L}\p{N}_]]))[A-Za-z0-9_.-]*(?:ap[iİı][_-]?key|password|secret|author[iİı]zat[iİı]on|token|credent[iİı]al|cook[iİı]e|headers?)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)"#).unwrap()
 });
 static DIAGNOSTIC_SECRET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(?:\b|(?P<prefix>[\w&&[^\p{L}\p{N}_]]))(?:api[_-]?key|password|secret|authorization|access[_-]?token|token)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*(?:"[^"]*"|'[^']*'|[^\s\x1c-\x1f,;]+)"#).unwrap()
+    Regex::new(r#"(?i)(?:\b|(?P<prefix>[\w&&[^\p{L}\p{N}_]]))(?:ap[iİı][_-]?key|password|secret|author[iİı]zat[iİı]on|access[_-]?token|token)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*(?:"[^"]*"|'[^']*'|[^\s\x1c-\x1f,;]+)"#).unwrap()
 });
 static SQL_INSERT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?is)(\bINSERT\s+(?:OR\s+\w+\s+)?INTO\s+[\w."`\[\]]+\s*\(([^()]*)\)\s*VALUES\s*)((?:\((?:'(?:''|[^'])*'|[^'()])*\)\s*,?\s*)+)"#).unwrap()
@@ -374,7 +374,7 @@ static SQL_ROW: LazyLock<Regex> =
 static SQL_VALUES: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?:'(?:''|[^'])*'|[^,']+)+").unwrap());
 static SQL_SECRET_COLUMN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(?:api[_-]?key|password|secret|credential|authorization|cookie|access[_-]?token|token)$").unwrap()
+    Regex::new(r"(?i)(?:ap[iİı][_-]?key|password|secret|credent[iİı]al|author[iİı]zat[iİı]on|cook[iİı]e|access[_-]?token|token)$").unwrap()
 });
 static DIAGNOSTIC_SQL: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     ["sql", "statement", "query", "summary"]
@@ -383,7 +383,7 @@ static DIAGNOSTIC_SQL: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .collect()
 });
 static STRUCTURED_SECRET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(?:\b|(?P<prefix>[\w&&[^\p{L}\p{N}_]]))[A-Za-z0-9_.-]*(?:api[_-]?key|password|secret|authorization|token|credential|cookie|headers?)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*[\[{]"#).unwrap()
+    Regex::new(r#"(?i)(?:\b|(?P<prefix>[\w&&[^\p{L}\p{N}_]]))[A-Za-z0-9_.-]*(?:ap[iİı][_-]?key|password|secret|author[iİı]zat[iİı]on|token|credent[iİı]al|cook[iİı]e|headers?)["']?[\s\x1c-\x1f]*[:=][\s\x1c-\x1f]*[\[{]"#).unwrap()
 });
 fn sensitive(key: &str) -> bool {
     let normalized: String = key
@@ -1802,6 +1802,47 @@ impl DetailFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_text_case_extension_keeps_existing_match_spans() {
+        let mut prior_matches = 0;
+        for current in [&*SECRET, &*DIAGNOSTIC_SECRET, &*SQL_SECRET_COLUMN, &*STRUCTURED_SECRET] {
+            let old = Regex::new(&current.as_str().replace("[iİı]", "i")).unwrap();
+            for prefix in ["", " ", ".", "中", "²", "\u{301}", "service."] {
+                for key in ["api_key", "password", "secret", "authorization", "credential", "cookie", "token", "headers", "APİ_KEY", "apı_key"] {
+                    for tail in ["", "=SYNTHETIC_VALUE", "='SYNTHETIC_VALUE'; public", "={ordinary: 'SYNTHETIC_VALUE'}"] {
+                        let source = format!("{prefix}{key}{tail}");
+                        for old_match in old.find_iter(&source) {
+                            prior_matches += 1;
+                            assert!(current.find_iter(&source).any(|new_match| new_match.start() <= old_match.start() && new_match.end() >= old_match.end()), "lost prior match: {source}");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(prior_matches > 300);
+    }
+
+    #[test]
+    fn credential_text_matches_python_dotted_and_dotless_i() {
+        for dotted in ['İ', 'ı'] {
+            for key in ["api_key", "authorization", "credential", "cookie"] {
+                let key = key.replace('i', &dotted.to_string());
+                let source = format!("{key}=SYNTHETIC_VALUE");
+                assert_eq!(text_value(&source, true, 0), json!("[已隱藏]"), "{source}");
+                assert_eq!(text_value(&source, false, 0), json!(source));
+                let structured = format!("{key}={{ordinary: 'SYNTHETIC_VALUE'}}");
+                assert_eq!(text_value(&structured, true, 0), json!("[已隱藏]"));
+                let sql = format!("INSERT INTO sample ({key},ordinary) VALUES ('SYNTHETIC_VALUE','public')");
+                assert_eq!(sql_content(Some(&sql), true, true)["sql"], format!("INSERT INTO sample ({key},ordinary) VALUES ('[已隱藏]','public')"));
+                assert_eq!(sql_content(Some(&sql), false, true)["sql"], sql);
+            }
+            for key in ["api_key", "authorization"] {
+                let source = format!("{}=SYNTHETIC_VALUE; public", key.replace('i', &dotted.to_string()));
+                assert_eq!(diagnostic_redact(&source, 0), "[已隱藏]; public");
+            }
+        }
+    }
 
     #[test]
     fn credential_keys_lower_unicode_before_ascii_filtering() {
