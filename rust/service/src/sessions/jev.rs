@@ -429,7 +429,9 @@ fn details(
     series.reverse();
     let mut query = db.prepare("SELECT CASE WHEN length(CAST(metadata AS BLOB))<=65536 THEN metadata END FROM jev_events WHERE timestamp>=? ORDER BY timestamp DESC LIMIT 80")?;
     let mut recent = Vec::new();
-    for row in query.query_map([cutoff], |row| row.get::<_, Option<String>>(0))? {
+    for row in query.query_map([cutoff], |row| {
+        Ok(row.get_ref(0)?.as_str().ok().map(str::to_owned))
+    })? {
         let Some(raw) = row? else { continue };
         let Ok(event) = serde_json::from_str::<Value>(&raw) else {
             continue;
@@ -676,6 +678,42 @@ mod tests {
             snapshot(home.path(), "1h", reference, true)["summary"]["calls"],
             0
         );
+    }
+
+    #[test]
+    fn recent_skips_non_text_metadata_without_losing_valid_rows_or_counts() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join("monitoring")).unwrap();
+        let database = home.path().join("jev.sqlite");
+        let db = Connection::open(&database).unwrap();
+        db.execute_batch("CREATE TABLE jev_events(timestamp TEXT,status TEXT,http_attempts INTEGER,input_tokens INTEGER,output_tokens INTEGER,request_bytes INTEGER,response_bytes INTEGER,response_unknown_attempts INTEGER,latency_ms INTEGER,metadata)").unwrap();
+        let valid = json!({"timestamp":"2026-11-13T12:00:00Z","status":"ok","operation":"rank"}).to_string();
+        for metadata in [
+            rusqlite::types::Value::Text(valid.clone()),
+            rusqlite::types::Value::Blob(valid.into_bytes()),
+            rusqlite::types::Value::Integer(42),
+            rusqlite::types::Value::Real(1.5),
+            rusqlite::types::Value::Null,
+            rusqlite::types::Value::Text("invalid JSON".into()),
+            rusqlite::types::Value::Text("[]".into()),
+            rusqlite::types::Value::Text(json!({"status":"ok","operation":"embed"}).to_string()),
+        ] {
+            db.execute("INSERT INTO jev_events VALUES('2026-11-13T12:00:00.000Z','ok',1,1,1,1,1,0,9,?)", [metadata]).unwrap();
+        }
+        fs::write(home.path().join("monitoring/jev-monitor.json"),
+            json!({"version":1,"enabled":true,"database":database}).to_string()).unwrap();
+        let reference = lam_history_store::parse_utc_stamp("2026-11-13T12:00:00Z").unwrap();
+        for window in ["1h", "24h", "7d", "all"] {
+            let result = snapshot(home.path(), window, reference, true);
+            assert_eq!(result["health"], "ok", "{window}");
+            assert_eq!(result["summary"]["calls"], 8);
+            assert_eq!(result["summary"]["statuses"], json!({"ok":8}));
+            assert_eq!(result["series"], json!([{"time":"2026-11-13T12:00:00Z","calls":8}]));
+            let recent = result["recent"].as_array().unwrap();
+            assert_eq!(recent.len(), 2);
+            assert_eq!(recent[0]["operation"], "rank");
+            assert_eq!(recent[1]["operation"], "embed");
+        }
     }
 
     #[test]

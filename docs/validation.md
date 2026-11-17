@@ -1449,3 +1449,13 @@ JEV 模組單輪 7 項通過 (0.07 秒), diff 檢查通過, 本輪僅測試與�
 Linux / Rust 1.100.0、原 Cargo.lock, JEV 模組單輪 8 項通過 (0.05 秒), serial HTTP 的 JEV 13 項通過 (3.85 秒), runtime diff 比較確認僅替換 average_latency_ms 的捨入運算, diff 檢查通過
 
 `/api/snapshot` 的 jev.summary 與 mcp.telemetry.jev.summary 仍使用原 jev_events / timestamp>=cutoff 查詢結果, SQL、四窗查詢次數、80 ms timeout、資料庫讀取旗標與 response 欄位未變, 未修改共同 capture 或重跑完整 service / HTTP suites
+
+### JEV 非文字 metadata 的略過行為
+
+以 `69b3a1a` 為基底, LAM main `5c03daf` 與 workbench-workspace main `4616074` 核對未變, Python `JevCollector.snapshot` 略過非字串 metadata, Rust 原先將 BLOB 轉換為 String 失敗後回報整份 telemetry unavailable
+
+實際 Python collector 的混合 SQLite 型別資料確認 8 筆仍計入 summary / statuses / series, recent 只保留 2 筆有效文字 JSON, BLOB、整數、浮點、null、無效 JSON 與非物件 JSON 不產生 recent 項目, Rust 新測試先重現 unavailable, 改為只讀取文字型別後四窗各自通過
+
+Linux / Rust 1.100.0、原 Cargo.lock, JEV 模組單輪 9 項通過 (0.04 秒), serial HTTP 的 JEV 13 項通過 (3.51 秒), diff 檢查通過
+
+`/api/snapshot` 的 jev.recent 與 mcp.telemetry.jev.recent 仍取自 jev_events.metadata, SQL、timestamp>=cutoff、80 筆上限、65536 位元組防護、查詢次數、summary 與 transaction 邊界未變, 未修改四窗共同 capture 或重跑完整 service / HTTP suites
