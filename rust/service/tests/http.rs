@@ -10113,6 +10113,82 @@ fn model_api_observation_switch_preserves_other_diagnostics_and_replays() {
 }
 
 #[test]
+fn model_api_settings_transition_preserves_four_window_source_identities() {
+    let home = tempdir().unwrap();
+    let source = rusqlite::Connection::open(home.path().join("logs_fixture.sqlite")).unwrap();
+    source
+        .execute_batch(
+            "CREATE TABLE logs(id INTEGER PRIMARY KEY,ts REAL,level TEXT,target TEXT,message TEXT)",
+        )
+        .unwrap();
+    let directory = home.path().join("desktop-logs");
+    fs::create_dir(&directory).unwrap();
+    let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now());
+    let request = r#"event.name="codex.api_request" endpoint="/responses" status_code=200"#;
+    let mut desktop = String::new();
+    for (index, hours) in [0, 2, 25, 169].into_iter().enumerate() {
+        let stamp = now - chrono::Duration::hours(hours);
+        source
+            .execute(
+                "INSERT INTO logs VALUES(?,?,'INFO','codex_otel.log_only',?)",
+                rusqlite::params![index as i64 + 1, stamp.timestamp(), request],
+            )
+            .unwrap();
+        desktop.push_str(&format!(
+            "{} INFO [codex_otel.log_only] {request}\n",
+            stamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        ));
+    }
+    fs::write(directory.join("codex-desktop-fixture.log"), desktop).unwrap();
+    let set = |service: &Service, enabled: bool| {
+        let body = json!({"observations":{"model_api":enabled}}).to_string();
+        let response = service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body);
+        assert_eq!(response.status, 200);
+        assert_eq!(response.json()["observations"]["model_api"], enabled);
+    };
+    let windows = ["1h", "24h", "7d", "all"];
+    let inspect = |service: &Service, enabled: bool| {
+        windows.iter().enumerate().map(|(index, window)| {
+            let response = service.get(&format!("/api/snapshot?window={window}"));
+            assert_eq!(response.status, 200);
+            let api = response.json()["model_api"].clone();
+            let count = if enabled { (index + 1) * 2 } else { 0 };
+            assert_eq!(api["enabled"], enabled, "{window}");
+            assert_eq!(api["requests"], count, "{window}");
+            let events = api["events"].as_array().unwrap();
+            assert_eq!(events.len(), count, "{window}");
+            for name in ["codex_core", "codex_desktop"] {
+                assert_eq!(
+                    events.iter().filter(|event| event["source"] == name).count(),
+                    count / 2,
+                    "{window} {name}"
+                );
+            }
+            let sources = api["sources"].as_array().unwrap();
+            assert_eq!(sources.len(), 2);
+            if !enabled {
+                assert!(sources.iter().all(|source| source["health"] == "disabled"));
+            }
+            let mut identities = events
+                .iter()
+                .map(|event| event["observation_id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>();
+            identities.sort();
+            identities
+        }).collect::<Vec<_>>()
+    };
+    let mut service = Service::start(home.path(), true, None);
+    snapshot_when(&service, |value| value["model_api"]["requests"] == 8);
+    let original = inspect(&service, true);
+    set(&service, false);
+    inspect(&service, false);
+    set(&service, true);
+    snapshot_when(&service, |value| value["model_api"]["requests"] == 8);
+    assert_eq!(inspect(&service, true), original);
+    service.stop();
+}
+
+#[test]
 fn core_model_api_projects_requests_connections_and_retries() {
     let home = tempdir().unwrap();
     let writer = rusqlite::Connection::open(home.path().join("logs_4.sqlite")).unwrap();

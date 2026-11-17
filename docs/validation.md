@@ -2226,3 +2226,17 @@ LAM main `5c03daf`、workbench-workspace main `ce972bd` 再核對未變, consume
 - LAM main 與 `5c03daf` 相同, workspace main 仍只比 `ce972bd` 多出前次已審的 AI.md 導覽新增
 
 來源錯誤為 fixture 注入, applied 切換由測試設定, 未驗證實際 OS 權限、設定 HTTP / worker 套用或 candidate 最終發布, 未重跑 session-error 失敗測試或完整套件, production 切換仍待完成
+
+### Model API 四窗 HTTP 開關與來源識別
+
+基準 `2fc68d4`, 新增獨立 HTTP fixture, 僅修改測試與本節記錄, 不改 production 或保留中的 session-error 實驗
+
+- Core SQLite 與 Desktop 合成來源各有 0 / 2 / 25 / 169 小時前的一筆請求, 實際服務的 `1h` / `24h` / `7d` / `all` 分別回傳 2 / 4 / 6 / 8 筆, 每窗兩個來源各佔一半
+- 實際 `POST /api/settings` 關閉 Model API 後, 四窗均回傳 disabled、空 events 與零 requests, 兩個來源 health 也為 disabled, 回覆成功後直接讀取四窗, 未直接修改 applied 欄位
+- 同程序重新啟用後, worker 重新讀取來源, 各窗筆數與完整 observation ID 集合回復原值, 未產生重複事件
+- 原重啟實驗的持久化假設與既有規格不符, 已停止並另存, 未更動產品行為
+- [設定保存範圍](settings-format.md#相容與保存範圍)規定後端觀察設定僅維持目前程序, 瀏覽器重新連線時再套用 localStorage, 本項獨立測試僅保留同程序 HTTP 開關流程, 不宣稱重啟持久化或瀏覽器還原已驗收
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, `cargo test --manifest-path rust/service/Cargo.toml --locked --offline --test http model_api_settings_transition_preserves_four_window_source_identities -- --exact` 通過 1 項、226 項未選取, 0.77 秒, 維持 8 個既有 warnings, git diff --check 通過
+
+LAM main `5c03daf` 與 workspace main `383fbb9` 再核對未變, 後者相較前次只有 WBUI AI 導覽更新, consumer pin 不變, 未執行 session-error 失敗 fixture、完整套件或 candidate finalizer
