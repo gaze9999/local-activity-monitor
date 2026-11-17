@@ -353,11 +353,14 @@ fn validate_yaml(
         let code=format!("try{{require({package}).load(require('fs').readFileSync(0,'utf8'));}}catch{{process.exit(1)}}");
         return node_execute(&runtime, &code, text, false).map(|_| ());
     }
-    if text.lines().any(|line| {
-        line.chars()
-            .take_while(|ch| ch.is_whitespace())
-            .any(|ch| ch == '\t')
-    }) {
+    if text
+        .split(['\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}'])
+        .any(|line| {
+            line.chars()
+                .take_while(|ch| ch.is_whitespace() || matches!(ch, '\x1c'..='\x1f'))
+                .any(|ch| ch == '\t')
+        })
+    {
         return Err(WriteError::Invalid);
     }
     Ok(())
@@ -561,6 +564,20 @@ mod tests {
         let rows = documents(parsed.as_table().unwrap());
         assert!(rows.iter().any(|row| row["path"] == first.to_string_lossy().as_ref()));
         assert!(!rows.iter().any(|row| row["path"] == last.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn basic_yaml_validation_matches_python_line_and_indent_boundaries() {
+        let table = toml::map::Map::new();
+        for separator in ["\n", "\r\n", "\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\u{85}", "\u{2028}", "\u{2029}"] {
+            let invalid = format!("first: true{separator} \tsecond: false");
+            assert!(matches!(validate_yaml(&invalid, &table), Err(WriteError::Invalid)), "{separator:?}");
+            let valid = format!("first: true{separator}  second: false");
+            assert!(validate_yaml(&valid, &table).is_ok(), "{separator:?}");
+        }
+        assert!(matches!(validate_yaml("\x1f\tkey: value", &table), Err(WriteError::Invalid)));
+        assert!(validate_yaml("key: value\tinline", &table).is_ok());
+        assert!(validate_yaml("key: \"tab\tinside\"", &table).is_ok());
     }
 
     #[test]

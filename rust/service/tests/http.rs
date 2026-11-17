@@ -4138,6 +4138,9 @@ fn mcp_document_edit_rejects_yaml_toml_and_origin_failures() {
     };
     for (name, invalid) in [
         ("settings.yaml", "value:\n\tbad: 1\n"),
+        ("settings.yaml", "value:\r\tbad: 1\r"),
+        ("settings.yaml", "value:\u{2028}\tbad: 1"),
+        ("settings.yaml", "\x1f\tbad: 1"),
         ("settings.toml", "enabled = [\n"),
     ] {
         let id = files.iter().find(|entry| entry["name"] == name).unwrap()["id"]

@@ -2286,3 +2286,16 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, `sessions::skill_detail::tests` 通過 3 
 Linux / Rust 1.100.0 / 原 Cargo.lock, 新測試通過 1 項、227 項未選取, 0.11 秒, 既有 mcp_document HTTP filter 通過 4 項、224 項未選取, 0.17 秒, 維持 8 個既有 warnings, git diff --check 通過
 
 LAM main `5c03daf` 與 workspace main `383fbb9` 再核對未變, bounded read 失敗分支依來源與程式碼審查同步旗標, 本次 fixture 直接覆蓋 UTF-8 解碼失敗與恢復, 未注入 OS 讀取錯誤、重跑完整套件或驗收其他平台
+
+### MCP YAML 基礎縮排驗證的換行邊界
+
+基準 `e2fa27d`, 對齊 Python `mcp_source_files.validate_document` 在沒有既有 YAML parser 時的 splitlines / lstrip 行為, 不新增 parser 或更改完整語法驗證的選取順序
+
+- 原 Rust lines() 未拆開單獨 CR, 使該行後的 tab 縮排未被拒絕, 新測試先重現再通過
+- 基礎檢查涵蓋 LF / CRLF / CR、VT / FF、U+001C 至 U+001E、NEL、Unicode line / paragraph separator, 以及 U+001F 後的 tab 縮排
+- 11 種換行各測 tab 縮排拒絕與空白縮排保留, 加上控制空白與兩個 inline tab 例子, 25 組 Python 實際 validate_document oracle 均通過, 不把 inline tab 一律禁用
+- 延伸既有 HTTP fixture, 單獨 CR、Unicode line separator 與 U+001F 縮排寫入均回傳 409, 原 YAML / TOML 檔案不變, 外部 Origin 仍為 403
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, yaml_validation filter 通過 2 項、439 項未選取, 2.04 秒, 包含既有 parser 失敗與 timeout 回歸, HTTP 精確 fixture 通過 1 項、227 項未選取, 0.10 秒, git diff --check 通過
+
+此為既有基礎規則的相容性修正, 不宣稱完整 YAML 語法驗證, 未更動 POST /api/mcp/file 參數、來源範圍、查詢次數或 parser 串接, 未重跑完整套件與其他平台
