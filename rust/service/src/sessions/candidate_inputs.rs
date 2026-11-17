@@ -1,5 +1,5 @@
 //! Internal validation prerequisite, not a production aggregation/publication switch.
-//! Checkpoint selection/signatures, discovery ordering, other metadata/diagnostics
+//! Complete CallSelection/signatures, other metadata/diagnostics
 //! and final publication guards remain separate requirements.
 use super::{account, Anchor, Collector, CommandSwitches, Session, SessionContentStamp, SnapshotSourceSettings};
 use std::collections::BTreeMap;
@@ -59,9 +59,40 @@ impl ObservationFlags {
     }
 }
 
+// Selection inputs outside the Session payload owners. A generation-only rescan
+// is deliberately not an input; meaningful membership changes own the SQL epoch.
+#[derive(PartialEq, Eq)]
+struct SourceTopology {
+    membership: Option<(u64, i64, i64)>,
+    root_identity: Option<(u64, u64)>,
+    root: Option<PathBuf>,
+    complete: bool,
+    discovered_files: Option<usize>,
+    order: BTreeMap<PathBuf, usize>,
+    paths: BTreeMap<String, PathBuf>,
+    duplicates: BTreeMap<String, PathBuf>,
+}
+impl SourceTopology {
+    fn capture(collector: &Collector) -> Option<Self> {
+        // Discovery may temporarily own and mutate the membership database.
+        if collector.discovery.is_some() { return None; }
+        let membership = match &collector.source_membership {
+            Some(source) => Some((source.identity, source.revision,
+                source.db.query_row("SELECT value FROM selection_epoch", [],
+                    |row| row.get::<_, i64>(0)).ok()?)),
+            None => None,
+        };
+        Some(Self { membership, root_identity:collector.source_membership_root,
+            root:collector.session_root.clone(), complete:collector.source_membership_complete,
+            discovered_files:collector.discovered_files, order:collector.snapshot_source_order.clone(),
+            paths:collector.session_paths.clone(), duplicates:collector.duplicate_session_paths.clone() })
+    }
+}
+
 type Sessions = BTreeMap<PathBuf, (SessionContentStamp, ReadProgress)>;
 
 pub(super) struct CandidateInputs {
+    topology: SourceTopology,
     active: Sessions,
     overflow: Sessions,
     history_revision: u64,
@@ -89,6 +120,7 @@ impl CandidateInputs {
     pub(super) fn capture(collector: &Collector, enabled: bool, stopped: &AtomicBool) -> Option<Self> {
         if !enabled || stopped.load(Ordering::Acquire) { return None; }
         let inputs = Self {
+            topology:SourceTopology::capture(collector)?,
             active:Self::sessions(&collector.files)?, overflow:Self::sessions(&collector.overflow_files)?,
             history_revision:collector.history_revision.value()?,
             queries:Self::queries(collector).into_iter().map(|source|
@@ -102,6 +134,7 @@ impl CandidateInputs {
     #[allow(dead_code)]
     pub(super) fn validate(self, collector: &Collector, enabled: bool, stopped: &AtomicBool) -> Option<Self> {
         let valid = enabled && !stopped.load(Ordering::Acquire)
+            && SourceTopology::capture(collector).as_ref() == Some(&self.topology)
             && collector.history_revision.value() == Some(self.history_revision)
             && Self::sessions_match(&self.active, &collector.files)
             && Self::sessions_match(&self.overflow, &collector.overflow_files)
@@ -221,4 +254,66 @@ mod tests {
         assert!(guard.validate(&collector, true, &stopped).is_none(), "worker applied state is also an input");
         assert!(capture(&collector).validate(&collector, true, &stopped).is_some());
     }
+
+    #[test]
+    fn candidate_inputs_validate_membership_epoch_and_source_order_without_rescan_churn() {
+        use super::super::{MembershipRecord, SourceMembership};
+        let (_temporary, mut collector, path) = fixture();
+        let stopped = AtomicBool::new(false);
+        let capture = |collector: &Collector| CandidateInputs::capture(collector, true, &stopped).unwrap();
+        // Use the real membership producers, not a synthetic revision counter.
+        collector.source_membership = Some(SourceMembership::new().unwrap());
+        let record = || MembershipRecord { key:"fixture".into(), fingerprint:Some("unchanged".into()) };
+        collector.source_membership.as_mut().unwrap().insert(&[record()]).unwrap();
+        let guard = capture(&collector);
+        let source = collector.source_membership.as_mut().unwrap();
+        source.next_generation().unwrap();
+        source.insert(&[record()]).unwrap();
+        assert!(guard.validate(&collector, true, &stopped).is_some(), "unchanged rescan generation");
+        let guard = capture(&collector);
+        collector.source_membership.as_mut().unwrap().set_working(&["fixture".into()]).unwrap();
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        collector.source_membership.as_mut().unwrap().invalidate().unwrap();
+        assert!(guard.validate(&collector, true, &stopped).is_none(), "invalidation precedes row updates");
+        let guard = capture(&collector);
+        collector.source_membership.as_mut().unwrap().insert(&[MembershipRecord {
+            key:"fixture".into(), fingerprint:Some("changed".into()) }]).unwrap();
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        collector.snapshot_source_order.insert(path.clone(), 17);
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        collector.session_paths.insert("fixture".into(), path.clone());
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        collector.duplicate_session_paths.insert("fixture".into(), path.clone());
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        collector.source_membership_complete = !collector.source_membership_complete;
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        collector.source_membership_root = Some((91, 92));
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        collector.session_root = Some(path.parent().unwrap().join("other"));
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        collector.discovered_files = Some(37);
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        collector.discovery = Some(super::super::SessionDiscovery::new(path.parent().unwrap(),
+            (91, 92), Default::default(), collector.source_membership.take(), Default::default(), false));
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        assert!(CandidateInputs::capture(&collector, true, &stopped).is_none(), "discovery owns mutable membership");
+        collector.source_membership = collector.discovery.take().unwrap().membership;
+        let guard = capture(&collector);
+        collector.source_membership = Some(SourceMembership::new().unwrap());
+        assert!(guard.validate(&collector, true, &stopped).is_none(), "same empty epoch is not same owner");
+        let guard = capture(&collector);
+        collector.source_membership.as_ref().unwrap().db.execute("UPDATE selection_epoch SET value='invalid'", []).unwrap();
+        assert!(guard.validate(&collector, true, &stopped).is_none(), "read failure drops candidate");
+        assert!(CandidateInputs::capture(&collector, true, &stopped).is_none());
+    }
+
 }

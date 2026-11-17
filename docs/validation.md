@@ -1838,3 +1838,15 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, Shared 原測試與新增內容版本測�
 Linux / Rust 1.100.0 / 原 Cargo.lock, cargo check 通過並保留原 5 個 warnings, 新 targeted 2 項通過、421 項未選取, 耗時 0.01 秒, 原 source-settings / query capture 各 1 項通過、422 項未選取, 各 0.00 秒
 
 未執行 HTTP、完整套件或任何 deferred 檢查, 未驗收完整來源清單 / 排序、其他 metadata / diagnostics owner、固定時間窗、頁間完整 reducer、worker 發布與容量, 此結果不構成 production 切換或全域一致性證據
+
+### Candidate 來源拓樸與 membership 驗證
+
+基準 `21e9efa`, SourceTopology 串接既有 membership identity / revision / selection_epoch 與來源順序、路徑映射, 不改 production snapshots、fallback 或設定保存流程
+
+- 使用真實 SourceMembership insert / next_generation, 相同 fingerprint 的 generation-only 重掃仍接受 guard
+- 真實 set_working、invalidate、fingerprint 更新均拒絕舊 guard, 不以手動增加假想 counter 取代 producer
+- Source order、session / duplicate path map、complete、root identity / path 與 discovered count 改變均拒絕, 替換 membership owner 亦拒絕
+- 真實 SessionDiscovery 接手 membership 時拒絕舊 guard 與新 capture, SQLite epoch 型別錯誤拒絕原 guard 且不建立新 guard, 保留原錯誤 / 取消流程
+- Linux / Rust 1.100.0 / 原 Cargo.lock, targeted `candidate_inputs` 3 項通過、421 項未選取, 耗時 0.01 秒, 包含原 mutable-owner 及取消回歸, 未跑 HTTP、完整套件或 deferred 檢查
+
+這僅補齊 candidate 的來源拓樸驗證, 尚未串接完整 CallSelection 與 checkpoint 最終 signature sweep、固定時間窗及所有 reducers, 亦未驗收實際 worker 的全量輸出、容量或高頻 discovery 下的完成能力, 不宣稱已消除 production 16 MiB staging

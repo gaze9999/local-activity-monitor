@@ -304,7 +304,11 @@ Capture 完成後重新核對較早讀取的 owner, validate 消耗原 guard, �
 | History / queries | 既有內容 revision 必須可比較, 八來源各核對同一 Shared owner, cached completion 不當成內容變更 |
 | Source settings / flags | 沿原讀鎖擷取 owned 值作相等比較, requested disable 與 worker applied 狀態分別檢查, 不改設定保存 / 失敗流程 |
 
-這是 mutable owner 範圍的必要組合, 尚未接入 production aggregation, 不替代 selection / membership / discovery order、外部檔案 identity 與最終 signature sweep、reference / cutoffs、其他 catalog / diagnostics metadata、JEV / device 或 route / publication guard, 逐來源驗證也不建立跨所有來源的單一 transaction
+後續 SourceTopology 組合實際 SourceMembership identity / revision / SQLite selection_epoch、root identity / path、membership complete、discovered count、snapshot source order 及 session / duplicate path maps, 任一變更取消 guard, discovery 持有可變 membership 時或 epoch 讀取失敗時不建立候選
+
+只增加 generation 的相同來源重掃不取消候選, 實際 insert / set_working / invalidate 仍由既有 owner 與 SQLite trigger 判定, 不新增平行 counter, 不複製來源本文或 call payload, 每次驗證新增一次既有本機 membership database 的 epoch SELECT 與 owned 路徑映射比較, 不增加外部來源查詢
+
+這是 mutable owner 與來源拓樸範圍的必要組合, 尚未接入 production aggregation, 不替代完整 CallSelection、外部檔案 identity 與最終 signature sweep、reference / cutoffs、其他 catalog / diagnostics metadata、JEV / device 或 route / publication guard, 逐來源驗證也不建立跨所有來源的單一 transaction, 路徑副本成本與高頻 discovery 下的完成能力尚待整體候選量測
 
 ### 共同 capture / mutation 邊界設計草案
 
