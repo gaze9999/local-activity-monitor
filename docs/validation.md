@@ -1487,3 +1487,13 @@ Linux / Rust 1.100.0、原 Cargo.lock, Model API 模組單輪 7 項通過 (0.21 
 Linux / Rust 1.100.0、原 Cargo.lock, `sessions::mcp` 篩選共 16 項通過 (包含 mcp_documents, 2.09 秒), serial HTTP `mcp_` 篩選 21 項通過 (7.23 秒), 既有 legacy scalar-summary oracle 未修改且通過, runtime diff 確認只有 production p99 的捨入運算改變
 
 `/api/snapshot` 的 mcp.servers[].p99_ms 仍取自選定 window 中各 server 的 direct-call duration_ms, cutoff、插值、平均值、p95、來源讀取與請求次數未變, 未重跑完整 service / HTTP suites, 不代表記憶體上限或跨來源一致性驗收
+
+### Rust 同輪完整 service / HTTP 回歸
+
+在 `081d3ef`、Linux / Rust 1.100.0 與原 Cargo.lock 執行一次完整回歸, 測試期間未修改來源, LAM main `5c03daf` 與 workbench-workspace main `4616074` 核對未變
+
+- `cargo test --locked --manifest-path rust/service/Cargo.toml --bin local-activity-monitor`: 407 項通過, 69.03 秒
+- `cargo test --locked --manifest-path rust/service/Cargo.toml --test http -- --test-threads=1`: 226 項通過, 172.63 秒
+- 本輪未重試歷史阻擋檢查, 未執行 browser、macOS / Windows 原生平台或 Library 下載驗收
+
+此結果整合近期 JEV 捨入 / metadata 與 MCP p99 修正的 Linux 回歸證據, 不抹除歷史失敗, 也不代表四窗共同擷取、跨輪 candidate、16 MiB staging、所有 producer revision 或完整重建已驗收
