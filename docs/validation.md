@@ -1753,3 +1753,13 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, fail-before 0.55 秒, test-only 修正後
 已停止此實驗並撤回本輪未提交的程式碼擴充, 保留原通過的兩來源案例與兩次失敗記錄, 不修改 production、oracle 或 context 驗證, 不自動重跑此 metadata-only 實驗
 
 後續若恢復驗證, 應由實際 Projection::consume 的 turn_context 建立合法來源狀態, 並依真正 source key 排序, 不再手造部分 context 欄位, 此替代方案本輪未執行, metadata-only 與無 thread ID 的 candidate 驗收仍待完成
+
+### ActivitySeries 與 FileSummary 共用已定案 winner
+
+以 `34fa656` 為基準, 在既有通過的兩來源 test-only candidate 加入原 ActivitySeries, 同一批實際 checkpoint pages 同時提供四窗 file reducer 與 activity / tool series, 不新增 reducer 或改 production
+
+同 thread / 不同 thread、相同 call ID、未知時間與不同時間窗沿用原 fixture, 反向來源處理只觀察已定案 winner, 完整 series 與未修改 materialized ActivitySeries 及實際 snapshots 兩個 series 欄位相符
+
+來源最後驗證失敗時整組 file / series 結果不回傳, 恢復後整組重建相符, 已完成 owned 結果保持不變, ordered / canonical 兩條測試路徑均保留
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 測試 1 筆通過、415 筆未選取, 耗時 2.32 秒, 未重跑 metadata-only、大型 padding、HTTP 或其他延後檢查, 不代表全部 reducer、記憶體上限或 worker 發布驗收

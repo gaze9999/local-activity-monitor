@@ -5862,6 +5862,12 @@ mod log_tests {
                 let (events,total,operations) = summary.finish();
                 json!({"events":events,"total":total,"operations":operations})
             });
+            let expected_series = cutoffs.map(|cutoff| {
+                let mut series = project::ActivitySeries::new();
+                for projection in materialized.values() { series.observe(projection, cutoff); }
+                let (activity, tools) = series.finish();
+                json!({"activity":activity,"tools":tools})
+            });
             // Read each source's thread identity from its verified cursor metadata,
             // without loading call payloads merely to arbitrate duplicate IDs.
             let mut winners = BTreeMap::new();
@@ -5890,7 +5896,8 @@ mod log_tests {
             }
             // Process winner sources in reverse to show reduction is independent of
             // page arrival once canonical-fallback winners have been fixed.
-            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool| -> Option<[Value;4]> {
+            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool| -> Option<([Value;4], [Value;4])> {
+                let mut series = std::array::from_fn::<_,4,_>(|_| project::ActivitySeries::new());
                 let mut summaries = std::array::from_fn::<_,4,_>(|_| project::FileSummary::new(1000));
                 let mut observed = 0;
                 for source in sources.into_iter().rev() {
@@ -5907,6 +5914,9 @@ mod log_tests {
                             for (id, call) in &mut projection.projection.calls {
                                 call.presentation_sequence = call_slots[&(thread.clone(), id.clone())];
                             }
+                        }
+                        for (series, cutoff) in series.iter_mut().zip(cutoffs) {
+                            series.observe(&projection.projection, cutoff);
                         }
                         observed += projection.projection.calls.len();
                         for (summary, cutoff) in summaries.iter_mut().zip(cutoffs) {
@@ -5935,14 +5945,19 @@ mod log_tests {
                     let (events,total,operations) = summary.finish();
                     json!({"events":events,"total":total,"operations":operations})
                 });
-                Some(result)
+                let series = series.map(|series| {
+                    let (activity, tools) = series.finish();
+                    json!({"activity":activity,"tools":tools})
+                });
+                Some((result, series))
             };
             let result = reduce(&mut store, false, false).unwrap();
-            assert_eq!(result, expected);
+            assert_eq!(result.0, expected);
+            assert_eq!(result.1, expected_series);
             assert!(reduce(&mut store, true, false).is_none(), "a source changed after its own validation");
-            assert_eq!(result, expected, "previously completed output is immutable");
+            assert_eq!(result, (expected.clone(), expected_series.clone()), "previously completed output is immutable");
             store.save_checkpoints(std::slice::from_ref(&second_cursor), &second_calls, &[]).unwrap();
-            assert_eq!(reduce(&mut store, false, false).unwrap(), expected);
+            assert_eq!(reduce(&mut store, false, false).unwrap(), (expected.clone(), expected_series.clone()));
             let ordered_expected = cutoffs.map(|cutoff| {
                 let mut summary = project::FileSummary::new(1000);
                 for (thread, projection) in &materialized {
@@ -5954,14 +5969,17 @@ mod log_tests {
             });
             let ordered_result = reduce(&mut store, false, true).unwrap();
             for index in 0..4 {
-                assert!(ordered_result[index] == ordered_expected[index],
+                assert!(ordered_result.0[index] == ordered_expected[index],
                     "cross-source insertion slots changed, same_thread={same_thread}, window={index}");
             }
+            assert_eq!(ordered_result.1, expected_series);
             collector.updated = Some(reference);
             let baseline = collector.snapshots("ok", "ok", 1);
             for index in 0..4 {
                 let window: Value = serde_json::from_slice(&baseline.window_bytes(index)).unwrap();
                 assert_eq!(window["codex"]["file_activity"], expected[index]);
+                assert_eq!(window["codex"]["activity_series"], expected_series[index]["activity"]);
+                assert_eq!(window["codex"]["tool_series"], expected_series[index]["tools"]);
             }
         }
     }
