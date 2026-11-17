@@ -1537,3 +1537,27 @@ Linux / Rust 1.100.0、原 Cargo.lock, performance_debug 模組 10 項通過 (0.
 Linux / Rust 1.100.0、原 Cargo.lock, focused uptime 測試通過, HTTP idle_snapshot_and_new_stream_report_current_uptime 通過 (17.00 秒), 確認無新 collection 時 snapshot 與新 SSE stream 仍回報目前 uptime, diff 檢查通過
 
 影響 monitor.uptime_seconds 與其原有整秒 render cache key 的中點選擇, 不修改 cache 欄位、traffic / collection revision 或裝置發布, 未重跑完整套件
+
+### af7c18e 計時修正後完整回歸與保留失敗
+
+在 `af7c18e`、Linux / Rust 1.100.0 與原 Cargo.lock 執行一次完整回歸, 期間來源未改, LAM main `5c03daf` 與 workbench-workspace main `4616074` 核對未變
+
+- service binary: 411 項通過, 67.90 秒
+- serial HTTP: 224 項通過、2 項失敗, 179.41 秒, 不是完整通過
+- `core_sql_diagnostics_follow_the_wal_and_publish_only_metadata`: `tests/http.rs:10000` 的 files[0].record_id 實際為 2、預期為 3, 尚未進入後續 read_lines / append / restart 驗證
+- `overflow_tool_detail_uses_verified_source_and_masks_secrets`: metadata POST 經 5.004106815 秒收到 HTTP 503 與 Settings temporarily unavailable, 已讀 455 bytes, child 仍存活, 未通過預期 200 / 202, 後續設定與明細驗證未執行
+
+單次原始碼檢查發現 Core fixture 的前三筆 INSERT 各自 commit, 等待條件只要求 SQL total=1 與 errors total=1, 前兩筆已能滿足, 隨後卻立即要求 logs cursor=3, 因此等待條件不足以保證第三筆已發布, 這是可辨識的測試同步缺口, 但本輪沒有再次觀察到第三筆是否最終完成, 不宣稱 runtime 遺失或已修復
+
+Overflow 503 與先前保留的 metadata POST 失敗屬相同操作與回應類型, 本輪僅證實再現, 未建立與計時捨入變更的因果, 不延長 timeout、放寬 assertions、重寫預期結果或自動重試
+
+上述兩項保留為使用者後續測試, 後續獨立驗證不得以再跑完整套件的方式默默重試它們, 若跳過兩項須明確標示為篩選結果而非完整 suite
+
+使用者在可用且已授權的環境核對 repository / branch / revision、原 Cargo.lock 與合成 fixture 後, 可分別執行以下既有測試, 保留完整 stdout / stderr、實際退出碼與版本, 這些是待執行步驟, 不代表本輪重跑
+
+```sh
+cargo test --locked --manifest-path rust/service/Cargo.toml --test http core_sql_diagnostics_follow_the_wal_and_publish_only_metadata -- --exact --test-threads=1 --nocapture
+cargo test --locked --manifest-path rust/service/Cargo.toml --test http overflow_tool_detail_uses_verified_source_and_masks_secrets -- --exact --test-threads=1 --nocapture
+```
+
+此失敗紀錄不撤銷 `081d3ef` 的歷史 407 / 226 通過, 也不以舊通過覆蓋目前結果, 四窗共同擷取、跨輪 candidate、記憶體與平台驗收仍未完成
