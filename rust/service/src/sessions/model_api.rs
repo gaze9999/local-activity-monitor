@@ -290,6 +290,54 @@ mod tests {
     }
 
     #[test]
+    fn summary_windows_match_python_counts_and_keep_current_source_health() {
+        let reference = lam_history_store::parse_utc_stamp("2026-11-17T12:00:00Z").unwrap();
+        let events: VecDeque<_> = [
+            ("old", 169, "request", "failed"),
+            ("week", 168, "connection", "returned"),
+            ("day", 24, "retry", "returned"),
+            ("hour", 1, "request", "failed"),
+            ("tie-a", 0, "request", "returned"),
+            ("tie-b", 0, "connection", "returned"),
+        ].into_iter().map(|(id, hours, kind, status)| {
+            let timestamp = (reference - chrono::Duration::hours(hours))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            json!({"observation_id":id,"timestamp":timestamp,"event_kind":kind,"status":status})
+        }).collect();
+        let retained = events.clone();
+        // Fixed outputs checked against Python api_summary with the same cutoffs.
+        let expected_ids = [
+            vec!["tie-a", "tie-b", "hour"],
+            vec!["tie-a", "tie-b", "hour", "day"],
+            vec!["tie-a", "tie-b", "hour", "day", "week"],
+            vec!["tie-a", "tie-b", "hour", "day", "week", "old"],
+        ];
+        let expected_counts = [[2, 1, 0, 1], [2, 1, 1, 1], [2, 2, 1, 1], [3, 2, 1, 2]];
+        for (index, hours) in super::super::HOURS.into_iter().enumerate() {
+            let boundary = hours.map(|hours| reference - chrono::Duration::hours(hours));
+            let source = json!({"checked_at":"first", "read_lines":6, "storage_health":"ok"});
+            let mut value = summary(&events, boundary, true, source.clone());
+            assert_eq!(value["events"].as_array().unwrap().iter()
+                .map(|event| event["observation_id"].as_str().unwrap()).collect::<Vec<_>>(), expected_ids[index]);
+            for (key, expected) in ["requests", "connections", "retry_events", "failed_requests"]
+                .into_iter().zip(expected_counts[index]) {
+                assert_eq!(value[key], expected, "window {index}: {key}");
+            }
+            assert_eq!(value["limit"], 1000);
+            assert_eq!(value["enabled"], true);
+            assert_eq!(value["sources"], json!([source]));
+            let refreshed = json!({"checked_at":"second", "read_lines":7, "storage_health":"unavailable"});
+            value["sources"] = json!([refreshed.clone()]);
+            assert_eq!(summary(&events, boundary, true, refreshed.clone()), value);
+            assert_eq!(summary(&events, boundary, false, refreshed.clone()), json!({
+                "enabled":false, "events":[], "requests":0, "connections":0,
+                "retry_events":0, "failed_requests":0, "limit":1000, "sources":[refreshed]
+            }));
+            assert_eq!(events, retained);
+        }
+    }
+
+    #[test]
     fn api_retention_preserves_source_and_cross_round_ties_without_replaying_duplicates() {
         let timestamp = "2026-11-12T00:00:00Z";
         let mut retained = VecDeque::new();

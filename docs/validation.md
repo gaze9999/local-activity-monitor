@@ -2204,3 +2204,14 @@ LAM main `5c03daf`、workbench-workspace main `ce972bd` 再核對未變, consume
 - 待驗證條件: 固定 retained events / reference 的四窗與原同步結果一致, pending / 重複事件不誤取消, 真正採用 / 清空 / 停用拒絕舊 candidate, quiet refresh 的新 source health 在同步 finalizer 可見, 同批 publication 與 JEV / device 順序不變
 
 此審查不是上述待驗證條件的通過證據, 原 session-error 失敗與 production switch gates 保留, 未執行新 runtime tests
+
+### Model API 四窗與 source health 的獨立回歸
+
+基準 `842ad47`, 僅新增 model_api.rs 的測試, 不修改保留中的 session-error 實驗或 production caller
+
+- 六筆合成事件涵蓋 169 / 168 / 24 / 1 小時及同時間的兩筆不同種類事件, 先以 Python api_summary 核對固定期望, Rust 使用既有 HOURS 的四個 cutoff 比較完整事件順序、requests / connections / retry_events / failed_requests 與 limit
+- 精確邊界事件保留, 同時間維持到達順序, source checked_at / read_lines / storage_health 更新時輸出反映新 source 且不改 retained events, 停用輸出空 events / 零計數但保留呼叫端提供的 source
+- Linux / Rust 1.100.0 / 原 Cargo.lock, 新測試精確 filter 通過 1 項、435 項未選取, model_api filter 回歸通過 8 項、428 項未選取, 0.38 秒, git diff --check 通過
+- LAM main 與 `5c03daf` 相同, workspace main 相較 `ce972bd` 僅新增 AI.md 導覽, 未變更來源實作、gitlinks 或 consumer pin
+
+這是既有 summary 的獨立單元驗證, source health 由合成參數提供, 未執行真實 quiet refresh 或四窗完整 finalizer, 未重跑 session-error 失敗測試、HTTP 或完整套件, candidate 整合與 production 切換仍待完成
