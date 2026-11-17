@@ -575,6 +575,68 @@ impl Source {
     }
 }
 
+#[cfg(test)]
+mod shared_version_tests {
+    use super::*;
+
+    #[test]
+    fn query_version_tracks_configuration_events_not_reads_or_noops() {
+        let shared = Shared::new();
+        let (wake, received) = std::sync::mpsc::sync_channel(1);
+        shared.set_wake(wake);
+        assert_eq!(shared.version(), 0);
+        assert_eq!(shared.settings(), Settings::default());
+        assert_eq!(shared.result(), None);
+        shared.configure(Settings::default());
+        assert_eq!(shared.version(), 0);
+        assert!(received.try_recv().is_err());
+        let enabled = Settings { enabled: true, interval: 300 };
+        shared.configure(enabled);
+        assert_eq!(shared.version(), 1);
+        assert!(shared.force_due.swap(false, Ordering::AcqRel));
+        assert!(received.try_recv().is_ok());
+        shared.configure(enabled);
+        assert_eq!(shared.version(), 1);
+        assert!(!shared.force_due.load(Ordering::Acquire));
+        assert!(received.try_recv().is_err());
+        shared.configure(Settings { interval: 600, ..enabled });
+        assert_eq!(shared.version(), 2);
+        assert!(!shared.force_due.load(Ordering::Acquire));
+        shared.configure(Settings { enabled: false, interval: 600 });
+        assert_eq!(shared.version(), 3);
+        assert!(!shared.force_due.load(Ordering::Acquire));
+        assert_eq!(shared.result(), None);
+    }
+
+    #[test]
+    fn identical_query_publications_still_signal_completion_with_full_wake_queue() {
+        let shared = Shared::new();
+        let (wake, received) = std::sync::mpsc::sync_channel(1);
+        shared.set_wake(wake);
+        let value = json!({"health":"ok","items":[{"count":0,"enabled":false,"missing":null}]});
+        assert!(shared.completed.read().unwrap().is_none());
+        shared.publish(value.clone());
+        assert_eq!(shared.version(), 1);
+        let first = shared.completed.read().unwrap().unwrap();
+        // A cached result is still a completed query event, not a content mutation.
+        // Leave the wake queue full: try_send failure must not suppress versioning.
+        shared.publish(value.clone());
+        assert_eq!(shared.version(), 2);
+        assert!(shared.completed.read().unwrap().unwrap() >= first);
+        assert_eq!(shared.result(), Some(value.clone()));
+        assert_eq!(shared.settings(), Settings::default());
+        assert!(received.try_recv().is_ok());
+        assert!(received.try_recv().is_err());
+        let mut changed = value;
+        changed["items"][0]["count"] = json!(1);
+        shared.publish(changed.clone());
+        assert_eq!(shared.version(), 3);
+        assert_eq!(shared.result(), Some(changed));
+        assert!(received.try_recv().is_ok());
+        assert_eq!(shared.version(), 3);
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

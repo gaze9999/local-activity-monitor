@@ -212,3 +212,15 @@ Cloud 測試不取代 Windows watcher、真實來源、SSE、Host/Origin 與持�
 現有測試證明選取/來源 signature 的局部生命週期, 尚未涵蓋所有 producer revision、跨輪 reference/cutoff、歷史/設定一致性及同一發布版本的 detail 查詢, 新測試應落在真實 mutation / publication 呼叫點, 不新增只有假想 stamp 比較的測試
 
 上述新增驗收均為待執行, 不能以現有 service / HTTP 通過數或單次 selector 微型量測代替
+
+### 查詢 producer 的現有 version 邊界
+
+依 `b7d9b88` 的 `account.rs::Shared` 與各查詢 caller 稽核, account、cloud、public、platform 使用同一種 Shared, worker 比較 version 來決定是否重建快照
+
+- configure 僅在 Settings 改變時 signal, 相同設定與單純讀取不增加 version
+- publish 每次寫入 result、更新 completed 後都 signal, 相同 cached result 也增加 version, 此值代表查詢/設定事件, 不是僅在內容改變時增加的 revision
+- account、public、platform 的快取命中會 publish, cloud 僅首頁 cursor=None 會 publish, 分頁結果不覆寫首頁的 shared result
+- signal 使用非阻塞 wake try_send, queue 已滿不阻止 version 增加, worker 仍以比較 version 偵測事件
+- settings、result、completed 各自上鎖, 寫入釋放鎖後才增加 version, 現有 before/after version 相同不能作為共同 atomic capture 的證據, 這是來源碼生命週期限制, 未以此宣稱已觀察到錯誤快照
+
+後續一致性設計不可直接重用此 counter 當內容 revision, 也不可為了取消較少 candidate 而移除 cached publish 的 completion / wake 行為, 必須另外決定與測試 settings/result 的完整 mutation 邊界, 此輪保留全部 runtime 行為

@@ -1258,3 +1258,14 @@ Linux / Rust 1.100.0 完整 service 單輪 389 項通過 (70.58 秒), 結束後�
 此步不提供共同設定 revision 或 atomic publication, 沒有改動 source query、HTTP schema、metadata / detail 隱私 guard 或即時 telemetry, 跨輪與 16 MiB 待辦保留
 
 Linux / Rust 1.100.0 完整 service 單輪 390 項通過 (64.71 秒), 結束後完整 serial HTTP 單輪 226 項通過 (129.67 秒)
+
+### 查詢 version 的 producer 邊界驗證
+
+新增兩項 Shared producer 回歸測試, 保留原始 runtime, 直接呼叫現行 configure / publish, 不引入假想 revision 或改動發布介面
+
+- 預設/相同設定與唯讀操作不增加 version, enable、interval、disable 變更保留原 force_due 與事件行為
+- 完全相同的 cached payload 仍更新 completed 並增加 version, wake queue 已滿不阻止 publish, 零值 / false / null 保留, 後續不同 payload 仍可通知
+
+來源稽核確認此 counter 是事件版本, settings/result/completed 分開寫入後才 signal, 不是共同 atomic capture 或僅內容變更的 revision, 詳見 maintenance 的查詢 producer 邊界
+
+Linux / Rust 1.100.0 針對性 2 項通過 (0.00 秒), 完整 service 單輪 392 項通過 (74.78 秒), 無 runtime / endpoint / query 次數變更, 未重跑前輪已通過的 HTTP 226 項, 未重試 browser 阻擋項目, 尚未驗證跨輪一致性或原生 Windows / macOS
