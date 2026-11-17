@@ -405,7 +405,11 @@ Candidate SQL preview / summary 使用已擷取的 applied sqlite 開關, activi
 
 MCP summary 已與同步 snapshots 共用既有來源過濾與 catalog augmentation 區段, 使用擷取的 global / per-source switches、自訂 category / description / tags 與受 owner revision guard 保護的 catalog, 四窗透過既有 scoped_summary 保留 server identity / connection 與 configuration, catalog discover 的讀取時機不變
 
-MCP diagnostics、完整 error windows 與正式發布仍待串接, raw failure components 不在此步套用名稱, 未因此重跑 deferred 額外 metadata-only / 無 ID 來源實驗
+Candidate 已在 call observations 後合併 Core / Desktop SQL queues, MCP diagnostics 依 canonical thread / call 順序套用 tool failures, 再接 Core 與 Desktop errors, 不沿 ordered row preview 的 presentation slots 決定同時間 diagnostic winner
+
+Core / Desktop observation revision 僅涵蓋 accepted errors / SQL queues 與 rescan clear, Core 沿原 refresh 接受事件, Desktop 沿原持久化成功後採用, save failure 不提升 revision, unchanged refresh / 空 clear 不取消, logs、source health、API queues 與完整 diagnostic publication 不在此 revision 的覆蓋範圍
+
+完整 error windows 與正式發布仍待串接, raw failure components 不在此步套用名稱, 未因此重跑 deferred 額外 metadata-only / 無 ID 來源實驗
 
 建構 eligibility 仍用原 Option, SelectedInputs 的舊 validate_sources 亦保留 Option wrapper, 新 try_validate_sources 提供有類型的驗證結果, 不改動同步 snapshots 或原失敗 fallback
 

@@ -369,7 +369,7 @@ impl SelectedCandidate {
     }
 
     fn finish(&mut self, collector: &Collector) -> Result<CompletedCandidate, Failure> {
-        let reducers = self.reducers.take().ok_or(Failure::State)?;
+        let mut reducers = self.reducers.take().ok_or(Failure::State)?;
         let reference = self.inputs.as_ref().ok_or(Failure::State)?.time.reference;
         let cutoffs = self.inputs.as_ref().ok_or(Failure::State)?.time.cutoffs;
         let files = reducers.files.map(|summary| {
@@ -443,9 +443,19 @@ impl SelectedCandidate {
             }
             json!({"rows":rows,"totals":totals,"nested_totals":nested_totals,"projects":projects.into_values().collect::<Vec<_>>()})
         }).collect::<Vec<_>>().try_into().map_err(|_| Failure::State)?;
+        reducers.observations.extend(collector.core.sql.iter().chain(&collector.desktop.sql).cloned());
+        let failures = reducers.failures.finish();
         let (mcp_events,sql_events): (Vec<_>,Vec<_>) = reducers.observations.finish().into_iter().partition(|event| event.get("server").is_some());
         let settings = self.inputs.as_ref().ok_or(Failure::State)?.source_settings();
         let (mcp_events, mut all_mcp) = collector.mcp_snapshot_summary(mcp_events, &settings.sources, &settings.customizations, settings.switches);
+        if self.inputs.as_ref().ok_or(Failure::State)?.errors_enabled() {
+            // MCP ties use canonical thread/call order even when row previews use
+            // presentation slots. Preserve tool, Core, Desktop source precedence.
+            let mut diagnostics: Vec<_> = failures.iter().map(|(_, event)| event).collect();
+            diagnostics.sort_by(|left, right| (left["thread_id"].as_str(), left["call_id"].as_str())
+                .cmp(&(right["thread_id"].as_str(), right["call_id"].as_str())));
+            mcp::apply_diagnostics(&mut all_mcp, diagnostics.into_iter().chain(collector.core.errors.iter()).chain(collector.desktop.errors.iter()));
+        }
         all_mcp["configuration"] = json!({"location":collector.catalog_home.join("config.toml").to_string_lossy(),"configured_sources":collector.mcp_catalog.len()});
         let sql_events = sqlite::identified(sql_events);
         let (mcp_enabled, sqlite_enabled) = self.inputs.as_ref().ok_or(Failure::State)?.observation_switches();
@@ -464,7 +474,7 @@ impl SelectedCandidate {
             }
             json!({"mcp":mcp,"sql":sql})
         });
-        let failures: Vec<_> = reducers.failures.finish().into_iter().map(|(start,event)| json!({"start":start.map(project::stamp),"event":event})).collect();
+        let failures: Vec<_> = failures.into_iter().map(|(start,event)| json!({"start":start.map(project::stamp),"event":event})).collect();
         Ok(CompletedCandidate { files,series,statistics,commands,skills,rows,observations,failures:json!(failures),
             #[cfg(test)] read_work:self.read_work })
     }

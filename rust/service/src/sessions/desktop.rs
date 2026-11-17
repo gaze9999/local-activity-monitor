@@ -703,6 +703,8 @@ impl DesktopFile {
 #[allow(dead_code)]
 #[derive(Default)]
 pub(super) struct DesktopCollector {
+    // Accepted error/SQL queue changes only; not source health, logs or API state.
+    pub(super) observation_revision: super::project::ContentRevision,
     files: std::collections::BTreeMap<PathBuf, DesktopFile>,
     cursor: usize,
     pending: Option<DesktopBatch>,
@@ -758,6 +760,12 @@ impl DesktopCollector {
     pub fn bytes_read(&self) -> u64 {
         self.bytes_read
     }
+    pub(super) fn clear_observations(&mut self) {
+        if !self.errors.is_empty() || !self.sql.is_empty() { self.observation_revision.bump(); }
+        self.errors.clear();
+        self.sql.clear();
+    }
+
     pub fn reset_log_scan(&mut self) -> bool {
         if self.pending.is_some() {
             return false;
@@ -951,6 +959,7 @@ impl DesktopCollector {
                 self.logs.push(event.log.clone());
             }
         }
+        let mut observations_changed = false;
         for event in batch.live.iter().chain(&batch.history) {
             if let Some(sql) = event.sql.as_ref().filter(|_| batch.capture_sql) {
                 if let Some(id) = lam_history_store::sql_event_id(sql) {
@@ -958,6 +967,7 @@ impl DesktopCollector {
                         lam_history_store::sql_event_id(old).as_deref() == Some(id.as_str())
                     }) {
                         self.sql.push(sql.clone());
+                        observations_changed = true;
                     }
                 }
             }
@@ -970,6 +980,7 @@ impl DesktopCollector {
                     let mut error = event.log.clone();
                     error["severity"] = severity.into();
                     self.errors.push(error);
+                    observations_changed = true;
                 }
             }
             if let Some(api) = event.api.as_ref().filter(|_| batch.capture_api) {
@@ -986,6 +997,7 @@ impl DesktopCollector {
         self.sql
             .sort_by(|a, b| b["timestamp"].as_str().cmp(&a["timestamp"].as_str()));
         self.sql.truncate(500);
+        if observations_changed { self.observation_revision.bump(); }
         Ok(Some(batch))
     }
 
@@ -1523,7 +1535,9 @@ mod tests {
         let mut collector = super::DesktopCollector::default();
         assert_eq!(collector.refresh(&[source(&logs)], now).live.len(), 1);
         let mut checkpoints = super::super::checkpoint::Checkpoints::new(monitoring, true);
+        let before = collector.observation_revision.value();
         assert!(collector.commit(&mut checkpoints, now).is_err());
+        assert_eq!(collector.observation_revision.value(), before);
         assert_eq!(collector.source["health"], "ok");
         assert_eq!(collector.source["storage_health"], "unavailable");
         assert_eq!(collector.source["storage_error"], "SQLiteError");
@@ -1533,6 +1547,8 @@ mod tests {
         db.execute_batch("DROP TRIGGER reject_errors").unwrap();
         let committed = collector.commit(&mut checkpoints, now).unwrap().unwrap();
         assert_eq!(committed.live.len(), 1);
+        assert_ne!(collector.observation_revision.value(), before);
+        let committed_revision = collector.observation_revision.value();
         assert_eq!(collector.source["storage_health"], "ok");
         assert!(collector.source["storage_error"].is_null());
         assert_eq!(collector.errors.len(), 1);
@@ -1547,6 +1563,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+        assert_eq!(collector.observation_revision.value(), committed_revision);
+        collector.clear_observations();
+        assert_ne!(collector.observation_revision.value(), committed_revision);
+        let cleared = collector.observation_revision.value();
+        collector.clear_observations();
+        assert_eq!(collector.observation_revision.value(), cleared);
     }
 
     #[test]

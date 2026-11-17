@@ -2129,3 +2129,20 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, 修正 fixture temporary 後八情境 tar
 Linux / Rust 1.100.0 / 原 Cargo.lock, catalog owner targeted 通過 1 項、430 項未選取, 0.01 秒, MCP 模組通過 10 項、421 項未選取, 0.55 秒, 明確排除既有同步 telemetry 後八情境 targeted 通過 1 項、430 項未選取, 66.25 秒, cargo check 通過並維持 8 個既有 warnings
 
 Production aggregation caller、fallback、diagnostics / telemetry 時機與設定保存不變, 未執行 deferred fixtures, 完整 diagnostics owners、error windows、同批 detail index、資源與平台驗收仍待完成
+
+### Candidate projected diagnostics 與來源優先序
+
+基準 `5bb9f6d`, Core / Desktop 新增限定 errors / SQL queues 的實際 owner revision, production rescan clear 經同一 clear_observations, 不改 logs、API、storage health 或持久化順序
+
+- Core refresh 接受 error / SQL batch 時更新 revision, Desktop 僅在成功 commit 並新增 projected error / SQL 時更新, failed storage 保留 pending batch 與原 revision, 重複空 clear 不更新
+- CandidateInputs 驗證兩個 owner, Core focused fixture 經真實 SQLite refresh 核對新增、無變更 refresh、清空與重複清空, Desktop 既有 failed-storage fixture 加入 revision assertions, 保留失敗、重試成功與保存結果斷言
+- Candidate observations 依 call、Core、Desktop 次序合併 SQL, MCP overlay 以 canonical thread / call 順序套用 tool failures 再接 Core / Desktop errors, 不使用 presentation slots 決定相同 timestamp 的 diagnostic winner
+- 八情境新增真實 Core SQLite / Desktop SQL 記錄, 沿原 refresh / commit 入口取得非空 queues, 一個既有 non-nested 情境改用實際 direct MCP call, failure codes 使用 connection / authentication 分類, 其餘七情境保留, 四窗與原 synchronous summary 比較, telemetry 仍維持既有排除範圍
+- 首次串接在 12.23 秒失敗, 新 assertion 錯誤假設 mixed nested exec failure 可歸屬單一 MCP server, 實際 failure_event 不做此歸屬, 保留該語意並以 direct MCP call 覆蓋具名 diagnostics, 原失敗記錄保留
+- 首次 cargo check 因新增合成 SQL fixture 的引號未跳脫而編譯失敗, 改用 Rust raw string, 原錯誤記錄保留, 未修改 SQL parser 或 production 行為
+
+本輪來源再核對 LAM main `5c03daf`、workbench-workspace main `ce972bd`, 與前輪相同, consumer pin 未變更
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, Core owner targeted 通過 1 項、431 項未選取, 0.03 秒, Desktop failed-storage owner targeted 通過 1 項、431 項未選取, 0.03 秒, 修正具名 diagnostic fixture 後八情境串接通過 1 項、431 項未選取, 68.97 秒, cargo check 通過並維持 8 個既有 warnings
+
+此 owner revision 不包含 logs / API queues、source health 或 detail source identity, 不宣稱完整 diagnostics snapshot 一致性, 同步 telemetry / JEV、production caller、fallback 與原保存失敗處理保留, deferred checks 未執行

@@ -270,6 +270,8 @@ impl From<rusqlite::Error> for ReadError {
 }
 
 pub struct Core {
+    // Accepted error/SQL queue changes only; not source health, logs or API state.
+    pub(super) observation_revision: super::project::ContentRevision,
     source: Option<Source>,
     cursor: Option<i64>,
     history: Option<i64>,
@@ -304,6 +306,7 @@ impl Core {
     }
     pub fn new(enabled: bool) -> Self {
         Self {
+            observation_revision: super::project::ContentRevision::default(),
             source: None,
             cursor: None,
             history: None,
@@ -346,6 +349,12 @@ impl Core {
         self.history = None;
         self.backfill = false;
         true
+    }
+
+    pub(super) fn clear_observations(&mut self) {
+        if !self.errors.is_empty() || !self.sql.is_empty() { self.observation_revision.bump(); }
+        self.errors.clear();
+        self.sql.clear();
     }
 
     pub fn health(&self) -> &'static str {
@@ -416,6 +425,9 @@ impl Core {
                 self.trimmed += 1;
             }
             push(&mut self.logs, value, LOG_LIMIT);
+        }
+        if (self.capture_errors && !batch.errors.is_empty()) || (self.capture_sql && !batch.sql.is_empty()) {
+            self.observation_revision.bump();
         }
         if self.capture_errors {
             for value in batch.errors {

@@ -1042,8 +1042,8 @@ impl Monitor {
                         rescan_core_logs = false;
                         *core_source_writer.write().unwrap_or_else(|error| error.into_inner()) = None;
                         if clear_core_for_errors {
-                            collector.core.logs.clear(); collector.core.errors.clear();
-                            collector.core.api_events.clear(); collector.core.sql.clear();
+                            collector.core.logs.clear(); collector.core.clear_observations();
+                            collector.core.api_events.clear();
                             clear_core_for_errors = false;
                         }
                         rescan_ready = true;
@@ -1052,7 +1052,7 @@ impl Monitor {
                         rescan_desktop_logs = false;
                         desktop_source_writer.write().unwrap_or_else(|error| error.into_inner()).clear();
                         if clear_desktop_for_errors {
-                            collector.desktop.logs.clear(); collector.desktop.errors.clear(); collector.desktop.api_events.clear(); collector.desktop.sql.clear();
+                            collector.desktop.logs.clear(); collector.desktop.clear_observations(); collector.desktop.api_events.clear();
                             clear_desktop_for_errors = false;
                         }
                         rescan_ready = true;
@@ -5857,7 +5857,8 @@ mod log_tests {
         use selected_candidate::Failure;
         for (same_thread, nested, active) in [(true, false, false), (false, false, false), (true, true, false), (false, true, false),
             (true, false, true), (false, false, true), (true, true, true), (false, true, true)] {
-            let fixture_tool = if nested { "exec" } else { "fixture_tool" };
+            let diagnostic_call = same_thread && !nested && !active;
+            let fixture_tool = if nested { "exec" } else if diagnostic_call { "mcp__sqlite__query" } else { "fixture_tool" };
             let arguments = if nested { "await tools.fixture_tool({}); await tools.fixture_tool({}); await tools.exec({}); await tools.mcp__sqlite__query({query:\"SELECT 42\"});" } else { "{}" };
             let directory = tempfile::tempdir().unwrap();
             let root = directory.path().canonicalize().unwrap();
@@ -5891,6 +5892,7 @@ mod log_tests {
                 // must not disappear when the winner comes from a different source.
                 if n != 300 { payload["request_position"] = Value::Null; }
                 payload["response_position"] = Value::Null;
+                if diagnostic_call { payload["failure"]["code"] = json!("connection_refused"); }
                 payload["skills"] = json!(["shared", format!("skill-{}", n % 3), "shared"]);
                 if nested {
                     payload["commands"] = json!({"git":[{"operation":"status"},{"operation":"diff","repository":"fixture"}],
@@ -5932,6 +5934,7 @@ mod log_tests {
                 payload["files"][0]["path"] = json!(format!("second-{n}"));
                 payload["request_position"] = Value::Null;
                 payload["response_position"] = Value::Null;
+                if diagnostic_call { payload["failure"]["code"] = json!("authentication_failed"); }
                 payload["completed"] = json!(row.event_time.as_deref().and_then(lam_history_store::parse_utc_stamp)
                     .filter(|_| n % 3 != 0).map(|time| stamp(time + Duration::milliseconds(n as i64))));
                 row.payload = payload.to_string();
@@ -5965,6 +5968,17 @@ mod log_tests {
                 custom.mcp_descriptions.insert("sqlite".into(), "Custom database".into());
                 custom.mcp_tags.insert("sqlite".into(), vec!["fixture".into()]);
             }
+            let diagnostics = rusqlite::Connection::open(root.join("logs_candidate.sqlite")).unwrap();
+            diagnostics.execute_batch("CREATE TABLE logs(id INTEGER PRIMARY KEY, ts REAL, level TEXT, target TEXT, message TEXT)").unwrap();
+            diagnostics.execute(r#"INSERT INTO logs VALUES(1,?,'INFO','sqlx::query','summary="SELECT PRIVATE" elapsed=2ms rows_returned=3')"#, [reference.timestamp() - 60]).unwrap();
+            collector.refresh_core(core_logs::discover(&root), reference);
+            let logs = root.join("desktop-logs");
+            std::fs::create_dir(&logs).unwrap();
+            std::fs::write(logs.join("codex-desktop-candidate.log"), "2026-11-13T01:59:00Z INFO [sqlx::query] summary=\"SELECT PRIVATE\" elapsed=2ms rows_returned=3\n").unwrap();
+            collector.desktop.refresh(&[desktop::DesktopRoot {base:root.clone(),path:logs}], reference);
+            collector.desktop.commit(&mut collector.checkpoints, reference).unwrap();
+            assert!(!collector.core.sql.is_empty());
+            assert!(!collector.desktop.sql.is_empty());
             collector.refresh_activity(reference);
             assert!(collector.activity_view.is_some());
             if nested {
@@ -6052,7 +6066,8 @@ mod log_tests {
                 serde_json::to_value(project::ToolStatistics::new(&statistics_threads, cutoff, true)).unwrap());
             let observed = lam_history_store::combine_observations(&collector.activity_history,
                 materialized.iter().flat_map(|(thread, projection)| projection.calls.iter()
-                    .flat_map(move |(id, call)| call.activities(thread, id))));
+                    .flat_map(move |(id, call)| call.activities(thread, id)))
+                    .chain(collector.core.sql.iter().cloned()).chain(collector.desktop.sql.iter().cloned()));
             let (mcp_observations, sql_observations): (Vec<_>, Vec<_>) = observed.into_iter()
                 .partition(|event| event.get("server").is_some());
             let sql_observations = sqlite::identified(sql_observations);
@@ -6063,6 +6078,10 @@ mod log_tests {
             let source_settings = collector.capture_snapshot_source_settings();
             let (mcp_observations, mut all_mcp) = collector.mcp_snapshot_summary(mcp_observations,
                 &source_settings.sources, &source_settings.customizations, source_settings.switches);
+            let diagnostics = materialized.iter().flat_map(|(thread, projection)| projection.calls.iter()
+                .filter_map(move |(id, call)| call.failure_event(thread, id))).collect::<Vec<_>>();
+            if diagnostic_call { assert!(diagnostics.iter().any(|event| event["server"] == "sqlite")); }
+            mcp::apply_diagnostics(&mut all_mcp, diagnostics.iter().chain(collector.core.errors.iter()).chain(collector.desktop.errors.iter()));
             all_mcp["configuration"] = json!({"location":collector.catalog_home.join("config.toml").to_string_lossy(),"configured_sources":2});
             let configured = all_mcp["servers"].as_array().unwrap().iter().find(|row| row["server"] == "sqlite").unwrap();
             assert_eq!(configured["description"], "Custom database");

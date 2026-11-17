@@ -99,6 +99,7 @@ pub(super) struct CandidateInputs {
     thread_metadata_revision: u64,
     project_details_revision: u64,
     mcp_catalog_revision: u64,
+    diagnostic_observations: (u64, u64),
     overflow_details_revision: u64,
     queries: [(Arc<account::Shared>, u64); 8],
     sources: SnapshotSourceSettings,
@@ -130,6 +131,7 @@ impl CandidateInputs {
             thread_metadata_revision:collector.thread_metadata_revision.value()?,
             project_details_revision:collector.project_details_revision.value()?,
             mcp_catalog_revision:collector.mcp_catalog_revision.value()?,
+            diagnostic_observations:(collector.core.observation_revision.value()?, collector.desktop.observation_revision.value()?),
             overflow_details_revision:collector.overflow_details_revision.value()?,
             queries:Self::queries(collector).into_iter().map(|source|
                 Some((Arc::clone(source), source.content_revision()?)))
@@ -147,6 +149,8 @@ impl CandidateInputs {
             && collector.thread_metadata_revision.value() == Some(self.thread_metadata_revision)
             && collector.project_details_revision.value() == Some(self.project_details_revision)
             && collector.mcp_catalog_revision.value() == Some(self.mcp_catalog_revision)
+            && collector.core.observation_revision.value() == Some(self.diagnostic_observations.0)
+            && collector.desktop.observation_revision.value() == Some(self.diagnostic_observations.1)
             && collector.overflow_details_revision.value() == Some(self.overflow_details_revision)
             && Self::sessions_match(&self.active, &collector.files)
             && Self::sessions_match(&self.overflow, &collector.overflow_files)
@@ -185,6 +189,7 @@ impl SelectedInputs {
         (self.inputs.flags.tool_events, self.inputs.flags.files, self.inputs.flags.applied_commands)
     }
     pub(super) fn source_settings(&self) -> &SnapshotSourceSettings { &self.inputs.sources }
+    pub(super) fn errors_enabled(&self) -> bool { self.inputs.flags.applied_errors }
     pub(super) fn observation_switches(&self) -> (bool, bool) {
         (self.inputs.sources.switches.mcp, self.inputs.flags.applied_sqlite)
     }
@@ -259,6 +264,29 @@ mod tests {
         }
         assert_eq!(collector.files[&path].projection.calls.len(), 1);
         (temporary, collector, path)
+    }
+
+    #[test]
+    fn candidate_inputs_track_core_observation_refresh_and_clear() {
+        let (temporary, mut collector, _) = fixture();
+        let stopped = AtomicBool::new(false);
+        let reference = now();
+        let db = rusqlite::Connection::open(temporary.path().join("logs_candidate.sqlite")).unwrap();
+        db.execute_batch("CREATE TABLE logs(id INTEGER PRIMARY KEY, ts REAL, level TEXT, target TEXT)").unwrap();
+        db.execute("INSERT INTO logs VALUES(1,?,'WARN','codex_core')", [reference.timestamp()]).unwrap();
+        let guard = CandidateInputs::capture(&collector, true, &stopped).unwrap();
+        collector.refresh_core(super::super::core_logs::discover(temporary.path()), reference);
+        assert!(!collector.core.errors.is_empty());
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = CandidateInputs::capture(&collector, true, &stopped).unwrap();
+        collector.refresh_core(super::super::core_logs::discover(temporary.path()), reference);
+        assert!(guard.validate(&collector, true, &stopped).is_some());
+        let guard = CandidateInputs::capture(&collector, true, &stopped).unwrap();
+        collector.core.clear_observations();
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = CandidateInputs::capture(&collector, true, &stopped).unwrap();
+        collector.core.clear_observations();
+        assert!(guard.validate(&collector, true, &stopped).is_some());
     }
 
     #[test]
