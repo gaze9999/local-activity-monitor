@@ -1371,3 +1371,13 @@ watch 可能合併未讀通知, 此測試只驗證實際讀到的兩批更新, �
 依實際來源修正為必須省略 observed_tool_calls、threads=[]、tools={}, 修正後針對性單輪 1 項通過 (0.11 秒), 原始新增測試的失敗紀錄保留
 
 本輪僅擴充測試與文件, 未重跑前輪 service 397 / serial HTTP 226 項, 不宣稱覆蓋每個交錯、跨輪候選取消或原生平台, worker 已透過 Drop 停止, 未重試 browser
+
+### 個別 MCP source 停用的保存 oracle
+
+另行檢查 `mcp_source_setting_filters_history_details_and_replays_on_enable` 的 777 substring 斷言, 本輪未觀察到此測試失敗, 修正依據為同樣會搜尋 time / offset / hash 的結構問題, 不將先前 444 的未知失敗原因套用到此測試
+
+依來源保留個別 source 停用與全域 MCP 停用的差異: 前者保存 observation identity / category / action, metadata 與 result 必須為空, failure 不得保存
+
+改成完整 Call JSON 比較, 包含正規化 time / completed、sequence、狀態、精確 request / response offset 與 SHA256, 任意額外欄位也會失敗, 未修改 runtime 或後續重新啟用的 replay 斷言
+
+針對性實際 HTTP 單輪 1 項通過 (0.25 秒), 本輪僅測試與文件, 未重跑前輪完整 service 397 / HTTP 226 項, 既有未知失敗與 browser 阻擋紀錄保留

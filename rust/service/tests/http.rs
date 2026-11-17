@@ -3467,8 +3467,13 @@ fn mcp_source_setting_filters_history_details_and_replays_on_enable() {
         .unwrap()
         .iter()
         .all(|row| row["server"] != "workspace_inspection"));
-    fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(event(&stamp, "response_item", json!({"type":"function_call","name":"mcp__workspace_inspection__inspect","call_id":"disabled","arguments":{"max_files":777}})).as_bytes()).unwrap();
-    fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(event(&stamp, "response_item", json!({"type":"function_call_output","call_id":"disabled","output":{"isError":true,"status":"failed"}})).as_bytes()).unwrap();
+    let offset = fs::metadata(&path).unwrap().len();
+    let request = event(&stamp, "response_item", json!({"type":"function_call","name":"mcp__workspace_inspection__inspect","call_id":"disabled","arguments":{"max_files":777}}));
+    let response = event(&stamp, "response_item", json!({"type":"function_call_output","call_id":"disabled","output":{"isError":true,"status":"failed"}}));
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(request.as_bytes()).unwrap();
+    file.write_all(response.as_bytes()).unwrap();
+    drop(file);
     let disabled = snapshot_when(&service, |value| {
         value["codex"]["observed_tool_calls"] == 3
             && value["codex"]["threads"][0]["tool_events"]
@@ -3497,7 +3502,21 @@ fn mcp_source_setting_filters_history_details_and_replays_on_enable() {
             |row| row.get(0),
         )
         .unwrap();
-    assert!(!stored.contains("777"));
+    // Per-source disable keeps identity but must persist neither metadata,
+    // response metrics nor failure. Check all fields, allowing verified locator
+    // and timestamp digits rather than treating them as observation values.
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    let time = stamp.parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+    assert_eq!(stored, json!({
+        "tool":"mcp__workspace_inspection__inspect","time":time,"completed":time,
+        "sequence":2,"sql_failed":false,"mcp_sources_incomplete":true,
+        "observation":{"server":"workspace_inspection","tool":"inspect","category":"workspace",
+            "action":"read","metadata":{},"result":{}},
+        "request_position":{"offset":offset,
+            "hash":format!("{:x}", Sha256::digest(request.strip_suffix('\n').unwrap().as_bytes()))},
+        "response_position":{"offset":offset + request.len() as u64,
+            "hash":format!("{:x}", Sha256::digest(response.strip_suffix('\n').unwrap().as_bytes()))}
+    }));
     drop(db);
     assert_eq!(set_source(true).status, 200);
     let enabled = snapshot_when(&service, |value| value["mcp"]["total_events"] == 3);
