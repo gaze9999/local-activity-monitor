@@ -352,7 +352,7 @@ selected_overflow_projections 在來源 signature 全部驗證成功後, 將 mut
 
 依 `203b466` 重新核對 `sessions/mod.rs` 的兩條 worker 路徑, 每輪先由 `refresh_jev_errors` 單獨讀取 all-window、寫入 diagnostics, 再 refresh error history, 之後 `snapshots` 才為四個 window 各讀一次 JEV, 啟動初始快照另有直接呼叫路徑
 
-因此只合併四窗仍不會讓 JEV error history 與 telemetry 共用同一份外部資料庫視圖, 若要涵蓋 errors, 必須先決定擷取、diagnostics 寫入與 history refresh 的順序, 不將第五次讀取直接刪除或改成只使用目前 recent 預覽
+因此只合併四窗仍不會讓 JEV error history 與 telemetry 共用同一份外部資料庫視圖, 若要涵蓋 errors, 必須先決定擷取、diagnostics 寫入與 history refresh 的順序, 不將第五次讀取直接刪除, 須保留既有 recent / attempts 投影與 diagnostics 寫入規則
 
 | 選擇 | 可保留的行為 | 需要決定的差異 |
 | --- | --- | --- |
