@@ -1381,3 +1381,11 @@ watch 可能合併未讀通知, 此測試只驗證實際讀到的兩批更新, �
 改成完整 Call JSON 比較, 包含正規化 time / completed、sequence、狀態、精確 request / response offset 與 SHA256, 任意額外欄位也會失敗, 未修改 runtime 或後續重新啟用的 replay 斷言
 
 針對性實際 HTTP 單輪 1 項通過 (0.25 秒), 本輪僅測試與文件, 未重跑前輪完整 service 397 / HTTP 226 項, 既有未知失敗與 browser 阻擋紀錄保留
+
+### Snapshot 輸入 owner 稽核與現況同步
+
+依 `7338ce6` 讀取 snapshots / error_windows / render 及 JEV、platform credentials、source registry、worktree / core / journal helpers, 更新 maintenance 的 owner 表與過時的獨立發布、深複製、分離查詢讀鎖描述
+
+新確認的剩餘邊界包括每個 window 的 JEV config/唯讀 SQLite I/O、credential availability 環境讀取, 以及 error_windows 額外讀 mcp_sources / journal, 明確區分已載入 registry/worktree projection 與即時 render telemetry
+
+本輪只有文件修改與來源稽核, diff 檢查通過, 未執行新 runtime 驗收、未調整查詢/鎖定順序、未將來源生命週期風險描述為已觀察到錯誤, 既有跨輪/容量/原生平台與 browser 界線保留

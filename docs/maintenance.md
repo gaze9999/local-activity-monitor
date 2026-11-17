@@ -178,17 +178,17 @@ Cloud 測試不取代 Windows watcher、真實來源、SSE、Host/Origin 與持�
 
 ## 跨輪快照的實作前置規格
 
-此節是依 `3c1fd9e` 原始碼整理的實作計畫, 尚未切換發布架構, 不代表 16 MiB staging、原子明細發布或跨平台驗收完成
+此節起於 `3c1fd9e` 的實作計畫, 下表已依 `7338ce6` 更新目前狀態, 共同發布與單一查詢 paired capture 已實作, 不代表跨輪 candidate、16 MiB staging 或跨平台驗收完成
 
 ### 已確認的資料生命週期
 
 | 範圍 | 現行行為與來源 | 對跨輪處理的限制 |
 | --- | --- | --- |
 | 來源與選取 | `sessions/mod.rs::SourceMembership` 有 identity / revision, SQLite selection_epoch 與完整 CallSelection 共同界定選取 | generation 可在來源未變更的重掃增加, 不可單憑 generation 取消所有進度 |
-| Payload staging | `selected_overflow_projections_with_limits` 分頁保存完整 Projection, 最後重查各來源 signature, 成功後 clone vector | 現有 charge 不是完整 allocation 計量, 不能只改成較小 page 就宣稱移除 staging |
+| Payload staging | `selected_overflow_projections_with_limits` 分頁保存完整 Projection, 最後重查各來源 signature, 成功後移入 Arc, 再驗證成功共用 allocation | 現有 charge 不是完整 allocation 計量, 不能只改成較小 page 就宣稱移除 staging |
 | 目前發布 | worker 依序整理歷史、建立完整 Snapshots, 再 send_replace | 單一 worker 的同步步驟不等於未來跨輪快照有完整版本保證 |
-| 明細發布 | worker 先將 detail_index 寫入獨立 detail_writer, 再建立及發布 Snapshots, server State.details 另持有 RwLock | 不可將目前 windows 與 detail index 描述為同一個原子交換, 亦未由此證明已發生錯誤 |
-| 時間與外部結果 | snapshots 固定 reference / cutoffs, 在四 window 前擷取 account / cloud / public / platform 結果及多數設定 | 發布 version 不是上述輸入的版本, settings 與 result 的分開讀取也不是共同版本 token |
+| 明細發布 | Snapshots 擁有 immutable detail index, 同一次 send_replace 發布, 8 個 reader 擷取同批內容 | 共同發布不等於組裝期間所有輸入同時一致, 外部來源仍須驗證 |
+| 時間與外部結果 | snapshots 固定 reference / cutoffs, 在四 window 前擷取 account / cloud / public / platform 結果及多數設定 | 單一來源 settings/result 已共用讀鎖, 發布 version 仍不是 8 個來源與其他輸入的共同版本 token |
 | 裝置與即時資訊 | fonts / gpus / device_completion 目前在每個 window 內讀取, render 另有即時 monitor 欄位 | 必須先區分應固定於整批的資料與刻意即時更新的欄位, 不直接凍結所有 telemetry |
 | 歷史與 active payload | worker 會更新歷史及記憶體 Projection, checkpoint_dirty 僅為布林值 | 同 call ID / timestamp 的 response、error、context 更新仍可能改變輸出, 不可以選取 key 相同視為資料相同 |
 
@@ -247,7 +247,7 @@ Cloud 測試不取代 Windows watcher、真實來源、SSE、Host/Origin 與持�
 
 ### 共同 capture / mutation 邊界設計草案
 
-此草案依 `2427f5e` 的 producer 與 server reader 稽核提出, 尚未實作或視為架構驗收, 由主線整合時確認
+此設計起於 `2427f5e` 的 producer 與 server reader 稽核, 共同 publication 部分已實作並通過限定範圍驗證, 下列跨輪 capture / mutation 部分仍為待整合規格, 不視為全部架構驗收
 
 優先採用既有 Snapshots 作為共同發布擁有者, 保存該批 immutable detail index 的 Arc, 不新增另一套全域 counter 或第二個發布 channel
 
@@ -301,3 +301,23 @@ selected_overflow_projections 在來源 signature 全部驗證成功後, 將 mut
 正在讀頁或驗證的 candidate 仍不能回傳, signature 不符、儲存讀取失敗、選取改變、停用或取消仍清除 cache 擁有權, 已交付的舊 Arc 不被改寫, 下一次新 candidate 仍獨立重建
 
 原 16 MiB charge、每輪頁數與 signature 批次、source limit、保留策略及精確統計皆未調整, staging 仍保存完整 payload, 合併 thread 與最後四個 window 仍可能另有配置, 不將移除一次 deep clone 描述成已解決 staging 容量或程序記憶體上限
+
+### Snapshot 輸入 owner 與剩餘讀取邊界
+
+依 `7338ce6` 的 snapshots、error_windows、render 與直接 helper 原始碼稽核, 下表區分已擷取狀態、每個 window 的額外讀取及刻意即時資料, 不把直接 self 欄位清單當作完整一致性 token
+
+| 輸入家族 | 目前 owner / 讀取點 | 跨輪處理前的要求 |
+| --- | --- | --- |
+| active / overflow / selected calls | worker 的 files / membership, checkpoint reader 與已驗證 Arc stage, snapshots 內合併 threads | 保留來源與 winner 順序、未保存 payload、選取與 signature 邊界, 不以同 call key 判定內容相同 |
+| retained activity / error / skill / API events | worker 的 activity_view/history、error_history、skill_history、api_events、core / desktop / JEV error 集合 | candidate 固定本批使用的 view 與健康狀態, 外部持久層更新不由記憶體 counter 自動涵蓋 |
+| thread / project / schedule / plugin / worktree / dots metadata | worker 更新的 thread_metadata、project_details、schedules、plugins、worktrees、dots 與相應 reports | 不只 capture calls, 相同 call 集合下 metadata 與狀態仍會改變輸出 |
+| tracking / MCP source / customization / feature flags | SnapshotSourceSettings、applied flags 與 tool/files atomics | 目前只有部分同步擷取, 尚未提供共同設定版本, error_windows 還會另讀 mcp_sources |
+| account / cloud / public / platform | SnapshotQueries 在四 window 前取得 8 個獨立 paired capture | 不宣稱 8 個來源共同時點或結果對目前設定的 provenance |
+| journal / debug | snapshots 開頭讀 events/debug, error_windows 再鎖 journal 取 entries/source/events, 後續另取 journal source | 不可僅凍結其中一次讀取就說明細/logs/monitor 都屬同一來源版本 |
+| JEV telemetry | 每個 window 呼叫 jev::snapshot, 重新讀 config, active 路徑開唯讀 SQLite 並查 summary/recent/series | 這是實際 I/O, 不是 worker 已保存的 Value, 後續須設計同批來源快照與設定/DB identity 驗證, 保留唯讀、安全旗標及錯誤行為 |
+| credential availability | 每個 window 呼叫 platform::credentials 讀環境變數並只輸出可用狀態 | 不新增憑證輸出或查詢, 若要固定整批讀取點須單獨驗證現有結果語意 |
+| fonts / GPUs / device completion | 每個 window 取得共用讀鎖與 ready_at | 保留初始化完成語意, 不與 render 的即時更新混為同一種靜態輸入 |
+| render telemetry | Snapshots::render 依 uptime、traffic revision、collection revision 更新 cache, 並取 memory / process usage | 仍屬刻意即時資料, 不放進靜態 payload 相等 oracle 或藉此取消所有 candidate |
+| source registry / worktree snapshot | source_registry::augment 整理已載入的參數與 snapshot, worktrees::snapshot 複製既有 result/items | 此兩者不是新增檔案 I/O, 應連同其真正上游狀態驗證, 不重複發明來源 revision |
+
+下一個跨輪整合步驟必須先處理上述實際讀取邊界, 尤其 JEV 與 journal 的多次讀取, 不能只為 active calls 加 counter 就宣稱完整 snapshot 一致, 本次僅完成 owner 稽核與現況修正, 未改變讀取時機或查詢次數
