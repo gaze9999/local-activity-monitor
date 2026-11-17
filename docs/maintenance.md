@@ -175,3 +175,40 @@ Core 錯誤與同批 SQL 摘要一起保存, 錯誤歷史的讀寫狀態可查�
 Cloud 開發只使用獨立的合成 Codex home 與資料庫, 不複製個人 sessions 或登入狀態. 先核對 workbench-ui.json、離線資產及指定來源, 再使用 local-activity-monitor --codex-home <fixture-home> --port 8787 啟動, 不啟用真實 Codex CLI 查詢作為一般健康檢查
 
 Cloud 測試不取代 Windows watcher、真實來源、SSE、Host/Origin 與持久化驗收, 核對受測版本、pin 及實際載入資產, 結果記錄於既有驗收文件
+
+## 跨輪快照的實作前置規格
+
+此節是依 `3c1fd9e` 原始碼整理的實作計畫, 尚未切換發布架構, 不代表 16 MiB staging、原子明細發布或跨平台驗收完成
+
+### 已確認的資料生命週期
+
+| 範圍 | 現行行為與來源 | 對跨輪處理的限制 |
+| --- | --- | --- |
+| 來源與選取 | `sessions/mod.rs::SourceMembership` 有 identity / revision, SQLite selection_epoch 與完整 CallSelection 共同界定選取 | generation 可在來源未變更的重掃增加, 不可單憑 generation 取消所有進度 |
+| Payload staging | `selected_overflow_projections_with_limits` 分頁保存完整 Projection, 最後重查各來源 signature, 成功後 clone vector | 現有 charge 不是完整 allocation 計量, 不能只改成較小 page 就宣稱移除 staging |
+| 目前發布 | worker 依序整理歷史、建立完整 Snapshots, 再 send_replace | 單一 worker 的同步步驟不等於未來跨輪快照有完整版本保證 |
+| 明細發布 | worker 先將 detail_index 寫入獨立 detail_writer, 再建立及發布 Snapshots, server State.details 另持有 RwLock | 不可將目前 windows 與 detail index 描述為同一個原子交換, 亦未由此證明已發生錯誤 |
+| 時間與外部結果 | snapshots 固定 reference / cutoffs, 在四 window 前擷取 account / cloud / public / platform 結果及多數設定 | 發布 version 不是上述輸入的版本, settings 與 result 的分開讀取也不是共同版本 token |
+| 裝置與即時資訊 | fonts / gpus / device_completion 目前在每個 window 內讀取, render 另有即時 monitor 欄位 | 必須先區分應固定於整批的資料與刻意即時更新的欄位, 不直接凍結所有 telemetry |
+| 歷史與 active payload | worker 會更新歷史及記憶體 Projection, checkpoint_dirty 僅為布林值 | 同 call ID / timestamp 的 response、error、context 更新仍可能改變輸出, 不可以選取 key 相同視為資料相同 |
+
+### 建議次序與驗收門檻
+
+| 次序 | 有界工作範圍 | 必須保留或新增的證據 |
+| --- | --- | --- |
+| 1 | 在現有同步流程盤點每個 snapshot 輸入的 owner、讀取點與更新點, 將既有四 window 前的局部擷取整理成私有 capture 介面, 不跨輪、不改 HTTP schema | 固定 reference 的 materialized oracle 對四 window、logs、activity、errors 逐項比對, duplicate / tie / null / disabled / numeric 邊界不變, 不把即時 monitor 欄位混入靜態相等測試 |
+| 2 | 依 capture 實際使用範圍補齊 mutation revision, 先保持同步發布 | 對同 ID / timestamp 的回覆、錯誤、context 及刪除/重建來源驗證 revision 改變, 無效或未改變寫入不得假裝資料更新, 每個變更點須有實際 producer 測試 |
+| 3 | 決定 candidate 的一致性 token 與取消條件, 再接入已存在的 winner plan | 選取改變、來源 signature 改變、設定/歷史改變、停止/停用時丟棄整個 candidate, 不沿用部分 reducer, 未變更來源的 discovery 重掃仍可完成 |
+| 4 | 一次接入一種 owned reducer, 與未修改的 materialized serializer 比對 | winner 必須先定案且每次只觀察一次, 保留 canonical tie、distinct-thread、精確 p99、history identity 與排序, 超出暫存預算不得發布部分統計 |
+| 5 | 盤點所有 server detail readers 後決定共同發布介面, 再把四 window、logs 與 detail metadata 綁定同一個已驗證 candidate | 測試在每個分頁/驗證/發布交界注入變更, 查詢只取得可識別的舊版或新版, 不把混合資料標為完整, 錯誤與取消時上個可用版本仍保留 |
+| 6 | 接入大資料的實際 worker / HTTP 驗證 | 超過現有 payload staging 預算仍完成全量選取, 不降低 count、預覽、保存或精確統計規格, 量測 staging、reducer state、最終四 window 與程序記憶體分開, 同時保留原 5 秒 settings 測試 |
+
+第一步只能整理已存在的讀取邊界, 若需要改變裝置讀取時機、settings/result 的共同版本或 detail 發布方式, 必須先完成對應來源與呼叫者稽核, 不把介面抽取當作行為變更授權
+
+### 現有回歸與新增測試的分界
+
+保留 `snapshot_payload_pages_coalesce_metadata_and_reject_stale_or_cancelled_stage`、`snapshot_payload_scan_bounds_source_and_validation_rounds`、`recent_call_selection_resumes_past_100000_tied_headers` 及 `project.rs` 的兩個 snapshot winner 規格測試, 不重寫 oracle 或以新實作自我比對
+
+現有測試證明選取/來源 signature 的局部生命週期, 尚未涵蓋所有 producer revision、跨輪 reference/cutoff、歷史/設定一致性及同一發布版本的 detail 查詢, 新測試應落在真實 mutation / publication 呼叫點, 不新增只有假想 stamp 比較的測試
+
+上述新增驗收均為待執行, 不能以現有 service / HTTP 通過數或單次 selector 微型量測代替
