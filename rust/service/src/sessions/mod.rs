@@ -1941,7 +1941,7 @@ struct SnapshotSourceSettings {
 }
 
 // Owned query values captured at the existing synchronous snapshot boundary.
-// This is not an atomic settings/result read or a cross-round version token.
+// Each settings/result pair is read together, not an eight-source or cross-round token.
 #[derive(Debug, PartialEq)]
 struct SnapshotQueries {
     account_settings: account::Settings,
@@ -4684,14 +4684,14 @@ impl Collector {
     }
 
     fn capture_snapshot_queries(&self) -> SnapshotQueries {
-        let account_settings = self.account.settings();
-        let account = self.account.result();
-        let cloud_settings = self.cloud.settings();
-        let cloud = self.cloud.result();
-        let public_settings = self.public.each_ref().map(|source| source.settings());
-        let public = self.public.each_ref().map(|source| source.result());
-        let platform_settings = self.platform.each_ref().map(|source| source.settings());
-        let platform = self.platform.each_ref().map(|source| source.result());
+        let (account_settings, account) = self.account.capture();
+        let (cloud_settings, cloud) = self.cloud.capture();
+        let public_capture = self.public.each_ref().map(|source| source.capture());
+        let public_settings = public_capture.each_ref().map(|(settings, _)| *settings);
+        let public = public_capture.map(|(_, result)| result);
+        let platform_capture = self.platform.each_ref().map(|source| source.capture());
+        let platform_settings = platform_capture.each_ref().map(|(settings, _)| *settings);
+        let platform = platform_capture.map(|(_, result)| result);
         SnapshotQueries {
             account_settings, account, cloud_settings, cloud,
             public_settings, public, platform_settings, platform,

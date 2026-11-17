@@ -1301,3 +1301,25 @@ SQL、error、Git/check、skill、JEV、MCP、tool、context/agent-message 的 8
 此處交界注入使用實際 watch 與 route, 不是 worker 任意階段的 fault injection, 尚未驗證跨輪 candidate 失敗/取消、共同輸入 revision、全部來源同時一致或移除 16 MiB staging, 原待辦保留
 
 恢復後完整 serial HTTP 單輪 226 項通過 (132.39 秒), 涵蓋既有真實 worker / HTTP 明細、停用、checkpoint、來源保護與 5 秒設定等待回歸, Linux / Rust 1.100.0, 未執行原生 Windows / macOS 或 browser 驗收
+
+### 單一來源 settings / result paired capture
+
+Shared 以同一個 QueryState RwLock 保存 settings 與 retained result, 新 capture 供 SnapshotQueries 使用, 不再將單一來源的兩次獨立讀取組成一對, public / platform 改成逐來源成對讀取
+
+原有 getter、configure / publish、no-op、force_due、completed、cached 相同結果的 signal、queue 滿時 version 行為保留, 沒有新增 counter、外部查詢或 HTTP 欄位, 仍只 clone 每個 result 一次
+
+直接讀取 oracle 的 1 項 capture 測試通過 (0.00 秒), 4 項 Shared producer 測試通過 (0.00 秒), 其中新增 retained result / owned capture 與共同讀鎖下真實 configure / publish writer 的交界測試, 不使用 sleep 或競速假設判斷成功
+
+完整 service 單輪 396 項通過 (69.18 秒), 此步只保證單一來源當下的 settings/result 共同讀取, 不代表結果由目前設定產生、completed 同步、8 個來源共同版本或跨輪 candidate token
+
+本輪完整 serial HTTP 未全數通過: 225 通過 / 1 失敗 (134.04 秒), `mcp_and_web_observation_switches_filter_independently_and_replay` 在 `tests/http.rs:3327` 的 `!stored.contains("444")` 失敗, 原斷言未改動, 未重新執行以取得綠燈
+
+失敗 fixture 的暫存資料庫已隨測試清理, 未保留原始 stored 值, 因此不能將此失敗歸因為 fixture 或宣稱已排除回歸
+
+來源稽核發現 stored 是完整 Call JSON, 含 time 與 request_position.hash, 原斷言對所有文字搜尋 444, 不是只檢查 MCP metadata
+
+另做獨立的合成 producer 診斷, 使用時間 `2026-11-17T00:00:00.444Z`、MCP 關閉與 max_files=444, 真實 consume 序列化結果為 observation=null、mcp_sources_incomplete=true, 完全沒有 max_files, 但 stored.contains("444") 仍為 true, 來源是時間欄位, 診斷單項通過 (0.00 秒)
+
+這只證明原斷言存在誤判可能, 沒有重現或解決原失敗, 診斷暫時程式碼已移出產品 diff 並保留證據, 尚未放寬或替換驗證
+
+後續人工測試應保留失敗時的原始 stored JSON 與 fixture 時間, 先判定 444 位於 time/hash/offset 或真正 metadata, 同時核對 observation、mcp_sources_incomplete 與禁用資料是否落盤, 不以單次重跑成功推翻本次失敗, 此 checkpoint 不列為完整 HTTP 驗收通過

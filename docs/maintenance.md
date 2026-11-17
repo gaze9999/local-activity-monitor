@@ -283,3 +283,13 @@ Cloud 測試不取代 Windows watcher、真實來源、SSE、Host/Origin 與持�
 前述 8 個 reader 均先擷取同批 all-window、error_details Arc 與 index Arc, 釋放 watch borrow 後才執行既有查詢與來源 I/O, error map 不在每次 request 完整複製, live disable、mask、locator 與 checkpoint guard 保留
 
 這取代前文描述的獨立 detail_writer 發布方式, 但跨輪 capture / mutation revision、候選取消及 16 MiB staging 仍未完成, 同一發布物件不保證所有外部輸入在同一時刻產生, 也不保證跨 request 或實體來源變更後仍能讀取舊明細
+
+### 單一查詢來源的共同讀取邊界
+
+account::Shared 的 settings 與 retained result 已合併到同一個 RwLock<QueryState>, capture 在一次 read lock 內複製 Settings 與 result, SnapshotQueries 的 8 個來源各自使用這個 paired capture
+
+原 settings / result getter、configure 的 no-op / force_due、publish 的 completed 與每次 signal 行為保留, cached 相同結果仍通知, event version 不改作內容 revision, 不新增外部查詢
+
+相較最初的擷取順序, public / platform 現在各來源 settings/result 成對讀取, 不再先讀完整 settings array 再讀 results array, 不增加 result clone 次數, 不持有多來源鎖
+
+此步使單一來源的當前設定與保留結果具有共同讀取點, 但設定變更不會清除既有結果, 查詢仍可能在先前設定下啟動, 因此不代表 result 的設定 provenance、completed 的原子讀取、8 個來源共同時點或跨輪版本 token, 更不能直接將 signal counter 當 candidate revision

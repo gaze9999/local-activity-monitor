@@ -429,9 +429,13 @@ impl Default for Settings {
     }
 }
 
+struct QueryState {
+    settings: Settings,
+    result: Option<Value>,
+}
+
 pub(crate) struct Shared {
-    settings: RwLock<Settings>,
-    result: RwLock<Option<Value>>,
+    state: RwLock<QueryState>,
     pub(super) completed: RwLock<Option<std::time::Instant>>,
     version: AtomicU64,
     pub(super) force_due: AtomicBool,
@@ -441,8 +445,7 @@ pub(crate) struct Shared {
 impl Shared {
     pub fn new() -> Self {
         Self {
-            settings: RwLock::new(Settings::default()),
-            result: RwLock::new(None),
+            state: RwLock::new(QueryState { settings: Settings::default(), result: None }),
             completed: RwLock::new(None),
             version: AtomicU64::new(0),
             force_due: AtomicBool::new(false),
@@ -451,16 +454,16 @@ impl Shared {
         }
     }
     pub fn settings(&self) -> Settings {
-        *self
-            .settings
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
+        self.state.read().unwrap_or_else(|error| error.into_inner()).settings
     }
     pub fn result(&self) -> Option<Value> {
-        self.result
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone()
+        self.state.read().unwrap_or_else(|error| error.into_inner()).result.clone()
+    }
+    // One source's current settings and retained result, not result provenance
+    // or a version shared with other sources and scheduler completion state.
+    pub fn capture(&self) -> (Settings, Option<Value>) {
+        let state = self.state.read().unwrap_or_else(|error| error.into_inner());
+        (state.settings, state.result.clone())
     }
     pub fn version(&self) -> u64 {
         self.version.load(Ordering::Acquire)
@@ -481,24 +484,18 @@ impl Shared {
         }
     }
     pub fn configure(&self, settings: Settings) {
-        let mut current = self
-            .settings
-            .write()
-            .unwrap_or_else(|error| error.into_inner());
-        if *current != settings {
-            if current.enabled != settings.enabled {
+        let mut current = self.state.write().unwrap_or_else(|error| error.into_inner());
+        if current.settings != settings {
+            if current.settings.enabled != settings.enabled {
                 self.force_due.store(settings.enabled, Ordering::Release);
             }
-            *current = settings;
+            current.settings = settings;
             drop(current);
             self.signal();
         }
     }
     pub(super) fn publish(&self, result: Value) {
-        *self
-            .result
-            .write()
-            .unwrap_or_else(|error| error.into_inner()) = Some(result);
+        self.state.write().unwrap_or_else(|error| error.into_inner()).result = Some(result);
         *self
             .completed
             .write()
@@ -578,6 +575,50 @@ impl Source {
 #[cfg(test)]
 mod shared_version_tests {
     use super::*;
+
+    #[test]
+    fn paired_query_capture_preserves_retained_result_and_owned_values() {
+        let shared = Shared::new();
+        assert_eq!(shared.capture(), (Settings::default(), None));
+        let result = json!({"count":0,"enabled":false,"missing":null});
+        shared.publish(result.clone());
+        let settings = Settings { enabled: true, interval: 600 };
+        shared.configure(settings);
+        let captured = shared.capture();
+        assert_eq!(captured, (settings, Some(result.clone())));
+        assert_eq!(shared.version(), 2);
+        shared.configure(Settings::default());
+        assert_eq!(shared.capture(), (Settings::default(), Some(result)));
+        shared.publish(json!({"count":1}));
+        assert_eq!(captured.1.unwrap()["count"], 0);
+        assert_eq!(shared.capture().1.unwrap()["count"], 1);
+        assert_eq!(shared.version(), 4);
+    }
+
+    #[test]
+    fn query_producers_share_the_capture_lock_without_suppressing_events() {
+        let shared = Arc::new(Shared::new());
+        let read = shared.state.read().unwrap();
+        let (started, ready) = std::sync::mpsc::channel();
+        let (finished, done) = std::sync::mpsc::channel();
+        let writer = Arc::clone(&shared);
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            writer.configure(Settings { enabled: true, interval: 600 });
+            writer.publish(json!({"fixture":true}));
+            finished.send(()).unwrap();
+        });
+        ready.recv().unwrap();
+        assert!(matches!(done.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
+        assert_eq!(read.settings, Settings::default());
+        assert_eq!(read.result, None);
+        drop(read);
+        worker.join().unwrap();
+        done.recv().unwrap();
+        assert_eq!(shared.capture(), (Settings { enabled: true, interval: 600 }, Some(json!({"fixture":true}))));
+        assert_eq!(shared.version(), 2);
+        assert!(shared.completed.read().unwrap().is_some());
+    }
 
     #[test]
     fn query_version_tracks_configuration_events_not_reads_or_noops() {
