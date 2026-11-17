@@ -411,6 +411,8 @@ Core / Desktop observation revision 涵蓋 accepted logs / errors / SQL queues �
 
 Candidate 另核對實際供 snapshots 讀取的 retained API queue revision, Desktop 再 Core 的 arrival / dedup / eviction 次序不變, 僅真正接受事件或清除非空 queue 更新 revision, pending API queues 在採用前不是 snapshot 輸入, 不另外為它們增加 revision
 
+Session error per-source candidate 擷取仍為未驗收工作, 已嘗試在 header read 保留各來源錯誤, active 沿 complete-source-order 分組後追加 checkpoint errors, 但延伸八情境 fixture 連續兩次失敗, 不重試或視為完成, 實驗修改與重現方式保留供使用者測試, 詳見 validation 的 pending 記錄
+
 Error windows 已分離為可接受 owned tool failures 的 render_error_windows_captured, production 經原 wrapper 提供一次性 reducer, 仍在原來源設定 / journal 準備後才執行 reducer, 其餘 rendering 區段未改, candidate 尚未呼叫此入口
 
 Desktop source.checked_at 在無新事件的 refresh 也可能改變, 不能將完整 source report 當成跨輪穩定 payload revision, session error 來源順序與 source metadata 的同步 finalization 邊界仍須確立, logs / retained API owner guards 已建立, 不先替 candidate 加入容易反覆失效的 volatile report guard

@@ -2177,3 +2177,18 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, error targeted 7 項通過、426 項未�
 Linux / Rust 1.100.0 / 原 Cargo.lock, owner targeted 7 項通過、428 項未選取, 0.03 秒, Model API 模組 6 項通過、429 項未選取, 0.24 秒, 增補 bool 斷言後 retention targeted 2 項通過、433 項未選取, 0.23 秒, Desktop failed-storage targeted 1 項通過、434 項未選取, 0.03 秒, cargo check 通過並維持 8 個既有 warnings
 
 此步沒有新增 API 查詢或設定讀取, 未串接 candidate error / API windows, session error source-order、同批 detail index、volatile source finalization 與完整資源 / 平台驗收保留, production aggregation / fallback 與 telemetry 時機不變, deferred checks 未執行
+
+### Pending: candidate per-source session errors
+
+基準 `e5956f3`, 實驗尚未驗收, 不作 production adoption 或完整 error windows 證據
+
+- 實驗在既有 header 讀取時保留 owned per-source errors, active 以實際 complete-source-order 分組後追加 checkpoint errors, 不從合併後的 thread metadata 還原來源, 未新增 checkpoint 查詢
+- 延伸 `snapshot_file_candidate_resolves_two_source_winners_before_paging`: 合成 JSONL 加入 turn_failed / first-source, 第二 checkpoint error code 改為 second-source, completed session_errors 與原逐來源投影比對
+- 第一次在 10.18 秒失敗: 新 session error 的 record_offset 讓第二 thread 也具備 detail pending, 與既有僅第一來源 pending 的斷言衝突, 保留此失敗
+- 一次修正嘗試僅清除第二來源 error.record_offset, 第二次在 0.49 秒失敗: checkpoint::snapshot_projection 回傳 None, materialized oracle unwrap 失敗
+- 唯一原因檢查確認 Projection 驗證要求 record_hash 與 record_offset 同時存在或同時不存在, 該次 synthetic cursor 留下 record_hash, 因此被原驗證正確拒絕, 未放寬驗證, 未再修正或重跑
+- 重現時從上述基準套用保留的實驗 patch, 使用原 Cargo.lock, 執行精確 test filter, 第二狀態即為 offset / hash 不成對的失敗 fixture, 第一狀態移除實驗新增的 record_offset=null 即可對照, 待使用者決定測試及修正, 不把原 error detail guard 當成產品缺陷
+
+Linux / Rust 1.100.0, 實驗 cargo check 通過並維持 8 個既有 warnings, 原 production `complete_source_session_errors_follow_first_thread_then_source_order` 精確測試通過 1 項、434 項未選取, 0.10 秒, 這些結果不代表新 candidate 分組或錯誤輸出通過
+
+LAM main `5c03daf`、workbench-workspace main `ce972bd` 再核對未變, consumer pin 未變, 其他 deferred checks 未執行, 實驗程式碼另行保留且不包含於本次文件 checkpoint, production fallback 與讀取時機未變
