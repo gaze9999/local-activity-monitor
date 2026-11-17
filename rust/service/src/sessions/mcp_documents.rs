@@ -245,11 +245,13 @@ pub(crate) fn read_document(
     let path = PathBuf::from(entry["path"].as_str()?);
     let Some(raw) = read_bounded(&path, READ_LIMIT) else {
         entry["health"] = json!("unavailable");
+        entry["editable"] = json!(false);
         return Some(entry);
     };
     let bytes = &raw[..raw.len().min(READ_LIMIT)];
     let Ok(text) = std::str::from_utf8(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes)) else {
         entry["health"] = json!("unavailable");
+        entry["editable"] = json!(false);
         return Some(entry);
     };
     let (clean, masked) = if path

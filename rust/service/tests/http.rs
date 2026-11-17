@@ -4159,6 +4159,52 @@ fn mcp_document_edit_rejects_yaml_toml_and_origin_failures() {
 }
 
 #[test]
+fn mcp_unavailable_document_is_not_advertised_as_editable() {
+    let home = tempdir().unwrap();
+    let root = tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let file = root.join("settings.txt");
+    let original = b"invalid UTF-8: \xff";
+    fs::write(&file, original).unwrap();
+    fs::write(
+        home.path().join("config.toml"),
+        format!(
+            "[mcp_servers.fixture]\ncommand = \"node\"\nargs = [{}]\n",
+            serde_json::to_string(file.to_str().unwrap()).unwrap()
+        ),
+    )
+    .unwrap();
+    let service = Service::start(home.path(), true, None);
+    let list = service.get("/api/mcp/files?server=fixture").json();
+    let entry = list["files"].as_array().unwrap().iter()
+        .find(|entry| entry["name"] == "settings.txt").unwrap();
+    assert_eq!(entry["editable"], true);
+    let id = entry["id"].as_str().unwrap();
+    let detail = service
+        .get(&format!("/api/mcp/files?server=fixture&document={id}"))
+        .json();
+    assert_eq!(detail["health"], "unavailable");
+    assert_eq!(detail["editable"], false);
+    assert!(detail.get("text").is_none());
+    assert!(detail.get("sha256").is_none());
+    let body = json!({"server":"fixture","document":id,"sha256":"0".repeat(64), "text":"replacement"}).to_string();
+    let response = service.request_body(
+        &format!("POST /api/mcp/file HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()),
+        &body,
+    );
+    assert_eq!(response.status, 409);
+    assert_eq!(fs::read(&file).unwrap(), original);
+    fs::write(&file, "recovered text").unwrap();
+    let recovered = service
+        .get(&format!("/api/mcp/files?server=fixture&document={id}"))
+        .json();
+    assert_eq!(recovered["editable"], true);
+    assert_eq!(recovered["text"], "recovered text");
+    assert!(recovered.get("health").is_none());
+    assert!(recovered["sha256"].is_string());
+}
+
+#[test]
 fn mcp_document_edit_validates_and_preserves_changed_files() {
     let home = tempdir().unwrap();
     let root = tempdir().unwrap();

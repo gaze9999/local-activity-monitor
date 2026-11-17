@@ -2272,3 +2272,17 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, `sessions::skill_detail::tests` 通過 2 
 - 實際 Python collector 的四組合成來源輸出已核對, Rust 同時驗證來源內容未被修改, 未擴大已觀察 Skill 的來源範圍或變更 API 查詢
 
 Linux / Rust 1.100.0 / 原 Cargo.lock, `sessions::skill_detail::tests` 通過 3 項、437 項未選取, 1.71 秒, 包含兩項 Unicode 回歸, git diff --check 通過, 未重跑 HTTP、完整套件或平台檔案系統驗收
+
+### MCP 文件 unavailable 的編輯旗標
+
+基準 `ffb0220`, 對齊 Python `mcp_source_files.read_document` 的失敗回應, Rust 在 bounded read 或 UTF-8 解碼失敗時一併回傳 editable=false, 保留 health=unavailable 與既有 metadata
+
+- 新 HTTP fixture 先重現無效 UTF-8 文件的 detail 錯誤保留 editable=true, 修正後不可編輯且不回傳 text / sha256, 原檔案不變
+- 使用符合既有 64 位 lowercase hex 格式的合成 sha256 提交修改, 仍回傳 409, 修復來源文字後相同 document ID 可重新讀取且恢復 editable=true
+- 第一版 fixture 使用空 sha256 而被既有輸入驗證以 400 拒絕, 修正測試輸入後通過, 未修改 server 的請求驗證或錯誤碼
+- Python 實際 read_document / write_document 已用同一合成資料核對, 前端原本已拒收 health=unavailable, 既有寫入路徑也不接受缺少有效 digest 的回應, 本項不宣稱修正了可覆寫原檔案的漏洞
+- GET /api/mcp/files 的 server / document 與 POST /api/mcp/file 的 server / document / sha256 / text 不變, 回應資料仍來自已設定 launcher 的本機文件, 不新增查詢或擴大來源
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 新測試通過 1 項、227 項未選取, 0.11 秒, 既有 mcp_document HTTP filter 通過 4 項、224 項未選取, 0.17 秒, 維持 8 個既有 warnings, git diff --check 通過
+
+LAM main `5c03daf` 與 workspace main `383fbb9` 再核對未變, bounded read 失敗分支依來源與程式碼審查同步旗標, 本次 fixture 直接覆蓋 UTF-8 解碼失敗與恢復, 未注入 OS 讀取錯誤、重跑完整套件或驗收其他平台
