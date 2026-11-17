@@ -1653,3 +1653,16 @@ Linux / Rust 1.100.0 / 原 Cargo.lock 下, `cargo test --locked --manifest-path 
 修正後在 Linux / Rust 1.100.0 / 原 Cargo.lock 執行 filtered `snapshot_` service 測試, 59 筆通過、355 筆未選取, 耗時 6.74 秒, 包含未修改的四窗 logs overview / disabled 與 merge / series oracle, 未執行 HTTP、完整套件或延後測試
 
 此步僅整理既有同步輸入, 跨輪 candidate、mutation revision、JEV / 裝置語意與 staging 容量仍未驗收
+
+### 單一來源 FileSummary candidate 實驗
+
+以 `b3b5f06` 為基準, 僅在既有測試模組加入 candidate 實驗, production 程式碼與原測試 oracle 均未修改
+
+- 使用真實 Collector refresh / checkpoint 儲存與 select_recent_calls, 一個來源保存 600 個互異 call ID, 分別包含近一小時、近一天、近一週與未知時間
+- Candidate 持有實際 SelectedCheckpointReader 與四個 owned FileSummary, 每次只讀一頁, 第一頁觀察 512 calls 後仍回傳 pending, 不保留 Projection, 第二頁完成後重查 signature / epoch 才回傳結果
+- 四窗 file_activity 與未修改的 materialized checkpoint + FileSummary、實際 Collector::snapshots 序列化結果相符, totals 分別為 150 / 300 / 450 / 600, events、operations 與同時間排序完整比對
+- 第一頁後分別注入取消、membership epoch 改變與真實 checkpoint signature 改寫, 均不回傳部分結果且移除 reader / reducer 擁有者, 恢復原 checkpoint 後重建成功, 已完成 owned 結果保持不變
+
+此實驗僅涵蓋單來源無衝突 winner 與 file reducer, 未串接完整 worker candidate / send_replace、跨來源 winner、active mutation revision、history / settings 取消、所有摘要或明細發布, 亦未量測 allocation 或驗證超過 16 MiB 的服務行為, 不把 Option 擁有者釋放當作平台資源量測
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 新增 targeted 測試通過 1 筆、414 筆未選取, 加入實際 snapshots oracle 後的最終測試耗時 0.52 秒, 未執行 HTTP、完整套件或延後測試

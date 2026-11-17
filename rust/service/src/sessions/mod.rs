@@ -5762,6 +5762,154 @@ mod log_tests {
         assert!(payloads[0]["sequence"].as_u64().unwrap() > payloads[1]["sequence"].as_u64().unwrap());
     }
 
+    // Test-only single-source experiment: real selection, SQLite pages and owned
+    // reducer. Unique selected call IDs need no cross-source winner arbitration.
+    #[test]
+    fn snapshot_file_candidate_pages_validate_before_exposing_results() {
+        struct Candidate {
+            reader: lam_history_store::SelectedCheckpointReader,
+            summaries: [project::FileSummary; 4],
+            cutoffs: [Option<chrono::DateTime<Utc>>; 4],
+            epoch: i64,
+            key: String,
+            signature: String,
+            observed: usize,
+        }
+        fn epoch(collector: &Collector) -> i64 {
+            collector.source_membership.as_ref().unwrap().db
+                .query_row("SELECT value FROM selection_epoch", [], |row| row.get(0)).unwrap()
+        }
+        fn advance(slot: &mut Option<Candidate>, collector: &Collector, stopped: bool)
+            -> Result<Option<[Value; 4]>, &'static str>
+        {
+            // Taking ownership makes every rejection drop both reader and reducers.
+            let mut candidate = slot.take().expect("pending candidate");
+            if stopped { return Err("cancelled"); }
+            if epoch(collector) != candidate.epoch { return Err("selection changed"); }
+            let page = candidate.reader.next_page().map_err(|_| "read failed")?
+                .ok_or("unexpected eof")?;
+            let projection = checkpoint::snapshot_projection(page, false).ok_or("projection failed")?;
+            candidate.observed += projection.projection.calls.len();
+            for (summary, cutoff) in candidate.summaries.iter_mut().zip(candidate.cutoffs) {
+                summary.observe(&projection.projection, cutoff, true, None);
+            }
+            // projection is not stored in the candidate and is dropped this round.
+            if !candidate.reader.is_complete() {
+                *slot = Some(candidate);
+                return Ok(None);
+            }
+            let store = collector.checkpoints.snapshot_reader().map_err(|_| "store failed")?
+                .ok_or("store unavailable")?;
+            if store.checkpoint_signature(&candidate.key).map_err(|_| "signature failed")?
+                .as_ref() != Some(&candidate.signature) { return Err("source changed"); }
+            if epoch(collector) != candidate.epoch { return Err("selection changed"); }
+            Ok(Some(candidate.summaries.map(|summary| {
+                let (events, total, operations) = summary.finish();
+                json!({"events":events,"total":total,"operations":operations})
+            })))
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        let path = root.join(format!("rollout-{id}.jsonl"));
+        std::fs::write(&path, format!("{}\n{}\n{}\n",
+            json!({"timestamp":"2026-11-13T01:00:00Z","type":"session_meta","payload":{"id":id}}),
+            json!({"timestamp":"2026-11-13T01:00:01Z","type":"response_item","payload":{"type":"function_call","name":"fixture_tool","call_id":"call00","arguments":"{}"}}),
+            json!({"timestamp":"2026-11-13T01:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Message Type: MESSAGE\nTask name: fixture\nSender: source\nPayload:\nPRIVATE_BODY"}]}})
+        )).unwrap();
+        let mut collector = Collector::new(root.join("monitoring"), true, None);
+        let stopped = AtomicBool::new(false);
+        for _ in 0..4 {
+            let (_, pending, _) = collector.refresh(&root, &stopped, true, false, CommandSwitches::default());
+            if !pending { break; }
+        }
+        let key = checkpoint::key(&root, &path).unwrap();
+        let mut store = lam_history_store::Store::open(&root.join("monitoring"), lam_history_store::Access::ReadWrite).unwrap().unwrap();
+        let original = store.checkpoint(&key, 10).unwrap().unwrap();
+        assert_eq!(original.calls.len(), 1);
+        let calls: Vec<_> = (0..600).map(|n| {
+            let mut row = original.calls[0].clone();
+            row.call_id = format!("call{n:04}");
+            let time = [Some("2026-11-13T01:30:00Z"), Some("2026-11-13T00:00:00Z"),
+                Some("2026-11-11T02:00:00Z"), None][n % 4];
+            row.event_time = time.map(str::to_owned);
+            let mut payload: Value = serde_json::from_str(&row.payload).unwrap();
+            payload["time"] = json!(time);
+            payload["files"] = json!([{"operation":"read","path":format!("fixture-{n}"),"tool":"fixture_tool","nested":false}]);
+            row.payload = payload.to_string();
+            row
+        }).collect();
+        store.save_checkpoints(std::slice::from_ref(&original.cursor), &calls, &[]).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let fingerprint = source_fingerprint(file_identity(&metadata), metadata.len(), metadata.modified().ok()).unwrap();
+        let mut membership = SourceMembership::new().unwrap();
+        membership.insert(&[MembershipRecord { key:key.clone(), fingerprint:Some(fingerprint.clone()) }]).unwrap();
+        membership.mark_verified(&[VerifiedMembership { key:key.clone(), fingerprint, checkpoint_signature:original.cursor.signature.clone(),
+            materialized:true, call_headers:Some(calls.iter().map(|row| lam_history_store::CallHeader {call_id:row.call_id.clone(),event_time:row.event_time.clone()}).collect()) }]).unwrap();
+        collector.source_membership = Some(membership);
+        collector.source_membership_complete = true;
+        collector.discovered_files = Some(1);
+        collector.discovery = None;
+        collector.files.clear();
+        let selection = collector.select_recent_calls(600, 1000).unwrap();
+        assert!(selection.complete);
+        assert_eq!(selection.calls[&key].len(), 600);
+        let ids: Vec<_> = selection.calls[&key].iter().cloned().collect();
+        let expected = checkpoint::snapshot_projection(store.selected_checkpoint(
+            &lam_history_store::ExpectedCursor {source_key:&key,signature:Some(&original.cursor.signature)}, &ids
+        ).unwrap().unwrap(),false).unwrap();
+        let reference = chrono::DateTime::parse_from_rfc3339("2026-11-13T02:00:00Z").unwrap().with_timezone(&Utc);
+        let cutoffs = HOURS.map(|hours| hours.map(|hours| reference - Duration::hours(hours)));
+        let materialized = cutoffs.map(|cutoff| {
+            let mut summary = project::FileSummary::new(1000);
+            summary.observe(&expected.projection, cutoff, true, None);
+            let (events, total, operations) = summary.finish();
+            json!({"events":events,"total":total,"operations":operations})
+        });
+        assert_eq!(materialized.each_ref().map(|value| value["total"].as_u64().unwrap()), [150,300,450,600]);
+        collector.updated = Some(reference);
+        let baseline = collector.snapshots("ok", "ok", 1);
+        for index in 0..4 {
+            let window: Value = serde_json::from_slice(&baseline.window_bytes(index)).unwrap();
+            assert_eq!(window["codex"]["file_activity"], materialized[index]);
+        }
+        let begin = |collector: &Collector| Candidate {
+            reader: collector.checkpoints.snapshot_reader().unwrap().unwrap()
+                .into_selected_checkpoint_reader(&lam_history_store::ExpectedCursor {
+                    source_key:&key, signature:Some(&original.cursor.signature) }, ids.clone()).unwrap().unwrap(),
+            summaries: std::array::from_fn(|_| project::FileSummary::new(1000)),
+            cutoffs, epoch:epoch(collector), key:key.clone(), signature:original.cursor.signature.clone(), observed:0,
+        };
+        let mut candidate = Some(begin(&collector));
+        assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
+        assert_eq!(candidate.as_ref().unwrap().observed, 512);
+        let result = advance(&mut candidate, &collector, false).unwrap().unwrap();
+        assert!(candidate.is_none());
+        assert_eq!(result, materialized);
+        // Cancellation cannot expose the first page or retain its reader/reducer.
+        candidate = Some(begin(&collector));
+        assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
+        assert_eq!(advance(&mut candidate, &collector, true), Err("cancelled"));
+        assert!(candidate.is_none());
+        candidate = Some(begin(&collector));
+        assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
+        collector.source_membership.as_ref().unwrap().db.execute("UPDATE selection_epoch SET value=value+1", []).unwrap();
+        assert_eq!(advance(&mut candidate, &collector, false), Err("selection changed"));
+        assert!(candidate.is_none());
+        candidate = Some(begin(&collector));
+        assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
+        let mut replaced = original.cursor.clone();
+        replaced.signature = "candidate-source-replaced".into();
+        store.save_checkpoints(&[replaced], &[], &[]).unwrap();
+        assert_eq!(advance(&mut candidate, &collector, false), Err("source changed"));
+        assert!(candidate.is_none());
+        assert_eq!(result, materialized, "completed owned output remains unchanged");
+        store.save_checkpoints(std::slice::from_ref(&original.cursor), &calls, &[]).unwrap();
+        candidate = Some(begin(&collector));
+        assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
+        assert_eq!(advance(&mut candidate, &collector, false).unwrap().unwrap(), materialized);
+    }
+
     #[test]
     fn snapshot_payload_pages_coalesce_metadata_and_reject_stale_or_cancelled_stage() {
         let directory = tempfile::tempdir().unwrap();
