@@ -328,6 +328,10 @@ SkillSummary 已改為擁有通過原 names / cutoff / enabled 篩選的 retaine
 
 Production skill_summary 仍呼叫同一 reducer, 現在會複製 admitted history key / event, 最終 historical event 移入預覽而非再複製, 不增加 SQLite 查詢或改保存上限, 額外 allocation / RSS 成本尚未量測, 不宣稱免費或改善效能, 完整 candidate 必須同時保留已擷取的 names 與 history revision 驗證
 
+Per-thread RowSummary 已組合既有 RowTools、RowJev、FileSummary 與 CommunicationSummary, 由最終合併 metadata 初始化一次 incoming message 預覽, 逐 resolved winner 整理 tools / nested totals、100 筆 tool / JEV-call / communication、各 200 筆 file changes / reads, 不借用 call 或保留完整 calls map
+
+Projection::row 現在同步使用相同 RowSummary, row_with_summary 只把已整理的 call 欄位與原 metadata / lifecycle / token / task duration 欄位組合, 不改外部 JEV 查詢或裝置讀取, 串接呼叫端仍須保證 metadata、thread、cutoff 與 candidate guard 屬於同批, 此步不解決 metadata merge / 無 ID 來源策略, 也未取代 production 16 MiB staging
+
 ### 共同 capture / mutation 邊界設計草案
 
 此設計起於 `2427f5e` 的 producer 與 server reader 稽核, 共同 publication 部分已實作並通過限定範圍驗證, 下列跨輪 capture / mutation 部分仍為待整合規格, 不視為全部架構驗收

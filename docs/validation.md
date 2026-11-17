@@ -1899,3 +1899,17 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, cargo check 通過並保留原 5 個 warn
 - Linux / Rust 1.100.0 / 原 Cargo.lock, page candidate 1 項通過、423 項未選取, 14.49 秒, 與另一 targeted 測試同時執行, 不作跨輪效能比較
 
 未執行 HTTP、完整套件或 deferred 檢查, production skill_summary 的 admitted history 複製成本未量測, production aggregation / fallback 未切換, 全部 metadata、names capture、其他 reducers 與 worker / 資源驗收仍待完成
+
+### Owned per-thread row 摘要
+
+基準 `98cbabc`, RowSummary 組合原 call-derived reducers, Projection::row 同步共用該路徑, metadata / lifecycle 的 JSON 組合保留於 row_with_summary, FileSummary 新增內部單 call 入口且保留 disabled 提前返回
+
+最初編輯錯誤套用到 ActivitySeries 同名 observe, 編譯出現 26 個 E0061 / E0599 / E0609 錯誤, 已比對基準還原該區段並只套用 FileSummary, 保留失敗記錄, 未變更 ActivitySeries 行為
+
+- 原 call-preview legacy sort / counters oracle 1 項通過、423 項未選取, 0.37 秒, 加入清除 metadata.calls 後反向逐 winner 整理與完整 row / seeded aggregate totals 相等檢查, 涵蓋 cutoff、tool events / JEV-call disabled 與 null time
+- 原 file-summary 2 項通過、422 項未選取, 1.78 秒, 保留完整排序、source tie 與 preview 限制檢查
+- 原 communication full-sort / metadata-only oracle 1 項通過、423 項未選取, 0.33 秒, 另比較正式 row 的 agent_messages 與原 communication oracle, 不保留訊息本文
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 未執行 HTTP、完整套件或 deferred 檢查, 本輪先驗證 production 同步 row 重用, 尚未將 RowSummary 接入跨來源 page candidate, metadata 擷取與完整 worker / 資源驗收仍待完成, fallback 不變
+
+`cargo check --locked --manifest-path rust/service/Cargo.toml --bin local-activity-monitor` 通過, 保留前輪 6 個 warnings

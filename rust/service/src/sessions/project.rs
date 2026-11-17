@@ -988,21 +988,26 @@ impl FileSummary {
     pub(super) fn observe(&mut self, projection: &Projection, boundary: Option<Time>, enabled: bool, read_filter: Option<bool>) {
         if !enabled { return; }
         for (id, call) in &projection.calls {
-            if !boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff)) { continue; }
-            let timestamp = call.time.map(stamp);
-            for (index, file) in call.files.iter().enumerate() {
-                if read_filter.is_some_and(|read| (file["operation"] == "read") != read) { continue; }
-                self.total += 1;
-                if let Some(operation) = file["operation"].as_str() {
-                    *self.operations.entry(operation.to_owned()).or_default() += 1;
-                }
-                if self.limit == 0 { continue; }
-                let rank = (std::cmp::Reverse(timestamp.clone()), self.thread_order, projection.id.clone(),
-                    if self.presentation_order { call.presentation_sequence } else { 0 }, id.clone(), index);
-                if self.preview.len() == self.limit && self.preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { continue; }
-                if self.preview.len() == self.limit { self.preview.pop_last(); }
-                self.preview.insert(rank, FilePreview { thread: projection.id.as_deref(), id, call, file }.render());
+            self.observe_call(projection.id.as_deref(), id, call, boundary, enabled, read_filter);
+        }
+    }
+
+    fn observe_call(&mut self, thread: Option<&str>, id: &str, call: &Call,
+        boundary: Option<Time>, enabled: bool, read_filter: Option<bool>) {
+        if !enabled || !boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff)) { return; }
+        let timestamp = call.time.map(stamp);
+        for (index, file) in call.files.iter().enumerate() {
+            if read_filter.is_some_and(|read| (file["operation"] == "read") != read) { continue; }
+            self.total += 1;
+            if let Some(operation) = file["operation"].as_str() {
+                *self.operations.entry(operation.to_owned()).or_default() += 1;
             }
+            if self.limit == 0 { continue; }
+            let rank = (std::cmp::Reverse(timestamp.clone()), self.thread_order, thread.map(str::to_owned),
+                if self.presentation_order { call.presentation_sequence } else { 0 }, id.to_owned(), index);
+            if self.preview.len() == self.limit && self.preview.last_key_value().is_some_and(|(last, _)| &rank >= last) { continue; }
+            if self.preview.len() == self.limit { self.preview.pop_last(); }
+            self.preview.insert(rank, FilePreview { thread, id, call, file }.render());
         }
     }
 
@@ -1204,6 +1209,46 @@ impl CommunicationSummary {
     }
 
     fn finish(self) -> Vec<Value> { self.preview.into_values().collect() }
+}
+
+/// Call-derived fields for one thread/window, retaining only bounded previews.
+/// Seed from final merged metadata once, then feed resolved winners exactly once.
+pub(super) struct RowSummary {
+    thread: Option<String>,
+    boundary: Option<Time>,
+    tool_events_enabled: bool,
+    files_enabled: bool,
+    jev_calls_enabled: bool,
+    tools: RowTools,
+    jev: RowJev,
+    changes: FileSummary,
+    reads: FileSummary,
+    communication: CommunicationSummary,
+}
+impl RowSummary {
+    pub(super) fn new(metadata: &Projection, boundary: Option<Time>, tool_events_enabled: bool,
+        files_enabled: bool, jev_calls_enabled: bool, presentation_order: bool) -> Self {
+        let mut communication = CommunicationSummary { presentation_order, ..Default::default() };
+        for (ordinal, message) in metadata.agent_incoming.iter().enumerate() {
+            communication.incoming(metadata.id.as_deref().unwrap_or(""), ordinal, message, boundary);
+        }
+        let mut changes = FileSummary::new(200);
+        let mut reads = FileSummary::new(200);
+        changes.presentation_order = presentation_order;
+        reads.presentation_order = presentation_order;
+        Self { thread:metadata.id.clone(), boundary, tool_events_enabled, files_enabled, jev_calls_enabled,
+            tools:RowTools { presentation_order, ..Default::default() },
+            jev:RowJev { presentation_order, ..Default::default() }, changes, reads, communication }
+    }
+    pub(super) fn observe(&mut self, id: &str, call: &Call,
+        totals: &mut BTreeMap<String, usize>, nested_totals: &mut BTreeMap<String, usize>) {
+        if !self.boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff)) { return; }
+        self.tools.observe(id, call, self.tool_events_enabled, totals, nested_totals);
+        self.jev.observe(self.thread.as_deref(), id, call, self.jev_calls_enabled);
+        self.changes.observe_call(self.thread.as_deref(), id, call, self.boundary, self.files_enabled, Some(false));
+        self.reads.observe_call(self.thread.as_deref(), id, call, self.boundary, self.files_enabled, Some(true));
+        self.communication.outgoing(self.thread.as_deref().unwrap_or(""), id, call);
+    }
 }
 
 impl Projection {
@@ -2109,6 +2154,7 @@ impl Projection {
     /// events. Explicit tie keys preserve incoming and selected call order
     /// without requiring a complete sorted call-reference array.
     /// Render metadata only on preview admission, never message contents.
+    #[cfg(test)]
     fn communication<'a>(
         &'a self,
         calls: impl IntoIterator<Item = (&'a String, &'a Call)>,
@@ -2138,21 +2184,17 @@ impl Projection {
         jev_calls_enabled: bool,
         presentation_order: bool,
     ) -> Value {
-        let eligible = |call: &Call| boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff));
-        let mut tools = RowTools { presentation_order, ..Default::default() };
-        let mut jev = RowJev { presentation_order, ..Default::default() };
-        for (id, call) in self.calls.iter().filter(|(_, call)| eligible(call)) {
-            tools.observe(id, call, tool_events_enabled, totals, nested_totals);
-            jev.observe(self.id.as_deref(), id, call, jev_calls_enabled);
-        }
+        let mut summary = RowSummary::new(self, boundary, tool_events_enabled, files_enabled, jev_calls_enabled, presentation_order);
+        for (id, call) in &self.calls { summary.observe(id, call, totals, nested_totals); }
+        self.row_with_summary(partial, reference, summary)
+    }
+
+    /// Render final merged metadata with an independently accumulated call summary.
+    /// The caller must keep the metadata/summary thread and batch inputs aligned.
+    pub(super) fn row_with_summary(&self, partial: bool, reference: Time, summary: RowSummary) -> Value {
+        let RowSummary { tools, jev, changes, reads, communication, .. } = summary;
         let RowTools { count: call_count, counts, nested: nested_counts, preview, .. } = tools;
         let events: Vec<_> = preview.into_values().collect();
-        let mut changes = FileSummary::new(200);
-        let mut reads = FileSummary::new(200);
-        changes.presentation_order = presentation_order;
-        reads.presentation_order = presentation_order;
-        changes.observe(self, boundary, files_enabled, Some(false));
-        reads.observe(self, boundary, files_enabled, Some(true));
         let file_changes = changes.finish().0;
         let file_reads = reads.finish().0;
         let durations = self.intervals.iter()
@@ -2165,7 +2207,7 @@ impl Projection {
         let tokens = self
             .tokens
             .map(|values| COUNTERS.into_iter().zip(values).collect::<BTreeMap<_, _>>());
-        let communication = self.communication(self.calls.iter().filter(|(_, call)| eligible(call)), boundary, presentation_order);
+        let communication = communication.finish();
         let jev_calls: Vec<_> = jev.preview.into_values().collect();
         json!({
             "thread_id":self.id, "created_at":self.created.map(stamp), "updated_at":self.updated.map(stamp),
@@ -3024,6 +3066,18 @@ mod snapshot_merge_tests {
                     assert_eq!(row["nested_tools"],json!(expected_nested));
                     assert_eq!(row["tool_events"],json!(expected_tools));
                     assert_eq!(row["jev_calls"],json!(expected_jev));
+                    let mut metadata = projection.clone();
+                    metadata.calls.clear();
+                    let mut summary = RowSummary::new(&metadata, boundary, tools_enabled, false, jev_enabled, false);
+                    let (mut page_totals, mut page_nested) = (BTreeMap::from([("seed".into(),7)]), BTreeMap::from([("seed".into(),11)]));
+                    for (id, call) in projection.calls.iter().rev() {
+                        let temporary = call.clone();
+                        summary.observe(id, &temporary, &mut page_totals, &mut page_nested);
+                    }
+                    assert_eq!(metadata.row_with_summary(false, time, summary), row);
+                    assert_eq!(page_totals, totals);
+                    assert_eq!(page_nested, nested_totals);
+
                     expected_counts.insert("seed".into(),7);
                     expected_nested.insert("seed".into(),11);
                     assert_eq!(totals,expected_counts);
@@ -3115,6 +3169,8 @@ mod snapshot_merge_tests {
             legacy.sort_by(|left, right| right["timestamp"].as_str().cmp(&left["timestamp"].as_str()));
             legacy.truncate(100);
             let actual = projection.communication(calls.iter().copied(), boundary, false);
+            let (mut totals, mut nested) = Default::default();
+            assert_eq!(projection.row(false, boundary, time, &mut totals, &mut nested, true, true, true, false)["agent_messages"], json!(actual));
             assert_eq!(projection.communication(calls.iter().rev().copied(), boundary, false), actual);
             assert!(actual.len() <= 100);
             assert_eq!(actual, legacy);
