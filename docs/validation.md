@@ -1130,3 +1130,15 @@ Rust 新回歸先重現 partial 而非 ok, 修正後 account 12 項通過 (0.51 
 完整 serial HTTP 單輪 226 項通過 (127.49 秒), 執行起始與首輪 service 部分重疊, 不將此輪當成獨立效能基準
 
 最終測試設定的完整 service 單輪 384 項通過 (64.74 秒), 不消除首輪失敗的未明原因
+
+### Account JSON-RPC 的 UTF-8 BOM
+
+沿用已核對的 LAM main `5c03daf` account source, Python json.loads 接受各原始回應列開頭的 UTF-8 BOM, Rust 在累計原始 bytes 上限檢查後移除一個 BOM, 同一份借用資料同時交給值解析與保留欄位順序的解析器
+
+沒有重新序列化 JSON 或變更 map 順序, 合成 app-server 的 initialize、account/read、rateLimits/read 與 usage/read 回應皆含 BOM, 重複 zulu bucket 保留最後值且仍優先於 alpha, Python 原始 reader 與 Rust fixture 皆驗證此結果
+
+Python 另以 6 組 BOM / EOF / 累計上限 fixture 驗證原始行為, Rust 新回歸先失敗後通過, account 13 項通過 (0.51 秒), 既有無 BOM 的精確上限與 EOF 回歸保留
+
+僅補 UTF-8 BOM, 未擴大為 UTF-16/32 協定支援, 方法、參數、查詢次數、快取與白名單不變, 沒有真實帳戶請求, 前輪 fixture 未明失敗、其他歷史限制與跨平台驗收保留
+
+Linux / Rust 1.100.0 完整 service 單輪 385 項通過 (61.45 秒), 結束後執行完整 serial HTTP 單輪 226 項通過 (129.87 秒)

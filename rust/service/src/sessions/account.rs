@@ -244,7 +244,8 @@ impl Rpc {
             if count == 0 || self.read > LIMIT {
                 return Err(RpcError::Protocol);
             }
-            let value: Value = serde_json::from_slice(&line).map_err(|_| RpcError::Protocol)?;
+            let line = line.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&line);
+            let value: Value = serde_json::from_slice(line).map_err(|_| RpcError::Protocol)?;
             if !value.is_object() {
                 return Err(RpcError::Protocol);
             }
@@ -257,7 +258,7 @@ impl Rpc {
             let payload = value.get("result").filter(|value| value.is_object())
                 .cloned().ok_or(RpcError::Protocol)?;
             let order = if method == "account/rateLimits/read" {
-                limit_order(&line).map_err(|_| RpcError::Protocol)?
+                limit_order(line).map_err(|_| RpcError::Protocol)?
             } else {
                 None
             };
@@ -688,6 +689,23 @@ esac
 done"#;
         let (home, path) = fake(script);
         let result = read_from(&path, home.path(), Duration::from_secs(3)).await;
+        assert_eq!(result["health"], "ok");
+        assert_eq!(result["limit_id"], "zulu");
+        assert_eq!(result["credits"]["balance"], "7");
+        assert_eq!(result["plan_type"], "team");
+    }
+    #[tokio::test]
+    async fn bom_rpc_responses_preserve_primary_bucket_order() {
+        let script = r#"while IFS= read -r line; do
+case "$line" in
+*'"id":0'*) printf '\357\273\277%s\n' '{"id":0,"result":{}}' ;;
+*'"id":1'*) printf '\357\273\277%s\n' '{"id":1,"result":{"account":{}}}' ;;
+*'"id":2'*) printf '\357\273\277%s\n' '{"id":2,"result":{"rateLimitsByLimitId":{"zulu":{"planType":"pro","credits":{"balance":"9"}},"alpha":{"planType":"free","credits":{"balance":"1"}},"zulu":{"planType":"team","credits":{"balance":"7"}}}}}' ;;
+*'"id":3'*) printf '\357\273\277%s\n' '{"id":3,"result":{}}' ;;
+esac
+done"#;
+        let (home, path) = fake(script);
+        let result = read_from(&path, home.path(), Duration::from_secs(10)).await;
         assert_eq!(result["health"], "ok");
         assert_eq!(result["limit_id"], "zulu");
         assert_eq!(result["credits"]["balance"], "7");
