@@ -803,6 +803,50 @@ mod tests {
     }
 
     #[test]
+    fn rollback_journal_writer_commits_after_snapshot_releases_reader() {
+        for mode in ["DELETE", "TRUNCATE", "PERSIST"] {
+            let home = tempfile::tempdir().unwrap();
+            let database = home.path().join("jev.sqlite");
+            let writer = Connection::open(&database).unwrap();
+            writer.pragma_update(None, "journal_mode", mode).unwrap();
+            writer.busy_timeout(StdDuration::ZERO).unwrap();
+            writer.execute_batch("CREATE TABLE jev_events(timestamp TEXT,status TEXT,http_attempts INTEGER,input_tokens INTEGER,output_tokens INTEGER,request_bytes INTEGER,response_bytes INTEGER,response_unknown_attempts INTEGER,latency_ms INTEGER,metadata TEXT)").unwrap();
+            let insert = |time: &str| {
+                writer.execute("INSERT INTO jev_events VALUES(?,'ok',1,12,NULL,25,30,0,9,?)",
+                    rusqlite::params![time, json!({"timestamp":time,"status":"ok","operation":"rank"}).to_string()]).unwrap();
+            };
+            insert("2026-11-13T12:00:00.000Z");
+            let mut reader = Connection::open_with_flags(&database,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW | OpenFlags::SQLITE_OPEN_NO_MUTEX).unwrap();
+            reader.busy_timeout(StdDuration::from_millis(80)).unwrap();
+            reader.pragma_update(None, "query_only", true).unwrap();
+            reader.pragma_update(None, "trusted_schema", false).unwrap();
+            let (summary, recent, series) = read_snapshot(&mut reader, "", || {
+                writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+                insert("2026-11-13T13:00:00.000Z");
+                // No sleep or retry: the active reader prevents this commit now.
+                let error = writer.execute_batch("COMMIT").unwrap_err();
+                assert_eq!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseBusy), "{mode}");
+                assert!(!writer.is_autocommit());
+            }).unwrap();
+            assert_eq!(summary["calls"], 1, "{mode}");
+            assert_eq!(summary["statuses"]["ok"], 1);
+            assert_eq!(recent.len(), 1);
+            assert_eq!(series.len(), 1);
+            assert!(reader.is_autocommit());
+            // The same pending write commits once the production reader returns.
+            writer.execute_batch("COMMIT").unwrap();
+            assert!(writer.is_autocommit());
+            let (next, recent, series) = read_snapshot(&mut reader, "", || {}).unwrap();
+            assert_eq!(next["calls"], 2);
+            assert_eq!(next["statuses"]["ok"], 2);
+            assert_eq!(recent.len(), 2);
+            assert_eq!(series.len(), 2);
+            assert!(reader.is_autocommit());
+        }
+    }
+
+    #[test]
     fn read_transaction_releases_on_query_failure_and_preserves_begin_failure() {
         let mut db = Connection::open_in_memory().unwrap();
         assert!(read_snapshot(&mut db, "", || panic!("summary must fail")).is_err());

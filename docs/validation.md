@@ -1429,3 +1429,13 @@ watch 可能合併未讀通知, 此測試只驗證實際讀到的兩批更新, �
 這次注入涵蓋實際資料讀取 helper, 不是完整 HTTP 內注入, 不宣稱四個 window 或跨輪 candidate 原子一致, 並行 writer 驗證限於 WAL, 保留原 80 ms timeout 與原生平台、browser 驗收界線
 
 完整 service 單輪 401 項通過 (66.39 秒), 接續完整 serial HTTP 單輪 226 項通過 (134.54 秒), Linux / Rust 1.100.0, 另以程式比較確認 summary SQL 與 JSON 欄位 projection 和前版完全相同, diff 檢查通過
+
+### JEV rollback journal 的 writer 釋放邊界
+
+以 `286d92d` 為基底, LAM main `5c03daf` 與 workbench-workspace main `4616074` 核對未變, 恢復官方 Rust 1.100.0 後使用原 Cargo.lock 建置
+
+新增 DELETE / TRUNCATE / PERSIST 三種 journal mode 的 deterministic 雙 connection 測試, reader 沿用 production 唯讀旗標、pragmas 與 80 ms timeout, writer 的 timeout 設為 0 以立即觀察鎖定, 不使用 sleep 或競速重試
+
+在實際 read_snapshot 的 summary 後插入一筆並嘗試 COMMIT, 三種模式均回 DatabaseBusy 且保留 writer transaction, 當次 summary / statuses / recent / series 均維持 1 筆, reader 返回後已回 autocommit, 同一 pending writer 可成功 COMMIT, 下一次讀取的四項投影均為 2 筆
+
+JEV 模組單輪 7 項通過 (0.07 秒), diff 檢查通過, 本輪僅測試與文件, runtime SQL / timeout / endpoint / response 欄位與查詢次數未變, 前輪 service 401 / HTTP 226 為歷史結果, 四窗共同版本與跨輪 candidate 仍待完成
