@@ -1212,3 +1212,13 @@ Linux / Rust 1.100.0 完整 service 單輪 388 項通過 (59.81 秒), 結束後�
 候選 metadata POST 於 3.68249689 秒回 200、fixture 14.10 秒, baseline POST 於 3.158204272 秒回 200、fixture 11.72 秒, 兩者皆未重現 503, 此單組 endpoint 結果未顯示候選較快
 
 主 runtime 未採用候選, 不宣稱修復 503 或取得端到端效能收益, 保留原歷史失敗與驗收界線
+
+### 相依 Rust 套件的完整驗證補查
+
+在 `d72f05f` 的 Linux / Rust 1.100.0 執行 history-store manifest 的完整 locked 測試, 53 項通過: unit 9、legacy 6、migration 7、observation_view 18、storage 13, doc tests 0 項
+
+session-core manifest 加入既有 sqlite-python feature 的完整 locked 測試 34 項通過 (0.39 秒), doc tests 0 項, 未改動相依套件或 lockfile
+
+此補查涵蓋 service / HTTP 測試不會自動執行的相依套件測試, 不代表 Windows / macOS 或 Python extension 驗收, session-scan manifest 明確停用 test / doctest, 未將零測試視為 extension 通過
+
+16 MiB 稽核仍見 selected_overflow_projections 保存完整 Projection vector 並於完成後 clone, 現有 winner / reducer prototype 未接入執行期, 跨輪來源與設定版本、原子四 window / detail 發布仍需完整設計與驗證, 本輪不新增截斷、近似統計或儲存政策
