@@ -1409,3 +1409,11 @@ watch 可能合併未讀通知, 此測試只驗證實際讀到的兩批更新, �
 初版 focused 單輪 1 項通過 (0.04 秒), 之後加強 recent / series 為完整順序比較, runtime 未修改
 
 加強後 JEV 模組單輪 4 項通過 (0.04 秒), diff 檢查通過, 本輪僅測試與文件, 未重跑前輪 service 398 / serial HTTP 226 項, 尚未執行並行 writer 的可見性驗收, 既有失敗與受阻項目紀錄保留
+
+### JEV 受控 writer 可見性
+
+新增 deterministic WAL 雙 connection 測試, reader 使用 runtime 相同唯讀 / NOFOLLOW / NO_MUTEX、query_only / trusted_schema 與 80 ms timeout, 不使用 sleep 或競速重試
+
+首個 count SELECT 完成後由 writer transaction 新增資料並 commit, 再實際呼叫現有 details, autocommit 分支保留舊 calls=1 但 statuses / recent / series 與新 count 為 2, explicit BEGIN 分支全部仍為 1, ROLLBACK 釋放 reader 後讀到 2, writer 最終資料均為 2
+
+針對性單輪 1 項通過 (0.01 秒), 本輪沒有 runtime transaction 變更, 首個 count 僅模擬 summary 讀取邊界, 不宣稱已在完整 snapshot / HTTP 注入 writer 或驗證所有 SQLite journal modes, 未重跑先前 aggregate suites, diff 檢查通過, 既有受阻與歷史失敗不重試

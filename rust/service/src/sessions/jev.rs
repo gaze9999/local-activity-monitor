@@ -730,6 +730,50 @@ mod tests {
     }
 
     #[test]
+    fn controlled_writer_visibility_distinguishes_autocommit_and_read_transaction() {
+        for transaction in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let database = home.path().join("jev.sqlite");
+            let mut writer = Connection::open(&database).unwrap();
+            writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+            writer.execute_batch("CREATE TABLE jev_events(timestamp TEXT,status TEXT,http_attempts INTEGER,input_tokens INTEGER,output_tokens INTEGER,request_bytes INTEGER,response_bytes INTEGER,response_unknown_attempts INTEGER,latency_ms INTEGER,metadata TEXT)").unwrap();
+            let insert = |db: &Connection, time: &str| {
+                db.execute("INSERT INTO jev_events VALUES(?,'ok',1,12,NULL,25,30,0,9,?)",
+                    rusqlite::params![time, json!({"timestamp":time,"status":"ok","operation":"rank"}).to_string()]).unwrap();
+            };
+            insert(&writer, "2026-11-13T12:00:00.000Z");
+            let reader = Connection::open_with_flags(&database,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW | OpenFlags::SQLITE_OPEN_NO_MUTEX).unwrap();
+            reader.busy_timeout(StdDuration::from_millis(80)).unwrap();
+            reader.pragma_update(None, "query_only", true).unwrap();
+            reader.pragma_update(None, "trusted_schema", false).unwrap();
+            if transaction { reader.execute_batch("BEGIN").unwrap(); }
+            let count = || reader.query_row("SELECT count(*) FROM jev_events WHERE timestamp>=?",
+                [""], |row| row.get::<_, i64>(0)).unwrap();
+            // Materialize and finish the first SELECT before a separate writer commits.
+            let mut summary = json!({"calls":count()});
+            assert_eq!(summary["calls"], 1);
+            let write = writer.transaction().unwrap();
+            insert(&write, "2026-11-13T13:00:00.000Z");
+            write.commit().unwrap();
+            let (recent, series) = details(&reader, "", &mut summary).unwrap();
+            let visible = if transaction { 1 } else { 2 };
+            assert_eq!(summary["calls"], 1);
+            assert_eq!(summary["statuses"]["ok"], visible);
+            assert_eq!(recent.len(), visible as usize);
+            assert_eq!(series.len(), visible as usize);
+            assert_eq!(count(), visible);
+            assert_eq!(reader.is_autocommit(), !transaction);
+            if transaction {
+                reader.execute_batch("ROLLBACK").unwrap();
+                assert!(reader.is_autocommit());
+                assert_eq!(count(), 2);
+            }
+            assert_eq!(writer.query_row("SELECT count(*) FROM jev_events", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+        }
+    }
+
+    #[test]
     fn invalid_disabled_missing_and_unsupported_sources_are_distinct() {
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(home.path().join("monitoring")).unwrap();
