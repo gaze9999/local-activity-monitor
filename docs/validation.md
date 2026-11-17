@@ -1196,3 +1196,19 @@ Linux / Rust 1.100.0 完整 service 單輪 388 項通過 (59.81 秒), 結束後�
 兩次樣本皆沒有重現失敗, instrumentation 與執行環境可影響時間, 不推定歷史失敗根因、不宣稱穩定達標, 不延長 timeout、降低 fixture 容量、略過 JSON 完整驗證或改寫錯誤回應
 
 目前結果支持繼續評估 snapshot 組裝成本, 但尚不足以採用略過驗證的 JEV descriptor 快取, 原歷史失敗、16 MiB staging 與跨平台接受仍未解決
+
+### Single-pass selector 的隔離候選
+
+候選保留 reserved serde key / Unicode escape 的既有 Value fallback, 其他物件一次遍歷, 目標欄位解析為 Value、其餘完整使用 Checked 驗證, duplicate key 取最後值, 結尾仍檢查 trailing data
+
+對非 object root 先以 Checked 驗證再回 null, 避免 arbitrary_precision 的 number synthetic map 被誤當真實欄位, 原 selector 另保留為 test-only oracle
+
+74 組有效 / 無效 fixture、其全部截斷前綴及四種目標欄位的對照通過, 包含非物件、精確數字、深度邊界、reserved key 與 Unicode escape, 不代表任意 JSON 輸入的形式化等價證明
+
+3,678,608 bytes 合成 JSON 的六組交替配對, debug build 中位數為舊 selector 65.569 ms / 候選 43.631 ms, 第六組兩者均有較大時間變異, 不將此結果推論為完整 endpoint 改善
+
+接著在獨立來源副本將 field 指向候選, 保留原 selector 作測試 oracle並重跑對照, 2 項通過, 實際 5001-session overflow HTTP fixture 分別單次執行候選後 baseline, 原 5 秒限制與隱私 / detail assertions 均保留
+
+候選 metadata POST 於 3.68249689 秒回 200、fixture 14.10 秒, baseline POST 於 3.158204272 秒回 200、fixture 11.72 秒, 兩者皆未重現 503, 此單組 endpoint 結果未顯示候選較快
+
+主 runtime 未採用候選, 不宣稱修復 503 或取得端到端效能收益, 保留原歷史失敗與驗收界線
