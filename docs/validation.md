@@ -1335,3 +1335,15 @@ Shared 以同一個 QueryState RwLock 保存 settings 與 retained result, 新 c
 修改後針對性實際 HTTP 測試單輪通過 (0.34 秒), 原始失敗的 stored 值已遺失, 仍不宣稱原始失敗原因已確定, 此次是基於已確認 oracle 缺陷的測試修正
 
 最小測試修正後, 完整 serial HTTP 單輪 226 項通過 (131.97 秒), service runtime 未變更, 沿用前輪 396 項通過的範圍, 不抹除前輪 225/1 與原始失敗未知的紀錄, 未重試 browser 或擴大至跨平台驗收
+
+### 真實 worker 的共同發布回歸
+
+新增 `worker_publishes_detail_index_with_matching_snapshot_and_keeps_old_index`, 啟動真實 Monitor worker 讀取合成 session, 等待第一筆 call 發布後附加第二筆, 透過既有 manual refresh / wake 與 watch channel 等待更新
+
+對讀取到的非空 publication 同時檢查 snapshot observed_tool_calls 與同批 index 的 a / b call 成員, 第二批 version 增加且 index Arc 不同, 保留的第一批 bytes / Arc 仍只有第一筆, 第二筆 locator 可通過實際來源讀取
+
+針對性單輪 1 項通過 (0.08 秒), worker 在測試結束透過 Monitor Drop 停止, 無 runtime 變更, 此測試補足前輪僅注入 watch / route 的範圍
+
+watch 可能合併未讀通知, 此測試只驗證實際讀到的兩批更新, 不宣稱覆蓋所有交錯、任意 worker fault injection、跨輪 candidate 取消或 16 MiB staging, 保留既有失敗與阻擋紀錄, 未重試 browser
+
+完整 service 單輪 397 項通過 (61.53 秒), Linux / Rust 1.100.0, 本輪只新增測試與文件, 未重跑前輪已通過的 serial HTTP 226 項, 未擴稱原生平台或 browser 驗收

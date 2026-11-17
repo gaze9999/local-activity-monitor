@@ -5760,6 +5760,52 @@ mod log_tests {
         assert!(scan.projections.is_empty());
     }
 
+    #[tokio::test]
+    async fn worker_publishes_detail_index_with_matching_snapshot_and_keeps_old_index() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("sessions");
+        fs::create_dir(&root).unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        let path = root.join(format!("rollout-{id}.jsonl"));
+        let record = |call: &str| json!({"timestamp":"2026-11-17T00:00:00Z","type":"response_item",
+            "payload":{"type":"function_call","name":"exec_command","call_id":call,"arguments":"{}"}}).to_string() + "\n";
+        fs::write(&path, json!({"type":"session_meta","payload":{"id":id}}).to_string() + "\n" + &record("a")).unwrap();
+        let (monitor, mut receiver) = Monitor::start(home.path(), true, None, 20).unwrap();
+        async fn next_count(receiver: &mut watch::Receiver<Snapshots>, id: &str, expected: u64) -> (u64, Bytes, Arc<details::Index>) {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    {
+                        let snapshot = receiver.borrow_and_update();
+                        let value: Value = serde_json::from_slice(&snapshot.windows[3]).unwrap();
+                        let count = value["codex"]["observed_tool_calls"].as_u64().unwrap_or(0);
+                        if count != 0 {
+                            assert!(snapshot.detail_index.select_call(id, "a").is_some());
+                            assert_eq!(snapshot.detail_index.select_call(id, "b").is_some(), count == 2);
+                        }
+                        if count == expected {
+                            return (snapshot.version(), snapshot.windows[3].clone(), Arc::clone(&snapshot.detail_index));
+                        }
+                    }
+                    receiver.changed().await.expect("worker publication channel");
+                }
+            }).await.expect("worker must publish matching snapshot and detail index")
+        }
+        let (old_version, old_window, old_index) = next_count(&mut receiver, id, 1).await;
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        std::io::Write::write_all(&mut file, record("b").as_bytes()).unwrap();
+        drop(file);
+        let (wake, manual) = monitor.refresh_sender().unwrap();
+        manual.store(true, Ordering::Release);
+        let _ = wake.try_send(());
+        let (new_version, _, new_index) = next_count(&mut receiver, id, 2).await;
+        assert!(new_version > old_version);
+        assert!(!Arc::ptr_eq(&old_index, &new_index));
+        assert!(old_index.select_call(id, "b").is_none());
+        assert_eq!(serde_json::from_slice::<Value>(&old_window).unwrap()["codex"]["observed_tool_calls"], 1);
+        assert!(new_index.select_call(id, "b").unwrap().tool("b", true, false).is_some());
+        drop(monitor);
+    }
+
     #[test]
     fn payload_mutations_preserve_selection_keys_and_latest_timestamp() {
         let id = "00000000-0000-4000-8000-000000000001";
