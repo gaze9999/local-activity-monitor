@@ -2113,3 +2113,19 @@ Production snapshots 的 project summary 實作未改, 無新增查詢或外部�
 Linux / Rust 1.100.0 / 原 Cargo.lock, 修正 fixture temporary 後八情境 targeted 通過 1 項、429 項未選取, 83.20 秒, 既有 retained history owner / failure retention targeted 通過 1 項、429 項未選取, 0.01 秒, cargo check 通過並維持 8 個既有 warnings
 
 無新增資料庫查詢至 candidate finalizer, 未改查詢 subject、key、資料來源、production caller、設定保存或 fallback, full diagnostics / catalogs、同批 detail index、資源與平台驗收仍待完成
+
+### Candidate MCP 來源設定與 catalog 串接
+
+基準 `3595502`, 同步 snapshots 的既有 MCP 過濾 / catalog 區段移入共用 mcp_snapshot_summary, 候選完成時使用同一區段及 captured source settings, 不增加設定讀取、來源 discovery 或資料庫查詢
+
+- 以來源文字比對確認過濾與 catalog 區段逐 byte 保留, 僅 SQL / API local bindings 留在原 snapshots, diagnostics 與 JEV telemetry 的既有位置不動
+- mcp_catalog 的兩個 production replacement 經內容 setter, constructor 保持原 discover, 相同內容不增加 revision, CandidateInputs 核對實際 owner, 新測試涵蓋來源新增、相同 replacement、description 變更、清空與重複清空
+- 八情境設定 sqlite / unused catalog、預設與自訂 description、category / tags, 分別涵蓋啟用、per-source 停用與 global MCP 停用, 來源過濾、configured server、scoped windows、retained aggregate 與原同步 summary 比較
+- 首次新加入的完整 MCP 比較在 4.37 秒失敗, 差異為 production 另有同步 JEV telemetry 欄位, 此欄原本不在 candidate 範圍, 新比較改只排除此一欄, 原既有 assertions 與 telemetry 讀取時機未改, 不宣稱完整 MCP publication 驗收
+- 首次 `sessions::mcp::tests` filter 選到 0 tests, 不算測試通過證據, 改用實際 `sessions::mcp::` 範圍, 未包含 deferred HTTP checks
+
+本輪來源再核對 LAM main `5c03daf`、workbench-workspace main `ce972bd`, 與前輪相同, consumer pin 未變更
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, catalog owner targeted 通過 1 項、430 項未選取, 0.01 秒, MCP 模組通過 10 項、421 項未選取, 0.55 秒, 明確排除既有同步 telemetry 後八情境 targeted 通過 1 項、430 項未選取, 66.25 秒, cargo check 通過並維持 8 個既有 warnings
+
+Production aggregation caller、fallback、diagnostics / telemetry 時機與設定保存不變, 未執行 deferred fixtures, 完整 diagnostics owners、error windows、同批 detail index、資源與平台驗收仍待完成

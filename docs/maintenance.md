@@ -403,7 +403,9 @@ project_details 的初始化、metadata 停用清除與 refresh replacement 經�
 
 Candidate SQL preview / summary 使用已擷取的 applied sqlite 開關, activity_view 存在時依既有四窗 render 加入 MCP history_aggregate 與 SQL aggregate, 停用對應來源時使用空 Aggregate, 不把 preview 當 retained total, 重用現有 history / settings guards 且不新增 revision
 
-MCP catalog augmentation、完整 error windows 與正式發布仍待串接, raw failure components 不在此步套用名稱, 未因此重跑 deferred 額外 metadata-only / 無 ID 來源實驗
+MCP summary 已與同步 snapshots 共用既有來源過濾與 catalog augmentation 區段, 使用擷取的 global / per-source switches、自訂 category / description / tags 與受 owner revision guard 保護的 catalog, 四窗透過既有 scoped_summary 保留 server identity / connection 與 configuration, catalog discover 的讀取時機不變
+
+MCP diagnostics、完整 error windows 與正式發布仍待串接, raw failure components 不在此步套用名稱, 未因此重跑 deferred 額外 metadata-only / 無 ID 來源實驗
 
 建構 eligibility 仍用原 Option, SelectedInputs 的舊 validate_sources 亦保留 Option wrapper, 新 try_validate_sources 提供有類型的驗證結果, 不改動同步 snapshots 或原失敗 fallback
 

@@ -98,6 +98,7 @@ pub(super) struct CandidateInputs {
     history_revision: u64,
     thread_metadata_revision: u64,
     project_details_revision: u64,
+    mcp_catalog_revision: u64,
     overflow_details_revision: u64,
     queries: [(Arc<account::Shared>, u64); 8],
     sources: SnapshotSourceSettings,
@@ -128,6 +129,7 @@ impl CandidateInputs {
             history_revision:collector.history_revision.value()?,
             thread_metadata_revision:collector.thread_metadata_revision.value()?,
             project_details_revision:collector.project_details_revision.value()?,
+            mcp_catalog_revision:collector.mcp_catalog_revision.value()?,
             overflow_details_revision:collector.overflow_details_revision.value()?,
             queries:Self::queries(collector).into_iter().map(|source|
                 Some((Arc::clone(source), source.content_revision()?)))
@@ -144,6 +146,7 @@ impl CandidateInputs {
             && collector.history_revision.value() == Some(self.history_revision)
             && collector.thread_metadata_revision.value() == Some(self.thread_metadata_revision)
             && collector.project_details_revision.value() == Some(self.project_details_revision)
+            && collector.mcp_catalog_revision.value() == Some(self.mcp_catalog_revision)
             && collector.overflow_details_revision.value() == Some(self.overflow_details_revision)
             && Self::sessions_match(&self.active, &collector.files)
             && Self::sessions_match(&self.overflow, &collector.overflow_files)
@@ -181,6 +184,7 @@ impl SelectedInputs {
     pub(super) fn reducer_switches(&self) -> (bool, bool, super::CommandSwitches) {
         (self.inputs.flags.tool_events, self.inputs.flags.files, self.inputs.flags.applied_commands)
     }
+    pub(super) fn source_settings(&self) -> &SnapshotSourceSettings { &self.inputs.sources }
     pub(super) fn observation_switches(&self) -> (bool, bool) {
         (self.inputs.sources.switches.mcp, self.inputs.flags.applied_sqlite)
     }
@@ -255,6 +259,30 @@ mod tests {
         }
         assert_eq!(collector.files[&path].projection.calls.len(), 1);
         (temporary, collector, path)
+    }
+
+    #[test]
+    fn candidate_inputs_track_mcp_catalog_replacement_and_clear() {
+        let (_temporary, mut collector, _) = fixture();
+        let stopped = AtomicBool::new(false);
+        let capture = |collector: &Collector| CandidateInputs::capture(collector, true, &stopped).unwrap();
+        let guard = capture(&collector);
+        assert!(collector.replace_mcp_catalog([("fixture".into(), None)].into_iter().collect()));
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        assert!(!collector.replace_mcp_catalog(collector.mcp_catalog.clone()));
+        assert!(guard.validate(&collector, true, &stopped).is_some());
+        let guard = capture(&collector);
+        assert!(collector.replace_mcp_catalog([("fixture".into(), Some(super::super::source_introduction::Description {
+            text:"Changed".into(),source:"fixture".into(),path:None,
+        }))].into_iter().collect()));
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        assert!(collector.replace_mcp_catalog(Default::default()));
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        assert!(!collector.replace_mcp_catalog(Default::default()));
+        assert!(guard.validate(&collector, true, &stopped).is_some());
     }
 
     #[test]

@@ -565,7 +565,7 @@ impl Monitor {
                         collector.refresh_jev_errors(reference);
                         collector.refresh_error_history(reference);
                         collector.refresh_skill_history();
-                        collector.mcp_catalog = mcp::discover(&home);
+                        collector.replace_mcp_catalog(mcp::discover(&home));
                         collector.updated = Some(reference);
                         let mut metrics =
                             json!({"refresh_ms":began.elapsed().as_secs_f64()*1000.0});
@@ -1084,8 +1084,7 @@ impl Monitor {
                     collector.applied_model_api_enabled = model_api_enabled;
                     collector.applied_command_switches = command_switches;
                     let catalog = mcp::discover(&home);
-                    let catalog_changed = catalog != collector.mcp_catalog;
-                    collector.mcp_catalog = catalog;
+                    let catalog_changed = collector.replace_mcp_catalog(catalog);
                     let (future_changed, next_future) = collector.checkpoints.pending_activity(now()).unwrap_or((false, Some(now() + Duration::seconds(5))));
                     let selection_pending = collector.recent_call_refresh_pending();
                     if changed
@@ -2620,6 +2619,7 @@ struct Collector {
     previous_mcp_sources: BTreeMap<String, bool>,
     mcp_view_sources: BTreeMap<String, bool>,
     mcp_catalog: BTreeMap<String, Option<source_introduction::Description>>,
+    mcp_catalog_revision: project::ContentRevision,
     catalog_home: PathBuf,
     mcp_switches: Arc<RwLock<McpSwitches>>,
     previous_mcp_switches: McpSwitches,
@@ -2883,6 +2883,7 @@ impl Collector {
             force_replay: false,
             catalog_home: catalog_home.clone(),
             mcp_catalog,
+            mcp_catalog_revision: project::ContentRevision::default(),
             files: BTreeMap::new(),
             snapshot_source_order: BTreeMap::new(),
             discovery: None,
@@ -4778,6 +4779,13 @@ impl Collector {
         self.overflow_details_ready = ready;
     }
 
+    fn replace_mcp_catalog(&mut self, catalog: BTreeMap<String, Option<source_introduction::Description>>) -> bool {
+        let changed = self.mcp_catalog != catalog;
+        if changed { self.mcp_catalog_revision.bump(); }
+        self.mcp_catalog = catalog;
+        changed
+    }
+
     fn replace_project_details(&mut self, projects: BTreeMap<String, Value>) -> bool {
         let changed = self.project_details != projects;
         if changed { self.project_details_revision.bump(); }
@@ -4867,6 +4875,104 @@ impl Collector {
                 + journal_source["retained"].as_u64().expect("journal retained count")
         });
         SnapshotDiagnostics { locations, logs_overview }
+    }
+
+    fn mcp_snapshot_summary(&self, mut mcp_events: Vec<Value>, sources: &BTreeMap<String, bool>,
+        customizations: &McpCustomizations, switches: McpSwitches) -> (Vec<Value>, Value)
+    {
+        let observed_servers: BTreeSet<String> = mcp_events
+            .iter()
+            .filter_map(|event| event["server"].as_str().map(str::to_owned))
+            .collect();
+        mcp_events.retain(|event| {
+            event["server"]
+                .as_str()
+                .is_none_or(|server| switches.allows(server) && sources.get(server) != Some(&false))
+        });
+        for event in &mut mcp_events {
+            if let Some(category) = event["server"]
+                .as_str()
+                .and_then(|server| customizations.mcp_categories.get(server))
+            {
+                event["category"] = json!(category);
+            }
+        }
+        let mut all_mcp = mcp::summary(&mcp_events, None, self.activity_history_health);
+        if let Some(rows) = all_mcp["servers"].as_array_mut() {
+            for server in &observed_servers {
+                if !switches.allows(server) || sources.get(server) == Some(&false) {
+                    rows.push(mcp::disabled_server(server));
+                }
+            }
+        }
+        if let Some(rows) = all_mcp["servers"].as_array_mut() {
+            for row in rows.iter_mut() {
+                if let Some(name) = row["server"].as_str().map(str::to_owned) {
+                    let enabled = sources.get(&name) != Some(&false);
+                    row["enabled"] = json!(enabled);
+                    if !enabled {
+                        row["connection"]["state"] = json!("paused");
+                    } else if row["connection"]["state"] == "paused" {
+                        row["connection"]["state"] = json!("unconfirmed");
+                    }
+                    if self.mcp_catalog.contains_key(&name) {
+                        row["origin"] = json!("configured");
+                    }
+                }
+            }
+            for (name, description) in &self.mcp_catalog {
+                if !rows.iter().any(|row| row["server"] == *name) {
+                    rows.push(mcp::configured_server(
+                        name,
+                        sources.get(name) != Some(&false),
+                    ));
+                }
+                if let Some(row) = rows.iter_mut().find(|row| row["server"] == *name) {
+                    if let Some(description) = description {
+                        row["description"] = json!(description.text);
+                        row["description_source"] = json!(description.source);
+                        if let Some(path) = &description.path {
+                            row["description_file"] = json!(path);
+                        }
+                    }
+                    row["default_description"] = json!(description
+                        .as_ref()
+                        .map(|value| value.text.as_str())
+                        .unwrap_or(""));
+                }
+            }
+            for row in rows.iter_mut() {
+                let Some(name) = row["server"].as_str().map(str::to_owned) else {
+                    continue;
+                };
+                let default_description = row["description"].as_str().unwrap_or("").to_owned();
+                row["default_description"] = json!(default_description);
+                let tool_names = row["tools"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                row["default_category"] = json!(lam_history_store::mcp::category(
+                    &name,
+                    &format!("{tool_names} {default_description}")
+                ));
+                row["category"] = customizations.mcp_categories.get(&name).map_or_else(
+                    || row["default_category"].clone(),
+                    |category| json!(category),
+                );
+                if let Some(description) = customizations.mcp_descriptions.get(&name) {
+                    row["description"] = json!(description);
+                    row["description_source"] = json!("custom");
+                }
+                if let Some(tags) = customizations.mcp_tags.get(&name) {
+                    row["tags"] = json!(tags);
+                }
+            }
+            rows.sort_by(|a, b| a["server"].as_str().cmp(&b["server"].as_str()));
+        }
+        (mcp_events, all_mcp)
     }
 
     fn snapshots(&self, health: &str, watch_health: &str, version: u64) -> Snapshots {
@@ -4991,103 +5097,12 @@ impl Collector {
         );
         let SnapshotSourceSettings { tracking, sources, customizations, switches } =
             self.capture_snapshot_source_settings();
-        let (mut mcp_events, sql_events): (Vec<_>, Vec<_>) = observed_activity
+        let (mcp_events, sql_events): (Vec<_>, Vec<_>) = observed_activity
             .into_iter()
             .partition(|event| event.get("server").is_some());
-        let observed_servers: BTreeSet<String> = mcp_events
-            .iter()
-            .filter_map(|event| event["server"].as_str().map(str::to_owned))
-            .collect();
-        mcp_events.retain(|event| {
-            event["server"]
-                .as_str()
-                .is_none_or(|server| switches.allows(server) && sources.get(server) != Some(&false))
-        });
-        for event in &mut mcp_events {
-            if let Some(category) = event["server"]
-                .as_str()
-                .and_then(|server| customizations.mcp_categories.get(server))
-            {
-                event["category"] = json!(category);
-            }
-        }
+        let (mcp_events, mut all_mcp) = self.mcp_snapshot_summary(mcp_events, &sources, &customizations, switches);
         let sql_events = sqlite::identified(sql_events);
         let api_events = &self.api_events;
-        let mut all_mcp = mcp::summary(&mcp_events, None, self.activity_history_health);
-        if let Some(rows) = all_mcp["servers"].as_array_mut() {
-            for server in &observed_servers {
-                if !switches.allows(server) || sources.get(server) == Some(&false) {
-                    rows.push(mcp::disabled_server(server));
-                }
-            }
-        }
-        if let Some(rows) = all_mcp["servers"].as_array_mut() {
-            for row in rows.iter_mut() {
-                if let Some(name) = row["server"].as_str().map(str::to_owned) {
-                    let enabled = sources.get(&name) != Some(&false);
-                    row["enabled"] = json!(enabled);
-                    if !enabled {
-                        row["connection"]["state"] = json!("paused");
-                    } else if row["connection"]["state"] == "paused" {
-                        row["connection"]["state"] = json!("unconfirmed");
-                    }
-                    if self.mcp_catalog.contains_key(&name) {
-                        row["origin"] = json!("configured");
-                    }
-                }
-            }
-            for (name, description) in &self.mcp_catalog {
-                if !rows.iter().any(|row| row["server"] == *name) {
-                    rows.push(mcp::configured_server(
-                        name,
-                        sources.get(name) != Some(&false),
-                    ));
-                }
-                if let Some(row) = rows.iter_mut().find(|row| row["server"] == *name) {
-                    if let Some(description) = description {
-                        row["description"] = json!(description.text);
-                        row["description_source"] = json!(description.source);
-                        if let Some(path) = &description.path {
-                            row["description_file"] = json!(path);
-                        }
-                    }
-                    row["default_description"] = json!(description
-                        .as_ref()
-                        .map(|value| value.text.as_str())
-                        .unwrap_or(""));
-                }
-            }
-            for row in rows.iter_mut() {
-                let Some(name) = row["server"].as_str().map(str::to_owned) else {
-                    continue;
-                };
-                let default_description = row["description"].as_str().unwrap_or("").to_owned();
-                row["default_description"] = json!(default_description);
-                let tool_names = row["tools"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                row["default_category"] = json!(lam_history_store::mcp::category(
-                    &name,
-                    &format!("{tool_names} {default_description}")
-                ));
-                row["category"] = customizations.mcp_categories.get(&name).map_or_else(
-                    || row["default_category"].clone(),
-                    |category| json!(category),
-                );
-                if let Some(description) = customizations.mcp_descriptions.get(&name) {
-                    row["description"] = json!(description);
-                    row["description_source"] = json!("custom");
-                }
-                if let Some(tags) = customizations.mcp_tags.get(&name) {
-                    row["tags"] = json!(tags);
-                }
-            }
-            rows.sort_by(|a, b| a["server"].as_str().cmp(&b["server"].as_str()));
-        }
         if self.applied_errors_enabled && health != "disabled" {
             let diagnostics = threads.iter().flat_map(|(thread, (projection, _))| {
                 projection.calls.iter()
@@ -5938,10 +5953,22 @@ mod log_tests {
             assert_eq!(selection.calls.values().map(BTreeSet::len).sum::<usize>(), 1200);
             let reference = chrono::DateTime::parse_from_rfc3339("2026-11-13T02:00:00Z").unwrap().with_timezone(&Utc);
             let cutoffs = HOURS.map(|hours| hours.map(|hours| reference - Duration::hours(hours)));
+            collector.replace_mcp_catalog([
+                ("sqlite".into(), Some(source_introduction::Description {text:"Catalog database".into(),source:"fixture".into(),path:Some("fixture/README.md".into())})),
+                ("unused".into(), None),
+            ].into_iter().collect());
+            collector.mcp_sources.write().unwrap().insert("sqlite".into(), !active);
+            collector.mcp_switches.write().unwrap().mcp = same_thread || active;
+            {
+                let mut custom = collector.customizations.write().unwrap();
+                custom.mcp_categories.insert("sqlite".into(), "custom-category".into());
+                custom.mcp_descriptions.insert("sqlite".into(), "Custom database".into());
+                custom.mcp_tags.insert("sqlite".into(), vec!["fixture".into()]);
+            }
             collector.refresh_activity(reference);
             assert!(collector.activity_view.is_some());
             if nested {
-                assert!(collector.activity_view.as_ref().unwrap().mcp[3].total > 0);
+                if !active { assert!(collector.activity_view.as_ref().unwrap().mcp[3].total > 0); }
                 assert!(collector.activity_view.as_ref().unwrap().sql[3].total > 0);
             }
             collector.applied_sqlite_enabled = !active;
@@ -6033,15 +6060,26 @@ mod log_tests {
                 assert!(!mcp_observations.is_empty(), "actual nested parser produces MCP metadata");
                 assert!(!sql_observations.is_empty(), "actual nested parser produces SQL metadata");
             }
+            let source_settings = collector.capture_snapshot_source_settings();
+            let (mcp_observations, mut all_mcp) = collector.mcp_snapshot_summary(mcp_observations,
+                &source_settings.sources, &source_settings.customizations, source_settings.switches);
+            all_mcp["configuration"] = json!({"location":collector.catalog_home.join("config.toml").to_string_lossy(),"configured_sources":2});
+            let configured = all_mcp["servers"].as_array().unwrap().iter().find(|row| row["server"] == "sqlite").unwrap();
+            assert_eq!(configured["description"], "Custom database");
+            assert_eq!(configured["default_description"], "Catalog database");
+            assert_eq!(configured["category"], "custom-category");
+            assert_eq!(configured["tags"], json!(["fixture"]));
+            assert_eq!(configured["enabled"], !active);
+            if active || !same_thread { assert!(mcp_observations.is_empty()); }
             let expected_observations = std::array::from_fn::<_, 4, _>(|index| {
                 let cutoff = cutoffs[index];
-                let mut mcp = mcp::summary(&mcp_observations, cutoff, collector.activity_history_health);
+                let mut mcp = cutoff.map_or_else(|| all_mcp.clone(), |cutoff| mcp::scoped_summary(&mcp_observations, cutoff, collector.activity_history_health, &all_mcp));
                 let mut sql = sqlite::window(if active { &[] } else { &sql_observations }, cutoff, collector.activity_history_health);
                 apply_names(mcp["events"].as_array_mut().unwrap());
                 apply_names(sql["events"].as_array_mut().unwrap());
                 let view = collector.activity_view.as_ref().unwrap();
-                mcp["history_aggregate"] = history_view::render(&view.mcp[index], WINDOWS[index]);
                 let empty = lam_history_store::Aggregate::default();
+                mcp["history_aggregate"] = history_view::render(if source_settings.switches.mcp { &view.mcp[index] } else { &empty }, WINDOWS[index]);
                 sql["aggregate"] = history_view::render(if active { &empty } else { &view.sql[index] }, WINDOWS[index]);
                 json!({"mcp":mcp,"sql":sql})
             });
@@ -6322,7 +6360,10 @@ mod log_tests {
                 assert_eq!(window["codex"]["skills"], expected_skills[index]);
                 assert_eq!(window["codex"]["projects"], json!(expected_projects));
                 assert_eq!(window["codex"]["sqlite"], expected_observations[index]["sql"]);
-                assert_eq!(window["mcp"]["history_aggregate"], expected_observations[index]["mcp"]["history_aggregate"]);
+                let mut mcp_summary = window["mcp"].clone();
+                // JEV telemetry remains a synchronous per-window read, outside this candidate.
+                mcp_summary.as_object_mut().unwrap().remove("telemetry");
+                assert_eq!(mcp_summary, expected_observations[index]["mcp"]);
             }
             if same_thread && !nested && !active {
                 let make_ready_candidate = |collector: &Collector| selected_candidate::SelectedCandidate::new(collector, &selection,

@@ -444,11 +444,14 @@ impl SelectedCandidate {
             json!({"rows":rows,"totals":totals,"nested_totals":nested_totals,"projects":projects.into_values().collect::<Vec<_>>()})
         }).collect::<Vec<_>>().try_into().map_err(|_| Failure::State)?;
         let (mcp_events,sql_events): (Vec<_>,Vec<_>) = reducers.observations.finish().into_iter().partition(|event| event.get("server").is_some());
+        let settings = self.inputs.as_ref().ok_or(Failure::State)?.source_settings();
+        let (mcp_events, mut all_mcp) = collector.mcp_snapshot_summary(mcp_events, &settings.sources, &settings.customizations, settings.switches);
+        all_mcp["configuration"] = json!({"location":collector.catalog_home.join("config.toml").to_string_lossy(),"configured_sources":collector.mcp_catalog.len()});
         let sql_events = sqlite::identified(sql_events);
         let (mcp_enabled, sqlite_enabled) = self.inputs.as_ref().ok_or(Failure::State)?.observation_switches();
         let observations = std::array::from_fn(|index| {
             let cutoff = cutoffs[index];
-            let mut mcp = mcp::summary(&mcp_events,cutoff,collector.activity_history_health);
+            let mut mcp = cutoff.map_or_else(|| all_mcp.clone(), |cutoff| mcp::scoped_summary(&mcp_events, cutoff, collector.activity_history_health, &all_mcp));
             let mut sql = sqlite::window(if sqlite_enabled { &sql_events } else { &[] },cutoff,collector.activity_history_health);
             for event in mcp["events"].as_array_mut().into_iter().flatten()
                 .chain(sql["events"].as_array_mut().into_iter().flatten()) {
