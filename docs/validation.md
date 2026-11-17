@@ -2064,3 +2064,22 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, owner targeted 通過 1 項、428 項未�
 2026-11-17 再核對來源, LAM main 仍為 `5c03daf`, workbench-workspace 從 `4616074` 前進至 `ce972bd`, 單一 commit 僅更新 WBUI 交付文件及 gitlink 至 `4392a57`, LAM consumer pin 仍為 `e9741c6`, 本輪沒有前端採用或 Rust 規格變更
 
 Production snapshots、detail publication 時機、設定保存與 fallback 不變, 完整 detail markers、其他 catalog / diagnostics owners、完整快照與資源驗收仍待完成
+
+### Selected calls 的 detail-pending 來源標記
+
+基準 `0af1cb9`, candidate checkpoint reader 改為讀取完整 selection 的 bounded pages, 先由現有 snapshot_projection 收集 source_details_pending, 再移除 losers, reducers 仍只觀察每個 winner 一次, active payload 仍只複製 winners, 未增加來源、查詢服務或資料庫 schema
+
+- 原八情境 fixture 僅讓第一來源 call0300 保留 request locator, 第二來源與其餘 calls 移除 request / response locators, 相同 thread 時此 call 被第二來源取代, materialized source oracle 仍要求 pending, 此案例防止錯誤使用 winners-only 標記
+- 新增 final signature sweep 前 readiness owner 變更測試, 舊 candidate 拒絕為 InputsRejected, 新 candidate 完成後四窗均不輸出 source_details_pending, 原 completed-only、取消、winner、精確計數與排序 oracles 保留
+- 測試限定 counters 核對實際 reader pages、calls 與 payload 字串長度, 每個完成 candidate 讀取 1,200 calls / 4 pages, ordinary payload 426,464 bytes、nested payload 1,182,464 bytes, active 前綴不改變 checkpoint 讀取量
+
+| 來源條件 | 相對前一 winners-only 路徑增加量 | 邊界 |
+| --- | --- | --- |
+| 相同 thread、300 個重複 call IDs | 300 calls、ordinary 107,934 bytes 或 nested 296,934 bytes, 由 3 pages 增為 4 pages | 原 reader 每頁 512 calls / 16 MiB encoded charge 不變 |
+| 不同 threads | 0 calls、0 payload bytes、0 pages | 原本所有 selected calls 都是 winners |
+
+上述 bytes 僅計 call payload 的 UTF-8 長度, 不含 cursor、key、event_time、SQLite page cache 或實際磁碟讀取, 不代表 allocator / RSS、工作輪延遲或大來源容量已驗收
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 第一版八情境 targeted 通過 1 項、428 項未選取, 75.89 秒, 補上 readiness 變更 / suppression 驗證後同一 targeted 通過 1 項、428 項未選取, 77.18 秒, cargo check 通過並維持 8 個既有 warnings, 本輪測試與編譯無失敗
+
+Production caller、同步 snapshots、detail index publication 與 fallback 未切換, deferred fixtures 未執行, 完整 catalogs / diagnostics owners、error windows、同批 detail index 與資源 / 平台驗收仍保留

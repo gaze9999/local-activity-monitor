@@ -391,7 +391,11 @@ Row / name 組合現在使用已受 revision guard 保護的 thread_metadata, �
 
 Rows 已改為 stable updated_at 降冪陣列, canonical ties 保留 observed thread key 順序再接 catalog insertion order, complete-source ties 使用 first-observed thread slots, status_backfill_pending 由受 Session guard 保護的 pending() 計算
 
-Detail readiness 的實際 owner overflow_details_ready 經 setter 追蹤內容 revision, production detail index assignment 與原讀取時機不變, 相同 set 不取消候選, 但 source_details_pending 仍未串接: checkpoint::snapshot_projection 會採用全部 selected calls 的 request / response locator, 包含後來被其他來源取代的 call, empty header 與 winners-only payload 都不能推導完整標記, 下一步須提供同一 signature 下的來源 descriptor, 不得從 winners 猜測或提前宣稱 ready
+Detail readiness 的實際 owner overflow_details_ready 經 setter 追蹤內容 revision, production detail index assignment 與原讀取時機不變, 相同 set 不取消候選
+
+source_details_pending 已沿同一 signature 的 SelectedCheckpointReader 讀取全部 selected calls, 在每頁 snapshot_projection 後先合併來源標記, 再移除 losers 並僅觀察 winners, 保留 workdir / error locator 與被取代 call 的 request / response locator 貢獻, ready set 已包含的 thread 不輸出 pending 標記
+
+每頁仍最多 512 calls / 16 MiB encoded charge, 不保留第二份完整 payload vector, 但會額外讀取、解碼 losers, 此成本不能宣稱為零或固定 RSS, active payload 仍只複製 winners, 因原 detail-pending 集合僅取自 overflow projections, 詳見 validation 的讀取量測與驗收邊界
 
 Project summary、MCP catalog augmentation、完整 error windows 與正式發布仍待串接, raw failure components 不在此步套用名稱, 未因此重跑 deferred 額外 metadata-only / 無 ID 來源實驗
 

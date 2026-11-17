@@ -5864,6 +5864,10 @@ mod log_tests {
                 row.event_time = time.map(str::to_owned);
                 let mut payload: Value = serde_json::from_str(&row.payload).unwrap();
                 payload["time"] = json!(time);
+                // Only this later-replaced call retains a locator. Source readiness
+                // must not disappear when the winner comes from a different source.
+                if n != 300 { payload["request_position"] = Value::Null; }
+                payload["response_position"] = Value::Null;
                 payload["skills"] = json!(["shared", format!("skill-{}", n % 3), "shared"]);
                 if nested {
                     payload["commands"] = json!({"git":[{"operation":"status"},{"operation":"diff","repository":"fixture"}],
@@ -5903,6 +5907,8 @@ mod log_tests {
                 row.call_id = format!("call{:04}", n + 300);
                 let mut payload: Value = serde_json::from_str(&row.payload).unwrap();
                 payload["files"][0]["path"] = json!(format!("second-{n}"));
+                payload["request_position"] = Value::Null;
+                payload["response_position"] = Value::Null;
                 payload["completed"] = json!(row.event_time.as_deref().and_then(lam_history_store::parse_utc_stamp)
                     .filter(|_| n % 3 != 0).map(|time| stamp(time + Duration::milliseconds(n as i64))));
                 row.payload = payload.to_string();
@@ -5944,6 +5950,7 @@ mod log_tests {
             collector.replace_thread_metadata(metadata);
             let expected_winners = if same_thread { 900 } else if active { 1800 } else { 1200 };
             let mut materialized = BTreeMap::<String, Projection>::new();
+            let mut detail_pending = BTreeSet::new();
             for (_, state) in collector.ordered_working_sources() {
                 let thread = state.projection.id.clone().unwrap();
                 materialized.entry(thread.clone()).or_insert_with(|| Projection::for_id(Some(thread)))
@@ -5955,9 +5962,13 @@ mod log_tests {
                     source_key:source,signature:Some(&original.cursor.signature)}, &ids).unwrap().unwrap();
                 let projection = checkpoint::snapshot_projection(checkpoint, false).unwrap();
                 let thread = projection.projection.id.as_ref().unwrap();
+                if projection.source_details_pending { detail_pending.insert(thread.clone()); }
                 materialized.entry(thread.clone()).or_insert_with(|| Projection::for_id(Some(thread.clone())))
                     .merge_snapshot(&projection.projection, None, &cutoffs);
             }
+            assert_eq!(detail_pending, [id.to_owned()].into_iter().collect());
+            let expected_payload_bytes: usize = calls.iter().chain(&second_calls).map(|call| call.payload.len()).sum();
+            let extra_payload_bytes: usize = if same_thread { calls[300..].iter().map(|call| call.payload.len()).sum() } else { 0 };
             assert_eq!(materialized.values().map(|projection| projection.calls.len()).sum::<usize>(), expected_winners);
             let apply_names = |events: &mut Vec<Value>| {
                 for event in events {
@@ -6080,6 +6091,9 @@ mod log_tests {
                     for field in ["file_changes", "file_reads"] { apply_names(row[field].as_array_mut().unwrap()); }
                     row["status_backfill_pending"] = json!(collector.files.values()
                         .any(|state| state.pending() && state.projection.id.as_ref() == Some(thread)));
+                    if detail_pending.contains(thread) && !collector.overflow_details_ready.contains(thread) {
+                        row["source_details_pending"] = json!(true);
+                    }
                     row
                 }).collect();
                 rows.sort_by(|left, right| right["updated_at"].as_str().cmp(&left["updated_at"].as_str())
@@ -6131,6 +6145,10 @@ mod log_tests {
                         Advance::Pending(next) => candidate = next,
                         Advance::Complete(completed) => {
                             assert_eq!(validation_rounds, 2, "one-source final validation rounds");
+                            assert_eq!(completed.read_work, [4, 1200, expected_payload_bytes,
+                                if same_thread { 300 } else { 0 }, extra_payload_bytes]);
+                            eprintln!("candidate checkpoint reads same_thread={same_thread} nested={nested} active={active}: pages={} calls={} payload_bytes={} extra_calls={} extra_payload_bytes={}",
+                                completed.read_work[0], completed.read_work[1], completed.read_work[2], completed.read_work[3], completed.read_work[4]);
                             return Ok((completed.files, completed.series, completed.statistics, completed.commands,
                                 completed.skills, completed.rows, completed.observations, completed.failures));
                         }
@@ -6268,6 +6286,39 @@ mod log_tests {
                 assert_eq!(window["codex"]["git"], expected_commands[index]["git"]);
                 assert_eq!(window["codex"]["checks"], expected_commands[index]["checks"]);
                 assert_eq!(window["codex"]["skills"], expected_skills[index]);
+            }
+            if same_thread && !nested && !active {
+                let make_ready_candidate = |collector: &Collector| selected_candidate::SelectedCandidate::new(collector, &selection,
+                    SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
+                        selected_candidate::Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
+                    false, 10_000, 10_000, true, &stopped).unwrap();
+                let mut candidate = make_ready_candidate(&collector);
+                for _ in 0..32 {
+                    if candidate.awaiting_validation() { break; }
+                    candidate = match candidate.advance(&collector, &selection, true, &stopped, 1).unwrap() {
+                        selected_candidate::Advance::Pending(next) => next,
+                        selected_candidate::Advance::Complete(_) => panic!("emitted before readiness change"),
+                    };
+                }
+                assert!(candidate.awaiting_validation());
+                collector.replace_overflow_details_ready([id.to_owned()].into_iter().collect());
+                assert_eq!(candidate.advance(&collector, &selection, true, &stopped, 1).err(), Some(Failure::InputsRejected));
+                let mut candidate = make_ready_candidate(&collector);
+                let mut finished = false;
+                for _ in 0..32 {
+                    match candidate.advance(&collector, &selection, true, &stopped, 1).unwrap() {
+                        selected_candidate::Advance::Pending(next) => candidate = next,
+                        selected_candidate::Advance::Complete(completed) => {
+                            for window in completed.rows {
+                                assert!(window["rows"].as_array().unwrap().iter().all(|row| row["source_details_pending"].is_null()));
+                            }
+                            finished = true;
+                            break;
+                        }
+                    }
+                }
+                assert!(finished);
+                collector.replace_overflow_details_ready(Default::default());
             }
             // No Collector refresh or checkpoint update: only the real JSONL changes.
             let make = || selected_candidate::SelectedCandidate::new(&collector, &selection,

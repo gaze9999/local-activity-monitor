@@ -43,6 +43,11 @@ pub(super) struct SelectedCandidate {
     reader: Option<lam_history_store::SelectedCheckpointReader>,
     metadata: BTreeMap<String, Projection>,
     partial: BTreeMap<String, bool>,
+    detail_pending: BTreeSet<String>,
+    // Checkpoint pages, calls, payload bytes, losing calls, losing payload bytes.
+    // Encoded payload bytes exclude cursor/keys and are not disk I/O or RSS.
+    #[cfg(test)]
+    read_work: [usize; 5],
     winners: BTreeMap<CallKey, usize>,
     slots: BTreeMap<CallKey, u64>,
     next_slots: BTreeMap<String, u64>,
@@ -77,6 +82,8 @@ pub(super) struct CompletedCandidate {
     pub rows: [Value; 4],
     pub observations: [Value; 4],
     pub failures: Value,
+    #[cfg(test)]
+    pub read_work: [usize; 5],
 }
 
 #[allow(dead_code)] // Not activated by the production snapshot worker.
@@ -120,7 +127,9 @@ impl SelectedCandidate {
             Some(path.clone())
         }).collect::<Option<Vec<_>>>()?;
         Some(Self { inputs:Some(inputs), sources, active, active_offset:0, source_paths, physical, physical_after:None, phase:Phase::Headers, next:0, reader:None,
-            metadata:BTreeMap::new(), partial:BTreeMap::new(), winners:BTreeMap::new(), slots:BTreeMap::new(),
+            metadata:BTreeMap::new(), partial:BTreeMap::new(), detail_pending:BTreeSet::new(),
+            #[cfg(test)] read_work:[0; 5],
+            winners:BTreeMap::new(), slots:BTreeMap::new(),
             next_slots:BTreeMap::new(), thread_slots:BTreeMap::new(), source_threads:Vec::new(), names:HashMap::new(), ordered,
             statistics_units, statistics_key_bytes, reducers:None })
     }
@@ -210,6 +219,9 @@ impl SelectedCandidate {
                             source_key:&source.key, signature:Some(&source.signature) }, &[]).map_err(|_| Failure::CheckpointRead)?.ok_or(Failure::CheckpointChanged)?;
                         let projection = checkpoint::snapshot_projection(header, false).ok_or(Failure::InvalidProjection)?;
                         if !projection.projection.calls.is_empty() { return Err(Failure::InvalidProjection); }
+                        if projection.source_details_pending {
+                            self.detail_pending.insert(projection.projection.id.clone().ok_or(Failure::InvalidProjection)?);
+                        }
                         let ids = selection.calls.get(&source.key).into_iter().flatten().cloned().collect();
                         (projection.projection, projection.partial, ids)
                     };
@@ -260,21 +272,40 @@ impl SelectedCandidate {
                     } else {
                         let source = &self.sources[source_index - self.active.len()];
                         if self.reader.is_none() {
-                            let ids = self.winners.iter().filter(|(_, winner)| **winner == source_index)
-                                .map(|((_, id), _)| id.clone()).collect();
+                            // Read every selected checkpoint call: even a losing call's
+                            // locator contributes to the source detail-pending marker.
+                            let ids = selection.calls.get(&source.key).into_iter().flatten().cloned().collect();
                             self.reader = Some(collector.checkpoints.snapshot_reader().map_err(|_| Failure::CheckpointRead)?.ok_or(Failure::CheckpointRead)?
                                 .into_selected_checkpoint_reader(&lam_history_store::ExpectedCursor {
                                     source_key:&source.key, signature:Some(&source.signature) }, ids).map_err(|_| Failure::CheckpointRead)?.ok_or(Failure::CheckpointChanged)?);
                         }
                         let reader = self.reader.as_mut().ok_or(Failure::State)?;
                         let page = reader.next_page().map_err(|_| Failure::CheckpointRead)?.ok_or(Failure::CheckpointChanged)?;
-                        (checkpoint::snapshot_projection(page, false).ok_or(Failure::InvalidProjection)?.projection, reader.is_complete())
+                        #[cfg(test)] {
+                            self.read_work[0] += 1;
+                            self.read_work[1] += page.calls.len();
+                            for call in &page.calls {
+                                self.read_work[2] += call.payload.len();
+                                if self.winners.get(&(self.source_threads[source_index].clone(), call.call_id.clone())) != Some(&source_index) {
+                                    self.read_work[3] += 1;
+                                    self.read_work[4] += call.payload.len();
+                                }
+                            }
+                        }
+                        let projection = checkpoint::snapshot_projection(page, false).ok_or(Failure::InvalidProjection)?;
+                        if projection.source_details_pending {
+                            self.detail_pending.insert(projection.projection.id.clone().ok_or(Failure::InvalidProjection)?);
+                        }
+                        (projection.projection, reader.is_complete())
                     };
                     let thread = projection.id.as_deref().ok_or(Failure::InvalidProjection)?;
                     if thread != self.source_threads[source_index] { return Err(Failure::InvalidProjection); }
+                    if projection.calls.keys().any(|id| !self.winners.contains_key(&(thread.to_owned(), id.clone()))) {
+                        return Err(Failure::InvalidProjection);
+                    }
+                    projection.calls.retain(|id, _| self.winners.get(&(thread.to_owned(), id.clone())) == Some(&source_index));
                     for (id, call) in &mut projection.calls {
                         let key = (thread.to_owned(), id.clone());
-                        if self.winners.get(&key) != Some(&source_index) { return Err(Failure::InvalidProjection); }
                         if self.ordered { call.presentation_sequence = *self.slots.get(&key).ok_or(Failure::State)?; }
                     }
                     let reducers = self.reducers.as_mut().ok_or(Failure::State)?;
@@ -383,6 +414,10 @@ impl SelectedCandidate {
                 .filter_map(|state| state.projection.id.as_deref()).collect();
             for row in &mut rows {
                 row["status_backfill_pending"] = json!(row["thread_id"].as_str().is_some_and(|id| pending.contains(id)));
+                if row["thread_id"].as_str().is_some_and(|id| self.detail_pending.contains(id)
+                    && !collector.overflow_details_ready.contains(id)) {
+                    row["source_details_pending"] = json!(true);
+                }
             }
             // Stable canonical ties retain BTreeMap source rows followed by catalog
             // insertion order. Complete-source ties use first-observed thread slots.
@@ -407,7 +442,8 @@ impl SelectedCandidate {
             json!({"mcp":mcp,"sql":sql})
         });
         let failures: Vec<_> = reducers.failures.finish().into_iter().map(|(start,event)| json!({"start":start.map(project::stamp),"event":event})).collect();
-        Ok(CompletedCandidate { files,series,statistics,commands,skills,rows,observations,failures:json!(failures) })
+        Ok(CompletedCandidate { files,series,statistics,commands,skills,rows,observations,failures:json!(failures),
+            #[cfg(test)] read_work:self.read_work })
     }
 }
 
