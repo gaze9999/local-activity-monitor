@@ -172,6 +172,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn capped_inventory_retains_primary_documents() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let path = root.join("SKILL.md");
+        fs::write(&path, "primary fixture").unwrap();
+        fs::write(root.join("README.md"), "overview fixture").unwrap();
+        for index in 0..205 {
+            fs::write(root.join(format!("extra-{index:03}.md")), "extra fixture").unwrap();
+        }
+        let candidate = lam_session_core::SkillRead {
+            name: "fixture".into(), path: path.to_string_lossy().into_owned(), workdir: None,
+        };
+        let detail = render("fixture", &candidate, None).unwrap();
+        assert_eq!(detail["files"].as_array().unwrap().len(), 200);
+        assert_eq!(detail["files_truncated"], true);
+        let documents = detail["documents"].as_array().unwrap();
+        assert_eq!(documents.len(), 2);
+        assert_eq!(documents[0]["relative_path"], "README.md");
+        assert_eq!(documents[0]["text"], "overview fixture");
+        assert_eq!(documents[1]["relative_path"], "SKILL.md");
+        assert_eq!(documents[1]["text"], "primary fixture");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 207);
+    }
+
+    #[test]
+    fn inventory_depth_boundary_keeps_selected_documents_inside_limit() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let path = root.join("SKILL.md");
+        fs::write(&path, "primary fixture").unwrap();
+        fs::create_dir_all(root.join("a/b/c/d/e")).unwrap();
+        fs::write(root.join("a/b/c/d/inside.md"), "inside fixture").unwrap();
+        fs::write(root.join("a/b/c/d/e/outside.md"), "outside fixture").unwrap();
+        let candidate = lam_session_core::SkillRead {
+            name: "fixture".into(), path: path.to_string_lossy().into_owned(), workdir: None,
+        };
+        let detail = render("fixture", &candidate, Some("a/b/c/d/inside.md")).unwrap();
+        assert_eq!(detail["files"].as_array().unwrap().len(), 2);
+        assert_eq!(detail["files_truncated"], true);
+        assert_eq!(detail["documents"].as_array().unwrap().len(), 1);
+        assert_eq!(detail["documents"][0]["text"], "inside fixture");
+        let excluded = render("fixture", &candidate, Some("a/b/c/d/e/outside.md")).unwrap();
+        assert!(excluded["documents"].as_array().unwrap().is_empty());
+        assert_eq!(fs::read_to_string(root.join("a/b/c/d/e/outside.md")).unwrap(), "outside fixture");
+    }
+
+    #[test]
     fn document_limit_preserves_raw_digest_bom_and_utf8_boundary() {
         let home = tempfile::tempdir().unwrap();
         let root = home.path().canonicalize().unwrap();

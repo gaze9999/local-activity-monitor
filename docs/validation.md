@@ -2326,3 +2326,15 @@ GET /api/mcp/files 與 POST /api/mcp/file 來源、document ID 與查詢次數�
 Linux / Rust 1.100.0 / 原 Cargo.lock, `mcp_json_string_edits_preserve_types_and_digest_through_http` 通過 1 項、228 項未選取, 0.10 秒, 維持 8 個既有 warnings, git diff --check 通過
 
 測試使用臨時 launcher 設定與合成檔案, 不新增 API 或 production 查詢, 未執行瀏覽器、完整套件或其他平台驗收, metadata recursion 候選與原停止工作未變
+
+### Skill inventory 容量與深度邊界
+
+基準 `80d767d`, 依 Python `CodexCollector.skill_detail` 既有容量與遍歷限制新增獨立合成測試, 不改 production
+
+- 207 個文件的來源仍只回傳 200 個 inventory entries 並標 files_truncated, README.md / SKILL.md 預先保留且預設本文可讀取, 來源檔案數未改變
+- 第四層子目錄的文件可出現在 inventory 並按需讀取, 第五層子目錄的文件不列入且精確選取不回傳本文, 同時標 files_truncated, 不刪除或修改被排除來源
+- Python 實際 collector 已使用相同兩組合成資料核對, 不要求未指定的額外文件遍歷順序相同
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, `sessions::skill_detail::tests` 通過 5 項、439 項未選取, 1.76 秒, 包含既有 Unicode 與文件位元組上限回歸, git diff --check 通過
+
+此項未驗證 1000-entry 掃描預算的完整排列、競態檔案異動或跨平台目錄列舉, 未新增 API 查詢或重跑完整套件, 原停止候選與 dirty files 保留
