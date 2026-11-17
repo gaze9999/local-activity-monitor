@@ -180,6 +180,21 @@ Cloud 測試不取代 Windows watcher、真實來源、SSE、Host/Origin 與持�
 
 此節起於 `3c1fd9e` 的實作計畫, 下表已依 `7338ce6` 更新目前狀態, 共同發布與單一查詢 paired capture 已實作, 不代表跨輪 candidate、16 MiB staging 或跨平台驗收完成
 
+### 重建驗收與下一個實作優先項
+
+依 `5a429e7` 重新核對, 重建目標仍是保留來源行為、完整選取與精確統計, 並讓大型來源的整理可分批完成而不阻塞服務, 不是增加 candidate fixture 數量, 已有單元通過或已交付提交不取代端到端及平台驗收
+
+| 優先項 | 現況與必要工作 | 驗收界線 |
+| --- | --- | --- |
+| 大型快照 production 路徑 | `selected_overflow_projections_with_limits` 仍累積完整 Projection, 以 encoded bytes 限制 16 MiB, cfg(test) candidate 不會改變服務行為 | 必須消除完整 payload staging 的依賴並保留全部 winner、metadata / 無 ID 來源、精確計數、預覽與歷史合併, 不能提高上限或降低選取數作結 |
+| 跨輪資料擁有權 | 原有 selection epoch / signature 不涵蓋 active response、context、retention、設定與 history 更新 | 先補齊真實 mutation owner 與候選取消, 再串接全部摘要及明細發布, 不能把已驗證的三種 reducer 當完整快照 |
+| Production 切換規格 | 目前 staging 的 None 同時涵蓋 pending / 失敗, caller 可發布 incomplete fallback | 保持此 baseline 或改成保留最後完整版本必須明確決定, 後者另需初次載入及新鮮度規格, test-only 拒絕整組結果不是此決定 |
+| 相容性與實際驗收 | JEV / 裝置讀取仍依本章既有 baseline, 編碼 / surrogate、排序 / 還原及平台缺口保持未結案 | 不為候選串接順便改變這些語意, 先取得具體來源差異再修改, 延後的檢查不自動重跑 |
+
+下一個必要實作是跨輪 mutation 擁有權與完整 candidate 串接, 不再無限擴充已通過的 file / series / statistics fixture, 在 production 切換範圍確認前保留目前執行期
+
+容量、效能與功能驗收分開: staging charge 不等於 allocator 或程序 RSS, 最終四窗仍占記憶體, 需要實際 worker / HTTP 的全量輸出與資源量測, 尚未完成此驗收, 既有 deferred 檢查與失敗記錄不因本次盤點改變
+
 ### 已確認的資料生命週期
 
 | 範圍 | 現行行為與來源 | 對跨輪處理的限制 |
