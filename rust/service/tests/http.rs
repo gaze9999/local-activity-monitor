@@ -983,6 +983,13 @@ fn debug_collection_reports_only_measured_phase_metrics() {
         })
         .unwrap();
     for phase in ["sessions", "worktrees", "diagnostics", "history"] {
+        // Diagnostics combines two separately measured timers; other phases use one timer.
+        if phase != "diagnostics" {
+            for metric in ["elapsed_ms", "cpu_ms"] {
+                let value = record["phase_metrics"][phase][metric].as_f64().unwrap();
+                assert_eq!(value, format!("{value:.2}").parse::<f64>().unwrap(), "{phase}.{metric}");
+            }
+        }
         assert!(record["phase_metrics"][phase]["elapsed_ms"]
             .as_f64()
             .is_some_and(|value| value >= 0.0));

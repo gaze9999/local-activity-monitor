@@ -1497,3 +1497,13 @@ Linux / Rust 1.100.0、原 Cargo.lock, `sessions::mcp` 篩選共 16 項通過 (�
 - 本輪未重試歷史阻擋檢查, 未執行 browser、macOS / Windows 原生平台或 Library 下載驗收
 
 此結果整合近期 JEV 捨入 / metadata 與 MCP p99 修正的 Linux 回歸證據, 不抹除歷史失敗, 也不代表四窗共同擷取、跨輪 candidate、16 MiB staging、所有 producer revision 或完整重建已驗收
+
+### 已完成 phase 的計時精度
+
+以 `5009ef3` 為基底, 來源為 Python main `5c03daf` 的 `Dashboard.phase`, workbench-workspace main `4616074` 核對未變, Python 完成每個 phase 時將 elapsed_ms / cpu_ms 四捨五入至小數兩位, Rust PhaseTimer 原先直接輸出未捨入的浮點數
+
+以受控 clock 執行實際 Python Dashboard.phase, 7 組資料涵蓋 2.675、1.225、精確中點、1.005、一般小數與零, Rust 新測試先重現差異, production finish 改用可直接測試的私有 phase_metrics 投影, 保留原始計時來源、CPU 差值非負處理與 CPU 不可用時省略欄位
+
+Linux / Rust 1.100.0、原 Cargo.lock, performance_debug 模組 8 項通過 (0.01 秒), 加強的 HTTP debug_collection_reports_only_measured_phase_metrics 通過 (0.08 秒), 核對實際 sessions / worktrees / history 數值的兩位精度, diagnostics 仍保留兩個 timer 結果相加的原規則
+
+影響 `/api/snapshot` 中已完成 phase_metrics 的 elapsed_ms / cpu_ms 及其 debug 記錄, 不改動來源讀取、請求次數、目前進行中 collection 的計時或裝置 capture, 本輪未重跑完整套件, 前輪 407 / 226 為 `081d3ef` 的歷史結果

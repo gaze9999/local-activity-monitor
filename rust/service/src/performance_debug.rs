@@ -156,16 +156,20 @@ impl PhaseTimer {
         })
     }
     pub fn finish(self) -> Value {
-        let mut result = json!({"elapsed_ms":self.began.elapsed().as_secs_f64()*1000.0});
-        if let Some(cpu) = self
-            .cpu
-            .zip(process_cpu_ms())
-            .map(|(before, after)| (after - before).max(0.0))
-        {
-            result["cpu_ms"] = json!(cpu);
-        }
-        result
+        phase_metrics(
+            self.began.elapsed().as_secs_f64() * 1000.0,
+            self.cpu.zip(process_cpu_ms()).map(|(before, after)| (after - before).max(0.0)),
+        )
     }
+}
+
+fn phase_metrics(elapsed_ms: f64, cpu_ms: Option<f64>) -> Value {
+    let rounded = |value: f64| format!("{value:.2}").parse::<f64>().expect("finite phase duration");
+    let mut result = json!({"elapsed_ms":rounded(elapsed_ms)});
+    if let Some(cpu_ms) = cpu_ms {
+        result["cpu_ms"] = json!(rounded(cpu_ms));
+    }
+    result
 }
 
 pub fn combine_phases(first: Option<Value>, second: Option<Value>) -> Option<Value> {
@@ -535,6 +539,16 @@ impl PerformanceDebug {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn completed_phase_metrics_round_like_python_and_preserve_missing_cpu() {
+        for (value, expected) in [(2.675, 2.67), (1.225, 1.23), (0.125, 0.12),
+            (0.375, 0.38), (1.005, 1.0), (12.34567, 12.35), (0.0, 0.0)] {
+            assert_eq!(phase_metrics(value, Some(value)),
+                json!({"elapsed_ms":expected,"cpu_ms":expected}), "{value}");
+            assert_eq!(phase_metrics(value, None), json!({"elapsed_ms":expected}));
+        }
+    }
+
     fn fixture_row(value: u64) -> Vec<u8> {
         json!({"application":"local-activity-monitor","version":1,"kind":"collection","refresh_ms":value,"secret":"PRIVATE"}).to_string().into_bytes()
     }
