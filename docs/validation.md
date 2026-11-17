@@ -1924,3 +1924,14 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, 未執行 HTTP、完整套件或 deferred
 - Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 1 項通過、423 項未選取, 16.11 秒, 未執行 HTTP、完整套件或 deferred 檢查
 
 本輪不覆蓋額外 metadata-only / 無 ID 來源、非 null thread-name enrichment 或完整 partial-history, 也未重跑已延後的 metadata-only source experiment, production worker / fallback / 16 MiB staging 未切換, 整體記憶體與完成能力尚未驗收
+
+### Runtime-owned statistics 與既有 encoder 串接
+
+基準 `a59eb3b`, OwnedStatistics 從 test module 移至正常編譯範圍, 保留原精確統計演算法與 borrowed ToolStatistics oracle, 新 CompletedStatistics 只能經成功 finish_for_snapshot 建立
+
+- 原 statistics targeted 4 項通過、420 項未選取, 0.01 秒, 涵蓋 nested / primary、missing / zero / negative durations、整數除法與 p99、logical budget 拒絕及清除已保留 groups
+- 擴充原 serialization 測試, 完成 owned result 後丟棄來源 threads, 使用相同 snapshot encoder 產生逐位元組相同 JSON, 只出現一個 tool_statistics 欄位且保留其他欄位 / read_state
+- 非 object 或缺少 codex 的原 fallback 保留, disabled 產生空統計, 超過 budget 的 reducer 無法建立 encoder input, targeted 1 項通過、423 項未選取, 0.00 秒
+- Linux / Rust 1.100.0 / 原 Cargo.lock, cargo check 通過並保留前輪 6 個 warnings, 無本輪失敗, 未執行 HTTP、完整套件或 deferred 檢查
+
+此為 runtime 可用的 owned-result 編碼入口, production worker 仍使用原 borrowed statistics 路徑, 未切換 aggregation / fallback / 16 MiB staging, 完成 JSON 的 allocation、全部 metadata / reducers 與 worker / 資源驗收尚未完成

@@ -21,8 +21,9 @@ const COUNTERS: [&str; 6] = [
 
 mod statistics;
 pub(super) use statistics::ToolStatistics;
-#[cfg(test)]
-pub(super) use statistics::tests::OwnedStatistics;
+#[allow(unused_imports)] // Candidate worker integration is not enabled yet.
+pub(super) use statistics::OwnedStatistics;
+use statistics::CompletedStatistics;
 
 type Time = DateTime<Utc>;
 
@@ -76,6 +77,15 @@ impl ActivitySeries {
 impl ActivitySeries {
     /// Inject the bounded series only at final encoding, after source augmentation.
     pub(super) fn snapshot_json(&self, snapshot: &Value, statistics: Option<&ToolStatistics<'_>>) -> String {
+        self.snapshot_json_with_statistics(snapshot, statistics.map(StatisticsInput::Borrowed))
+    }
+
+    #[allow(dead_code)] // Accept only a successfully completed owned reducer.
+    pub(super) fn snapshot_json_with_owned_statistics(&self, snapshot: &Value, statistics: &CompletedStatistics) -> String {
+        self.snapshot_json_with_statistics(snapshot, Some(StatisticsInput::Owned(statistics)))
+    }
+
+    fn snapshot_json_with_statistics(&self, snapshot: &Value, statistics: Option<StatisticsInput<'_>>) -> String {
         let Some(root) = snapshot.as_object() else { return snapshot.to_string(); };
         let Some(codex) = root.get("codex").and_then(Value::as_object) else { return snapshot.to_string(); };
         serde_json::to_string(&SnapshotWithSeries { root, codex, series: self, statistics })
@@ -83,11 +93,25 @@ impl ActivitySeries {
     }
 }
 
+#[derive(Clone, Copy)]
+enum StatisticsInput<'a> {
+    Borrowed(&'a ToolStatistics<'a>),
+    Owned(&'a CompletedStatistics),
+}
+impl Serialize for StatisticsInput<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Borrowed(value) => value.serialize(serializer),
+            Self::Owned(value) => value.serialize(serializer),
+        }
+    }
+}
+
 struct SnapshotWithSeries<'a> {
     root: &'a serde_json::Map<String, Value>,
     codex: &'a serde_json::Map<String, Value>,
     series: &'a ActivitySeries,
-    statistics: Option<&'a ToolStatistics<'a>>,
+    statistics: Option<StatisticsInput<'a>>,
 }
 
 impl Serialize for SnapshotWithSeries<'_> {
@@ -106,7 +130,7 @@ impl Serialize for SnapshotWithSeries<'_> {
 struct CodexWithSeries<'a> {
     fields: &'a serde_json::Map<String, Value>,
     series: &'a ActivitySeries,
-    statistics: Option<&'a ToolStatistics<'a>>,
+    statistics: Option<StatisticsInput<'a>>,
 }
 
 impl Serialize for CodexWithSeries<'_> {
@@ -120,7 +144,7 @@ impl Serialize for CodexWithSeries<'_> {
         }
         map.serialize_entry("activity_series", &MinuteSeries(&self.series.minutes))?;
         map.serialize_entry("tool_series", &ToolSeries(&self.series.tools))?;
-        if let Some(statistics) = self.statistics { map.serialize_entry("tool_statistics", statistics)?; }
+        if let Some(statistics) = self.statistics { map.serialize_entry("tool_statistics", &statistics)?; }
         map.end()
     }
 }

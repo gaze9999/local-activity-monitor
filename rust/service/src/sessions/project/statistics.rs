@@ -1,6 +1,7 @@
 //! Exact tool summaries over already selected call winners, streamed at encoding.
 use super::{stamp, Call, Projection, Time};
 use serde::{Serialize, Serializer};
+use serde_json::Value;
 use serde::ser::SerializeSeq;
 use std::cmp::Ordering;
 use std::collections::{btree_map, BTreeMap, BinaryHeap};
@@ -137,94 +138,105 @@ fn ratio(numerator: u128, denominator: u64) -> f64 {
     (quotient as f64) * 2f64.powi(exponent - 52)
 }
 
+// Owned candidate reducer. Limits are supplied by its caller; they are logical
+// charges, not a measurement of allocator or process memory.
+#[derive(Default)]
+struct OwnedGroup {
+    calls: usize,
+    threads: std::collections::BTreeSet<String>,
+    returned: usize,
+    durations: Vec<i64>,
+    last_at: Option<Time>,
+    last_response: Option<Time>,
+}
+
+pub(in crate::sessions) struct OwnedStatistics {
+    groups: BTreeMap<(String, bool), OwnedGroup>,
+    boundary: Option<Time>,
+    enabled: bool,
+    units: usize,
+    key_bytes: usize,
+    unit_limit: usize,
+    key_limit: usize,
+    valid: bool,
+}
+
+#[allow(dead_code)] // Candidate worker integration is not enabled yet.
+impl OwnedStatistics {
+    pub(in crate::sessions) fn new(boundary: Option<Time>, enabled: bool, unit_limit: usize, key_limit: usize) -> Self {
+        Self { groups: BTreeMap::new(), boundary, enabled, units: 0, key_bytes: 0,
+            unit_limit, key_limit, valid: true }
+    }
+
+    fn admit(&mut self, thread: &str, tool: &str, nested: bool, count: usize, call: &Call) {
+        if !self.valid { return; }
+        let key = (tool.to_owned(), nested);
+        let previous = self.groups.get(&key);
+        let new_group = previous.is_none();
+        let new_thread = previous.is_none_or(|group| !group.threads.contains(thread));
+        let duration = (!nested).then(|| call.duration_ms()).flatten();
+        let units = usize::from(new_group) + usize::from(new_thread) + usize::from(duration.is_some());
+        let bytes = if new_group { tool.len() } else { 0 } + if new_thread { thread.len() } else { 0 };
+        if units > self.unit_limit.saturating_sub(self.units)
+            || bytes > self.key_limit.saturating_sub(self.key_bytes)
+            || previous.is_some_and(|group| group.calls.checked_add(count).is_none()) {
+            self.valid = false;
+            self.groups.clear();
+            self.units = 0;
+            self.key_bytes = 0;
+            return;
+        }
+        self.units += units;
+        self.key_bytes += bytes;
+        let group = self.groups.entry(key).or_default();
+        group.calls += count;
+        group.threads.insert(thread.to_owned());
+        group.last_at = group.last_at.max(call.completed.or(call.time));
+        if !nested {
+            if let Some(completed) = call.completed {
+                group.returned += 1;
+                group.last_response = group.last_response.max(Some(completed));
+            }
+            if let Some(duration) = duration { group.durations.push(duration); }
+        }
+    }
+
+    pub(in crate::sessions) fn observe(&mut self, thread: &str, call: &Call) {
+        if !self.valid || !self.enabled
+            || self.boundary.is_some_and(|cutoff| call.time.is_none_or(|time| time < cutoff)) { return; }
+        self.admit(thread, &call.tool, false, 1, call);
+        if let Some(nested) = &call.nested {
+            for (tool, count) in &nested.tools { self.admit(thread, tool, true, *count, call); }
+        }
+    }
+
+    pub(in crate::sessions) fn finish_for_snapshot(self) -> Option<CompletedStatistics> {
+        self.finish().map(CompletedStatistics)
+    }
+
+    pub(in crate::sessions) fn finish(self) -> Option<Value> {
+        if !self.valid { return None; }
+        Some(Value::Array(self.groups.into_iter().map(|((tool, nested), mut group)| {
+            let (average_ms, p99_ms) = metrics(&mut group.durations);
+            serde_json::to_value(Row { tool: &tool, nested, calls: group.calls,
+                thread_count: group.threads.len(), returned: (!nested).then_some(group.returned),
+                known_duration_count: (!nested).then_some(group.durations.len()),
+                average_ms, p99_ms, last_at: group.last_at.map(stamp),
+                last_response_at: group.last_response.map(stamp) }).unwrap()
+        }).collect()))
+    }
+}
+
+
+#[derive(Serialize)]
+#[serde(transparent)]
+pub(in crate::sessions) struct CompletedStatistics(Value);
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
     use super::super::{ActivitySeries, NestedActivity};
     use serde_json::{json, Value};
-
-    // Non-runtime prototype. Bounds are injected by tests, not product limits.
-    #[derive(Default)]
-    struct OwnedGroup {
-        calls: usize,
-        threads: std::collections::BTreeSet<String>,
-        returned: usize,
-        durations: Vec<i64>,
-        last_at: Option<Time>,
-        last_response: Option<Time>,
-    }
-
-    pub(in crate::sessions) struct OwnedStatistics {
-        groups: BTreeMap<(String, bool), OwnedGroup>,
-        boundary: Option<Time>,
-        enabled: bool,
-        units: usize,
-        key_bytes: usize,
-        unit_limit: usize,
-        key_limit: usize,
-        valid: bool,
-    }
-
-    impl OwnedStatistics {
-        pub(in crate::sessions) fn new(boundary: Option<Time>, enabled: bool, unit_limit: usize, key_limit: usize) -> Self {
-            Self { groups: BTreeMap::new(), boundary, enabled, units: 0, key_bytes: 0,
-                unit_limit, key_limit, valid: true }
-        }
-
-        fn admit(&mut self, thread: &str, tool: &str, nested: bool, count: usize, call: &Call) {
-            if !self.valid { return; }
-            let key = (tool.to_owned(), nested);
-            let previous = self.groups.get(&key);
-            let new_group = previous.is_none();
-            let new_thread = previous.is_none_or(|group| !group.threads.contains(thread));
-            let duration = (!nested).then(|| call.duration_ms()).flatten();
-            let units = usize::from(new_group) + usize::from(new_thread) + usize::from(duration.is_some());
-            let bytes = if new_group { tool.len() } else { 0 } + if new_thread { thread.len() } else { 0 };
-            if units > self.unit_limit.saturating_sub(self.units)
-                || bytes > self.key_limit.saturating_sub(self.key_bytes)
-                || previous.is_some_and(|group| group.calls.checked_add(count).is_none()) {
-                self.valid = false;
-                self.groups.clear();
-                self.units = 0;
-                self.key_bytes = 0;
-                return;
-            }
-            self.units += units;
-            self.key_bytes += bytes;
-            let group = self.groups.entry(key).or_default();
-            group.calls += count;
-            group.threads.insert(thread.to_owned());
-            group.last_at = group.last_at.max(call.completed.or(call.time));
-            if !nested {
-                if let Some(completed) = call.completed {
-                    group.returned += 1;
-                    group.last_response = group.last_response.max(Some(completed));
-                }
-                if let Some(duration) = duration { group.durations.push(duration); }
-            }
-        }
-
-        pub(in crate::sessions) fn observe(&mut self, thread: &str, call: &Call) {
-            if !self.valid || !self.enabled
-                || self.boundary.is_some_and(|cutoff| call.time.is_none_or(|time| time < cutoff)) { return; }
-            self.admit(thread, &call.tool, false, 1, call);
-            if let Some(nested) = &call.nested {
-                for (tool, count) in &nested.tools { self.admit(thread, tool, true, *count, call); }
-            }
-        }
-
-        pub(in crate::sessions) fn finish(self) -> Option<Value> {
-            if !self.valid { return None; }
-            Some(Value::Array(self.groups.into_iter().map(|((tool, nested), mut group)| {
-                let (average_ms, p99_ms) = metrics(&mut group.durations);
-                serde_json::to_value(Row { tool: &tool, nested, calls: group.calls,
-                    thread_count: group.threads.len(), returned: (!nested).then_some(group.returned),
-                    known_duration_count: (!nested).then_some(group.durations.len()),
-                    average_ms, p99_ms, last_at: group.last_at.map(stamp),
-                    last_response_at: group.last_response.map(stamp) }).unwrap()
-            }).collect()))
-        }
-    }
 
     #[test]
     fn owned_statistics_prototype_matches_exact_oracle_and_discards_over_budget() {
@@ -349,5 +361,24 @@ pub(super) mod tests {
         assert_eq!(value["codex"]["tool_statistics"],render(&threads,None,true));
         assert_eq!(value["codex"]["tool_statistics"][0]["tool"],"new");assert_eq!(value["codex"]["tool_statistics"][1]["nested"],true);
         assert_eq!(ActivitySeries::new().snapshot_json(&Value::Null,Some(&statistics)),"null");
+        let mut owned = OwnedStatistics::new(None, true, 1000, 1000);
+        for (thread, (projection, _)) in &threads {
+            for call in projection.calls.values() { owned.observe(thread, call); }
+        }
+        let completed = owned.finish_for_snapshot().unwrap();
+        drop(threads);
+        let owned_text = ActivitySeries::new().snapshot_json_with_owned_statistics(&root, &completed);
+        assert_eq!(owned_text, text, "completed owned statistics must use the same field encoder");
+        assert_eq!(owned_text.matches("\"tool_statistics\":").count(), 1);
+        for unchanged in [Value::Null, json!({"keep":17}), json!({"codex":null})] {
+            assert_eq!(ActivitySeries::new().snapshot_json_with_owned_statistics(&unchanged, &completed), unchanged.to_string());
+        }
+        let mut rejected = OwnedStatistics::new(None, true, 0, 0);
+        rejected.observe("fixture", &call("tool", None, None, &[]));
+        assert!(rejected.finish_for_snapshot().is_none(), "rejected reducers cannot create encoder input");
+        let disabled = OwnedStatistics::new(None, false, 0, 0).finish_for_snapshot().unwrap();
+        let value: Value = serde_json::from_str(&ActivitySeries::new().snapshot_json_with_owned_statistics(&root, &disabled)).unwrap();
+        assert_eq!(value["codex"]["tool_statistics"], json!([]));
+
     }
 }

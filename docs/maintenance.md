@@ -336,6 +336,10 @@ Projection::row 現在同步使用相同 RowSummary, row_with_summary 只把已�
 
 此處只是已存在且含 selected calls 的兩個來源, 並未重跑 deferred metadata-only source experiment, 尚未涵蓋無 ID / 額外無 calls 來源、外部 thread-name enrichment、完整 partial-history / worker metadata ownership, 不得把 fixture header 合併當作全部來源策略已完成
 
+OwnedStatistics 已由 cfg(test) 移至正常編譯範圍, 演算法、exact duration / percentile 與 caller-provided logical budget 不變, finish_for_snapshot 只在完整成功後產生 CompletedStatistics, snapshot_json_with_owned_statistics 透過原相同 serializer 注入 activity / tool series 與單一 tool_statistics 欄位, 不接受 arbitrary Value 作為完成證明
+
+正式 snapshot 仍使用原 borrowed ToolStatistics, 新 encoder 入口尚未接到 worker, 不以移出 cfg(test) 宣稱 production candidate 已啟用, CompletedStatistics 持有完成後的統計 JSON 而非 calls, 其輸出 allocation 與 retained duration / key logical charge 不等於完整 RSS 上限
+
 ### 共同 capture / mutation 邊界設計草案
 
 此設計起於 `2427f5e` 的 producer 與 server reader 稽核, 共同 publication 部分已實作並通過限定範圍驗證, 下列跨輪 capture / mutation 部分仍為待整合規格, 不視為全部架構驗收
