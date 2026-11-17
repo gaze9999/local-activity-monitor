@@ -1269,3 +1269,11 @@ Linux / Rust 1.100.0 完整 service 單輪 390 項通過 (64.71 秒), 結束後�
 來源稽核確認此 counter 是事件版本, settings/result/completed 分開寫入後才 signal, 不是共同 atomic capture 或僅內容變更的 revision, 詳見 maintenance 的查詢 producer 邊界
 
 Linux / Rust 1.100.0 針對性 2 項通過 (0.00 秒), 完整 service 單輪 392 項通過 (74.78 秒), 無 runtime / endpoint / query 次數變更, 未重跑前輪已通過的 HTTP 226 項, 未重試 browser 阻擋項目, 尚未驗證跨輪一致性或原生 Windows / macOS
+
+### Active / history producer 稽核與同 key mutation
+
+依 `4caa994` 追查 Session read/reset、Projection consume/context/complete、retire / error bound、checkpoint save/conflict 與 history refresh, 更新 maintenance 的 mutation owner 表, 未加入 revision 或切換架構
+
+新增 `payload_mutations_preserve_selection_keys_and_latest_timestamp` 單輪通過 (0.01 秒), 真實 consume producer 在 call ID / time / 數量與 Projection updated 不變時接受錯誤回覆及相同時間戳的 model / effort 修改, 同時驗證有效無 payload 行與 malformed 的回傳值 / 狀態邊界
+
+此輪只新增測試與文件, 無 runtime 變更, 未重跑前輪 service 392 項或 HTTP 226 項, 不把針對性通過擴稱為 source replacement、儲存 rollback、跨輪取消或原子發布驗收, browser 阻擋項目未重試

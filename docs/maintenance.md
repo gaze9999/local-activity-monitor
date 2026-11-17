@@ -224,3 +224,23 @@ Cloud 測試不取代 Windows watcher、真實來源、SSE、Host/Origin 與持�
 - settings、result、completed 各自上鎖, 寫入釋放鎖後才增加 version, 現有 before/after version 相同不能作為共同 atomic capture 的證據, 這是來源碼生命週期限制, 未以此宣稱已觀察到錯誤快照
 
 後續一致性設計不可直接重用此 counter 當內容 revision, 也不可為了取消較少 candidate 而移除 cached publish 的 completion / wake 行為, 必須另外決定與測試 settings/result 的完整 mutation 邊界, 此輪保留全部 runtime 行為
+
+### Active / history mutation producer 稽核
+
+依 `4caa994` 的同步流程盤點, 下列為已讀取的實際修改點與驗收缺口, 尚未加入新 revision
+
+| Producer / reader | 目前行為 | 跨輪一致性要求 |
+| --- | --- | --- |
+| `Session::read` / `capture_anchor` | restore 可替換整個 Projection, identity / 縮短 / prefix 或同長度修改會 reset, 讀取完整行後 consume, capture_anchor 設定 checkpoint_dirty | 讀取回傳 changed 也涵蓋原始位元組與 reset, 不能直接當語意內容 revision, 未完成行與 malformed 仍須保留 cursor 狀態 |
+| `Projection::consume` / `Call::complete` | 同 call ID 的 output 可改 completed、failure、檔案位元組、SQL / MCP 結果與 response locator | call ID、call time、數量皆相同仍可能改變統計與明細, consume 的 bool 是解析結果, 不是 mutation 判斷 |
+| `Projection::context` | when >= context_at 可替換 model / effort / execution, 相同 timestamp 可接受後到資料 | 不可只依 updated 的最大時間戳決定 candidate 有效性 |
+| `retire_call` / `Collector::bound_errors` | 修剪呼叫、保留待寫 observations、限制錯誤 preview, 可在沒有新 timestamp 時改變集合 | revision 需涵蓋 retention 與工作集調整, 保留既有未儲存資料保護 |
+| `Checkpoints::save` | dirty / retired 且有 anchor 才產生 VersionedAnchor revision+1, 成功且非 conflict 才更新 signature 並清除 dirty / pending | checkpoint signature 是已提交來源的版本, 不涵蓋尚未成功保存的 active 修改, checkpoint_dirty 布林值不能區分兩次修改 |
+| `Store::commit_checkpoints` | Immediate transaction 檢查 expected signature, conflict source 不寫入, calls / cursor 與 observation batch 依既有 transaction 保存 | 保留 conflict / rollback 語意, 不得在失敗後替 candidate 標記成已提交 |
+| `refresh_activity` / `refresh_error_history` / `refresh_skill_history` | 從持久層更新快照使用的 retained view / error / skill 資料, error 讀取失敗保留舊值並設定讀取錯誤 | history 與健康狀態亦屬輸入, 不能只追蹤 working session 變更 |
+| `select_recent_calls` | active 部分 hash 包含路徑、call 數量、ID 與 call time | 足以描述選取用的 key, 不是整個 payload 的內容 hash |
+| `selected_detail_index_with_limit` | 另含 anchor / checkpoint signature、request / response position、workdir metadata 等 | 此明細 staging 的 token 與選取 hash 不同, 不可視為共同 windows / detail 發布版本 |
+
+最小後續設計應先區分 active 尚未保存變更、已提交 checkpoint、retained history 與設定/查詢事件四種來源, 再選擇共同 capture / mutation 邊界, 不是在任一現有 bool 或 counter 外加一層名稱即可完成
+
+已新增 producer 測試驗證同 call key / timestamp 的回覆錯誤及 context 修改, 並確認有效但無 payload 的行可回傳 true 而不修改 Projection, 此證據不代表 source replacement、transaction conflict、history refresh 或跨輪取消的完整驗收, 這些仍需依原有專項測試與後續共同發布測試分別確認

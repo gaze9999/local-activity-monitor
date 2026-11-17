@@ -5751,6 +5751,47 @@ mod log_tests {
     }
 
     #[test]
+    fn payload_mutations_preserve_selection_keys_and_latest_timestamp() {
+        let id = "00000000-0000-4000-8000-000000000001";
+        let time = "2026-11-13T01:00:00Z";
+        let mut projection = Projection::for_id(Some(id.into()));
+        let consume = |projection: &mut Projection, record: Value, offset| {
+            projection.consume(record.to_string().as_bytes(), offset, true, true,
+                &BTreeMap::new(), McpSwitches::default(), true, true, CommandSwitches::default())
+        };
+        assert!(consume(&mut projection, json!({"timestamp":time,"type":"response_item",
+            "payload":{"type":"function_call","name":"exec_command","call_id":"a","arguments":"{}"}}), 0));
+        assert!(consume(&mut projection, json!({"timestamp":time,"type":"turn_context",
+            "payload":{"model":"before","reasoning_effort":"low"}}), 100));
+        let selection = |projection: &Projection| projection.calls.iter()
+            .map(|(id, call)| (id.clone(), call.time)).collect::<Vec<_>>();
+        let keys = selection(&projection);
+        let updated = projection.updated();
+        assert!(!projection.calls["a"].has_failure());
+        assert!(consume(&mut projection, json!({"timestamp":time,"type":"response_item",
+            "payload":{"type":"function_call_output","call_id":"a","output":{"exit_code":2,"output":"fixture failure"}}}), 200));
+        assert_eq!(selection(&projection), keys);
+        assert_eq!(projection.updated(), updated);
+        assert_eq!(projection.calls["a"].failure_event(id, "a").unwrap()["exit_code"], 2);
+        assert!(projection.dirty_calls.contains("a"));
+        let before = serde_json::to_value(&projection).unwrap();
+        assert!(consume(&mut projection, json!({"timestamp":time,"type":"turn_context",
+            "payload":{"model":"after","reasoning_effort":"high"}}), 300));
+        let after = serde_json::to_value(&projection).unwrap();
+        assert_eq!(before["model"], "before");
+        assert_eq!(after["model"], "after");
+        assert_eq!(after["effort"], "high");
+        assert_eq!(selection(&projection), keys);
+        assert_eq!(projection.updated(), updated);
+        // consume reports valid framing, not whether payload state changed.
+        assert!(consume(&mut projection, json!({}), 400));
+        assert_eq!(serde_json::to_value(&projection).unwrap(), after);
+        assert!(!projection.consume(b"{", 500, true, true, &BTreeMap::new(),
+            McpSwitches::default(), true, true, CommandSwitches::default()));
+        assert_eq!(serde_json::to_value(&projection).unwrap(), after);
+    }
+
+    #[test]
     fn snapshot_source_settings_capture_matches_existing_reads_and_owns_maps() {
         let home = tempfile::tempdir().unwrap();
         let collector = Collector::new(home.path().join("monitoring"), true, None);
