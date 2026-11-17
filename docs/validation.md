@@ -2338,3 +2338,13 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, `mcp_json_string_edits_preserve_types_and
 Linux / Rust 1.100.0 / 原 Cargo.lock, `sessions::skill_detail::tests` 通過 5 項、439 項未選取, 1.76 秒, 包含既有 Unicode 與文件位元組上限回歸, git diff --check 通過
 
 此項未驗證 1000-entry 掃描預算的完整排列、競態檔案異動或跨平台目錄列舉, 未新增 API 查詢或重跑完整套件, 原停止候選與 dirty files 保留
+
+### MCP JSON 遮蔽調整後的模組回歸
+
+基準 `0aec883`, 針對 `099e71e` 調整涉及的兩個模組補做完整模組 filter, 不包含 session-error 停止 fixture 或完整服務套件
+
+- `sessions::details::tests`: 18 項通過、426 項未選取, 0.21 秒, 涵蓋 credential / structured / SQL 遮蔽、record 異動拒絕、retained Skill framing 與 byte boundary
+- `sessions::mcp_documents::tests`: 8 項通過、436 項未選取, 2.03 秒, 涵蓋 JSON 字串編輯、YAML 基礎規則、parser 失敗 / timeout / oversized output、nested masking、文件名稱與設定順序
+- Node 已可用, Node preview 測試未因缺少執行檔而提早返回, 使用合成 module loader, 不宣稱驗證真實 js-yaml 套件
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 無新增 production 或 fixture 變更, git diff --check 通過, 未執行瀏覽器、跨平台或 production candidate 最終發布驗收
