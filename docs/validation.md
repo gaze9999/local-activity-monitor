@@ -1666,3 +1666,15 @@ Linux / Rust 1.100.0 / 原 Cargo.lock 下, `cargo test --locked --manifest-path 
 此實驗僅涵蓋單來源無衝突 winner 與 file reducer, 未串接完整 worker candidate / send_replace、跨來源 winner、active mutation revision、history / settings 取消、所有摘要或明細發布, 亦未量測 allocation 或驗證超過 16 MiB 的服務行為, 不把 Option 擁有者釋放當作平台資源量測
 
 Linux / Rust 1.100.0 / 原 Cargo.lock, 新增 targeted 測試通過 1 筆、414 筆未選取, 加入實際 snapshots oracle 後的最終測試耗時 0.52 秒, 未執行 HTTP、完整套件或延後測試
+
+### Candidate encoded payload 實驗未通過
+
+在 `6d4c28d` 後嘗試擴充既有 600 calls fixture, 每筆加入 32 KiB 的額外 JSON 欄位, 目標是比較原 16 MiB staging 與 test-only candidate, 但未取得有效結果
+
+- 第一次失敗為 projection failed, fixture 使用非 JSON signature, 不符合既有 VersionedAnchor 驗證
+- 改為保留原 anchor 並增加 revision 後, 第二次仍為 projection failed, 來源檢查確認 Call 使用 deny_unknown_fields, 額外欄位不是可忽略 padding
+- 兩次 targeted 測試均失敗, 耗時分別 1.91 / 1.97 秒, 失敗不能證明 production 容量缺陷或 candidate 可完成大型輸入
+
+已停止此檢查並撤回本輪未提交的測試擴充, 保留既有通過的單來源測試與原 runtime, 未放寬 schema、上限或 oracle, 兩份失敗記錄保留, 不自動重跑此大型輸入實驗
+
+後續若恢復此項驗證, 應沿既有 detail fixture 使用合法 JSON 空白擴大 encoded payload, 先確認 fixture 解碼有效再評估 staging, 本輪未執行此替代方案, 未量測 allocation 或宣稱超過 16 MiB 驗收
