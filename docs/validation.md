@@ -2160,3 +2160,20 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, error targeted 7 項通過、426 項未�
 本輪來源再核對 LAM main `5c03daf`、workbench-workspace main `ce972bd`, 與前輪相同, consumer pin 未變更
 
 此步僅完成渲染入口, candidate 尚未串接 error windows, session error source-order 與 logs / API guard 尚未完成, volatile source.checked_at 不當成穩定 payload revision, production caller / fallback 保留, deferred checks 未執行
+
+### Candidate logs 與 retained API owner guards
+
+基準 `c5360e2`, logs 沿既有 Core / Desktop observation revision 擴充, 不增加重複計數器, API 只為實際供同步 snapshots 讀取的 retained queue 建立 revision
+
+- Core 接受 log batch 時更新, Desktop 在成功保存後採用新 log 時更新, disable / rescan 清空沿 owner 方法, failed save 保留 pending batch、舊內容與 revision
+- 新 log-only fixture 經實際 Core SQLite refresh 與 Desktop refresh / commit, errors / SQL 保持空, 驗證新內容取消、pending 未採用不取消、清空取消及重複空 clear 不取消
+- 無新資料 refresh 的 checked_at 仍可更新, fixture 明確斷言 Desktop checked_at 變更且 guard 仍有效, 未將 volatile source report 當成穩定 payload
+- model_api::collect 只新增回報 accepted mutation 的 bool, 事件仍依 Desktop 再 Core 接收, 原 dedup、1000 筆上限、同時間 arrival winner 與較舊事件拒絕規則保留, Collector 四個 retained clear 位置與唯一 collect 位置經實際 owner
+- 新 API fixture 驗證 pending queue 不取消、真正採用取消、duplicate / missing ID 不取消、清空取消及空 collect / clear 不取消, 原 retention fixtures 另斷言插入 / eviction 回報 true, 空批次 / 較舊或重複事件回報 false
+- 首次 log-only 測試編譯因重複使用消耗型 CandidateInputs::validate 的 guard 而出現 E0382, 修正 fixture 在各變更前重新 capture, 未改 guard 的消耗型介面或失敗行為
+
+本輪來源再核對 LAM main `5c03daf`、workbench-workspace main `ce972bd`, 與前輪相同, consumer pin 未變更
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, owner targeted 7 項通過、428 項未選取, 0.03 秒, Model API 模組 6 項通過、429 項未選取, 0.24 秒, 增補 bool 斷言後 retention targeted 2 項通過、433 項未選取, 0.23 秒, Desktop failed-storage targeted 1 項通過、434 項未選取, 0.03 秒, cargo check 通過並維持 8 個既有 warnings
+
+此步沒有新增 API 查詢或設定讀取, 未串接 candidate error / API windows, session error source-order、同批 detail index、volatile source finalization 與完整資源 / 平台驗收保留, production aggregation / fallback 與 telemetry 時機不變, deferred checks 未執行

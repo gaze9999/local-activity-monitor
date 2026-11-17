@@ -100,6 +100,7 @@ pub(super) struct CandidateInputs {
     project_details_revision: u64,
     mcp_catalog_revision: u64,
     diagnostic_observations: (u64, u64),
+    api_events_revision: u64,
     overflow_details_revision: u64,
     queries: [(Arc<account::Shared>, u64); 8],
     sources: SnapshotSourceSettings,
@@ -132,6 +133,7 @@ impl CandidateInputs {
             project_details_revision:collector.project_details_revision.value()?,
             mcp_catalog_revision:collector.mcp_catalog_revision.value()?,
             diagnostic_observations:(collector.core.observation_revision.value()?, collector.desktop.observation_revision.value()?),
+            api_events_revision:collector.api_events_revision.value()?,
             overflow_details_revision:collector.overflow_details_revision.value()?,
             queries:Self::queries(collector).into_iter().map(|source|
                 Some((Arc::clone(source), source.content_revision()?)))
@@ -151,6 +153,7 @@ impl CandidateInputs {
             && collector.mcp_catalog_revision.value() == Some(self.mcp_catalog_revision)
             && collector.core.observation_revision.value() == Some(self.diagnostic_observations.0)
             && collector.desktop.observation_revision.value() == Some(self.diagnostic_observations.1)
+            && collector.api_events_revision.value() == Some(self.api_events_revision)
             && collector.overflow_details_revision.value() == Some(self.overflow_details_revision)
             && Self::sessions_match(&self.active, &collector.files)
             && Self::sessions_match(&self.overflow, &collector.overflow_files)
@@ -264,6 +267,87 @@ mod tests {
         }
         assert_eq!(collector.files[&path].projection.calls.len(), 1);
         (temporary, collector, path)
+    }
+
+    #[test]
+    fn candidate_inputs_track_retained_api_adoption_not_pending_queues() {
+        let (_temporary, mut collector, _) = fixture();
+        let stopped = AtomicBool::new(false);
+        let capture = |collector: &Collector| CandidateInputs::capture(collector, true, &stopped).unwrap();
+        let event = json!({"observation_id":"fixture","timestamp":"2026-11-13T01:00:00Z","event_kind":"request","status":"returned"});
+        let guard = capture(&collector);
+        collector.desktop.api_events.push(event.clone());
+        collector.core.api_events.push_back(event.clone());
+        assert!(guard.validate(&collector, true, &stopped).is_some());
+        let guard = capture(&collector);
+        collector.collect_api_events();
+        assert_eq!(collector.api_events.len(), 1);
+        assert!(collector.core.api_events.is_empty() && collector.desktop.api_events.is_empty());
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        collector.core.api_events.push_back(event);
+        collector.desktop.api_events.push(json!({"missing_id":true}));
+        collector.collect_api_events();
+        assert_eq!(collector.api_events.len(), 1);
+        assert!(guard.validate(&collector, true, &stopped).is_some());
+        let guard = capture(&collector);
+        collector.clear_api_events();
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        collector.clear_api_events();
+        collector.collect_api_events();
+        assert!(guard.validate(&collector, true, &stopped).is_some());
+    }
+
+    #[test]
+    fn candidate_inputs_track_log_only_acceptance_and_clear() {
+        let (temporary, mut collector, _) = fixture();
+        let stopped = AtomicBool::new(false);
+        let reference = now();
+        let capture = |collector: &Collector| CandidateInputs::capture(collector, true, &stopped).unwrap();
+        let db = rusqlite::Connection::open(temporary.path().join("logs_candidate.sqlite")).unwrap();
+        db.execute_batch("CREATE TABLE logs(id INTEGER PRIMARY KEY, ts REAL, level TEXT, target TEXT)").unwrap();
+        db.execute("INSERT INTO logs VALUES(1,?,'INFO','codex_core')", [reference.timestamp()]).unwrap();
+        let guard = capture(&collector);
+        collector.refresh_core(super::super::core_logs::discover(temporary.path()), reference);
+        assert_eq!(collector.core.logs.len(), 1);
+        assert!(collector.core.errors.is_empty() && collector.core.sql.is_empty());
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        collector.refresh_core(super::super::core_logs::discover(temporary.path()), reference + chrono::Duration::seconds(1));
+        assert!(guard.validate(&collector, true, &stopped).is_some());
+        let guard = capture(&collector);
+        collector.core.clear_logs();
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        collector.core.clear_logs();
+        assert!(guard.validate(&collector, true, &stopped).is_some());
+
+        let logs = temporary.path().join("desktop-logs");
+        std::fs::create_dir(&logs).unwrap();
+        std::fs::write(logs.join("codex-desktop-candidate.log"),
+            format!("{} INFO [codex] fixture\n", reference.to_rfc3339())).unwrap();
+        let roots = [super::super::desktop::DesktopRoot {base:temporary.path().to_path_buf(),path:logs}];
+        let guard = capture(&collector);
+        assert_eq!(collector.desktop.refresh(&roots, reference).live.len(), 1);
+        assert!(guard.validate(&collector, true, &stopped).is_some());
+        let guard = capture(&collector);
+        collector.desktop.commit(&mut collector.checkpoints, reference).unwrap();
+        assert_eq!(collector.desktop.logs.len(), 1);
+        assert!(collector.desktop.errors.is_empty() && collector.desktop.sql.is_empty());
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        let previous_checked_at = collector.desktop.source["checked_at"].clone();
+        collector.desktop.refresh(&roots, reference + chrono::Duration::seconds(1));
+        collector.desktop.commit(&mut collector.checkpoints, reference + chrono::Duration::seconds(1)).unwrap();
+        assert_ne!(collector.desktop.source["checked_at"], previous_checked_at);
+        assert!(guard.validate(&collector, true, &stopped).is_some());
+        let guard = capture(&collector);
+        collector.desktop.clear_logs();
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        collector.desktop.clear_logs();
+        assert!(guard.validate(&collector, true, &stopped).is_some());
     }
 
     #[test]

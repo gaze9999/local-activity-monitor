@@ -613,7 +613,7 @@ impl Monitor {
         };
                 collector.force_replay = was_active;
                 let reactivated = was_active;
-                if reactivated { collector.api_events.clear(); }
+                if reactivated { collector.clear_api_events(); }
                 was_active = true;
                 let watch_failed = Arc::new(AtomicBool::new(false));
                 let worktree_dirty = Arc::new(AtomicBool::new(true));
@@ -803,7 +803,7 @@ impl Monitor {
                     collector.core.capture_api = model_api_enabled;
                     collector.desktop.set_capture_api(model_api_enabled);
                     if errors_reenabled || sqlite_reenabled || model_api_reenabled {
-                        collector.api_events.clear();
+                        collector.clear_api_events();
                         rescan_core_logs = true; rescan_desktop_logs = true;
                         clear_core_for_errors = true; clear_desktop_for_errors = true;
                     }
@@ -1024,16 +1024,16 @@ impl Monitor {
                     let logs_changed = collector.logs_enabled != logs_enabled;
                     collector.logs_enabled = logs_enabled;
                     if logs_changed && logs_enabled {
-                        collector.api_events.clear();
+                        collector.clear_api_events();
                         rescan_core_logs = true;
                         rescan_desktop_logs = true;
                     }
                     if !logs_enabled {
-                        collector.core.logs.clear();
-                        collector.desktop.logs.clear();
+                        collector.core.clear_logs();
+                        collector.desktop.clear_logs();
                     }
                     if !model_api_enabled {
-                        collector.api_events.clear();
+                        collector.clear_api_events();
                         collector.core.api_events.clear();
                         collector.desktop.api_events.clear();
                     }
@@ -1042,7 +1042,7 @@ impl Monitor {
                         rescan_core_logs = false;
                         *core_source_writer.write().unwrap_or_else(|error| error.into_inner()) = None;
                         if clear_core_for_errors {
-                            collector.core.logs.clear(); collector.core.clear_observations();
+                            collector.core.clear_logs(); collector.core.clear_observations();
                             collector.core.api_events.clear();
                             clear_core_for_errors = false;
                         }
@@ -1052,12 +1052,12 @@ impl Monitor {
                         rescan_desktop_logs = false;
                         desktop_source_writer.write().unwrap_or_else(|error| error.into_inner()).clear();
                         if clear_desktop_for_errors {
-                            collector.desktop.logs.clear(); collector.desktop.clear_observations(); collector.desktop.api_events.clear();
+                            collector.desktop.clear_logs(); collector.desktop.clear_observations(); collector.desktop.api_events.clear();
                             clear_desktop_for_errors = false;
                         }
                         rescan_ready = true;
                     }
-                    model_api::collect(&mut collector.api_events, &mut collector.core.api_events, &mut collector.desktop.api_events);
+                    collector.collect_api_events();
                     let mut after = collector.desktop.source.clone();
                     if let Some(source) = after.as_object_mut() {
                         source.remove("checked_at");
@@ -2583,6 +2583,7 @@ struct Collector {
     core: core_logs::Core,
     desktop: desktop::DesktopCollector,
     api_events: std::collections::VecDeque<Value>,
+    api_events_revision: project::ContentRevision,
     schedules: Value,
     plugins: Value,
     plugin_report: Option<Value>,
@@ -2936,6 +2937,7 @@ impl Collector {
             core: core_logs::Core::new(enabled),
             desktop: desktop::DesktopCollector::default(),
             api_events: std::collections::VecDeque::new(),
+            api_events_revision: project::ContentRevision::default(),
             schedules: json!({"items":[],"health":if enabled {"waiting"} else {"disabled"}}),
             plugins: json!({"items":[],"health":if enabled {"waiting"} else {"disabled"}}),
             plugin_report: None,
@@ -4787,6 +4789,17 @@ impl Collector {
     fn replace_overflow_details_ready(&mut self, ready: BTreeSet<String>) {
         if self.overflow_details_ready != ready { self.overflow_details_revision.bump(); }
         self.overflow_details_ready = ready;
+    }
+
+    fn clear_api_events(&mut self) {
+        if !self.api_events.is_empty() { self.api_events_revision.bump(); }
+        self.api_events.clear();
+    }
+
+    fn collect_api_events(&mut self) {
+        if model_api::collect(&mut self.api_events, &mut self.core.api_events, &mut self.desktop.api_events) {
+            self.api_events_revision.bump();
+        }
     }
 
     fn replace_mcp_catalog(&mut self, catalog: BTreeMap<String, Option<source_introduction::Description>>) -> bool {

@@ -270,7 +270,7 @@ impl From<rusqlite::Error> for ReadError {
 }
 
 pub struct Core {
-    // Accepted error/SQL queue changes only; not source health, logs or API state.
+    // Accepted log/error/SQL queue changes only; not source health or API state.
     pub(super) observation_revision: super::project::ContentRevision,
     source: Option<Source>,
     cursor: Option<i64>,
@@ -351,6 +351,11 @@ impl Core {
         true
     }
 
+    pub(super) fn clear_logs(&mut self) {
+        if !self.logs.is_empty() { self.observation_revision.bump(); }
+        self.logs.clear();
+    }
+
     pub(super) fn clear_observations(&mut self) {
         if !self.errors.is_empty() || !self.sql.is_empty() { self.observation_revision.bump(); }
         self.errors.clear();
@@ -420,13 +425,14 @@ impl Core {
         self.read_lines += batch.read;
         self.parsed += batch.parsed;
         self.unsupported += batch.unsupported;
+        let logs_changed = !batch.logs.is_empty();
         for value in batch.logs {
             if self.logs.len() == LOG_LIMIT {
                 self.trimmed += 1;
             }
             push(&mut self.logs, value, LOG_LIMIT);
         }
-        if (self.capture_errors && !batch.errors.is_empty()) || (self.capture_sql && !batch.sql.is_empty()) {
+        if logs_changed || (self.capture_errors && !batch.errors.is_empty()) || (self.capture_sql && !batch.sql.is_empty()) {
             self.observation_revision.bump();
         }
         if self.capture_errors {

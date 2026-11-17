@@ -703,7 +703,7 @@ impl DesktopFile {
 #[allow(dead_code)]
 #[derive(Default)]
 pub(super) struct DesktopCollector {
-    // Accepted error/SQL queue changes only; not source health, logs or API state.
+    // Accepted log/error/SQL queue changes only; not source health or API state.
     pub(super) observation_revision: super::project::ContentRevision,
     files: std::collections::BTreeMap<PathBuf, DesktopFile>,
     cursor: usize,
@@ -760,6 +760,11 @@ impl DesktopCollector {
     pub fn bytes_read(&self) -> u64 {
         self.bytes_read
     }
+    pub(super) fn clear_logs(&mut self) {
+        if !self.logs.is_empty() { self.observation_revision.bump(); }
+        self.logs.clear();
+    }
+
     pub(super) fn clear_observations(&mut self) {
         if !self.errors.is_empty() || !self.sql.is_empty() { self.observation_revision.bump(); }
         self.errors.clear();
@@ -950,6 +955,7 @@ impl DesktopCollector {
         self.source = batch.source.clone();
         self.source["storage_health"] = "ok".into();
         self.source["storage_error"] = serde_json::Value::Null;
+        let mut observations_changed = false;
         for event in &batch.live {
             if !self
                 .logs
@@ -957,9 +963,9 @@ impl DesktopCollector {
                 .any(|item| item["content_id"] == event.log["content_id"])
             {
                 self.logs.push(event.log.clone());
+                observations_changed = true;
             }
         }
-        let mut observations_changed = false;
         for event in batch.live.iter().chain(&batch.history) {
             if let Some(sql) = event.sql.as_ref().filter(|_| batch.capture_sql) {
                 if let Some(id) = lam_history_store::sql_event_id(sql) {

@@ -259,7 +259,8 @@ pub fn summary(
 
 // One retained arrival sequence for both diagnostic sources, like Python observe_api.
 // The caller commits Desktop observations before Core observations each round.
-pub fn collect(retained: &mut VecDeque<Value>, core: &mut VecDeque<Value>, desktop: &mut Vec<Value>) {
+pub fn collect(retained: &mut VecDeque<Value>, core: &mut VecDeque<Value>, desktop: &mut Vec<Value>) -> bool {
+    let mut changed = false;
     for event in desktop.drain(..).chain(core.drain(..)) {
         let Some(id) = event["observation_id"].as_str() else { continue };
         if retained.iter().any(|old| old["observation_id"].as_str() == Some(id)) {
@@ -275,7 +276,9 @@ pub fn collect(retained: &mut VecDeque<Value>, core: &mut VecDeque<Value>, deskt
             retained.remove(index);
         }
         retained.push_back(event);
+        changed = true;
     }
+    changed
 }
 
 #[cfg(test)]
@@ -292,18 +295,18 @@ mod tests {
         let mut retained = VecDeque::new();
         let mut core = VecDeque::from([api_event("a", timestamp, "request")]);
         let mut desktop = vec![api_event("z", timestamp, "connection")];
-        collect(&mut retained, &mut core, &mut desktop);
+        assert!(collect(&mut retained, &mut core, &mut desktop));
         assert!(core.is_empty() && desktop.is_empty());
         assert_eq!(retained.iter().map(|v| v["observation_id"].as_str().unwrap()).collect::<Vec<_>>(), ["z", "a"]);
         core.push_back(api_event("a", timestamp, "retry"));
         desktop.push(api_event("b", timestamp, "retry"));
-        collect(&mut retained, &mut core, &mut desktop);
+        assert!(collect(&mut retained, &mut core, &mut desktop));
         let value = summary(&retained, None, true, json!({}));
         assert_eq!(value["events"].as_array().unwrap().iter().map(|v| v["observation_id"].as_str().unwrap()).collect::<Vec<_>>(), ["z", "a", "b"]);
         assert_eq!(value["requests"], 1);
         assert_eq!(value["connections"], 1);
         assert_eq!(value["retry_events"], 1);
-        collect(&mut retained, &mut core, &mut desktop);
+        assert!(!collect(&mut retained, &mut core, &mut desktop));
         assert_eq!(summary(&retained, None, true, json!({})), value);
     }
 
@@ -313,9 +316,9 @@ mod tests {
         let mut retained = VecDeque::new();
         let mut core = (0..1000).map(|i| api_event(&format!("a{i:04}"), timestamp, "request")).collect();
         let mut desktop = Vec::new();
-        collect(&mut retained, &mut core, &mut desktop);
+        assert!(collect(&mut retained, &mut core, &mut desktop));
         desktop.push(api_event("z", timestamp, "connection"));
-        collect(&mut retained, &mut core, &mut desktop);
+        assert!(collect(&mut retained, &mut core, &mut desktop));
         assert_eq!(retained.len(), 1000);
         assert_eq!(retained.front().unwrap()["observation_id"], "a0001");
         assert_eq!(retained.back().unwrap()["observation_id"], "z");
@@ -324,11 +327,11 @@ mod tests {
         assert_eq!(value["connections"], 1);
         desktop.push(api_event("old", "2026-11-11T00:00:00Z", "retry"));
         core.push_back(api_event("a0001", timestamp, "retry"));
-        collect(&mut retained, &mut core, &mut desktop);
+        assert!(!collect(&mut retained, &mut core, &mut desktop));
         assert_eq!(summary(&retained, None, true, json!({})), value);
         retained.clear();
         core.push_back(api_event("a0001", timestamp, "request"));
-        collect(&mut retained, &mut core, &mut desktop);
+        assert!(collect(&mut retained, &mut core, &mut desktop));
         assert_eq!(retained.len(), 1);
     }
 

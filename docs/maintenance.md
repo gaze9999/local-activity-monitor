@@ -407,11 +407,13 @@ MCP summary 已與同步 snapshots 共用既有來源過濾與 catalog augmentat
 
 Candidate 已在 call observations 後合併 Core / Desktop SQL queues, MCP diagnostics 依 canonical thread / call 順序套用 tool failures, 再接 Core 與 Desktop errors, 不沿 ordered row preview 的 presentation slots 決定同時間 diagnostic winner
 
-Core / Desktop observation revision 僅涵蓋 accepted errors / SQL queues 與 rescan clear, Core 沿原 refresh 接受事件, Desktop 沿原持久化成功後採用, save failure 不提升 revision, unchanged refresh / 空 clear 不取消, logs、source health、API queues 與完整 diagnostic publication 不在此 revision 的覆蓋範圍
+Core / Desktop observation revision 涵蓋 accepted logs / errors / SQL queues 與 disable / rescan clear, Core 沿原 refresh 接受事件, Desktop 沿原持久化成功後採用, save failure 不提升 revision, unchanged refresh / 空 clear 不取消, source health、pending API queues 與完整 diagnostic publication 不在此 revision 的覆蓋範圍
+
+Candidate 另核對實際供 snapshots 讀取的 retained API queue revision, Desktop 再 Core 的 arrival / dedup / eviction 次序不變, 僅真正接受事件或清除非空 queue 更新 revision, pending API queues 在採用前不是 snapshot 輸入, 不另外為它們增加 revision
 
 Error windows 已分離為可接受 owned tool failures 的 render_error_windows_captured, production 經原 wrapper 提供一次性 reducer, 仍在原來源設定 / journal 準備後才執行 reducer, 其餘 rendering 區段未改, candidate 尚未呼叫此入口
 
-Desktop source.checked_at 在無新事件的 refresh 也可能改變, 不能將完整 source report 當成跨輪穩定 payload revision, session error 來源順序、logs / API guards 與 source metadata 的同步 finalization 邊界須先確立, 不先替 candidate 加入容易反覆失效的 volatile report guard
+Desktop source.checked_at 在無新事件的 refresh 也可能改變, 不能將完整 source report 當成跨輪穩定 payload revision, session error 來源順序與 source metadata 的同步 finalization 邊界仍須確立, logs / retained API owner guards 已建立, 不先替 candidate 加入容易反覆失效的 volatile report guard
 
 完整 error windows 與正式發布仍待串接, raw failure components 不在此步套用名稱, 未因此重跑 deferred 額外 metadata-only / 無 ID 來源實驗
 
