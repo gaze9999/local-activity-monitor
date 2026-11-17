@@ -471,7 +471,7 @@ fn read_snapshot(
     let query = "SELECT count(*), min(timestamp), sum(http_attempts), sum(max(http_attempts-1,0)), sum(input_tokens), sum(output_tokens), count(input_tokens), count(output_tokens), sum(request_bytes), sum(response_bytes), sum(response_unknown_attempts), avg(latency_ms) FROM jev_events WHERE timestamp>=?";
     let mut summary = transaction.query_row(query, [cutoff], |row| {
         let count:i64 = row.get(0)?; let since:Option<String> = row.get(1)?; let latency:Option<f64> = row.get(11)?;
-        Ok(json!({"calls":count,"since":since.as_deref().and_then(lam_history_store::parse_utc_stamp).map(super::project::stamp),"http_attempts":row.get::<_,Option<i64>>(2)?.unwrap_or(0),"retries":row.get::<_,Option<i64>>(3)?.unwrap_or(0),"input_tokens":row.get::<_,Option<i64>>(4)?,"output_tokens":row.get::<_,Option<i64>>(5)?,"input_known_calls":row.get::<_,i64>(6)?,"output_known_calls":row.get::<_,i64>(7)?,"input_unknown_calls":count-row.get::<_,i64>(6)?,"output_unknown_calls":count-row.get::<_,i64>(7)?,"request_body_bytes":row.get::<_,Option<i64>>(8)?.unwrap_or(0),"known_response_bytes":row.get::<_,Option<i64>>(9)?.unwrap_or(0),"response_unknown_attempts":row.get::<_,Option<i64>>(10)?.unwrap_or(0),"average_latency_ms":latency.map(|value|value.round() as i64)}))
+        Ok(json!({"calls":count,"since":since.as_deref().and_then(lam_history_store::parse_utc_stamp).map(super::project::stamp),"http_attempts":row.get::<_,Option<i64>>(2)?.unwrap_or(0),"retries":row.get::<_,Option<i64>>(3)?.unwrap_or(0),"input_tokens":row.get::<_,Option<i64>>(4)?,"output_tokens":row.get::<_,Option<i64>>(5)?,"input_known_calls":row.get::<_,i64>(6)?,"output_known_calls":row.get::<_,i64>(7)?,"input_unknown_calls":count-row.get::<_,i64>(6)?,"output_unknown_calls":count-row.get::<_,i64>(7)?,"request_body_bytes":row.get::<_,Option<i64>>(8)?.unwrap_or(0),"known_response_bytes":row.get::<_,Option<i64>>(9)?.unwrap_or(0),"response_unknown_attempts":row.get::<_,Option<i64>>(10)?.unwrap_or(0),"average_latency_ms":latency.map(|value|value.round_ties_even() as i64)}))
     })?;
     #[cfg(test)]
     after_summary();
@@ -676,6 +676,41 @@ mod tests {
             snapshot(home.path(), "1h", reference, true)["summary"]["calls"],
             0
         );
+    }
+
+    #[test]
+    fn average_latency_rounds_half_to_even_and_preserves_missing_values() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join("monitoring")).unwrap();
+        let database = home.path().join("jev.sqlite");
+        let db = Connection::open(&database).unwrap();
+        db.execute_batch("CREATE TABLE jev_events(timestamp TEXT,status TEXT,http_attempts INTEGER,input_tokens INTEGER,output_tokens INTEGER,request_bytes INTEGER,response_bytes INTEGER,response_unknown_attempts INTEGER,latency_ms INTEGER,metadata TEXT)").unwrap();
+        fs::write(home.path().join("monitoring/jev-monitor.json"),
+            json!({"version":1,"enabled":true,"database":database}).to_string()).unwrap();
+        let reference = lam_history_store::parse_utc_stamp("2026-11-13T12:00:00Z").unwrap();
+        for (values, expected) in [
+            (vec![Some(8), Some(9)], json!(8)),
+            (vec![Some(9), Some(10)], json!(10)),
+            (vec![Some(-8), Some(-9)], json!(-8)),
+            (vec![Some(-9), Some(-10)], json!(-10)),
+            (vec![Some(8), Some(8), Some(8), Some(9)], json!(8)),
+            (vec![Some(0), Some(1)], json!(0)),
+            (vec![Some(0), Some(-1)], json!(0)),
+            (vec![Some(0), Some(0)], json!(0)),
+            (vec![None, None], Value::Null),
+            (vec![], Value::Null),
+        ] {
+            db.execute("DELETE FROM jev_events", []).unwrap();
+            for latency in &values {
+                db.execute("INSERT INTO jev_events VALUES('2026-11-13T12:00:00.000Z','ok',1,1,1,1,1,0,?,'{}')", [latency]).unwrap();
+            }
+            for window in ["1h", "24h", "7d", "all"] {
+                let result = snapshot(home.path(), window, reference, true);
+                assert_eq!(result["health"], "ok");
+                assert_eq!(result["summary"]["calls"], values.len());
+                assert_eq!(result["summary"]["average_latency_ms"], expected, "{window}: {values:?}");
+            }
+        }
     }
 
     #[test]

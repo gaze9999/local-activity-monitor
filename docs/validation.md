@@ -1439,3 +1439,13 @@ watch 可能合併未讀通知, 此測試只驗證實際讀到的兩批更新, �
 在實際 read_snapshot 的 summary 後插入一筆並嘗試 COMMIT, 三種模式均回 DatabaseBusy 且保留 writer transaction, 當次 summary / statuses / recent / series 均維持 1 筆, reader 返回後已回 autocommit, 同一 pending writer 可成功 COMMIT, 下一次讀取的四項投影均為 2 筆
 
 JEV 模組單輪 7 項通過 (0.07 秒), diff 檢查通過, 本輪僅測試與文件, runtime SQL / timeout / endpoint / response 欄位與查詢次數未變, 前輪 service 401 / HTTP 226 為歷史結果, 四窗共同版本與跨輪 candidate 仍待完成
+
+### JEV 平均延遲的中點取偶捨入
+
+以 `2068448` 為基底, LAM main `5c03daf` 與 workbench-workspace main `4616074` 核對未變, Python `JevCollector.snapshot` 對 SQLite avg(latency_ms) 使用 round, 中點取偶, Rust 原先使用 round 而讓 8.5 / -8.5 變成 9 / -9
+
+實際 Python collector 的 10 組合成資料確認正負中點、非中點、正負 0.5、零、全 null 與空集合, Rust 新回歸先重現 9 與預期 8 的差異, 改成 round_ties_even 後四窗各自符合相同預期, null 與零仍分開
+
+Linux / Rust 1.100.0、原 Cargo.lock, JEV 模組單輪 8 項通過 (0.05 秒), serial HTTP 的 JEV 13 項通過 (3.85 秒), runtime diff 比較確認僅替換 average_latency_ms 的捨入運算, diff 檢查通過
+
+`/api/snapshot` 的 jev.summary 與 mcp.telemetry.jev.summary 仍使用原 jev_events / timestamp>=cutoff 查詢結果, SQL、四窗查詢次數、80 ms timeout、資料庫讀取旗標與 response 欄位未變, 未修改共同 capture 或重跑完整 service / HTTP suites
