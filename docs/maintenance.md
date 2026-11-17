@@ -363,3 +363,13 @@ selected_overflow_projections 在來源 signature 全部驗證成功後, 將 mut
 來源 LAM main `5c03daf` 的 `server.py` cache comprehension 與 `collectors.py::JevCollector.snapshot` 使用各窗獨立 connection, 沒有規定整批成功或失敗, 現行跨輪計畫也尚未決定上述外部來源失敗規格
 
 本節僅列出來源與設計選擇, 未改動 runtime, 四窗 capture 的失敗規格與 errors 範圍應在實作前確認, transaction 不跨 worker 輪次保留
+
+### 裝置資訊發布與 response-time baseline
+
+依 `0e5eec7` 與 Python main `5c03daf` 核對, Python `server.py` 在回應組裝時呼叫 `monitor.snapshot()`, 不是將 monitor 固定在四窗 cache 中, `monitor_state.py::load_device` 先在鎖外讀取 processor / GPUs / memory / fonts, 再於同一 monitor lock 內一起更新結果、device_ready 與 device_checked_at, snapshot 也使用該鎖讀取, memory / CPU 仍可另依既有週期更新
+
+Rust `main.rs` 的 font / GPU worker 各自先發布自己的結果, 再標記 DeviceCompletion 並通知更新, DeviceCompletion 僅在兩者都完成時首次設定 ready_at, `sessions/mod.rs::snapshots` 在每個 window 依 fonts → GPUs → completion 順序讀取, render 另更新 uptime / traffic / collection / memory / process usage, 不重新取得 fonts / GPUs
+
+因此單純將裝置讀取搬到四窗前, 只能減少同批 window 間的差異, 不能稱為恢復 Python 的 response-time baseline, 也不能將共同 ready_at 當作兩個結果原子發布的證據
+
+本輪保留 runtime, 後續如要對齊 Python, 須先決定裝置結果的共同發布單位、response-time 讀取與 render cache 失效條件, 同時保留初始化完成、只設定第一次完成時間、worker 通知與刻意即時 telemetry, 不能藉批次 capture 默默延後可見性, 現有 DeviceCompletion 單元測試與 idle uptime HTTP 測試不代表此整體語意已驗收
