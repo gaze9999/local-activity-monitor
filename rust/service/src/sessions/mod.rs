@@ -5864,30 +5864,52 @@ mod log_tests {
         assert_eq!(winners["call0300"], &second_key);
         // Process winner sources in reverse to show reduction is independent of
         // page arrival once canonical-fallback winners have been fixed.
-        let mut summaries = std::array::from_fn::<_,4,_>(|_| project::FileSummary::new(1000));
-        let mut observed = 0;
-        for source in sources.into_iter().rev() {
-            let ids: Vec<_> = winners.iter().filter(|(_, winner)| **winner == source)
-                .map(|(call,_)| call.clone()).collect();
-            let mut reader = collector.checkpoints.snapshot_reader().unwrap().unwrap()
-                .into_selected_checkpoint_reader(&lam_history_store::ExpectedCursor {
-                    source_key:source,signature:Some(&original.cursor.signature)}, ids).unwrap().unwrap();
-            while !reader.is_complete() {
-                let page = reader.next_page().unwrap().unwrap();
-                let projection = checkpoint::snapshot_projection(page, false).unwrap();
-                observed += projection.projection.calls.len();
-                for (summary, cutoff) in summaries.iter_mut().zip(cutoffs) {
-                    summary.observe(&projection.projection, cutoff, true, None);
+        let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool| -> Option<[Value;4]> {
+            let mut summaries = std::array::from_fn::<_,4,_>(|_| project::FileSummary::new(1000));
+            let mut observed = 0;
+            for source in sources.into_iter().rev() {
+                let ids: Vec<_> = winners.iter().filter(|(_, winner)| **winner == source)
+                    .map(|(call,_)| call.clone()).collect();
+                let mut reader = collector.checkpoints.snapshot_reader().unwrap().unwrap()
+                    .into_selected_checkpoint_reader(&lam_history_store::ExpectedCursor {
+                        source_key:source,signature:Some(&original.cursor.signature)}, ids).unwrap().unwrap();
+                while !reader.is_complete() {
+                    let page = reader.next_page().unwrap().unwrap();
+                    let projection = checkpoint::snapshot_projection(page, false).unwrap();
+                    observed += projection.projection.calls.len();
+                    for (summary, cutoff) in summaries.iter_mut().zip(cutoffs) {
+                        summary.observe(&projection.projection, cutoff, true, None);
+                    }
                 }
+                assert_eq!(store.checkpoint_signature(source).unwrap().as_deref(), Some(original.cursor.signature.as_str()));
             }
-            assert_eq!(store.checkpoint_signature(source).unwrap().as_deref(), Some(original.cursor.signature.as_str()));
-        }
-        assert_eq!(observed, 900, "duplicate losers must never reach the reducer");
-        let result = summaries.map(|summary| {
-            let (events,total,operations) = summary.finish();
-            json!({"events":events,"total":total,"operations":operations})
-        });
+            assert_eq!(observed, 900, "duplicate losers must never reach the reducer");
+            if replace_completed_source {
+                let mut changed = second_cursor.clone();
+                let mut signature: Value = serde_json::from_str(&changed.signature).unwrap();
+                signature["revision"] = json!(signature["revision"].as_u64().unwrap() + 1);
+                changed.signature = signature.to_string();
+                store.save_checkpoints(&[changed], &[], &[]).unwrap();
+            }
+            // Recheck every used source after all reducers are complete, not
+            // only the source whose page was just consumed.
+            let validation = collector.checkpoints.snapshot_reader().ok().flatten()?;
+            for source in sources {
+                if validation.checkpoint_signature(source).ok().flatten().as_deref()
+                    != Some(original.cursor.signature.as_str()) { return None; }
+            }
+            let result = summaries.map(|summary| {
+                let (events,total,operations) = summary.finish();
+                json!({"events":events,"total":total,"operations":operations})
+            });
+            Some(result)
+        };
+        let result = reduce(&mut store, false).unwrap();
         assert_eq!(result, expected);
+        assert!(reduce(&mut store, true).is_none(), "a source changed after its own validation");
+        assert_eq!(result, expected, "previously completed output is immutable");
+        store.save_checkpoints(std::slice::from_ref(&second_cursor), &second_calls, &[]).unwrap();
+        assert_eq!(reduce(&mut store, false).unwrap(), expected);
         collector.updated = Some(reference);
         let baseline = collector.snapshots("ok", "ok", 1);
         for index in 0..4 {

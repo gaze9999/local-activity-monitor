@@ -1708,3 +1708,13 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, fail-before 耗時 0.51 秒, test-only �
 此 fixture 固定為單一已知 thread 與 canonical fallback, 不是通用 thread identity / winner planner, 也未證明 Python 完整來源 first-insertion slots、metadata-only 來源、來源檔案 identity、跨來源變更取消或完整 worker 發布, production 與原 oracle 均未修改
 
 Linux / Rust 1.100.0 / 原 Cargo.lock, 新 targeted 測試 1 筆通過、415 筆未選取, 耗時 0.56 秒, 未重跑大型 padding、HTTP 或其他延後檢查
+
+### 兩來源完成後重新驗證
+
+沿 `459b9c7` 的兩來源 fixture, 在全部 pages 與各來源當下驗證完成後, 透過真實 checkpoint store 更新先處理來源的合法 VersionedAnchor revision, 先重現只逐來源即時檢查仍回傳結果的缺口
+
+Test-only candidate 改為所有 reducer 完成後另開既有唯讀 snapshot_reader, 再核對每個已使用來源的 signature, 任一不同則不回傳候選結果, 恢復原 checkpoint 後重建並比對原四窗 oracle, 先前完成的 owned 結果不被改寫
+
+此檢查對齊 production staging 已有的最後 signature 驗證原則, 不改 production, 不宣稱來源在檢查後不再變動、跨來源共同 transaction 或 HTTP 發布原子性, live locator guard 仍不可省略
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, fail-before 0.35 秒, test-only 修正後 targeted 測試 1 筆通過、415 筆未選取, 耗時 0.69 秒, 記錄均保留, 未執行大型 padding、HTTP、完整套件或其他延後檢查
