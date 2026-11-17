@@ -5754,6 +5754,27 @@ mod log_tests {
             assert_eq!(scan.projections[0].projection.calls.len(),512);
             assert!(scan.reader.is_some() && !scan.finished);
         }
+        // Allow exactly the charged first page, then exhaust capacity within the same source.
+        let first_page_budget = collector.selected_snapshot_scan.lock().unwrap().as_ref().unwrap().staged_bytes;
+        assert!(collector.selected_overflow_projections_with_limits(&selection,1,first_page_budget).is_none());
+        {
+            let scan = collector.selected_snapshot_scan.lock().unwrap();
+            let scan = scan.as_ref().unwrap();
+            assert_eq!(scan.staged_bytes, first_page_budget);
+            assert_eq!(scan.projections[0].projection.calls.len(), 512);
+            assert!(scan.valid && !scan.finished && scan.reader.is_some());
+        }
+        assert!(collector.selected_overflow_projections_with_limits(&selection,1,first_page_budget).is_none());
+        {
+            let scan = collector.selected_snapshot_scan.lock().unwrap();
+            let scan = scan.as_ref().unwrap();
+            assert!(scan.finished && !scan.valid && scan.reader.is_none());
+            assert!(scan.projections.is_empty() && scan.completed.is_none());
+            assert_eq!(scan.staged_bytes, first_page_budget);
+        }
+        assert!(!collector.recent_call_refresh_pending());
+        // A larger authorized test budget restarts from the beginning; no partial stage leaks.
+        assert!(collector.selected_overflow_projections_with_limits(&selection,1,16*1024*1024).is_none());
         assert!(collector.selected_overflow_projections_with_limits(&selection,1,16*1024*1024).is_none());
         let complete = collector.selected_overflow_projections_with_limits(&selection,1,16*1024*1024).unwrap();
         assert_eq!(complete.len(),1);

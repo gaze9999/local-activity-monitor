@@ -1585,3 +1585,15 @@ python tools/measure_rust_memory.py --binary rust/service/target/debug/local-act
 ```
 
 本輪樣本未超過 active working set 或 16 MiB payload staging, 不能由約 30–57 MB 的觀察值推論記憶體上限、overflow / candidate 正確性、跨平台或完整重建驗收, 原 411 pass / HTTP 224 pass + 2 fail 結果不變
+
+### 記憶體量測 CLI 與同來源分頁容量邊界
+
+`ba91075` 的正式 measure_rust_memory.py 另以明確 --binary 參數完成端到端執行, 六個新 child 均核對正確 call 數並退出 0, 0 / 1,000 / 5,000-call 的 RSS / HWM 範圍分別為 30,380,032–30,773,248 / 37,961,728–38,092,800 / 56,328,192–56,373,248 bytes, 與前節分開保留, 不合併成 release 或上限證據
+
+以 `ba91075` 為基底擴充原有 snapshot_payload_pages_coalesce_metadata_and_reject_stale_or_cancelled_stage, 保留 600-call materialized oracle 不變, 先讀取 512-call 首頁的實際 staged_bytes, 再將測試 budget 設為恰好等於該 charge
+
+首頁仍可暫存且 reader 存活, 同來源第二頁使容量不足後不回傳部分結果, reader / projections / completed 均釋放, staged_bytes 不超額且不排入無來源變化的持續 refresh, 恢復原測試 budget 後從頭讀取並完成 600 calls, 與原 materialized oracle 全結構相符
+
+Linux / Rust 1.100.0、原 Cargo.lock, 該 focused 測試通過 (0.15 秒), runtime 位元組比較與 diff 檢查通過, 未重跑任何延後測試
+
+這驗證既有 charge 門檻的中途取消與恢復, staged_bytes 仍主要依序列化來源長度記帳, 不是所有 allocation 的計量, 未解除 16 MiB staging 容量、未實作 reducer 或跨輪共同 candidate
