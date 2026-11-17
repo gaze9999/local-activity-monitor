@@ -474,7 +474,54 @@ pub(super) fn diagnostic_text(text: &str, masked: bool, full: bool) -> serde_jso
     json!({"text":shown,"truncated":end < text.len(),"content_status":"available"})
 }
 
+// Preserve JSON string types for editing while retaining display masking safeguards.
+pub(super) fn redact_json_value(value: &mut serde_json::Value, depth: usize) {
+    clean_json_value(value, depth, true);
+}
+
+fn clean_json_value(value: &mut serde_json::Value, depth: usize, preserve_display_masking: bool) {
+    if depth > 64 {
+        *value = json!("[內容過深]");
+        return;
+    }
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                if sensitive(key) {
+                    *value = json!("[已隱藏]");
+                } else {
+                    clean_json_value(value, depth + 1, preserve_display_masking);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            if preserve_display_masking {
+                mask_table_rows(items);
+            }
+            for item in items {
+                clean_json_value(item, depth + 1, preserve_display_masking);
+            }
+        }
+        serde_json::Value::String(text) => {
+            if preserve_display_masking {
+                let masked = text_value(text, true, depth + 1);
+                if masked != text_value(text, false, depth + 1) {
+                    *text = masked.as_str().map(str::to_owned)
+                        .unwrap_or_else(|| masked.to_string());
+                    return;
+                }
+            }
+            *text = diagnostic_redact_inner(text, depth + 1, preserve_display_masking);
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn diagnostic_redact(text: &str, depth: usize) -> String {
+    diagnostic_redact_inner(text, depth, false)
+}
+
+fn diagnostic_redact_inner(text: &str, depth: usize, preserve_display_masking: bool) -> String {
     if depth > 64 {
         return "[內容過深]".into();
     }
@@ -482,31 +529,7 @@ pub(super) fn diagnostic_redact(text: &str, depth: usize) -> String {
         if let Ok(mut value @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) =
             serde_json::from_str::<serde_json::Value>(text)
         {
-            fn clean(value: &mut serde_json::Value, depth: usize) {
-                if depth > 64 {
-                    *value = json!("[內容過深]");
-                    return;
-                }
-                match value {
-                    serde_json::Value::Object(map) => {
-                        for (key, value) in map {
-                            if sensitive(key) {
-                                *value = json!("[已隱藏]");
-                            } else {
-                                clean(value, depth + 1);
-                            }
-                        }
-                    }
-                    serde_json::Value::Array(items) => {
-                        for item in items {
-                            clean(item, depth + 1);
-                        }
-                    }
-                    serde_json::Value::String(text) => *text = diagnostic_redact(text, depth + 1),
-                    _ => {}
-                }
-            }
-            clean(&mut value, depth + 1);
+            clean_json_value(&mut value, depth + 1, preserve_display_masking);
             let encoded = value.to_string();
             let mut result = String::with_capacity(encoded.len());
             let mut quoted = false;

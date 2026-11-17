@@ -260,7 +260,8 @@ pub(crate) fn read_document(
         .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
     {
         if let Ok(value) = serde_json::from_str::<Value>(text) {
-            let clean = super::details::redact_value(value.clone(), true, 0);
+            let mut clean = value.clone();
+            super::details::redact_json_value(&mut clean, 0);
             if clean == value {
                 (text.to_owned(), false)
             } else {
@@ -462,7 +463,9 @@ fn validate(
         .to_ascii_lowercase();
     if extension == "json" {
         let value: Value = serde_json::from_str(text).map_err(|_| WriteError::Invalid)?;
-        if super::details::redact_value(value.clone(), true, 0) != value {
+        let mut clean = value.clone();
+        super::details::redact_json_value(&mut clean, 0);
+        if clean != value {
             return Err(WriteError::Invalid);
         }
     } else {
@@ -528,6 +531,54 @@ pub(crate) fn write_document(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn json_string_values_remain_editable_without_weakening_secret_masking() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let path = root.join("settings.json");
+        let table = toml::map::Map::from_iter([(
+            "args".into(),
+            toml::Value::Array(vec![toml::Value::String(path.to_string_lossy().into_owned())]),
+        )]);
+        let plain = r#"{"example":"{\"enabled\": true}","script":"print('fixture')"}"#;
+        fs::write(&path, plain).unwrap();
+        let id = documents(&table)[0]["id"].as_str().unwrap().to_owned();
+        let detail = read_document(&table, &id).unwrap();
+        assert_eq!(detail["editable"], true);
+        assert_eq!(detail["masked"], false);
+        assert_eq!(detail["text"], plain);
+        assert_eq!(detail["parsed"]["example"]["enabled"], true);
+        assert!(validate(&path, plain, &table).is_ok());
+        fs::write(
+            root.join("config.toml"),
+            format!("[mcp_servers.fixture]\nargs = [{}]\n", serde_json::to_string(path.to_str().unwrap()).unwrap()),
+        ).unwrap();
+        let changed = plain.replace("true", "false");
+        let saved = write_document(&root, "fixture", &id, &changed, detail["sha256"].as_str().unwrap()).unwrap();
+        assert_eq!(saved["editable"], true);
+        assert_eq!(saved["text"], changed);
+        assert_eq!(fs::read_to_string(&path).unwrap(), changed);
+
+        for sensitive in [
+            r#"{"example":"{\"password\": \"PRIVATE\"}"}"#,
+            r#"{"password":"PRIVATE"}"#,
+            r#"{"example":"Bearer abcdefghijkl"}"#,
+            r#"{"example":"client_secret: PRIVATE\nname: visible"}"#,
+            r#"{"example":"password,name\nPRIVATE,visible"}"#,
+            r#"[["password","name"],["PRIVATE","visible"]]"#,
+            r#"{"example":"[[\"password\", \"name\"], [\"PRIVATE\", \"visible\"]]"}"#,
+        ] {
+            fs::write(&path, sensitive).unwrap();
+            let detail = read_document(&table, &id).unwrap();
+            assert_eq!(detail["editable"], false);
+            assert_eq!(detail["masked"], true);
+            assert!(!detail.to_string().contains("PRIVATE"));
+            assert!(!detail.to_string().contains("abcdefghijkl"));
+            assert!(matches!(validate(&path, sensitive, &table), Err(WriteError::Invalid)));
+            assert_eq!(fs::read_to_string(&path).unwrap(), sensitive);
+        }
+    }
 
     #[test]
     fn javascript_config_candidates_match_python_case_sensitive_names() {

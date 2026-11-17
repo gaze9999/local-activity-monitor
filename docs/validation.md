@@ -2299,3 +2299,18 @@ LAM main `5c03daf` 與 workspace main `383fbb9` 再核對未變, bounded read �
 Linux / Rust 1.100.0 / 原 Cargo.lock, yaml_validation filter 通過 2 項、439 項未選取, 2.04 秒, 包含既有 parser 失敗與 timeout 回歸, HTTP 精確 fixture 通過 1 項、227 項未選取, 0.10 秒, git diff --check 通過
 
 此為既有基礎規則的相容性修正, 不宣稱完整 YAML 語法驗證, 未更動 POST /api/mcp/file 參數、來源範圍、查詢次數或 parser 串接, 未重跑完整套件與其他平台
+
+### MCP JSON 編輯保留字串型別
+
+基準 `8638f6d`, 修正 JSON 文件以 display projection 比較遮蔽結果, 導致無敏感內容的巢狀 JSON 字串被轉成 object、誤標 masked 並禁止編輯
+
+- read_document 與 validate 改共用既有 diagnostic JSON 遮蔽邏輯, 保留字串型別與文字正規化, 不把結構化預覽當作寫入資料, 原 diagnostic 呼叫的 depth 與行為不變
+- 新 fixture 先重現 canonical JSON 字串被誤判唯讀, 修正後原始 text 完整保留且可寫入, parsed 預覽仍可展開內層 JSON
+- 頂層 password、巢狀 JSON 字串 password 與 Bearer token 仍遮蔽、不可編輯, 驗證不接受敏感內容, 來源未被改寫
+- 保留 Rust 原有 table-column 與結構化字串遮蔽, 新增直接 / JSON 字串表格、YAML 與 CSV 敏感值回歸, 不為 Python 相容性移除既有保護, 編輯檢查會額外比較 masked / unmasked display projection, 成本未量測
+- 實際 Python read_document / write_document 以合成設定核對, 安全字串可寫入, 三種敏感文件均拒絕寫入且保留原內容
+- 抽出既有 helper 時的一處遺留名稱造成編譯錯誤, 更正後完成以下檢查, 未新增相依套件或改 API 參數
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 新 fixture 通過 1 項、441 項未選取, 0.07 秒, diagnostic 文字遮蔽回歸通過 1 項、441 項未選取, 0.03 秒, mcp_document HTTP filter 通過 4 項、224 項未選取, 0.22 秒, git diff --check 通過
+
+GET /api/mcp/files 與 POST /api/mcp/file 來源、document ID 與查詢次數不變, 新字串寫入案例直接呼叫實際 write_document, HTTP 使用既有整合 fixture, 未宣稱新案例的瀏覽器驗收或完整套件通過
