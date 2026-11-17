@@ -1182,3 +1182,17 @@ Python detail_lines 的 LF / CRLF 精確上限與超出 1 byte 共 4 組 fixture
 影響共用索引列讀取的工具、SQL、訊息、錯誤及 context detail 呼叫者, 僅縮回來源既有邊界, 查詢參數、讀取次數、權限與保存資料不變, 沒有擴大或修改 legacy tail fallback, 歷史限制保留
 
 Linux / Rust 1.100.0 完整 service 單輪 388 項通過 (59.81 秒), 結束後完整 serial HTTP 單輪 226 項通過 (138.39 秒)
+
+### 39c6f98 的 metadata 503 隔離重查
+
+以 exact `39c6f98` tracked source archive 與既有固定前端資產建立獨立來源副本, 沿用 5001 個合成 session 的 overflow HTTP fixture、5 秒 socket / server 期限與原 assertions, 未連線真實帳戶或讀取使用者來源
+
+未加 instrumentation 的單次 baseline 通過, metadata POST 於 3.796831409 秒回 200, child 存活, 後續 metadata=false、private workdir 不可見與工具憑證遮蔽 assertions 通過, 此次沒有重現歷史 503 / WouldBlock
+
+另於隔離副本加入只輸出 version、byte count 與 elapsed 的 snapshot 診斷, 主來源 runtime 未變更, 單次診斷 fixture 同樣通過, POST 於 3.510865775 秒回 200
+
+診斷版 metadata 更新 cycle 的四個 window 約各 3.73 MB, JEV field 完整驗證 / 擷取分別 129 / 126 / 135 / 125 ms, windows 與 logs 合計 2978 ms, snapshot 起點至 error_details 前為 3137 ms
+
+兩次樣本皆沒有重現失敗, instrumentation 與執行環境可影響時間, 不推定歷史失敗根因、不宣稱穩定達標, 不延長 timeout、降低 fixture 容量、略過 JSON 完整驗證或改寫錯誤回應
+
+目前結果支持繼續評估 snapshot 組裝成本, 但尚不足以採用略過驗證的 JEV descriptor 快取, 原歷史失敗、16 MiB staging 與跨平台接受仍未解決
