@@ -1686,3 +1686,13 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, 新增 targeted 測試通過 1 筆、414 
 恢復原 checkpoint 後重新讀取兩頁, 四窗結果仍與原 materialized / snapshots oracle 相符, 已完成的 owned 結果保持不變, production、既有驗證條件與大型輸入暫緩狀態未改動
 
 Linux / Rust 1.100.0 / 原 Cargo.lock, targeted candidate 測試 1 筆通過、414 筆未選取, 耗時 0.83 秒, 未執行大型 padding 變體、HTTP、完整套件或其他延後測試, 此結果不涵蓋跨來源 winner 與 worker 發布
+
+### Candidate 分頁來源序號
+
+沿小型 600 calls fixture 增加 ordered_thread 分支, 保留原 canonical fallback 驗收與未修改的 materialized oracle, 先重現第 1 小時 window 的事件順序不同, 原因是 snapshot_projection 每頁重設 presentation_sequence
+
+僅在 test-only candidate 對每頁序號加上該來源前面所有 calls 的數量, 不以預覽或時間窗篩選後筆數計算, 四窗 totals、完整事件順序與 operations 皆與一次 materialized 來源一致, production 不變
+
+此為單來源 checkpoint reader 的來源序號條件, 不涵蓋多來源 winner / first-insertion slots 或全域 discovery 順序, 未重跑大型 encoded payload、HTTP 或其他延後測試
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, fail-before 耗時 0.51 秒, test-only 修正後 targeted 測試 1 筆通過、414 筆未選取, 耗時 0.69 秒, 兩次記錄保留, 不構成完整 candidate 或容量驗收

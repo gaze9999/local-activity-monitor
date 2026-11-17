@@ -5774,6 +5774,7 @@ mod log_tests {
             key: String,
             signature: String,
             observed: usize,
+            ordered: bool,
         }
         fn epoch(collector: &Collector) -> i64 {
             collector.source_membership.as_ref().unwrap().db
@@ -5788,7 +5789,14 @@ mod log_tests {
             if epoch(collector) != candidate.epoch { return Err("selection changed"); }
             let page = candidate.reader.next_page().map_err(|_| "read failed")?
                 .ok_or("unexpected eof")?;
-            let projection = checkpoint::snapshot_projection(page, false).ok_or("projection failed")?;
+            let mut projection = checkpoint::snapshot_projection(page, false).ok_or("projection failed")?;
+            if candidate.ordered {
+                // snapshot_projection numbers each page from zero. Preserve the
+                // source reader's absolute ordinal before any future winner filtering.
+                for call in projection.projection.calls.values_mut() {
+                    call.presentation_sequence += candidate.observed as u64;
+                }
+            }
             candidate.observed += projection.projection.calls.len();
             for (summary, cutoff) in candidate.summaries.iter_mut().zip(candidate.cutoffs) {
                 summary.observe(&projection.projection, cutoff, true, None);
@@ -5873,30 +5881,52 @@ mod log_tests {
             let window: Value = serde_json::from_slice(&baseline.window_bytes(index)).unwrap();
             assert_eq!(window["codex"]["file_activity"], materialized[index]);
         }
-        let begin = |collector: &Collector| Candidate {
+        let begin = |collector: &Collector, ordered: bool| Candidate {
             reader: collector.checkpoints.snapshot_reader().unwrap().unwrap()
                 .into_selected_checkpoint_reader(&lam_history_store::ExpectedCursor {
                     source_key:&key, signature:Some(&original.cursor.signature) }, ids.clone()).unwrap().unwrap(),
-            summaries: std::array::from_fn(|_| project::FileSummary::new(1000)),
-            cutoffs, epoch:epoch(collector), key:key.clone(), signature:original.cursor.signature.clone(), observed:0,
+            summaries: std::array::from_fn(|_| {
+                let mut summary = project::FileSummary::new(1000);
+                if ordered { summary.ordered_thread(0); }
+                summary
+            }),
+            cutoffs, epoch:epoch(collector), key:key.clone(), signature:original.cursor.signature.clone(), observed:0, ordered,
         };
-        let mut candidate = Some(begin(&collector));
+        let mut candidate = Some(begin(&collector, false));
         assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
         assert_eq!(candidate.as_ref().unwrap().observed, 512);
         let result = advance(&mut candidate, &collector, false).unwrap().unwrap();
         assert!(candidate.is_none());
         assert_eq!(result, materialized);
+        // Complete-source presentation order must survive the reader page boundary.
+        let ordered_expected = cutoffs.map(|cutoff| {
+            let mut summary = project::FileSummary::new(1000);
+            summary.ordered_thread(0);
+            summary.observe(&expected.projection, cutoff, true, None);
+            let (events, total, operations) = summary.finish();
+            json!({"events":events,"total":total,"operations":operations})
+        });
+        candidate = Some(begin(&collector, true));
+        assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
+        let ordered_result = advance(&mut candidate, &collector, false).unwrap().unwrap();
+        for index in 0..4 {
+            assert_eq!(ordered_result[index]["total"], ordered_expected[index]["total"]);
+            let ids = |value: &Value| value["events"].as_array().unwrap().iter()
+                .map(|event| event["call_id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+            assert!(ids(&ordered_result[index]) == ids(&ordered_expected[index]), "source presentation order changed at window {index}");
+            assert_eq!(ordered_result[index], ordered_expected[index]);
+        }
         // Cancellation cannot expose the first page or retain its reader/reducer.
-        candidate = Some(begin(&collector));
+        candidate = Some(begin(&collector, false));
         assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
         assert_eq!(advance(&mut candidate, &collector, true), Err("cancelled"));
         assert!(candidate.is_none());
-        candidate = Some(begin(&collector));
+        candidate = Some(begin(&collector, false));
         assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
         collector.source_membership.as_ref().unwrap().db.execute("UPDATE selection_epoch SET value=value+1", []).unwrap();
         assert_eq!(advance(&mut candidate, &collector, false), Err("selection changed"));
         assert!(candidate.is_none());
-        candidate = Some(begin(&collector));
+        candidate = Some(begin(&collector, false));
         assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
         let mut replaced = original.cursor.clone();
         replaced.signature = "candidate-source-replaced".into();
@@ -5905,7 +5935,7 @@ mod log_tests {
         assert!(candidate.is_none());
         assert_eq!(result, materialized, "completed owned output remains unchanged");
         store.save_checkpoints(std::slice::from_ref(&original.cursor), &calls, &[]).unwrap();
-        candidate = Some(begin(&collector));
+        candidate = Some(begin(&collector, false));
         assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
         assert_eq!(advance(&mut candidate, &collector, false).unwrap().unwrap(), materialized);
         // Independent error-path fixture: only the second page has malformed JSON.
@@ -5913,14 +5943,14 @@ mod log_tests {
         let mut malformed_calls = calls.clone();
         malformed_calls[550].payload = "{malformed".into();
         store.save_checkpoints(std::slice::from_ref(&original.cursor), &malformed_calls, &[]).unwrap();
-        candidate = Some(begin(&collector));
+        candidate = Some(begin(&collector, false));
         assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
         assert_eq!(candidate.as_ref().unwrap().observed, 512);
         assert_eq!(advance(&mut candidate, &collector, false), Err("projection failed"));
         assert!(candidate.is_none());
         assert_eq!(result, materialized);
         store.save_checkpoints(std::slice::from_ref(&original.cursor), &calls, &[]).unwrap();
-        candidate = Some(begin(&collector));
+        candidate = Some(begin(&collector, false));
         assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
         assert_eq!(advance(&mut candidate, &collector, false).unwrap().unwrap(), materialized);
     }

@@ -438,3 +438,11 @@ Rust `main.rs` 的 font / GPU worker 各自先發布自己的結果, 再標記 D
 | Pending、停止、停用及持續變更 | 原未完成狀態不假裝完成, 無孤兒 reader / busy loop, 未變更重掃可以完成, settings 回應規格不放寬 |
 
 驗收應先執行新增且不重複受阻的 targeted tests, 再用明確列出排除項的 filtered service / HTTP 回歸, 已延後的 Core WAL cursor、overflow metadata POST、browser 與平台檢查不自動重跑, 原失敗與使用者測試責任保留, 不將排除結果標示成完整驗收
+
+### Candidate 來源順序的分頁條件
+
+依 `a2240fa` 核對, `checkpoint::snapshot_projection` 以每次傳入的 checkpoint calls 重新從 0 指派 presentation_sequence, SelectedCheckpointReader 每頁最多 512 calls, 因此直接將各頁交給啟用 ordered_thread 的 reducer 會讓第二頁重新使用第一頁的序號
+
+測試限定 candidate 已以跨頁累計已觀察 call 數補回單來源的絕對序號, 必須在未來 winner 篩選前處理, 不能使用留下的預覽數或時間窗內 call 數作為位移
+
+目前 production 的 overflow 沒有完整全域來源順序, 仍沿 canonical fallback, 本結果不是現行所有快照都排序錯誤的證據, 也尚未解決跨來源 replacement 保留首次插入 slot、metadata-only 來源與 live / restore 順序差異, 未將此測試修正套入 production
