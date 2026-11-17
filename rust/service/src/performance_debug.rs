@@ -134,11 +134,11 @@ impl CollectionStatus {
         if ["waiting", "idle", "stopped", "error"].contains(&self.phase) {
             return json!({"phase":self.phase,"phase_ms":0,"phase_cpu_ms":0});
         }
-        let elapsed = (self.started.elapsed().as_secs_f64() * 100_000.0).round() / 100.0;
+        let elapsed = round_millis(self.started.elapsed().as_secs_f64() * 1000.0);
         let cpu = self
             .cpu
             .zip(process_cpu_ms())
-            .map(|(before, after)| ((after - before).max(0.0) * 100.0).round() / 100.0);
+            .map(|(before, after)| round_millis((after - before).max(0.0)));
         json!({"phase":self.phase,"phase_ms":elapsed,"phase_cpu_ms":cpu})
     }
 }
@@ -163,11 +163,14 @@ impl PhaseTimer {
     }
 }
 
+fn round_millis(value: f64) -> f64 {
+    format!("{value:.2}").parse::<f64>().expect("finite phase duration")
+}
+
 fn phase_metrics(elapsed_ms: f64, cpu_ms: Option<f64>) -> Value {
-    let rounded = |value: f64| format!("{value:.2}").parse::<f64>().expect("finite phase duration");
-    let mut result = json!({"elapsed_ms":rounded(elapsed_ms)});
+    let mut result = json!({"elapsed_ms":round_millis(elapsed_ms)});
     if let Some(cpu_ms) = cpu_ms {
-        result["cpu_ms"] = json!(rounded(cpu_ms));
+        result["cpu_ms"] = json!(round_millis(cpu_ms));
     }
     result
 }
@@ -539,6 +542,24 @@ impl PerformanceDebug {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_collection_rounding_matches_python_and_idle_states_stay_zero() {
+        for (value, expected) in [(0.125, 0.12), (0.375, 0.38), (2.675, 2.67),
+            (1.225, 1.23), (1.005, 1.0), (12.34567, 12.35), (0.0, 0.0)] {
+            assert_eq!(round_millis(value), expected, "{value}");
+        }
+        let mut collection = CollectionStatus::new();
+        for phase in ["waiting", "idle", "stopped", "error"] {
+            collection.set(phase);
+            let revision = collection.revision();
+            assert_eq!(collection.snapshot(), json!({"phase":phase,"phase_ms":0,"phase_cpu_ms":0}));
+            assert_eq!(collection.revision(), revision);
+        }
+        collection.set("sessions");
+        collection.cpu = None;
+        assert_eq!(collection.snapshot()["phase_cpu_ms"], Value::Null);
+    }
+
     #[test]
     fn completed_phase_metrics_round_like_python_and_preserve_missing_cpu() {
         for (value, expected) in [(2.675, 2.67), (1.225, 1.23), (0.125, 0.12),

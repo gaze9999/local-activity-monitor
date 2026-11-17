@@ -1507,3 +1507,13 @@ Linux / Rust 1.100.0、原 Cargo.lock, `sessions::mcp` 篩選共 16 項通過 (�
 Linux / Rust 1.100.0、原 Cargo.lock, performance_debug 模組 8 項通過 (0.01 秒), 加強的 HTTP debug_collection_reports_only_measured_phase_metrics 通過 (0.08 秒), 核對實際 sessions / worktrees / history 數值的兩位精度, diagnostics 仍保留兩個 timer 結果相加的原規則
 
 影響 `/api/snapshot` 中已完成 phase_metrics 的 elapsed_ms / cpu_ms 及其 debug 記錄, 不改動來源讀取、請求次數、目前進行中 collection 的計時或裝置 capture, 本輪未重跑完整套件, 前輪 407 / 226 為 `081d3ef` 的歷史結果
+
+### 進行中 collection 的計時捨入
+
+以 `34fef7f` 為基底, LAM main `5c03daf` 與 workbench-workspace main `4616074` 核對未變, Python `MonitorState.snapshot` 對進行中的 phase_ms / phase_cpu_ms 直接 round(value, 2), Rust 原先先縮放再使用中點遠離零的 round, 使 0.125 變成 0.13 而非 0.12
+
+受控 clock 執行實際 Python MonitorState.snapshot 的 7 組資料, Rust 新測試先重現差異, 修正後與已完成 phase 共用兩位小數捨入, 保留原 elapsed / CPU 取樣、非負 CPU 差值、CPU 不可用時的 null、waiting / idle / stopped / error 的零與 snapshot 不增加 revision
+
+Linux / Rust 1.100.0、原 Cargo.lock, performance_debug 模組 9 項通過 (0.01 秒), HTTP monitor_snapshot_reports_idle_after_collection 通過 (0.07 秒), diff 檢查通過
+
+僅影響 `/api/snapshot` 與 SSE render 中 monitor.collection 的數值捨入, 未改變 render cache 條件、來源讀取或請求次數, 不固定即時 telemetry 或裝置 capture, 未重跑完整套件
