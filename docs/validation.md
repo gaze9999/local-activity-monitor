@@ -1982,3 +1982,18 @@ Candidate 尚未將 failure list、session errors 與全部 diagnostics / histor
 - Linux / Rust 1.100.0 / 原 Cargo.lock, 最終 runtime candidate targeted 1 項通過、424 項未選取, 33.46 秒, cargo check 通過, 共 8 個 warnings, 包含尚未被 production 消費的 Advance / CompletedCandidate 欄位, 本輪無失敗
 
 未執行 HTTP、完整套件或 deferred 檢查, budget 僅限制每輪來源 / 頁 / signature 操作數, source 內 planning、初始化與完成編碼仍同步, 不宣稱回應延遲 / RSS 驗收, 完整來源實體驗證、mixed active / metadata 與 augmentation / worker 發布仍待完成, production caller / fallback / 16 MiB staging 未切換
+
+
+### SelectedCandidate 的 active 前綴串接
+
+基準 `3a68839`, 已重新核對 LAM main `5c03daf` 與 workbench-workspace main `4616074` 未變, 依目前 snapshots 先 active、再全部 materialized checkpoints 的來源順序擴充候選, 不把 active 同路徑 checkpoint 排除
+
+- 原雙 checkpoint 四情境保留, 另加入四個實際 refreshed Session owner 的 active 情境, active call insertion order 與 canonical call ID 順序相反
+- 同 thread 保留 900 winners 並由後來 checkpoint 覆寫, 不同 active thread 合計 1,800 winners, 600 個 active winners 經兩頁處理, 對照未修改 materialized merge / serializers 的四窗 files、rows、activity、exact statistics、commands、skills、MCP / SQL 與 failures
+- Active owner 使用原 consume 入口在候選進入最後 validation 前更新 task_complete, 舊候選必須拒絕, 原停止、停用、signature 變更與 statistics 容量失敗檢查保留
+- 另在 600 個 active winners 已處理第一個 512-call page 後停止, 只取得 Pending 而無完成 components, 停止後整組候選被丟棄
+- 開發期間 mutation fixture 首次編譯因 consume 缺少既有參數而失敗, 補齊參數後首次執行在 partial_history 失敗, 原因為新建 Session 沒有已讀取的 file identity, 改為保留實際 refresh 的 Session owner, 未弱化 assertion 或更改 pending 規則
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 修正後 targeted 通過 1 項、424 項未選取, 70.35 秒, 加入 active 頁間停止後最終 targeted 通過 1 項、424 項未選取, 67.10 秒, cargo check 通過且維持 8 個既有未使用項目 warnings
+
+Active payload 每頁最多 512 calls 的暫時複本, 未新增完整 Session clone, 不是 16 MiB encoded page 或 RSS 保證, 未執行 HTTP、完整套件或 deferred fixtures, production caller、fallback 與既有 staging 未切換

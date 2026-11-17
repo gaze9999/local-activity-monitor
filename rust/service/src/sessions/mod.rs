@@ -5814,7 +5814,8 @@ mod log_tests {
 
     #[test]
     fn snapshot_file_candidate_resolves_two_source_winners_before_paging() {
-        for (same_thread, nested) in [(true, false), (false, false), (true, true), (false, true)] {
+        for (same_thread, nested, active) in [(true, false, false), (false, false, false), (true, true, false), (false, true, false),
+            (true, false, true), (false, false, true), (true, true, true), (false, true, true)] {
             let fixture_tool = if nested { "exec" } else { "fixture_tool" };
             let arguments = if nested { "await tools.fixture_tool({}); await tools.fixture_tool({}); await tools.exec({}); await tools.mcp__sqlite__query({query:\"SELECT 42\"});" } else { "{}" };
             let directory = tempfile::tempdir().unwrap();
@@ -5865,6 +5866,7 @@ mod log_tests {
             collector.source_membership_complete = true;
             collector.discovered_files = Some(1);
             collector.discovery = None;
+            let active_state = collector.files.remove(&path).unwrap();
             collector.files.clear();
             let second_path = root.join(format!("z-rollout-{id}.jsonl"));
             std::fs::copy(&path, &second_path).unwrap();
@@ -5904,8 +5906,27 @@ mod log_tests {
             let reference = chrono::DateTime::parse_from_rfc3339("2026-11-13T02:00:00Z").unwrap().with_timezone(&Utc);
             let cutoffs = HOURS.map(|hours| hours.map(|hours| reference - Duration::hours(hours)));
             let sources = [&key, &second_key];
-            let expected_winners = if same_thread { 900 } else { 1200 };
+            if active {
+                let ids: Vec<_> = selection.calls[&key].iter().cloned().collect();
+                let checkpoint = store.selected_checkpoint(&lam_history_store::ExpectedCursor {
+                    source_key:&key, signature:Some(&original.cursor.signature) }, &ids).unwrap().unwrap();
+                let mut session = active_state;
+                session.projection = checkpoint::snapshot_projection(checkpoint, false).unwrap().projection;
+                // Selected checkpoints still overlay this active prefix. A different
+                // active thread exercises payload winners that exist only in memory.
+                if !same_thread { session.projection.id = Some("00000000-0000-4000-8000-000000000003".into()); }
+                for (index, call) in session.projection.calls.values_mut().enumerate() {
+                    call.presentation_sequence = (599 - index) as u64;
+                }
+                collector.files.insert(path.clone(), session);
+            }
+            let expected_winners = if same_thread { 900 } else if active { 1800 } else { 1200 };
             let mut materialized = BTreeMap::<String, Projection>::new();
+            for (_, state) in collector.ordered_working_sources() {
+                let thread = state.projection.id.clone().unwrap();
+                materialized.entry(thread.clone()).or_insert_with(|| Projection::for_id(Some(thread)))
+                    .merge_snapshot(&state.projection, Some(&selection.calls[&key]), &cutoffs);
+            }
             for source in sources {
                 let ids: Vec<_> = selection.calls[source].iter().cloned().collect();
                 let checkpoint = store.selected_checkpoint(&lam_history_store::ExpectedCursor {
@@ -5970,7 +5991,7 @@ mod log_tests {
                 assert_eq!(nested_exec["calls"], json!(expected_winners));
                 assert_eq!(repeated["calls"], json!(expected_winners * 2));
                 for row in [nested_exec, repeated] {
-                    assert_eq!(row["thread_count"], json!(if same_thread { 1 } else { 2 }));
+                    assert_eq!(row["thread_count"], json!(if same_thread { 1 } else if active { 3 } else { 2 }));
                     for field in ["returned", "known_duration_count", "average_ms", "p99_ms", "last_response_at"] {
                         assert!(row[field].is_null(), "nested calls must not inherit container metrics");
                     }
@@ -5983,6 +6004,20 @@ mod log_tests {
             let mut thread_slots = BTreeMap::new();
             let mut call_slots = BTreeMap::new();
             let mut next_slots = BTreeMap::<String,u64>::new();
+            for (_, state) in collector.ordered_working_sources() {
+                let thread = state.projection.id.clone().unwrap();
+                row_metadata.entry(thread.clone()).or_insert_with(|| Projection::for_id(Some(thread.clone())))
+                    .merge_snapshot(&state.projection, Some(&BTreeSet::new()), &cutoffs);
+                let next_thread = thread_slots.len();
+                thread_slots.entry(thread.clone()).or_insert(next_thread);
+                for (call, _) in state.projection.ordered_calls() {
+                    if !selection.calls[&key].contains(call) { continue; }
+                    let entry = (thread.clone(), call.clone());
+                    let next = next_slots.entry(thread.clone()).or_default();
+                    call_slots.entry(entry.clone()).or_insert_with(|| { let slot = *next; *next += 1; slot });
+                    winners.insert(entry, &key);
+                }
+            }
             for source in sources {
                 let header = store.selected_checkpoint(&lam_history_store::ExpectedCursor {
                     source_key:source,signature:Some(&original.cursor.signature)}, &[]).unwrap().unwrap();
@@ -6139,6 +6174,41 @@ mod log_tests {
                     selected_candidate::Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
                 skill_names.clone(), false, 10_000, 10_000, true, &stopped).unwrap();
             assert!(candidate.advance(&collector, &selection, false, &stopped, 1).is_none());
+            if active && !same_thread {
+                let mut candidate = selected_candidate::SelectedCandidate::new(&collector, &selection,
+                    SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
+                        selected_candidate::Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
+                    skill_names.clone(), false, 10_000, 10_000, true, &stopped).unwrap();
+                for _ in 0..32 {
+                    if candidate.active_payload_in_progress() { break; }
+                    candidate = match candidate.advance(&collector, &selection, true, &stopped, 1).unwrap() {
+                        selected_candidate::Advance::Pending(next) => next,
+                        selected_candidate::Advance::Complete(_) => panic!("emitted before active second page"),
+                    };
+                }
+                assert!(candidate.active_payload_in_progress());
+                stopped.store(true, Ordering::Release);
+                assert!(candidate.advance(&collector, &selection, true, &stopped, 1).is_none());
+                stopped.store(false, Ordering::Release);
+            }
+            if active {
+                let mut candidate = selected_candidate::SelectedCandidate::new(&collector, &selection,
+                    SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
+                        selected_candidate::Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
+                    skill_names.clone(), false, 10_000, 10_000, true, &stopped).unwrap();
+                for _ in 0..32 {
+                    if candidate.awaiting_validation() { break; }
+                    candidate = match candidate.advance(&collector, &selection, true, &stopped, 1).unwrap() {
+                        selected_candidate::Advance::Pending(next) => next,
+                        selected_candidate::Advance::Complete(_) => panic!("emitted before active mutation"),
+                    };
+                }
+                assert!(candidate.awaiting_validation());
+                let state = collector.files.get_mut(&path).unwrap();
+                let event = json!({"timestamp":"2026-11-13T01:59:00Z","type":"event_msg","payload":{"type":"task_complete"}});
+                state.projection.consume(event.to_string().as_bytes(), 0, true, true, &BTreeMap::new(), McpSwitches::default(), true, true, CommandSwitches::default());
+                assert!(candidate.advance(&collector, &selection, true, &stopped, 1).is_none());
+            }
             collector.updated = Some(reference);
             let baseline = collector.snapshots("ok", "ok", 1);
             for index in 0..4 {

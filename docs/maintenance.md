@@ -365,7 +365,11 @@ selected_candidate.rs 現在擁有原 test-only orchestration 的 Headers → Pa
 
 每次 advance 的 budget 上限為 16 個 header / payload-page 操作或 signature checks, budget=0 拒絕, source 內 winner planning、reducer 初始化與最後 components 組合仍為同步工作, 尚未證明所有 round 的時間 / allocation / RSS 上限, logical statistics budget 不是完整記憶體計量
 
-目前只支援 checkpoint-only 候選, active 或 overflow Session map 非空即拒絕, 無 ID header 亦拒絕而非略過, 不宣稱 mixed active、額外 metadata-only / 無 ID 來源、完整 logs / error windows、catalog / names augmentation 或 production 發布已完成, deferred fixtures 未因此重跑
+候選現在先依 ordered_working_sources 保存 active 路徑順序, 再串接全部 materialized checkpoints, 即使 checkpoint 對應同一 active 路徑也不省略, 與現有 snapshots 的先後順序相同
+
+Active header 依 ordered_calls 建立第一個 insertion slot 並合併 metadata / partial, checkpoint 仍可覆寫同 thread / call winner, active payload 每批最多複製 512 個勝出 calls, 處理後釋放, 不在輪次間保留借用或完整 Session clone, 頁前後與完成後沿既有 owner revision guard 驗證
+
+Active 批次限制的是 call 數, 不是 encoded bytes / allocation / RSS, source 內排序與 metadata 整理仍同步, 不宣稱資源上限驗收, overflow Session map 非空與無 ID header 仍拒絕而非略過, 額外 metadata-only / 無 ID 來源、完整 logs / error windows、catalog / names augmentation 與 production 發布仍待完成, deferred fixtures 未因此重跑
 
 CompletedCandidate 是內部 components 而非完整 Snapshots, 額外 metadata owner、來源實體 identity 與 production fallback / freshness 決策仍須完成, 此入口沒有改動原 snapshots、worker 或 HTTP caller
 
