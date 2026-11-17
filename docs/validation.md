@@ -2192,3 +2192,15 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, owner targeted 7 項通過、428 項未�
 Linux / Rust 1.100.0, 實驗 cargo check 通過並維持 8 個既有 warnings, 原 production `complete_source_session_errors_follow_first_thread_then_source_order` 精確測試通過 1 項、434 項未選取, 0.10 秒, 這些結果不代表新 candidate 分組或錯誤輸出通過
 
 LAM main `5c03daf`、workbench-workspace main `ce972bd` 再核對未變, consumer pin 未變, 其他 deferred checks 未執行, 實驗程式碼另行保留且不包含於本次文件 checkpoint, production fallback 與讀取時機未變
+
+### Model API window 同步 finalization 審查
+
+基準 `f261494`, 本次僅唯讀核對 `Collector::snapshots`、`Core::source`、`model_api::summary / collect` 與 CandidateInputs, 未修改保留中的 session-error 實驗, 未執行其失敗 fixture
+
+- 現行 retained API queue 上限 1000, summary 只過濾 cutoff、穩定 timestamp 降冪排序與計數, 不讀取資料庫或網路
+- 每窗原次序為 Core source() → 依 model_api_enabled 覆寫 Core health → summary → Desktop source clone / health overlay → 將 Desktop 放在 sources 首項, 然後才執行 ActivitySeries 及後續 device / JEV 區段
+- Core source() 投影現有記憶體欄位, 其中 checked_at、read_lines、storage_health 等不屬 retained API queue 內容, 不應為跨輪 candidate 強制固定或用完整 report equality 造成無新事件取消
+- 建議未來完整 finalizer 沿原位置保留此區段, 先核對既有 retained API revision 及 requested / applied flags, 不另建 API reducer 或提前擷取四份 source reports, 目前不新增 helper 或移動 production caller
+- 待驗證條件: 固定 retained events / reference 的四窗與原同步結果一致, pending / 重複事件不誤取消, 真正採用 / 清空 / 停用拒絕舊 candidate, quiet refresh 的新 source health 在同步 finalizer 可見, 同批 publication 與 JEV / device 順序不變
+
+此審查不是上述待驗證條件的通過證據, 原 session-error 失敗與 production switch gates 保留, 未執行新 runtime tests
