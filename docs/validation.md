@@ -1742,3 +1742,14 @@ Test-only planner 在已選 calls 的來源遍歷中建立 thread slot 與 call 
 來源遍歷與每個來源 call 順序在此 fixture 明確固定, 此證據不代表 production 已取得 overflow 的完整全域 discovery 順序, 也未涵蓋 live parse 與 checkpoint restore 混合、metadata-only 或無 thread ID 來源, production 未修改
 
 Linux / Rust 1.100.0 / 原 Cargo.lock, fail-before 0.55 秒, test-only 修正後 targeted 測試 1 筆通過、415 筆未選取, 耗時 3.07 秒, 記錄均保留, 未執行大型 padding、HTTP、完整套件或其他延後檢查
+
+### Metadata-only candidate fixture 未通過
+
+在 `db9b53b` 後嘗試加入第三個沒有 calls、但應提供 model context 的 checkpoint source, 目標是驗證完整 source 清單與每來源 metadata 只合併一次, 未取得通過證據
+
+- 第一次測試在順序前置條件失敗, fixture 假設檔名前綴決定 checkpoint key 順序, 實際 key 是相對路徑的 SHA-256, 耗時 0.07 秒
+- 改為依真正 source key 排序後, model 仍為 null 而非預期值, 來源檢查確認 fixture 手改 model / context_at 卻未設定 context_seen, merge_metadata_fields 依原規則不採用該 context, 耗時 0.16 秒
+
+已停止此實驗並撤回本輪未提交的程式碼擴充, 保留原通過的兩來源案例與兩次失敗記錄, 不修改 production、oracle 或 context 驗證, 不自動重跑此 metadata-only 實驗
+
+後續若恢復驗證, 應由實際 Projection::consume 的 turn_context 建立合法來源狀態, 並依真正 source key 排序, 不再手造部分 context 欄位, 此替代方案本輪未執行, metadata-only 與無 thread ID 的 candidate 驗收仍待完成
