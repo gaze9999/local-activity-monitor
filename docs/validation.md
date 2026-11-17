@@ -1678,3 +1678,11 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, 新增 targeted 測試通過 1 筆、414 
 已停止此檢查並撤回本輪未提交的測試擴充, 保留既有通過的單來源測試與原 runtime, 未放寬 schema、上限或 oracle, 兩份失敗記錄保留, 不自動重跑此大型輸入實驗
 
 後續若恢復此項驗證, 應沿既有 detail fixture 使用合法 JSON 空白擴大 encoded payload, 先確認 fixture 解碼有效再評估 staging, 本輪未執行此替代方案, 未量測 allocation 或宣稱超過 16 MiB 驗收
+
+### Candidate 第二頁解碼錯誤
+
+獨立於已暫緩的大型 encoded payload 實驗, 使用原 600 calls 小型 fixture, 僅將第 551 筆 checkpoint payload 改成不完整 JSON, 第一頁 512 calls 正常處理且仍為 pending, 第二頁必須回傳 projection failed 並丟棄整個 reader / reducer 擁有者, 不能發布第一頁統計
+
+恢復原 checkpoint 後重新讀取兩頁, 四窗結果仍與原 materialized / snapshots oracle 相符, 已完成的 owned 結果保持不變, production、既有驗證條件與大型輸入暫緩狀態未改動
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, targeted candidate 測試 1 筆通過、414 筆未選取, 耗時 0.83 秒, 未執行大型 padding 變體、HTTP、完整套件或其他延後測試, 此結果不涵蓋跨來源 winner 與 worker 發布

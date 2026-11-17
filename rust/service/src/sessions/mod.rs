@@ -5908,6 +5908,21 @@ mod log_tests {
         candidate = Some(begin(&collector));
         assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
         assert_eq!(advance(&mut candidate, &collector, false).unwrap().unwrap(), materialized);
+        // Independent error-path fixture: only the second page has malformed JSON.
+        // This does not rerun the deferred large encoded-payload experiment.
+        let mut malformed_calls = calls.clone();
+        malformed_calls[550].payload = "{malformed".into();
+        store.save_checkpoints(std::slice::from_ref(&original.cursor), &malformed_calls, &[]).unwrap();
+        candidate = Some(begin(&collector));
+        assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
+        assert_eq!(candidate.as_ref().unwrap().observed, 512);
+        assert_eq!(advance(&mut candidate, &collector, false), Err("projection failed"));
+        assert!(candidate.is_none());
+        assert_eq!(result, materialized);
+        store.save_checkpoints(std::slice::from_ref(&original.cursor), &calls, &[]).unwrap();
+        candidate = Some(begin(&collector));
+        assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
+        assert_eq!(advance(&mut candidate, &collector, false).unwrap().unwrap(), materialized);
     }
 
     #[test]
