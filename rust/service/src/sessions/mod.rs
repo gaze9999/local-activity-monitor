@@ -5967,6 +5967,7 @@ mod log_tests {
             }
             // Read each source's thread identity from its verified cursor metadata,
             // without loading call payloads merely to arbitrate duplicate IDs.
+            let mut row_metadata = BTreeMap::<String, Projection>::new();
             let mut winners = BTreeMap::new();
             let mut thread_slots = BTreeMap::new();
             let mut call_slots = BTreeMap::new();
@@ -5976,7 +5977,9 @@ mod log_tests {
                     source_key:source,signature:Some(&original.cursor.signature)}, &[]).unwrap().unwrap();
                 assert!(header.calls.is_empty());
                 let projection = checkpoint::snapshot_projection(header, false).unwrap();
-                let thread = projection.projection.id.unwrap();
+                let thread = projection.projection.id.clone().unwrap();
+                row_metadata.entry(thread.clone()).or_insert_with(|| Projection::for_id(Some(thread.clone())))
+                    .merge_snapshot(&projection.projection, None, &cutoffs);
                 let next_thread = thread_slots.len();
                 thread_slots.entry(thread.clone()).or_insert(next_thread);
                 for call in &selection.calls[source] {
@@ -5986,6 +5989,15 @@ mod log_tests {
                     winners.insert(key, source);
                 }
             }
+            assert!(row_metadata.values().all(|metadata| metadata.calls.is_empty()), "row metadata must not stage selected calls");
+            let expected_rows = |ordered| cutoffs.map(|cutoff| {
+                let (mut totals, mut nested_totals) = Default::default();
+                let rows: BTreeMap<_,_> = materialized.iter().map(|(thread, projection)|
+                    (thread.clone(), projection.row(false, cutoff, reference, &mut totals, &mut nested_totals,
+                        true, true, true, ordered))).collect();
+                json!({"rows":rows,"totals":totals,"nested_totals":nested_totals})
+            });
+            let rows = expected_rows(false);
             assert_eq!(winners.len(), expected_winners);
             assert_eq!(winners[&(second_id.to_owned(), "call0300".to_owned())], &second_key);
             if !same_thread {
@@ -5993,12 +6005,16 @@ mod log_tests {
             }
             // Process winner sources in reverse to show reduction is independent of
             // page arrival once canonical-fallback winners have been fixed.
-            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool, statistics_units: usize| -> Option<([Value;4], [Value;4], [Value;4], [Value;4], [Value;4])> {
+            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool, statistics_units: usize| -> Option<([Value;4], [Value;4], [Value;4], [Value;4], [Value;4], [Value;4])> {
                 let mut inputs = candidate_inputs::SelectedInputs::capture(&collector, &selection,
                     SnapshotTime { reference, cutoffs }, true, &stopped)?;
                 for source in sources {
                     inputs = inputs.source(source.clone(), original.cursor.signature.clone())?;
                 }
+                let mut row_summaries = cutoffs.map(|cutoff| row_metadata.iter().map(|(thread, metadata)|
+                    (thread.clone(), project::RowSummary::new(metadata, cutoff, true, true, true, ordered))).collect::<BTreeMap<_,_>>());
+                let mut row_totals: [BTreeMap<String,usize>;4] = Default::default();
+                let mut row_nested: [BTreeMap<String,usize>;4] = Default::default();
                 let mut skill_summaries = cutoffs.map(|cutoff| project::SkillSummary::new(&collector.skill_history, &skill_names, cutoff, true));
                 let mut command_summaries = cutoffs.map(commands::WindowSummary::new);
                 let mut statistics = cutoffs.map(|cutoff| project::OwnedStatistics::new(cutoff, true, statistics_units, 10_000));
@@ -6030,6 +6046,10 @@ mod log_tests {
                             }
                         }
                         let thread = projection.projection.id.as_deref().unwrap();
+                        for ((rows, totals), nested) in row_summaries.iter_mut().zip(&mut row_totals).zip(&mut row_nested) {
+                            let summary = rows.get_mut(thread).unwrap();
+                            for (id, call) in &projection.projection.calls { summary.observe(id, call, totals, nested); }
+                        }
                         for summary in &mut skill_summaries {
                             for (id, call) in &projection.projection.calls { summary.observe(thread, Some(thread), id, call); }
                         }
@@ -6081,7 +6101,14 @@ mod log_tests {
                     let (events, total, counts) = summary.finish(&skill_names);
                     json!({"events":events,"total":total,"counts":counts})
                 });
-                Some((result, series, statistics, commands, skills))
+                let rows: [Value;4] = row_summaries.into_iter().zip(row_totals).zip(row_nested).map(|((summaries, totals), nested_totals)| {
+                    let rows: BTreeMap<_,_> = summaries.into_iter().map(|(thread, summary)| {
+                        let row = row_metadata[&thread].row_with_summary(false, reference, summary);
+                        (thread, row)
+                    }).collect();
+                    json!({"rows":rows,"totals":totals,"nested_totals":nested_totals})
+                }).collect::<Vec<_>>().try_into().ok()?;
+                Some((result, series, statistics, commands, skills, rows))
             };
             let result = reduce(&mut store, false, false, 10_000).unwrap();
             assert_eq!(result.0, expected);
@@ -6089,11 +6116,12 @@ mod log_tests {
             assert_eq!(result.2, expected_statistics);
             assert_eq!(result.3, expected_commands);
             assert_eq!(result.4, expected_skills);
+            assert_eq!(result.5, rows);
             assert!(reduce(&mut store, false, false, 0).is_none(), "statistics overflow rejects the whole candidate");
             assert!(reduce(&mut store, true, false, 10_000).is_none(), "a source changed after its own validation");
-            assert_eq!(result, (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone(), expected_skills.clone()), "previously completed output is immutable");
+            assert_eq!(result, (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone(), expected_skills.clone(), rows.clone()), "previously completed output is immutable");
             store.save_checkpoints(std::slice::from_ref(&second_cursor), &second_calls, &[]).unwrap();
-            assert_eq!(reduce(&mut store, false, false, 10_000).unwrap(), (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone(), expected_skills.clone()));
+            assert_eq!(reduce(&mut store, false, false, 10_000).unwrap(), (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone(), expected_skills.clone(), rows.clone()));
             let ordered_expected = cutoffs.map(|cutoff| {
                 let mut summary = project::FileSummary::new(1000);
                 for (thread, projection) in &materialized {
@@ -6117,6 +6145,7 @@ mod log_tests {
             assert_eq!(ordered_result.2, expected_statistics);
             assert_eq!(ordered_result.3, ordered_commands);
             assert_eq!(ordered_result.4, expected_skills);
+            assert_eq!(ordered_result.5, expected_rows(true));
             collector.updated = Some(reference);
             let baseline = collector.snapshots("ok", "ok", 1);
             for index in 0..4 {

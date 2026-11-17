@@ -332,6 +332,10 @@ Per-thread RowSummary 已組合既有 RowTools、RowJev、FileSummary 與 Commun
 
 Projection::row 現在同步使用相同 RowSummary, row_with_summary 只把已整理的 call 欄位與原 metadata / lifecycle / token / task duration 欄位組合, 不改外部 JEV 查詢或裝置讀取, 串接呼叫端仍須保證 metadata、thread、cutoff 與 candidate guard 屬於同批, 此步不解決 metadata merge / 無 ID 來源策略, 也未取代 production 16 MiB staging
 
+後續雙來源 page candidate 已從原 verified cursor 的 empty-call header 依既有來源順序合併 row metadata, 明確檢查該 map 不含 calls, 四窗各建立 per-thread RowSummary 並餵入 resolved winner 頁, 最終與 materialized row 及 tools / nested totals 比對, 同 thread replacement、不同 thread、canonical 與 source presentation order 均保留
+
+此處只是已存在且含 selected calls 的兩個來源, 並未重跑 deferred metadata-only source experiment, 尚未涵蓋無 ID / 額外無 calls 來源、外部 thread-name enrichment、完整 partial-history / worker metadata ownership, 不得把 fixture header 合併當作全部來源策略已完成
+
 ### 共同 capture / mutation 邊界設計草案
 
 此設計起於 `2427f5e` 的 producer 與 server reader 稽核, 共同 publication 部分已實作並通過限定範圍驗證, 下列跨輪 capture / mutation 部分仍為待整合規格, 不視為全部架構驗收

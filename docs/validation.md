@@ -1913,3 +1913,14 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, cargo check 通過並保留原 5 個 warn
 Linux / Rust 1.100.0 / 原 Cargo.lock, 未執行 HTTP、完整套件或 deferred 檢查, 本輪先驗證 production 同步 row 重用, 尚未將 RowSummary 接入跨來源 page candidate, metadata 擷取與完整 worker / 資源驗收仍待完成, fallback 不變
 
 `cargo check --locked --manifest-path rust/service/Cargo.toml --bin local-activity-monitor` 通過, 保留前輪 6 個 warnings
+
+### Cross-source RowSummary candidate 串接
+
+基準 `1b584fe`, 在既有雙來源實際 SQLite page candidate 組合 RowSummary, 不新增另一個平行 fixture 或 production 發布路徑
+
+- 來源 metadata 從原 selected_checkpoint empty-call header 擷取, 依同一來源順序 merge_snapshot, 明確確認 row metadata 不含 calls, 不借用 materialized oracle 的 calls
+- 四窗 per-thread reducers 在相同 resolved winner 頁接收 calls, canonical 與完整 source presentation order 的整列輸出、tools / nested totals 與原 materialized Projection::row 相等
+- 原同 thread 900 winners / 不同 thread 1,200 winners、一般 / nested 四種情境、incoming message metadata、file reads、Git / check、skills、精確 statistics 及 source-change / budget 拒絕整組結果檢查保留
+- Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 1 項通過、423 項未選取, 16.11 秒, 未執行 HTTP、完整套件或 deferred 檢查
+
+本輪不覆蓋額外 metadata-only / 無 ID 來源、非 null thread-name enrichment 或完整 partial-history, 也未重跑已延後的 metadata-only source experiment, production worker / fallback / 16 MiB staging 未切換, 整體記憶體與完成能力尚未驗收
