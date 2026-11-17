@@ -74,7 +74,7 @@ pub(crate) fn render(
         base.join(raw)
     };
     let path = path.canonicalize().ok()?;
-    if !path.file_name()?.to_str()?.eq_ignore_ascii_case("skill.md") || !path.is_file() {
+    if path.file_name()?.to_str()?.to_lowercase() != "skill.md" || !path.is_file() {
         return None;
     }
     let root = path.parent()?.canonicalize().ok()?;
@@ -113,7 +113,7 @@ pub(crate) fn render(
         let path = entry["relative_path"]
             .as_str()
             .unwrap_or("")
-            .to_ascii_lowercase();
+            .to_lowercase();
         (!["skill.md", "readme.md"].contains(&path.as_str()), path)
     });
     let mut documents = Vec::new();
@@ -121,7 +121,7 @@ pub(crate) fn render(
         let relative = entry["relative_path"].as_str()?;
         if entry["readable"] != true
             || !selected.map_or_else(
-                || ["skill.md", "readme.md"].contains(&relative.to_ascii_lowercase().as_str()),
+                || ["skill.md", "readme.md"].contains(&relative.to_lowercase().as_str()),
                 |name| name == relative,
             )
         {
@@ -170,6 +170,32 @@ pub(crate) fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observed_unicode_skill_filename_remains_a_primary_document() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let path = root.join("SKILL.md");
+        fs::write(&path, "fixture primary").unwrap();
+        fs::write(root.join("README.md"), "fixture overview").unwrap();
+        fs::write(root.join("other.md"), "fixture other").unwrap();
+        fs::write(root.join("É.md"), "fixture accent").unwrap();
+        fs::write(root.join("ä.md"), "fixture umlaut").unwrap();
+        let arguments = json!({"cmd":format!("cat '{}'", path.display())});
+        let observed = lam_session_core::skill_read_paths("exec_command", arguments.as_object());
+        assert_eq!(observed.len(), 1);
+        let detail = render(&observed[0].name, &observed[0], None).unwrap();
+        let names = detail["documents"].as_array().unwrap().iter()
+            .map(|entry| entry["relative_path"].as_str().unwrap()).collect::<Vec<_>>();
+        assert_eq!(names, ["README.md", "SKILL.md"]);
+        assert_eq!(detail["documents"][1]["text"], "fixture primary");
+        let files = detail["files"].as_array().unwrap();
+        assert_eq!(files[0]["relative_path"], "README.md");
+        assert_eq!(files[1]["relative_path"], "SKILL.md");
+        assert_eq!(files[2]["relative_path"], "other.md");
+        assert_eq!(files[3]["relative_path"], "ä.md");
+        assert_eq!(files[4]["relative_path"], "É.md");
+    }
 
     #[test]
     fn skill_suffixes_follow_unicode_lowercase_for_inventory_and_documents() {

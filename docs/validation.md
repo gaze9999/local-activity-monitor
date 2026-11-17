@@ -2251,3 +2251,13 @@ LAM main `5c03daf` 與 workspace main `383fbb9` 再核對未變, 後者相較前
 - `/api/codex/skill` 仍使用已觀察 skill 與 thread / call / file 選取, 不新增查詢或擴大來源目錄, 保留原遮蔽、symlink / identity、文件容量與 inventory 上限
 
 Linux / Rust 1.100.0 / 原 Cargo.lock, `skill_suffixes_follow_unicode_lowercase_for_inventory_and_documents` 通過 1 項、437 項未選取, 0.05 秒, 既有 HTTP `skill_document_details_require_observed_source_and_filter_sensitive_files` 通過 1 項、226 項未選取, 0.25 秒, git diff --check 通過, 未執行完整套件或實際平台檔案系統驗收
+
+### 已觀察 Skill 主要文件的 Unicode 名稱
+
+基準 `bdd9945`, 同一 Python 來源以 Unicode lowercase 判斷 `skill.md`、預設文件選取與 inventory 排序, Rust 對齊這三處, 保留原路徑及檔名供顯示與精確選取
+
+- 實際 recorded-command parser 可辨識 `SKILL.md`, 修正前 render 卻回傳 None, 新 fixture 先重現再通過
+- 修正後預設 documents 包含 README 與該主要文件, 其他 Markdown 不自動讀取, inventory 仍將主要文件置前, 其餘 `ä.md` / `É.md` 按 Unicode lowercase 排序
+- Python collector 與排序來源已使用合成資料核對, 未增加未觀察來源、執行 recorded command 或變更文件讀取上限
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, `sessions::skill_detail::tests` 通過 2 項、437 項未選取, 0.07 秒, 包含前項副檔名排除回歸, git diff --check 通過, 未重跑完整 HTTP 或平台檔名正規化驗收
