@@ -310,6 +310,10 @@ Capture 完成後重新核對較早讀取的 owner, validate 消耗原 guard, �
 
 這是 mutable owner 與來源拓樸範圍的必要組合, 尚未接入 production aggregation, 不替代完整 CallSelection、外部檔案 identity 與最終 signature sweep、reference / cutoffs、其他 catalog / diagnostics metadata、JEV / device 或 route / publication guard, 逐來源驗證也不建立跨所有來源的單一 transaction, 路徑副本成本與高頻 discovery 下的完成能力尚待整體候選量測
 
+既有真實 SQLite 分頁 candidate 已串接此 guard, 每頁讀取前與最終 signature 驗證後重新驗證 owner / topology, 拒絕時由原 Option 擁有權路徑丟棄 reader 與 reducers, 固定 cutoffs、每頁最多 512 calls 及四窗 oracle 不變, cached completion 可繼續完成, changed result / tracking / disabled 在下一頁前拒絕整組結果
+
+此串接仍在原 test-only candidate, production worker 尚未使用, 不將測試的整組拒絕行為套入現有 incomplete fallback, 不代表已完成全部摘要或 metadata / JEV / device 擷取
+
 ### 共同 capture / mutation 邊界設計草案
 
 此設計起於 `2427f5e` 的 producer 與 server reader 稽核, 共同 publication 部分已實作並通過限定範圍驗證, 下列跨輪 capture / mutation 部分仍為待整合規格, 不視為全部架構驗收

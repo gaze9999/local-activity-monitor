@@ -6078,6 +6078,7 @@ mod log_tests {
     #[test]
     fn snapshot_file_candidate_pages_validate_before_exposing_results() {
         struct Candidate {
+            inputs: candidate_inputs::CandidateInputs,
             reader: lam_history_store::SelectedCheckpointReader,
             summaries: [project::FileSummary; 4],
             cutoffs: [Option<chrono::DateTime<Utc>>; 4],
@@ -6091,13 +6092,14 @@ mod log_tests {
             collector.source_membership.as_ref().unwrap().db
                 .query_row("SELECT value FROM selection_epoch", [], |row| row.get(0)).unwrap()
         }
-        fn advance(slot: &mut Option<Candidate>, collector: &Collector, stopped: bool)
+        fn advance(slot: &mut Option<Candidate>, collector: &Collector, stopped: &AtomicBool, enabled: bool)
             -> Result<Option<[Value; 4]>, &'static str>
         {
             // Taking ownership makes every rejection drop both reader and reducers.
             let mut candidate = slot.take().expect("pending candidate");
-            if stopped { return Err("cancelled"); }
+            if stopped.load(Ordering::Acquire) { return Err("cancelled"); }
             if epoch(collector) != candidate.epoch { return Err("selection changed"); }
+            candidate.inputs = candidate.inputs.validate(collector, enabled, stopped).ok_or("inputs changed")?;
             let page = candidate.reader.next_page().map_err(|_| "read failed")?
                 .ok_or("unexpected eof")?;
             let mut projection = checkpoint::snapshot_projection(page, false).ok_or("projection failed")?;
@@ -6122,6 +6124,7 @@ mod log_tests {
             if store.checkpoint_signature(&candidate.key).map_err(|_| "signature failed")?
                 .as_ref() != Some(&candidate.signature) { return Err("source changed"); }
             if epoch(collector) != candidate.epoch { return Err("selection changed"); }
+            candidate.inputs = candidate.inputs.validate(collector, enabled, stopped).ok_or("inputs changed")?;
             Ok(Some(candidate.summaries.map(|summary| {
                 let (events, total, operations) = summary.finish();
                 json!({"events":events,"total":total,"operations":operations})
@@ -6193,6 +6196,7 @@ mod log_tests {
             assert_eq!(window["codex"]["file_activity"], materialized[index]);
         }
         let begin = |collector: &Collector, ordered: bool| Candidate {
+            inputs:candidate_inputs::CandidateInputs::capture(collector, true, &stopped).unwrap(),
             reader: collector.checkpoints.snapshot_reader().unwrap().unwrap()
                 .into_selected_checkpoint_reader(&lam_history_store::ExpectedCursor {
                     source_key:&key, signature:Some(&original.cursor.signature) }, ids.clone()).unwrap().unwrap(),
@@ -6204,9 +6208,9 @@ mod log_tests {
             cutoffs, epoch:epoch(collector), key:key.clone(), signature:original.cursor.signature.clone(), observed:0, ordered,
         };
         let mut candidate = Some(begin(&collector, false));
-        assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
+        assert!(advance(&mut candidate, &collector, &stopped, true).unwrap().is_none());
         assert_eq!(candidate.as_ref().unwrap().observed, 512);
-        let result = advance(&mut candidate, &collector, false).unwrap().unwrap();
+        let result = advance(&mut candidate, &collector, &stopped, true).unwrap().unwrap();
         assert!(candidate.is_none());
         assert_eq!(result, materialized);
         // Complete-source presentation order must survive the reader page boundary.
@@ -6218,8 +6222,8 @@ mod log_tests {
             json!({"events":events,"total":total,"operations":operations})
         });
         candidate = Some(begin(&collector, true));
-        assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
-        let ordered_result = advance(&mut candidate, &collector, false).unwrap().unwrap();
+        assert!(advance(&mut candidate, &collector, &stopped, true).unwrap().is_none());
+        let ordered_result = advance(&mut candidate, &collector, &stopped, true).unwrap().unwrap();
         for index in 0..4 {
             assert_eq!(ordered_result[index]["total"], ordered_expected[index]["total"]);
             let ids = |value: &Value| value["events"].as_array().unwrap().iter()
@@ -6229,41 +6233,65 @@ mod log_tests {
         }
         // Cancellation cannot expose the first page or retain its reader/reducer.
         candidate = Some(begin(&collector, false));
-        assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
-        assert_eq!(advance(&mut candidate, &collector, true), Err("cancelled"));
+        assert!(advance(&mut candidate, &collector, &stopped, true).unwrap().is_none());
+        stopped.store(true, Ordering::Release);
+        assert_eq!(advance(&mut candidate, &collector, &stopped, true), Err("cancelled"));
+        stopped.store(false, Ordering::Release);
         assert!(candidate.is_none());
         candidate = Some(begin(&collector, false));
-        assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
+        assert!(advance(&mut candidate, &collector, &stopped, true).unwrap().is_none());
         collector.source_membership.as_ref().unwrap().db.execute("UPDATE selection_epoch SET value=value+1", []).unwrap();
-        assert_eq!(advance(&mut candidate, &collector, false), Err("selection changed"));
+        assert_eq!(advance(&mut candidate, &collector, &stopped, true), Err("selection changed"));
         assert!(candidate.is_none());
         candidate = Some(begin(&collector, false));
-        assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
+        assert!(advance(&mut candidate, &collector, &stopped, true).unwrap().is_none());
         let mut replaced = original.cursor.clone();
         replaced.signature = "candidate-source-replaced".into();
         store.save_checkpoints(&[replaced], &[], &[]).unwrap();
-        assert_eq!(advance(&mut candidate, &collector, false), Err("source changed"));
+        assert_eq!(advance(&mut candidate, &collector, &stopped, true), Err("source changed"));
         assert!(candidate.is_none());
         assert_eq!(result, materialized, "completed owned output remains unchanged");
         store.save_checkpoints(std::slice::from_ref(&original.cursor), &calls, &[]).unwrap();
         candidate = Some(begin(&collector, false));
-        assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
-        assert_eq!(advance(&mut candidate, &collector, false).unwrap().unwrap(), materialized);
+        assert!(advance(&mut candidate, &collector, &stopped, true).unwrap().is_none());
+        assert_eq!(advance(&mut candidate, &collector, &stopped, true).unwrap().unwrap(), materialized);
+        // The actual page continuation now consumes the owner guard. Identical
+        // cached completion does not prevent progress, changed inputs discard all
+        // staged work before the next page can expose a mixed result.
+        candidate = Some(begin(&collector, false));
+        assert!(advance(&mut candidate, &collector, &stopped, true).unwrap().is_none());
+        collector.account.publish(json!({"candidate_fixture":1}));
+        assert_eq!(advance(&mut candidate, &collector, &stopped, true), Err("inputs changed"));
+        assert!(candidate.is_none());
+        candidate = Some(begin(&collector, false));
+        assert!(advance(&mut candidate, &collector, &stopped, true).unwrap().is_none());
+        collector.account.publish(json!({"candidate_fixture":1}));
+        assert_eq!(advance(&mut candidate, &collector, &stopped, true).unwrap().unwrap(), materialized);
+        candidate = Some(begin(&collector, false));
+        assert!(advance(&mut candidate, &collector, &stopped, true).unwrap().is_none());
+        collector.tracking.write().unwrap().max_files = 37;
+        assert_eq!(advance(&mut candidate, &collector, &stopped, true), Err("inputs changed"));
+        assert!(candidate.is_none());
+        candidate = Some(begin(&collector, false));
+        assert!(advance(&mut candidate, &collector, &stopped, true).unwrap().is_none());
+        assert_eq!(advance(&mut candidate, &collector, &stopped, false), Err("inputs changed"));
+        assert!(candidate.is_none());
+        assert_eq!(result, materialized, "input rejection must not mutate delivered output");
         // Independent error-path fixture: only the second page has malformed JSON.
         // This does not rerun the deferred large encoded-payload experiment.
         let mut malformed_calls = calls.clone();
         malformed_calls[550].payload = "{malformed".into();
         store.save_checkpoints(std::slice::from_ref(&original.cursor), &malformed_calls, &[]).unwrap();
         candidate = Some(begin(&collector, false));
-        assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
+        assert!(advance(&mut candidate, &collector, &stopped, true).unwrap().is_none());
         assert_eq!(candidate.as_ref().unwrap().observed, 512);
-        assert_eq!(advance(&mut candidate, &collector, false), Err("projection failed"));
+        assert_eq!(advance(&mut candidate, &collector, &stopped, true), Err("projection failed"));
         assert!(candidate.is_none());
         assert_eq!(result, materialized);
         store.save_checkpoints(std::slice::from_ref(&original.cursor), &calls, &[]).unwrap();
         candidate = Some(begin(&collector, false));
-        assert!(advance(&mut candidate, &collector, false).unwrap().is_none());
-        assert_eq!(advance(&mut candidate, &collector, false).unwrap().unwrap(), materialized);
+        assert!(advance(&mut candidate, &collector, &stopped, true).unwrap().is_none());
+        assert_eq!(advance(&mut candidate, &collector, &stopped, true).unwrap().unwrap(), materialized);
     }
 
     #[test]

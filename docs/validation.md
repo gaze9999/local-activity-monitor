@@ -1850,3 +1850,14 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, cargo check 通過並保留原 5 個 warn
 - Linux / Rust 1.100.0 / 原 Cargo.lock, targeted `candidate_inputs` 3 項通過、421 項未選取, 耗時 0.01 秒, 包含原 mutable-owner 及取消回歸, 未跑 HTTP、完整套件或 deferred 檢查
 
 這僅補齊 candidate 的來源拓樸驗證, 尚未串接完整 CallSelection 與 checkpoint 最終 signature sweep、固定時間窗及所有 reducers, 亦未驗收實際 worker 的全量輸出、容量或高頻 discovery 下的完成能力, 不宣稱已消除 production 16 MiB staging
+
+### 真實 SQLite candidate 分頁串接 owner guard
+
+基準 `772748d`, 在原 `snapshot_file_candidate_pages_validate_before_exposing_results` 串接 CandidateInputs, 不是新增另一套假想 token fixture
+
+- 每頁前與最後 source signature 驗證後消耗並重新持有 guard, 延用原 take / restore Option 擁有權流程, 失敗不留下 pending candidate
+- 第一頁 512 calls 後真實 account publish 改變 result, 下一頁拒絕整組結果, 重新建立 candidate 後相同 cached completion 可完成並符合原四窗 materialized oracle
+- Tracking 寫鎖改動與當下 enabled=false 分別拒絕後續頁, 取消使用實際 AtomicBool, 原 signature / epoch / malformed second-page、固定 cutoffs、排序與舊結果不可變檢查均保留
+- Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 1 項通過、423 項未選取, 耗時 0.99 秒, 未執行 HTTP、完整套件或 deferred 檢查
+
+僅為既有 test-only page candidate 的實際 guard 串接, 未改 production worker、聚合、設定保存或 fallback, 完整 CallSelection / metadata owners 與全量 worker / 資源驗收仍未完成
