@@ -138,7 +138,7 @@ fn ratio(numerator: u128, denominator: u64) -> f64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use super::super::{ActivitySeries, NestedActivity};
     use serde_json::{json, Value};
@@ -154,7 +154,7 @@ mod tests {
         last_response: Option<Time>,
     }
 
-    struct OwnedStatistics {
+    pub(in crate::sessions) struct OwnedStatistics {
         groups: BTreeMap<(String, bool), OwnedGroup>,
         boundary: Option<Time>,
         enabled: bool,
@@ -166,7 +166,7 @@ mod tests {
     }
 
     impl OwnedStatistics {
-        fn new(boundary: Option<Time>, enabled: bool, unit_limit: usize, key_limit: usize) -> Self {
+        pub(in crate::sessions) fn new(boundary: Option<Time>, enabled: bool, unit_limit: usize, key_limit: usize) -> Self {
             Self { groups: BTreeMap::new(), boundary, enabled, units: 0, key_bytes: 0,
                 unit_limit, key_limit, valid: true }
         }
@@ -204,7 +204,7 @@ mod tests {
             }
         }
 
-        fn observe(&mut self, thread: &str, call: &Call) {
+        pub(in crate::sessions) fn observe(&mut self, thread: &str, call: &Call) {
             if !self.valid || !self.enabled
                 || self.boundary.is_some_and(|cutoff| call.time.is_none_or(|time| time < cutoff)) { return; }
             self.admit(thread, &call.tool, false, 1, call);
@@ -213,7 +213,7 @@ mod tests {
             }
         }
 
-        fn finish(self) -> Option<Value> {
+        pub(in crate::sessions) fn finish(self) -> Option<Value> {
             if !self.valid { return None; }
             Some(Value::Array(self.groups.into_iter().map(|((tool, nested), mut group)| {
                 let (average_ms, p99_ms) = metrics(&mut group.durations);

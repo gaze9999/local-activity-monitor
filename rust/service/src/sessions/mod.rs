@@ -5824,6 +5824,8 @@ mod log_tests {
                 row.call_id = format!("call{:04}", n + 300);
                 let mut payload: Value = serde_json::from_str(&row.payload).unwrap();
                 payload["files"][0]["path"] = json!(format!("second-{n}"));
+                payload["completed"] = json!(row.event_time.as_deref().and_then(lam_history_store::parse_utc_stamp)
+                    .filter(|_| n % 3 != 0).map(|time| stamp(time + Duration::milliseconds(n as i64))));
                 row.payload = payload.to_string();
                 row
             }).collect();
@@ -5868,6 +5870,10 @@ mod log_tests {
                 let (activity, tools) = series.finish();
                 json!({"activity":activity,"tools":tools})
             });
+            let statistics_threads: BTreeMap<_,_> = materialized.iter()
+                .map(|(id, projection)| (id.as_str(), (projection.clone(), false))).collect();
+            let expected_statistics = cutoffs.map(|cutoff|
+                serde_json::to_value(project::ToolStatistics::new(&statistics_threads, cutoff, true)).unwrap());
             // Read each source's thread identity from its verified cursor metadata,
             // without loading call payloads merely to arbitrate duplicate IDs.
             let mut winners = BTreeMap::new();
@@ -5896,7 +5902,8 @@ mod log_tests {
             }
             // Process winner sources in reverse to show reduction is independent of
             // page arrival once canonical-fallback winners have been fixed.
-            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool| -> Option<([Value;4], [Value;4])> {
+            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool, statistics_units: usize| -> Option<([Value;4], [Value;4], [Value;4])> {
+                let mut statistics = cutoffs.map(|cutoff| project::OwnedStatistics::new(cutoff, true, statistics_units, 10_000));
                 let mut series = std::array::from_fn::<_,4,_>(|_| project::ActivitySeries::new());
                 let mut summaries = std::array::from_fn::<_,4,_>(|_| project::FileSummary::new(1000));
                 let mut observed = 0;
@@ -5917,6 +5924,11 @@ mod log_tests {
                         }
                         for (series, cutoff) in series.iter_mut().zip(cutoffs) {
                             series.observe(&projection.projection, cutoff);
+                        }
+                        for (statistics, _) in statistics.iter_mut().zip(cutoffs) {
+                            for call in projection.projection.calls.values() {
+                                statistics.observe(projection.projection.id.as_deref().unwrap(), call);
+                            }
                         }
                         observed += projection.projection.calls.len();
                         for (summary, cutoff) in summaries.iter_mut().zip(cutoffs) {
@@ -5949,15 +5961,19 @@ mod log_tests {
                     let (activity, tools) = series.finish();
                     json!({"activity":activity,"tools":tools})
                 });
-                Some((result, series))
+                let statistics: [Value;4] = statistics.into_iter().map(|value| value.finish())
+                    .collect::<Option<Vec<_>>>()?.try_into().ok()?;
+                Some((result, series, statistics))
             };
-            let result = reduce(&mut store, false, false).unwrap();
+            let result = reduce(&mut store, false, false, 10_000).unwrap();
             assert_eq!(result.0, expected);
             assert_eq!(result.1, expected_series);
-            assert!(reduce(&mut store, true, false).is_none(), "a source changed after its own validation");
-            assert_eq!(result, (expected.clone(), expected_series.clone()), "previously completed output is immutable");
+            assert_eq!(result.2, expected_statistics);
+            assert!(reduce(&mut store, false, false, 0).is_none(), "statistics overflow rejects the whole candidate");
+            assert!(reduce(&mut store, true, false, 10_000).is_none(), "a source changed after its own validation");
+            assert_eq!(result, (expected.clone(), expected_series.clone(), expected_statistics.clone()), "previously completed output is immutable");
             store.save_checkpoints(std::slice::from_ref(&second_cursor), &second_calls, &[]).unwrap();
-            assert_eq!(reduce(&mut store, false, false).unwrap(), (expected.clone(), expected_series.clone()));
+            assert_eq!(reduce(&mut store, false, false, 10_000).unwrap(), (expected.clone(), expected_series.clone(), expected_statistics.clone()));
             let ordered_expected = cutoffs.map(|cutoff| {
                 let mut summary = project::FileSummary::new(1000);
                 for (thread, projection) in &materialized {
@@ -5967,12 +5983,13 @@ mod log_tests {
                 let (events,total,operations) = summary.finish();
                 json!({"events":events,"total":total,"operations":operations})
             });
-            let ordered_result = reduce(&mut store, false, true).unwrap();
+            let ordered_result = reduce(&mut store, false, true, 10_000).unwrap();
             for index in 0..4 {
                 assert!(ordered_result.0[index] == ordered_expected[index],
                     "cross-source insertion slots changed, same_thread={same_thread}, window={index}");
             }
             assert_eq!(ordered_result.1, expected_series);
+            assert_eq!(ordered_result.2, expected_statistics);
             collector.updated = Some(reference);
             let baseline = collector.snapshots("ok", "ok", 1);
             for index in 0..4 {
@@ -5980,6 +5997,7 @@ mod log_tests {
                 assert_eq!(window["codex"]["file_activity"], expected[index]);
                 assert_eq!(window["codex"]["activity_series"], expected_series[index]["activity"]);
                 assert_eq!(window["codex"]["tool_series"], expected_series[index]["tools"]);
+                assert_eq!(window["codex"]["tool_statistics"], expected_statistics[index]);
             }
         }
     }

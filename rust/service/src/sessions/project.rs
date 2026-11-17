@@ -21,6 +21,8 @@ const COUNTERS: [&str; 6] = [
 
 mod statistics;
 pub(super) use statistics::ToolStatistics;
+#[cfg(test)]
+pub(super) use statistics::tests::OwnedStatistics;
 
 type Time = DateTime<Utc>;
 

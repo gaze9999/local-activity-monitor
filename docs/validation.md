@@ -1763,3 +1763,13 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, fail-before 0.55 秒, test-only 修正後
 來源最後驗證失敗時整組 file / series 結果不回傳, 恢復後整組重建相符, 已完成 owned 結果保持不變, ordered / canonical 兩條測試路徑均保留
 
 Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 測試 1 筆通過、415 筆未選取, 耗時 2.32 秒, 未重跑 metadata-only、大型 padding、HTTP 或其他延後檢查, 不代表全部 reducer、記憶體上限或 worker 發布驗收
+
+### 精確 ToolStatistics 與 candidate 共用 winner
+
+沿 `d664a85` 的通過 fixture 串接既有 cfg(test) OwnedStatistics prototype, 只增加測試可見性, 不新增 production reducer 或 API, unit / key 預算仍為測試注入值, 不是正式產品限制
+
+第二來源加入不同完成耗時與未完成 calls, 同一批已定案 winner / checkpoint pages 同時產生四窗 file、series 與 statistics, 比對未修改 materialized ToolStatistics 與實際 snapshots 的完整 statistics 欄位, 保留不同 thread 的 distinct 計數、known duration、average 與精確 p99
+
+來源 signature 變更或 statistics 測試預算為 0 時, 整組候選不回傳, 不只丟掉 statistics 後發布其他 reducer, 恢復來源與正常測試預算後仍須符合原 oracle, ordered / canonical 分支與舊結果不可變條件保留
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 測試 1 筆通過、415 筆未選取, 耗時 3.14 秒, 未重跑 metadata-only、大型 padding、HTTP、完整套件或其他延後檢查, 此 fixture 尚未加入 nested tool 呼叫, 亦不代表實際配置上限、所有 reducer 或 worker 發布驗收
