@@ -1773,3 +1773,13 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 測試 1 筆通過、415 筆未�
 來源 signature 變更或 statistics 測試預算為 0 時, 整組候選不回傳, 不只丟掉 statistics 後發布其他 reducer, 恢復來源與正常測試預算後仍須符合原 oracle, ordered / canonical 分支與舊結果不可變條件保留
 
 Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 測試 1 筆通過、415 筆未選取, 耗時 3.14 秒, 未重跑 metadata-only、大型 padding、HTTP、完整套件或其他延後檢查, 此 fixture 尚未加入 nested tool 呼叫, 亦不代表實際配置上限、所有 reducer 或 worker 發布驗收
+
+### Candidate nested tool 統計
+
+沿 `39e62a8` 保留原兩個無 nested 案例, 另加入同 thread / 不同 thread 的 exec fixture, 由實際 Collector::refresh 解析重複內層呼叫後取得 checkpoint, 不手造 NestedActivity 欄位
+
+同一 exec 包含兩次 fixture_tool 與一次 exec, 讓 primary / nested 同名工具仍分開計數, 全時間窗明確核對 900 / 1,200 winners、內層重複次數及 distinct thread, nested returned / duration / p99 / response time 保持 null, 不繼承 container 的耗時統計
+
+四個案例均經實際 selected reader 分頁, file / series / statistics 整組比對未修改 materialized 與 snapshots oracle, 保留 ordered / canonical、來源變更拒絕、statistics 預算拒絕與恢復條件, production 未修改
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 測試 1 筆通過、415 筆未選取, 耗時 7.11 秒, 未重跑 metadata-only、大型 padding、HTTP、完整套件或其他延後檢查, 不代表任意巢狀程式、所有 reducer、記憶體上限或 worker 發布驗收

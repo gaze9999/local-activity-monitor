@@ -5764,14 +5764,16 @@ mod log_tests {
 
     #[test]
     fn snapshot_file_candidate_resolves_two_source_winners_before_paging() {
-        for same_thread in [true, false] {
+        for (same_thread, nested) in [(true, false), (false, false), (true, true), (false, true)] {
+            let fixture_tool = if nested { "exec" } else { "fixture_tool" };
+            let arguments = if nested { "await tools.fixture_tool({}); await tools.fixture_tool({}); await tools.exec({});" } else { "{}" };
             let directory = tempfile::tempdir().unwrap();
             let root = directory.path().canonicalize().unwrap();
             let id = "00000000-0000-4000-8000-000000000001";
             let path = root.join(format!("rollout-{id}.jsonl"));
             std::fs::write(&path, format!("{}\n{}\n{}\n",
                 json!({"timestamp":"2026-11-13T01:00:00Z","type":"session_meta","payload":{"id":id}}),
-                json!({"timestamp":"2026-11-13T01:00:01Z","type":"response_item","payload":{"type":"function_call","name":"fixture_tool","call_id":"call00","arguments":"{}"}}),
+                json!({"timestamp":"2026-11-13T01:00:01Z","type":"response_item","payload":{"type":"function_call","name":fixture_tool,"call_id":"call00","arguments":arguments}}),
                 json!({"timestamp":"2026-11-13T01:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Message Type: MESSAGE\nTask name: fixture\nSender: source\nPayload:\nPRIVATE_BODY"}]}})
             )).unwrap();
             let mut collector = Collector::new(root.join("monitoring"), true, None);
@@ -5792,7 +5794,7 @@ mod log_tests {
                 row.event_time = time.map(str::to_owned);
                 let mut payload: Value = serde_json::from_str(&row.payload).unwrap();
                 payload["time"] = json!(time);
-                payload["files"] = json!([{"operation":"read","path":format!("fixture-{n}"),"tool":"fixture_tool","nested":false}]);
+                payload["files"] = json!([{"operation":"read","path":format!("fixture-{n}"),"tool":fixture_tool,"nested":false}]);
                 row.payload = payload.to_string();
                 row
             }).collect();
@@ -5874,6 +5876,21 @@ mod log_tests {
                 .map(|(id, projection)| (id.as_str(), (projection.clone(), false))).collect();
             let expected_statistics = cutoffs.map(|cutoff|
                 serde_json::to_value(project::ToolStatistics::new(&statistics_threads, cutoff, true)).unwrap());
+            if nested {
+                let all = expected_statistics[3].as_array().unwrap();
+                let primary = all.iter().find(|row| row["tool"] == "exec" && row["nested"] == false).unwrap();
+                let nested_exec = all.iter().find(|row| row["tool"] == "exec" && row["nested"] == true).unwrap();
+                let repeated = all.iter().find(|row| row["tool"] == "fixture_tool" && row["nested"] == true).unwrap();
+                assert_eq!(primary["calls"], json!(expected_winners));
+                assert_eq!(nested_exec["calls"], json!(expected_winners));
+                assert_eq!(repeated["calls"], json!(expected_winners * 2));
+                for row in [nested_exec, repeated] {
+                    assert_eq!(row["thread_count"], json!(if same_thread { 1 } else { 2 }));
+                    for field in ["returned", "known_duration_count", "average_ms", "p99_ms", "last_response_at"] {
+                        assert!(row[field].is_null(), "nested calls must not inherit container metrics");
+                    }
+                }
+            }
             // Read each source's thread identity from its verified cursor metadata,
             // without loading call payloads merely to arbitrate duplicate IDs.
             let mut winners = BTreeMap::new();
