@@ -681,6 +681,43 @@ mod tests {
     }
 
     #[test]
+    fn recent_attempt_projection_caps_before_filtering_and_preserves_raw_count() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE jev_events(timestamp TEXT,status TEXT,metadata TEXT)").unwrap();
+        let mut attempts = vec![Value::Null, json!("not an attempt")];
+        for value in [json!(0), json!(i64::MAX), json!(-1), json!(true), json!(1.5), json!("200"), Value::Null] {
+            attempts.push(json!({"status":"invalid status","http_status":value,"latency_ms":value,"body":"PRIVATE_ATTEMPT"}));
+        }
+        while attempts.len() < 20 {
+            attempts.push(json!({"status":"timeout","http_status":504,"latency_ms":9}));
+        }
+        let event = json!({"timestamp":"2026-11-13T12:00:00Z","status":"ok","operation":"rank",
+            "resolved_model":"invalid model","requested_model":"fallback-model","source":"invalid source",
+            "attempts":attempts,"prompt":"PRIVATE_ATTEMPT"});
+        db.execute("INSERT INTO jev_events VALUES('2026-11-13T12:00:00Z','ok',?)", [event.to_string()]).unwrap();
+        let (recent, _) = details(&db, "", &mut json!({})).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0]["model"], "fallback-model");
+        assert_eq!(recent[0]["source"], Value::Null);
+        assert_eq!(recent[0]["http_attempts"], 20);
+        let shown = recent[0]["attempts"].as_array().unwrap();
+        assert_eq!(shown.len(), 14);
+        for (index, expected) in [json!(0), json!(i64::MAX), Value::Null, Value::Null, Value::Null, Value::Null, Value::Null].iter().enumerate() {
+            assert_eq!(shown[index], json!({"status":"unknown","http_status":expected,"latency_ms":expected}));
+        }
+        assert!(shown[7..].iter().all(|value| value == &json!({"status":"timeout","http_status":504,"latency_ms":9})));
+        assert!(!recent[0].to_string().contains("PRIVATE_ATTEMPT"));
+        for attempts in [Value::Null, json!({"status":"timeout"}), json!("invalid"), json!([])] {
+            let mut event = event.clone();
+            event["attempts"] = attempts;
+            db.execute("UPDATE jev_events SET metadata=?", [event.to_string()]).unwrap();
+            let (recent, _) = details(&db, "", &mut json!({})).unwrap();
+            assert_eq!(recent[0]["http_attempts"], 0);
+            assert_eq!(recent[0]["attempts"], json!([]));
+        }
+    }
+
+    #[test]
     fn recent_skips_non_text_metadata_without_losing_valid_rows_or_counts() {
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(home.path().join("monitoring")).unwrap();

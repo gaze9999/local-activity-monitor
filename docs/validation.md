@@ -1459,3 +1459,13 @@ Linux / Rust 1.100.0、原 Cargo.lock, JEV 模組單輪 8 項通過 (0.05 秒), 
 Linux / Rust 1.100.0、原 Cargo.lock, JEV 模組單輪 9 項通過 (0.04 秒), serial HTTP 的 JEV 13 項通過 (3.51 秒), diff 檢查通過
 
 `/api/snapshot` 的 jev.recent 與 mcp.telemetry.jev.recent 仍取自 jev_events.metadata, SQL、timestamp>=cutoff、80 筆上限、65536 位元組防護、查詢次數、summary 與 transaction 邊界未變, 未修改四窗共同 capture 或重跑完整 service / HTTP suites
+
+### JEV attempts 投影邊界
+
+以 `562c7e1` 為基底, LAM main `5c03daf` 與 workbench-workspace main `4616074` 核對未變, 新增與實際 Python collector 對照的合成資料驗證, 本輪不修改 runtime
+
+20 筆原始 attempts 的前兩筆不是物件, 先取前 16 筆再過濾後顯示 14 筆, http_attempts 仍為 20, 不以後續項目補足預覽, 巢狀 http_status / latency_ms 保留 0 與 i64 最大值, 負數、布林、浮點、字串及 null 皆為 null
+
+另核對無效 attempt status 變成 unknown、無效 resolved_model 沿用有效 requested_model、無效 source 為 null, null / 物件 / 字串 / 空陣列 attempts 均不產生預覽或計數, 原始 prompt / body 不出現在投影
+
+Linux / Rust 1.100.0、原 Cargo.lock, Python 合成資料與 JEV 模組單輪 10 項通過 (0.06 秒), runtime 位元組比較與 diff 檢查通過, 本輪未重跑 HTTP 或完整 service suites, 不代表跨來源一致性或完整驗收
