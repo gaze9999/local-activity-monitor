@@ -315,7 +315,7 @@ pub fn combine_observations(history: &[Value], recent: impl Iterator<Item = Valu
         .collect()
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct ObservationView {
     pub retention_days: i64,
     pub events: Arc<Vec<Value>>,

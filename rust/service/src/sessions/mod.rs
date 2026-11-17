@@ -2568,6 +2568,8 @@ struct Collector {
     started: chrono::DateTime<Utc>,
     updated: Option<chrono::DateTime<Utc>>,
     checkpoints: Checkpoints,
+    // Scoped to retained inputs owned by this Collector, not a snapshot version.
+    history_revision: project::ContentRevision,
     activity_history: Arc<Vec<Value>>,
     activity_view: Option<ObservationView>,
     known_retention_days: Option<i64>,
@@ -2915,6 +2917,7 @@ impl Collector {
             frontend_revision,
             updated: None,
             checkpoints: Checkpoints::new(directory, enabled),
+            history_revision: project::ContentRevision::default(),
             activity_history: Arc::new(Vec::new()),
             activity_view: None,
             known_retention_days: None,
@@ -3003,12 +3006,25 @@ impl Collector {
             .observed_view(reference, &cutoffs, &excluded)
         {
             Ok(view) => {
+                if (!Arc::ptr_eq(&self.activity_history, &view.events)
+                    && self.activity_history.as_ref() != view.events.as_ref())
+                    || self.known_retention_days != Some(view.retention_days)
+                    || self.activity_view.as_ref() != Some(&view)
+                    || self.activity_history_health != "ok"
+                    || self.mcp_view_sources != *sources {
+                    self.history_revision.bump();
+                }
                 self.activity_history = Arc::clone(&view.events);
                 self.known_retention_days = Some(view.retention_days);
                 self.activity_view = Some(view);
                 self.activity_history_health = "ok";
             }
             Err(_) => {
+                if self.activity_view.is_some() || self.known_retention_days.is_some()
+                    || self.activity_history_health != "unavailable"
+                    || self.mcp_view_sources != *sources {
+                    self.history_revision.bump();
+                }
                 self.activity_view = None;
                 self.known_retention_days = None;
                 self.activity_history_health = "unavailable";
@@ -3056,10 +3072,17 @@ impl Collector {
     fn refresh_error_history(&mut self, reference: chrono::DateTime<Utc>) {
         match self.checkpoints.error_preview(reference) {
             Ok(events) => {
+                if self.error_history != events || self.error_history_read_error.is_some() {
+                    self.history_revision.bump();
+                }
                 self.error_history = events;
                 self.error_history_read_error = None;
             }
-            Err(error) => self.error_history_read_error = Some(storage_error_type(&error)),
+            Err(error) => {
+                let error = Some(storage_error_type(&error));
+                if self.error_history_read_error != error { self.history_revision.bump(); }
+                self.error_history_read_error = error;
+            }
         }
     }
 
@@ -3093,6 +3116,7 @@ impl Collector {
 
     fn refresh_skill_history(&mut self) {
         if let Ok(events) = self.checkpoints.skill_preview() {
+            if self.skill_history != events { self.history_revision.bump(); }
             self.skill_history = events;
         }
     }
@@ -6437,6 +6461,84 @@ mod log_tests {
         assert!(new_index.select_call(id, "c").is_none());
         assert!(resumed_index.select_call(id, "c").unwrap().tool("c", true, false).is_some());
         drop(monitor);
+    }
+
+    #[test]
+    fn retained_history_revision_tracks_content_health_and_failure_retention() {
+        use lam_history_store::{Access, HistoryWrite, Namespace, ObservationStore, Section, Store};
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("monitoring");
+        let reference = lam_history_store::parse_utc_stamp("2026-11-13T02:00:00Z").unwrap();
+        let mut collector = Collector::new(directory.clone(), true, None);
+        let mut store = Store::open(&directory, Access::ReadWrite).unwrap().unwrap();
+        let skill = json!({"thread_id":"00000000-0000-4000-8000-000000000001","call_id":"a","skill":"fixture","timestamp":"2026-11-13T01:00:00Z"}).to_string();
+        store.save_history(Namespace::Threads, r#"{"version":1}"#, 0, None,
+            &[HistoryWrite { section:Section::Skills, key:"fixture", ordinal:0,
+                event_time:Some("2026-11-13T01:00:00Z"), payload:&skill }]).unwrap();
+        drop(store);
+        let mut store = ObservationStore::open(&directory, Access::ReadWrite).unwrap().unwrap();
+        store.save_diagnostics(&[json!({"timestamp":"2026-11-13T01:00:00Z","server":"fixture","tool":"read","call_id":"a","metadata":{},"result":{"status":"ok"}})],
+            &[json!({"timestamp":"2026-11-13T01:00:00Z","source":"codex_core","category":"runtime","severity":"error","record_id":1})], reference).unwrap();
+        drop(store);
+        let before = collector.history_revision.value();
+        collector.refresh_activity(reference);
+        assert_ne!(collector.history_revision.value(), before);
+        assert_eq!(collector.activity_history.len(), 1);
+        let before = collector.history_revision.value();
+        collector.refresh_error_history(reference);
+        assert_ne!(collector.history_revision.value(), before);
+        assert_eq!(collector.error_history.len(), 1);
+        let before = collector.history_revision.value();
+        collector.refresh_skill_history();
+        assert_ne!(collector.history_revision.value(), before);
+        assert_eq!(collector.skill_history.len(), 1);
+        let before = collector.history_revision.value();
+        collector.refresh_activity(reference);
+        collector.refresh_error_history(reference);
+        collector.refresh_skill_history();
+        assert_eq!(collector.history_revision.value(), before, "equal refresh is not a content event");
+        collector.mcp_sources.write().unwrap().insert("fixture".into(), false);
+        collector.refresh_activity(reference);
+        assert_ne!(collector.history_revision.value(), before, "filtered view inputs changed");
+        let before = collector.history_revision.value();
+        collector.refresh_activity(reference);
+        assert_eq!(collector.history_revision.value(), before);
+        let activity = collector.activity_history.clone();
+        let errors = collector.error_history.clone();
+        let skills = collector.skill_history.clone();
+        let db = directory.join(lam_history_store::FILE_NAME);
+        let saved = directory.join("saved.sqlite3");
+        fs::rename(&db, &saved).unwrap();
+        fs::create_dir(&db).unwrap();
+        collector.refresh_activity(reference);
+        assert_ne!(collector.history_revision.value(), before);
+        assert_eq!(collector.activity_history_health, "unavailable");
+        assert!(collector.activity_view.is_none());
+        assert!(collector.known_retention_days.is_none());
+        assert!(Arc::ptr_eq(&collector.activity_history, &activity));
+        let before = collector.history_revision.value();
+        collector.refresh_error_history(reference);
+        assert_ne!(collector.history_revision.value(), before);
+        assert!(collector.error_history_read_error.is_some());
+        assert_eq!(collector.error_history, errors);
+        let before = collector.history_revision.value();
+        collector.refresh_skill_history();
+        assert_eq!(collector.history_revision.value(), before, "skill failure retains existing values without adding health semantics");
+        assert_eq!(collector.skill_history, skills);
+        collector.refresh_activity(reference);
+        collector.refresh_error_history(reference);
+        assert_eq!(collector.history_revision.value(), before, "unchanged failure health is not a new version");
+        fs::remove_dir(&db).unwrap();
+        fs::rename(&saved, &db).unwrap();
+        collector.refresh_activity(reference);
+        collector.refresh_error_history(reference);
+        collector.refresh_skill_history();
+        assert_ne!(collector.history_revision.value(), before);
+        assert_eq!(collector.activity_history_health, "ok");
+        assert!(collector.error_history_read_error.is_none());
+        assert_eq!(collector.error_history, errors);
+        assert_eq!(collector.skill_history, skills);
+        assert_eq!(*activity, *collector.activity_history, "previously captured Arc remains immutable");
     }
 
     #[test]

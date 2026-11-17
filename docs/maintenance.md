@@ -273,6 +273,16 @@ Cloud 測試不取代 Windows watcher、真實來源、SSE、Host/Origin 與持�
 
 實際 producer / restore / reset / retention 與限定 HTTP 驗證見 [驗證紀錄](validation.md#active-session-content-revision), 不將此必要前置工作視為 16 MiB staging、完整跨輪 mutation 覆蓋或 production 切換完成
 
+### Retained history 的內容 revision 前置實作
+
+Activity / error / skill 三個既有 refresh owner 共用 Collector-local history revision, 直接比較已讀回的內容與既有健康欄位, 不增加資料庫查詢或建立第二份歷史副本, 同一 immutable activity Arc 先走 identity 檢查, 不同 allocation 仍以內容比較
+
+Activity revision 涵蓋 events、四窗 SQL / MCP aggregates、retention days、health 與 mcp_view_sources, error 涵蓋 preview 與 read error, skill 僅涵蓋原 preview, 相同 refresh 不增加 revision
+
+原失敗規格維持: activity 保留舊 events 但清除 view / retention 並標 unavailable, error 保留舊 preview 並更新 read error, skill 讀取失敗保留原值且不新增健康欄位, 恢復後採用原 refresh 結果
+
+此值只在同一 Collector owner 內比較, 不寫入 API / checkpoint, 不代表資料庫 commit 版本、設定共同版本或完整 snapshot, 啟動初始化在 owner 對外可見前完成, 跨輪 candidate 與 production 切換仍未串接
+
 ### 共同 capture / mutation 邊界設計草案
 
 此設計起於 `2427f5e` 的 producer 與 server reader 稽核, 共同 publication 部分已實作並通過限定範圍驗證, 下列跨輪 capture / mutation 部分仍為待整合規格, 不視為全部架構驗收

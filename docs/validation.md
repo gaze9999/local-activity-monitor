@@ -1801,3 +1801,13 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 測試 1 筆通過、415 筆未�
 Linux / Rust 1.100.0 / 原 Cargo.lock, 開發中 cargo check 曾因缺少 PartialEq 與 Map 型別不符失敗, 修正後通過, 測試編譯另曾因 OpenOptions / Write import 與 HashMap / BTreeMap 型別不符失敗, 修正後取得上述結果, 編譯失敗記錄保留, 未把它們算成已執行的行為測試
 
 未重跑 deferred Core WAL cursor、overflow metadata POST、metadata-only candidate、大型 padding、browser、完整套件或平台檢查, 未量測本輪配置成本, 不宣稱消除 16 MiB staging 或完成 retained history / 設定、跨輪取消及 production candidate 驗收
+
+### Retained history revision
+
+在原 refresh_activity / refresh_error_history / refresh_skill_history 修改點比較已讀取的內容與既有 health, 只增加同一 Collector 內的 revision, 不改 SQL、讀取次數、來源範圍、API 欄位或發布 / fallback 時機
+
+真實 SQLite fixture 先寫入 activity、error 與 skill, 分別 refresh 後確認 revision 改變, 相同內容再次讀取保持 revision, MCP filter 變更使 retained view 失效, 暫時以資料夾取代測試 DB 路徑造成既有 UnsafePath 後, activity / error 保留舊資料並記錄原 health, skill 保留舊值且沒有新增錯誤欄位, 重複同樣失敗不再增加 revision, 恢復 DB 後重新取得健康結果, 原 activity Arc 仍不可變
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 測試 1 項通過、419 項未選取, 耗時 0.01 秒, 原 HTTP skill rollback / recovery 與 disabled future-history promotion 各 1 項通過、每次 225 項未選取, 分別 0.58 / 2.04 秒
+
+本輪未執行完整套件或任何 deferred 檢查, 未量測新增內容比較的成本, 不代表設定 / 查詢共同版本、跨來源 transaction、production candidate 或容量驗收完成
