@@ -314,6 +314,12 @@ Capture 完成後重新核對較早讀取的 owner, validate 消耗原 guard, �
 
 此串接仍在原 test-only candidate, production worker 尚未使用, 不將測試的整組拒絕行為套入現有 incomplete fallback, 不代表已完成全部摘要或 metadata / JEV / device 擷取
 
+SelectedInputs 將完整 CallSelection 與固定 SnapshotTime 納入候選擁有權, incomplete selection 不建立候選, 每頁驗證 exact selection, 相同 membership epoch 但呼叫端選取不同仍取消
+
+每個已使用來源保存原 checkpoint signature, 同 key 不允許靜默覆蓋不同 signature, 開始 final sweep 後不能追加來源, 來源數沿用 WALK_LIMIT, 每輪至多驗證 64 個來源或呼叫端較小上限, limit=0 拒絕, 每輪釋放 Store, 不跨輪保留讀取 transaction, 完成後再次要求驗證會重新掃描而非沿用成功快取
+
+原單來源 / 雙來源 candidate 已使用此共用邊界, 雙來源以每輪 1 個來源完成兩輪 final sweep, 這仍是依序來源驗證而非全域 SQLite snapshot, 完整 production 串接還須保留所有實體來源身份檢查、metadata / reducers 與發布條件, 不把本章 test-only 結果當成切換授權
+
 ### 共同 capture / mutation 邊界設計草案
 
 此設計起於 `2427f5e` 的 producer 與 server reader 稽核, 共同 publication 部分已實作並通過限定範圍驗證, 下列跨輪 capture / mutation 部分仍為待整合規格, 不視為全部架構驗收

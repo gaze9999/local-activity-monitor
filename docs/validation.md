@@ -1861,3 +1861,18 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, cargo check 通過並保留原 5 個 warn
 - Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 1 項通過、423 項未選取, 耗時 0.99 秒, 未執行 HTTP、完整套件或 deferred 檢查
 
 僅為既有 test-only page candidate 的實際 guard 串接, 未改 production worker、聚合、設定保存或 fallback, 完整 CallSelection / metadata owners 與全量 worker / 資源驗收仍未完成
+
+### SelectedInputs 的完整選取與最終來源驗證
+
+基準 `c300ea8`, 新 reusable SelectedInputs 擁有完整 CallSelection、固定 SnapshotTime 與既有 CandidateInputs, 已接入原單來源與雙來源分頁 candidate, production worker 尚未採用
+
+開發期間兩次編譯均回報 E0425, 原 SOURCE_ROUND_LIMIT 僅存在另一函式內, 不能以 super 存取, 已改成此 guard 的明確 64-source 單輪上限, 保留編譯失敗記錄, 不是執行期或既有 deferred fixture 失敗
+
+- 單來源 candidate 每頁比較 exact CallSelection, 在相同 epoch 下移除一個 selected call 仍拒絕, incomplete selection 與零 final-validation budget 不建立可交付結果, reference / cutoffs 保留原固定值
+- 雙來源 candidate 改用同一 SelectedInputs, 每輪驗證 1 個來源, 成功必須完成兩輪, 原 source-replacement 拒絕與四窗 file / activity / tool statistics oracle 不變
+- 完成後再次驗證不沿用 signature 成功快取, 實際 SQLite checkpoint signature 改變仍拒絕, 既有來源錯誤、owner cancellation、cached completion、排序與舊輸出不變測試保留
+- 最終 Linux / Rust 1.100.0 / 原 Cargo.lock targeted 2 項通過、422 項未選取, 耗時 6.04 秒, 未跑 HTTP、完整套件或 deferred 檢查
+
+此結果不涵蓋 production worker、完整 metadata / diagnostics、全部 reducers、跨來源共同 transaction 或資源上限量測, 現有 16 MiB staging 與 fallback 尚未切換
+
+`cargo check --locked --manifest-path rust/service/Cargo.toml --bin local-activity-monitor` 通過, 共 6 個 warnings, 含原 5 個與 SelectedInputs.time 尚未被 production 使用的 dead-code warning, 不宣稱正式 worker 已採用

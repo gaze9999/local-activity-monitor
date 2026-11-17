@@ -1,5 +1,5 @@
 //! Internal validation prerequisite, not a production aggregation/publication switch.
-//! Complete CallSelection/signatures, other metadata/diagnostics
+//! Other metadata/diagnostics
 //! and final publication guards remain separate requirements.
 use super::{account, Anchor, Collector, CommandSwitches, Session, SessionContentStamp, SnapshotSourceSettings};
 use std::collections::BTreeMap;
@@ -144,6 +144,69 @@ impl CandidateInputs {
             && self.flags == ObservationFlags::capture(collector);
         // A rejected guard drops all retained owner handles and settings copies.
         valid.then_some(self)
+    }
+}
+
+// Own the exact selection and clock alongside mutable-owner validation. This is
+// reusable candidate state, but is not called by the production snapshot worker.
+pub(super) struct SelectedInputs {
+    inputs: CandidateInputs,
+    selection: super::CallSelection,
+    pub(super) time: super::SnapshotTime,
+    signatures: BTreeMap<String, String>,
+    validated_after: Option<String>,
+    sweep_complete: bool,
+}
+#[allow(dead_code)]
+impl SelectedInputs {
+    pub(super) fn capture(collector: &Collector, selection: &super::CallSelection,
+        time: super::SnapshotTime, enabled: bool, stopped: &AtomicBool) -> Option<Self>
+    {
+        if !selection.complete { return None; }
+        Some(Self { inputs:CandidateInputs::capture(collector, enabled, stopped)?,
+            selection:selection.clone(), time, signatures:BTreeMap::new(), validated_after:None, sweep_complete:false })
+    }
+    pub(super) fn validate(mut self, collector: &Collector, selection: &super::CallSelection,
+        enabled: bool, stopped: &AtomicBool) -> Option<Self>
+    {
+        if self.selection != *selection { return None; }
+        self.inputs = self.inputs.validate(collector, enabled, stopped)?;
+        Some(self)
+    }
+    // Include metadata-only sources too; their cursor can affect the batch even
+    // when no selected call belongs to that source. Never silently replace a stamp.
+    pub(super) fn source(mut self, key: String, signature: String) -> Option<Self> {
+        if key.is_empty() || self.validated_after.is_some() { return None; }
+        if let Some(existing) = self.signatures.get(&key) {
+            if existing != &signature { return None; }
+        } else {
+            if self.signatures.len() >= super::WALK_LIMIT { return None; }
+            self.signatures.insert(key, signature);
+        }
+        Some(self)
+    }
+    // Each call opens a fresh Store and retains no SQLite transaction across
+    // rounds. Completion means a sequential sweep, not a database-wide snapshot.
+    pub(super) fn validate_sources(mut self, collector: &Collector, selection: &super::CallSelection,
+        enabled: bool, stopped: &AtomicBool, limit: usize) -> Option<(Self, bool)>
+    {
+        use std::ops::Bound::{Excluded, Unbounded};
+        if limit == 0 { return None; }
+        self = self.validate(collector, selection, enabled, stopped)?;
+        let store = collector.checkpoints.snapshot_reader().ok().flatten()?;
+        if self.sweep_complete { self.validated_after = Some(String::new()); }
+        let after = self.validated_after.clone().unwrap_or_default();
+        for (key, signature) in self.signatures.range((Excluded(after), Unbounded)).take(limit.min(64)) {
+            if stopped.load(Ordering::Acquire)
+                || store.checkpoint_signature(key).ok().flatten().as_ref() != Some(signature) { return None; }
+            self.validated_after = Some(key.clone());
+        }
+        let complete = self.signatures.last_key_value().is_none_or(|(key, _)| self.validated_after.as_ref() == Some(key));
+        self.sweep_complete = complete;
+        // The empty sweep is also closed to additional sources.
+        if self.validated_after.is_none() { self.validated_after = Some(String::new()); }
+        self = self.validate(collector, selection, enabled, stopped)?;
+        Some((self, complete))
     }
 }
 
