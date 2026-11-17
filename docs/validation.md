@@ -1156,3 +1156,17 @@ Python 原始 source 的 8 組合成 app-server 編碼 / 分行 fixture 通過, 
 沒有真實帳戶或認證操作, surrogate 差異、先前 fixture 未明失敗、其他歷史限制與跨平台驗收保留
 
 Linux / Rust 1.100.0 完整 service 單輪 386 項通過 (59.19 秒), 結束後完整 serial HTTP 單輪 226 項通過 (136.64 秒)
+
+### 保留 Skill 事件的文件尾段查詢
+
+核對 LAM main `5c03daf` 的 skill_detail, 保留事件對應的 session 尾段使用 bytes.splitlines 與 json.loads, Rust retained_skill_paths 改用既有 byte iterator / JSON bytes decoder, 補齊 CR 分行與 UTF-8 BOM
+
+僅修改已觀察 Skill 的保留事件 fallback, 未更動一般 session、工具本文與 context detail parser, 既有 call / skill / timestamp 比對、檔案身分、anchor、symlink、checkpoint guard、讀取預算與超限首段 LF 丟棄方式維持不變
+
+Python 依固定來源的 splitlines / json.loads 流程搭配現有 workflow_operations 驗證 6 組 CR / LF / CRLF 與有無 BOM, 此為對應流程測試而非完整 skill_detail endpoint 驗收
+
+Rust 新回歸先於 CR 案例失敗, 修正後 1 項通過 (0.01 秒), 涵蓋相同 6 組、實際原始 bytes 預算扣除與未知 call 拒絕, 不開啟真實使用者文件
+
+受影響的 /api/codex/skill 仍依 skill、thread_id、call_id 選取已觀察來源, 沒有新增來源查詢或放寬文件允許條件, surrogate 與歷史限制保留
+
+Linux / Rust 1.100.0 完整 service 單輪 387 項通過 (65.10 秒), 結束後完整 serial HTTP 單輪 226 項通過 (130.32 秒), 包含既有保留 Skill 尾段 HTTP 查詢回歸

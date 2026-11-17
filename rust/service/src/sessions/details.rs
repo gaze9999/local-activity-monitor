@@ -1125,8 +1125,8 @@ impl DetailFile {
             &bytes[..]
         };
         let mut result = Vec::new();
-        for line in bytes.split(|byte| *byte == b'\n') {
-            let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) else {
+        for line in crate::journal::byte_lines(bytes) {
+            let Some(record) = crate::json_bytes::parse(line) else {
                 continue;
             };
             let body = &record["payload"];
@@ -1802,6 +1802,34 @@ impl DetailFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_skill_tail_accepts_cr_and_bom_rows() {
+        for separator in ["\r", "\n", "\r\n"] {
+            for bom in ["", "\u{feff}"] {
+                let home = tempfile::tempdir().unwrap();
+                let root = home.path().join("sessions");
+                fs::create_dir(&root).unwrap();
+                let path = root.join("rollout.jsonl");
+                let stamp = "2026-11-17T00:00:00Z";
+                let record = json!({"timestamp":stamp,"type":"response_item","payload":{
+                    "type":"function_call","name":"exec_command","call_id":"retained",
+                    "arguments":{"cmd":"cat /fixture/sample/SKILL.md"}
+                }}).to_string();
+                fs::write(&path, format!("{{}}{separator}{bom}{record}{separator}")).unwrap();
+                let mut file = fs::File::open(&path).unwrap();
+                let meta = file.metadata().unwrap();
+                let mut checkpoints = super::super::checkpoint::Checkpoints::new(home.path().join("monitoring"), true);
+                let anchor = checkpoints.sample(&mut file, super::super::file_identity(&meta), meta.len()).unwrap();
+                let selected = DetailFile { root, path, anchor, guard: None, calls: SharedCalls::default() };
+                let mut budget = 1024 * 1024;
+                let paths = selected.retained_skill_paths("retained", "sample", stamp, &mut budget);
+                assert_eq!(paths.len(), 1, "{separator:?} {bom:?}");
+                assert_eq!(budget, 1024 * 1024 - meta.len() as usize);
+                assert!(selected.retained_skill_paths("unknown", "sample", stamp, &mut budget).is_empty());
+            }
+        }
+    }
 
     #[test]
     fn credential_tokens_match_python_dotted_and_dotless_i() {
