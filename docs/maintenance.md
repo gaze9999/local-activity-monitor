@@ -293,7 +293,7 @@ Account / cloud / public / platform 共用的 Shared, 在既有 QueryState 寫�
 
 ### Candidate mutable owner 驗證組合
 
-`candidate_inputs.rs::CandidateInputs` 組合既有 active / overflow Session owner 與內容 revision、read progress、Collector-local history revision、八個 Shared owner / 內容 revision、SnapshotSourceSettings 與 requested / applied observation flags, 不新增 global revision counter
+`candidate_inputs.rs::CandidateInputs` 組合既有 active / overflow Session owner 與內容 revision、read progress、Collector-local history revision、thread_metadata owner revision、八個 Shared owner / 內容 revision、SnapshotSourceSettings 與 requested / applied observation flags, 不新增 global revision counter
 
 Capture 完成後重新核對較早讀取的 owner, validate 消耗原 guard, 任一條件不符即丟棄整組 handles / 設定副本, 呼叫端每次都須提供當下 enabled 狀態與真正的 stopped flag, 不得沿用建立 candidate 時的 enabled 值
 
@@ -302,7 +302,10 @@ Capture 完成後重新核對較早讀取的 owner, validate 消耗原 guard, �
 | Active / overflow | 路徑集合、實際 Session owner、內容 revision, 工作集搬移或同路徑重建拒絕舊 guard |
 | Read progress | offset、size、partial 長度、discard、identity、modified、anchor、checkpoint signature, 不複製未完成行本文 |
 | History / queries | 既有內容 revision 必須可比較, 八來源各核對同一 Shared owner, cached completion 不當成內容變更 |
+| Thread metadata | 初始化、停用清除與 enrichment 後 refresh assignment 共用實際 owner setter, 值或 top-level insertion order 改變時 bump, 相同 refresh 不 bump |
 | Source settings / flags | 沿原讀鎖擷取 owned 值作相等比較, requested disable 與 worker applied 狀態分別檢查, 不改設定保存 / 失敗流程 |
+
+Thread metadata setter 沿既有 iter().eq 比較, refresh 直接使用回傳的 changed flag, 不在 refresh 同時重複比較整張 map, candidate 只保存 revision 而非每輪 clone metadata, 此 revision 不代表 project_details、MCP catalog、diagnostics 或其他 metadata owner 已覆蓋
 
 後續 SourceTopology 組合實際 SourceMembership identity / revision / SQLite selection_epoch、root identity / path、membership complete、discovered count、snapshot source order 及 session / duplicate path maps, 任一變更取消 guard, discovery 持有可變 membership 時或 epoch 讀取失敗時不建立候選
 

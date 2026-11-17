@@ -480,7 +480,7 @@ impl Monitor {
             reports.push(collector.related_lifecycle(&root, &mut metadata));
             let (schedules, schedule_report) = schedules::read(home, reference, &metadata);
             let (plugins, plugin_report, _) = plugins::scan(home);
-            collector.thread_metadata = metadata;
+            collector.replace_thread_metadata(metadata);
             collector.metadata_reports = reports;
             collector.project_details = projects;
             collector.project_roots_status = roots_status;
@@ -904,7 +904,7 @@ impl Monitor {
                         collector.plugin_report = None;
                         collector.schedule_report = None;
                         collector.metadata_reports.clear();
-                        collector.thread_metadata.clear();
+                        collector.replace_thread_metadata(Map::new());
                         let previous_workdirs = std::mem::take(&mut collector.overflow_thread_workdirs);
                         if command_switches.worktrees {
                             let mut scratch = Map::new();
@@ -938,10 +938,9 @@ impl Monitor {
                         plugin_report["watch_health"] = json!(if plugin_watch_ok {"ok"} else {"unavailable"});
                         if watch_changed {schedule_dirty.store(true,Ordering::Release);let _=events.try_send(());}
 
-                        let changed = !same_metadata_reports(&metadata_reports, &collector.metadata_reports) || schedules != collector.schedules
+                        let mut changed = !same_metadata_reports(&metadata_reports, &collector.metadata_reports) || schedules != collector.schedules
                             || plugins != collector.plugins || collector.plugin_report.as_ref() != Some(&plugin_report)
                             || dots != collector.dots
-                            || !metadata.iter().eq(collector.thread_metadata.iter())
                             || projects != collector.project_details
                             || roots_status != collector.project_roots_status
                             || collector.schedule_report.as_ref().is_none_or(|previous| {
@@ -955,7 +954,7 @@ impl Monitor {
                         collector.plugins = plugins;
                         collector.plugin_report = Some(plugin_report);
                         collector.dots = dots;
-                        collector.thread_metadata = metadata;
+                        changed |= collector.replace_thread_metadata(metadata);
                         collector.project_details = projects;
                         collector.project_roots_status = roots_status;
                         collector.schedule_report = Some(report);
@@ -2590,6 +2589,7 @@ struct Collector {
     plugin_report: Option<Value>,
     dots: [Value; 4],
     thread_metadata: Map<String, Value>,
+    thread_metadata_revision: project::ContentRevision,
     project_details: BTreeMap<String, Value>,
     project_roots_status: projects::RootStatus,
     worktrees: worktrees::Collector,
@@ -2942,6 +2942,7 @@ impl Collector {
             schedule_report: None,
             metadata_reports: Vec::new(),
             thread_metadata: Map::new(),
+            thread_metadata_revision: project::ContentRevision::default(),
             project_details: BTreeMap::new(),
             project_roots_status: projects::RootStatus::default(),
             worktrees: worktrees::Collector::new(catalog_home.clone()),
@@ -4767,6 +4768,15 @@ impl Collector {
             sources.sort_by_key(|(path, _)| self.snapshot_source_order.get(*path));
         }
         sources
+    }
+
+    fn replace_thread_metadata(&mut self, metadata: Map<String, Value>) -> bool {
+        // Preserve the existing refresh comparison, including top-level row order.
+        // A successful unchanged refresh does not invalidate an in-progress batch.
+        let changed = !metadata.iter().eq(self.thread_metadata.iter());
+        if changed { self.thread_metadata_revision.bump(); }
+        self.thread_metadata = metadata;
+        changed
     }
 
     fn capture_snapshot_source_settings(&self) -> SnapshotSourceSettings {
@@ -8663,7 +8673,7 @@ mod log_tests {
         let mut cached_metadata = Map::new();
         assert!(!collector.populate_overflow_workdirs(&root, &mut cached_metadata));
         assert_eq!(cached_metadata[&id]["_cwd"], "/fixture/private-workdir");
-        collector.thread_metadata = metadata;
+        collector.replace_thread_metadata(metadata);
         collector.project_details = projects;
         collector.files.values_mut().next().unwrap().projection.allowance = allowance::project(&json!({"primary":{"used_percent":80}}), now() - Duration::days(1));
         let duplicate_dir = root.join("duplicate");

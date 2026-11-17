@@ -2024,3 +2024,16 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, metadata guard targeted 通過 1 項、42
 Linux / Rust 1.100.0 / 原 Cargo.lock, 新增 Store 分類測試通過 1 項、426 項未選取, 0.01 秒, 八情境串接通過 1 項、426 項未選取, 76.72 秒, 受影響的原 single-source Option wrapper 測試通過 1 項、426 項未選取, 1.01 秒, cargo check 通過且維持 8 個既有 warnings, 本輪無失敗
 
 InputsRejected 與 PhysicalSource 只指出驗證失敗邊界, 不推定為特定 mutable owner 或特定 filesystem 原因, Constructor eligibility 仍未細分, production caller、既有 fallback 與 HTTP 資料格式不變, deferred fixtures 未執行
+
+
+### Thread metadata owner 的 candidate 驗證
+
+基準 `769c3da`, 補上 row / name augmentation 所需的 Collector.thread_metadata owner revision, production 初始化、metadata 停用清除與 refresh 完成 assignment 全部經過同一 setter, enrichment 與資料讀取順序保留
+
+- Setter 保留既有 top-level iter().eq 語意, refresh 直接採用 setter 的 changed flag, 不額外重複比較整張 map, 不改設定保存或失敗處理
+- 新 guard 測試分別核對初次賦值、相同 refresh、只改 top-level insertion order、保持順序但修改 name、清空與重複清空, 相同內容不取消、其他變更取消
+- CandidateInputs 只保存與核對此 owner revision, 不複製完整 metadata map, 既有 revision overflow 行為沿用 ContentRevision, 未新增 global counter
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 最終 owner targeted 通過 1 項、427 項未選取, 0.00 秒, 原 MCP / SQL / commands 名稱回歸通過 3 項、425 項未選取, 0.10 秒, cargo check 通過並維持 8 個既有 warnings, 本輪無失敗
+
+此步尚未把 candidate rows 串接完整 metadata / names finalizer, 不代表 project_details、MCP catalog、diagnostics 或其他 metadata owners 已覆蓋, production aggregation / fallback 不變, deferred fixtures 未執行

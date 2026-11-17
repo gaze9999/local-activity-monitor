@@ -96,6 +96,7 @@ pub(super) struct CandidateInputs {
     active: Sessions,
     overflow: Sessions,
     history_revision: u64,
+    thread_metadata_revision: u64,
     queries: [(Arc<account::Shared>, u64); 8],
     sources: SnapshotSourceSettings,
     flags: ObservationFlags,
@@ -123,6 +124,7 @@ impl CandidateInputs {
             topology:SourceTopology::capture(collector)?,
             active:Self::sessions(&collector.files)?, overflow:Self::sessions(&collector.overflow_files)?,
             history_revision:collector.history_revision.value()?,
+            thread_metadata_revision:collector.thread_metadata_revision.value()?,
             queries:Self::queries(collector).into_iter().map(|source|
                 Some((Arc::clone(source), source.content_revision()?)))
                 .collect::<Option<Vec<_>>>()?.try_into().ok()?,
@@ -136,6 +138,7 @@ impl CandidateInputs {
         let valid = enabled && !stopped.load(Ordering::Acquire)
             && SourceTopology::capture(collector).as_ref() == Some(&self.topology)
             && collector.history_revision.value() == Some(self.history_revision)
+            && collector.thread_metadata_revision.value() == Some(self.thread_metadata_revision)
             && Self::sessions_match(&self.active, &collector.files)
             && Self::sessions_match(&self.overflow, &collector.overflow_files)
             && self.queries.iter().zip(Self::queries(collector)).all(|((owner, revision), current)|
@@ -243,6 +246,44 @@ mod tests {
         }
         assert_eq!(collector.files[&path].projection.calls.len(), 1);
         (temporary, collector, path)
+    }
+
+    #[test]
+    fn candidate_inputs_track_thread_metadata_replacement_order_and_clear() {
+        let (_temporary, mut collector, _) = fixture();
+        let stopped = AtomicBool::new(false);
+        let capture = |collector: &Collector| CandidateInputs::capture(collector, true, &stopped).unwrap();
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("first".into(), json!({"name":"first title","_cwd":"fixture/project"}));
+        metadata.insert("second".into(), json!({"name":"second title"}));
+        let guard = capture(&collector);
+        collector.replace_thread_metadata(metadata.clone());
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let revision = collector.thread_metadata_revision.value();
+        let guard = capture(&collector);
+        collector.replace_thread_metadata(metadata.clone());
+        assert_eq!(collector.thread_metadata_revision.value(), revision);
+        assert!(guard.validate(&collector, true, &stopped).is_some());
+        let mut reordered = serde_json::Map::new();
+        reordered.insert("second".into(), metadata["second"].clone());
+        reordered.insert("first".into(), metadata["first"].clone());
+        assert!(!metadata.iter().eq(reordered.iter()), "actual preserve_order feature is required by this oracle");
+        let guard = capture(&collector);
+        collector.replace_thread_metadata(reordered);
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let mut metadata = collector.thread_metadata.clone();
+        metadata["first"]["name"] = json!("updated title");
+        let guard = capture(&collector);
+        collector.replace_thread_metadata(metadata);
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        collector.replace_thread_metadata(serde_json::Map::new());
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let revision = collector.thread_metadata_revision.value();
+        let guard = capture(&collector);
+        collector.replace_thread_metadata(serde_json::Map::new());
+        assert_eq!(collector.thread_metadata_revision.value(), revision);
+        assert!(guard.validate(&collector, true, &stopped).is_some());
     }
 
     #[test]
