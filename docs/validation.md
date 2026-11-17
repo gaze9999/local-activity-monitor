@@ -1888,3 +1888,14 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, cargo check 通過並保留原 5 個 warn
 - Linux / Rust 1.100.0 / 原 Cargo.lock, page candidate targeted 1 項通過、423 項未選取, 8.79 秒, 原 command reducer 2 項通過、422 項未選取, 0.36 秒
 
 未執行 HTTP、完整套件或 deferred 檢查, fixture 不涵蓋真實 shell 執行、所有 command parser 輸入或非 null thread-name enrichment, production worker、其他 metadata / reducers、16 MiB staging 與資源驗收尚未完成
+
+### Skill reducer 擁有 retained history 並串接分頁
+
+基準 `3df6c8c`, SkillSummary 將通過原條件的 history key / event 轉為 owned 值, 不變更 history 查詢、retention、current/history precedence、unknown time 或 disabled 行為
+
+- 原 legacy oracle 測試增加先丟棄 transient history buffer 再逐 winner 整理, 仍驗證 4 個 cutoff × enabled/disabled、重複 history、current skill 去重、history-only、缺少 names、無效時間與 500 筆預覽, targeted 1 項通過、423 項未選取, 6.50 秒
+- 原 eligible current tool / 不改歷史測試 1 項通過、423 項未選取, 0.00 秒
+- 同一真實雙來源 page candidate 加入 skill summaries, 每 call 兩個 distinct skills 與重複 shared, 四窗結果對照原 materialized skill_summary 與 production snapshot 欄位, 900 / 1,200 winners 各保留 1,800 / 2,400 全量計數與 500 筆預覽, 原其他 reducer / 順序 / 取消規格未弱化
+- Linux / Rust 1.100.0 / 原 Cargo.lock, page candidate 1 項通過、423 項未選取, 14.49 秒, 與另一 targeted 測試同時執行, 不作跨輪效能比較
+
+未執行 HTTP、完整套件或 deferred 檢查, production skill_summary 的 admitted history 複製成本未量測, production aggregation / fallback 未切換, 全部 metadata、names capture、其他 reducers 與 worker / 資源驗收仍待完成

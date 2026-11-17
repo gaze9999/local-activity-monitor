@@ -324,6 +324,10 @@ Git / check command 的既有 WindowSummary 已提供內部逐 winner 呼叫介�
 
 此串接尚未取代 production materialized threads, command thread-name 仍由既有 snapshot metadata 階段補入, 完整命名 metadata 與其他 reducers 仍待整批串接, 不以目前 fixture 的 null 名稱取代命名語意
 
+SkillSummary 已改為擁有通過原 names / cutoff / enabled 篩選的 retained history records, 不再借用 refresh buffer, candidate 可釋放原 history / 每頁 calls 後保留 reducer, 沿用現有 500 筆 history query、同 key 最後 history、eligible current tool、目前 skill 覆蓋歷史與 500 筆 preview 規則
+
+Production skill_summary 仍呼叫同一 reducer, 現在會複製 admitted history key / event, 最終 historical event 移入預覽而非再複製, 不增加 SQLite 查詢或改保存上限, 額外 allocation / RSS 成本尚未量測, 不宣稱免費或改善效能, 完整 candidate 必須同時保留已擷取的 names 與 history revision 驗證
+
 ### 共同 capture / mutation 邊界設計草案
 
 此設計起於 `2427f5e` 的 producer 與 server reader 稽核, 共同 publication 部分已實作並通過限定範圍驗證, 下列跨輪 capture / mutation 部分仍為待整合規格, 不視為全部架構驗收

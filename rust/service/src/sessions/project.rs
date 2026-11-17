@@ -1018,10 +1018,11 @@ fn retain_preview<K: Ord, V>(preview: &mut BTreeMap<K, V>, rank: K, value: V, li
 }
 
 /// Current call inputs are resolved winners with lookup keys matching their
-/// projection IDs, as constructed by Collector::snapshots. The history index borrows the
-/// existing retained history, whose production query is limited to 500 rows.
-struct SkillSummary<'a> {
-    historical: BTreeMap<(&'a str, &'a str, &'a str), (&'a str, &'a Value, Option<String>)>,
+/// projection IDs, as constructed by Collector::snapshots. Own admitted history
+/// records so the reducer can outlive a refresh; the production query is limited
+/// to 500 rows. No call or original history borrow survives admission.
+pub(super) struct SkillSummary {
+    historical: BTreeMap<(String, String, String), (String, Value, Option<String>)>,
     preview: BTreeMap<(std::cmp::Reverse<Option<String>>, String, String, String), Value>,
     counts: BTreeMap<String, usize>,
     total: usize,
@@ -1029,8 +1030,8 @@ struct SkillSummary<'a> {
     enabled: bool,
 }
 
-impl<'a> SkillSummary<'a> {
-    fn new(history: &'a [Value], names: &std::collections::HashMap<String, Value>, boundary: Option<Time>, enabled: bool) -> Self {
+impl SkillSummary {
+    pub(super) fn new(history: &[Value], names: &std::collections::HashMap<String, Value>, boundary: Option<Time>, enabled: bool) -> Self {
         let mut historical = BTreeMap::new();
         if enabled {
             for event in history {
@@ -1039,7 +1040,7 @@ impl<'a> SkillSummary<'a> {
                 ) else { continue; };
                 if !names.contains_key(thread) || boundary.is_some_and(|cutoff|
                     lam_history_store::parse_utc_stamp(time).is_none_or(|time| time < cutoff)) { continue; }
-                historical.insert((thread, id, skill), (time, event, None));
+                historical.insert((thread.to_owned(), id.to_owned(), skill.to_owned()), (time.to_owned(), event.clone(), None));
             }
         }
         Self { historical, preview: BTreeMap::new(), counts: BTreeMap::new(), total: 0, boundary, enabled }
@@ -1054,18 +1055,18 @@ impl<'a> SkillSummary<'a> {
         self.preview.insert(rank, render());
     }
 
-    fn observe(&mut self, lookup_thread: &str, thread: Option<&str>, id: &str, call: &Call) {
+    pub(super) fn observe(&mut self, lookup_thread: &str, thread: Option<&str>, id: &str, call: &Call) {
         if !self.enabled || !self.boundary.is_none_or(|cutoff| call.time.is_some_and(|time| time >= cutoff)) { return; }
         // Retained skills may no longer occur on this call. Python still uses
         // the eligible current call's tool without replacing retained metadata.
         for ((retained_thread, retained_call, _), (_, _, tool)) in &mut self.historical {
-            if *retained_thread == lookup_thread && *retained_call == id {
+            if retained_thread == lookup_thread && retained_call == id {
                 *tool = Some(call.tool.clone());
             }
         }
         // Source validation limits this per-call set to 40 skill names.
         for skill in call.skills.iter().map(String::as_str).collect::<BTreeSet<_>>() {
-            if let Some(key) = self.historical.keys().find(|(t, i, s)| *t == lookup_thread && *i == id && *s == skill).copied() {
+            if let Some(key) = self.historical.keys().find(|(t, i, s)| t == lookup_thread && i == id && s == skill).cloned() {
                 self.historical.remove(&key);
             }
             let Some(thread) = thread else { continue; };
@@ -1077,10 +1078,10 @@ impl<'a> SkillSummary<'a> {
         }
     }
 
-    fn finish(mut self, names: &std::collections::HashMap<String, Value>) -> (Vec<Value>, usize, BTreeMap<String, usize>) {
+    pub(super) fn finish(mut self, names: &std::collections::HashMap<String, Value>) -> (Vec<Value>, usize, BTreeMap<String, usize>) {
         for ((thread, id, skill), (time, event, tool)) in std::mem::take(&mut self.historical) {
-            self.admit(thread, id, skill, Some(time.to_owned()), || {
-                let mut event = event.clone();
+            self.admit(&thread, &id, &skill, Some(time), || {
+                let mut event = event;
                 if let Some(tool) = tool { event["tool"] = tool.into(); }
                 event
             });
@@ -2778,7 +2779,9 @@ mod snapshot_merge_tests {
             for enabled in [false,true] {
                 let actual = skill_summary(&threads,&history,&names,boundary,enabled);
                 assert_eq!(actual,legacy_skill_summary(&threads,&history,&names,boundary,enabled));
-                let mut streamed = SkillSummary::new(&history, &names, boundary, enabled);
+                let transient_history = history.clone();
+                let mut streamed = SkillSummary::new(&transient_history, &names, boundary, enabled);
+                drop(transient_history); // A candidate must not borrow the old refresh buffer.
                 for (lookup_thread, (projection, _)) in threads.iter().rev() {
                     for (id, call) in projection.calls.iter().rev() {
                         let temporary = call.clone();

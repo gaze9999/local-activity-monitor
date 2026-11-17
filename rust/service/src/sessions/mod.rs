@@ -5848,6 +5848,7 @@ mod log_tests {
                 row.event_time = time.map(str::to_owned);
                 let mut payload: Value = serde_json::from_str(&row.payload).unwrap();
                 payload["time"] = json!(time);
+                payload["skills"] = json!(["shared", format!("skill-{}", n % 3), "shared"]);
                 if nested {
                     payload["commands"] = json!({"git":[{"operation":"status"},{"operation":"diff","repository":"fixture"}],
                         "checks":[{"operation":"cargo test","category":"runtime"},{"operation":"cargo check","category":"runtime"}]});
@@ -5934,6 +5935,14 @@ mod log_tests {
                 .map(|(id, projection)| (id.as_str(), (projection.clone(), false))).collect();
             let expected_statistics = cutoffs.map(|cutoff|
                 serde_json::to_value(project::ToolStatistics::new(&statistics_threads, cutoff, true)).unwrap());
+            let skill_names = statistics_threads.keys().map(|id| (id.to_string(), Value::Null)).collect();
+            let expected_skills = cutoffs.map(|cutoff| {
+                let (events, total, counts) = project::skill_summary(&statistics_threads, &collector.skill_history,
+                    &skill_names, cutoff, true);
+                json!({"events":events,"total":total,"counts":counts})
+            });
+            assert_eq!(expected_skills[3]["total"], json!(expected_winners * 2));
+            assert_eq!(expected_skills[3]["events"].as_array().unwrap().len(), 500);
             let expected_commands = cutoffs.map(|cutoff| {
                 let (git, checks) = commands::Calls::new(&statistics_threads).window(cutoff, None);
                 json!({"git":git,"checks":checks})
@@ -5984,12 +5993,13 @@ mod log_tests {
             }
             // Process winner sources in reverse to show reduction is independent of
             // page arrival once canonical-fallback winners have been fixed.
-            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool, statistics_units: usize| -> Option<([Value;4], [Value;4], [Value;4], [Value;4])> {
+            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool, statistics_units: usize| -> Option<([Value;4], [Value;4], [Value;4], [Value;4], [Value;4])> {
                 let mut inputs = candidate_inputs::SelectedInputs::capture(&collector, &selection,
                     SnapshotTime { reference, cutoffs }, true, &stopped)?;
                 for source in sources {
                     inputs = inputs.source(source.clone(), original.cursor.signature.clone())?;
                 }
+                let mut skill_summaries = cutoffs.map(|cutoff| project::SkillSummary::new(&collector.skill_history, &skill_names, cutoff, true));
                 let mut command_summaries = cutoffs.map(commands::WindowSummary::new);
                 let mut statistics = cutoffs.map(|cutoff| project::OwnedStatistics::new(cutoff, true, statistics_units, 10_000));
                 let mut series = std::array::from_fn::<_,4,_>(|_| project::ActivitySeries::new());
@@ -6020,6 +6030,9 @@ mod log_tests {
                             }
                         }
                         let thread = projection.projection.id.as_deref().unwrap();
+                        for summary in &mut skill_summaries {
+                            for (id, call) in &projection.projection.calls { summary.observe(thread, Some(thread), id, call); }
+                        }
                         for summary in &mut command_summaries {
                             if ordered { summary.ordered_thread(thread_slots[thread]); }
                             for (id, call) in &projection.projection.calls { summary.observe(thread, id, call); }
@@ -6064,18 +6077,23 @@ mod log_tests {
                     let (git, checks) = summary.finish();
                     json!({"git":git,"checks":checks})
                 });
-                Some((result, series, statistics, commands))
+                let skills = skill_summaries.map(|summary| {
+                    let (events, total, counts) = summary.finish(&skill_names);
+                    json!({"events":events,"total":total,"counts":counts})
+                });
+                Some((result, series, statistics, commands, skills))
             };
             let result = reduce(&mut store, false, false, 10_000).unwrap();
             assert_eq!(result.0, expected);
             assert_eq!(result.1, expected_series);
             assert_eq!(result.2, expected_statistics);
             assert_eq!(result.3, expected_commands);
+            assert_eq!(result.4, expected_skills);
             assert!(reduce(&mut store, false, false, 0).is_none(), "statistics overflow rejects the whole candidate");
             assert!(reduce(&mut store, true, false, 10_000).is_none(), "a source changed after its own validation");
-            assert_eq!(result, (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone()), "previously completed output is immutable");
+            assert_eq!(result, (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone(), expected_skills.clone()), "previously completed output is immutable");
             store.save_checkpoints(std::slice::from_ref(&second_cursor), &second_calls, &[]).unwrap();
-            assert_eq!(reduce(&mut store, false, false, 10_000).unwrap(), (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone()));
+            assert_eq!(reduce(&mut store, false, false, 10_000).unwrap(), (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone(), expected_skills.clone()));
             let ordered_expected = cutoffs.map(|cutoff| {
                 let mut summary = project::FileSummary::new(1000);
                 for (thread, projection) in &materialized {
@@ -6098,6 +6116,7 @@ mod log_tests {
             assert_eq!(ordered_result.1, expected_series);
             assert_eq!(ordered_result.2, expected_statistics);
             assert_eq!(ordered_result.3, ordered_commands);
+            assert_eq!(ordered_result.4, expected_skills);
             collector.updated = Some(reference);
             let baseline = collector.snapshots("ok", "ok", 1);
             for index in 0..4 {
@@ -6108,6 +6127,7 @@ mod log_tests {
                 assert_eq!(window["codex"]["tool_statistics"], expected_statistics[index]);
                 assert_eq!(window["codex"]["git"], expected_commands[index]["git"]);
                 assert_eq!(window["codex"]["checks"], expected_commands[index]["checks"]);
+                assert_eq!(window["codex"]["skills"], expected_skills[index]);
             }
         }
     }
