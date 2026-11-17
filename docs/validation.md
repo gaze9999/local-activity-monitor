@@ -1469,3 +1469,11 @@ Linux / Rust 1.100.0、原 Cargo.lock, JEV 模組單輪 9 項通過 (0.04 秒), 
 另核對無效 attempt status 變成 unknown、無效 resolved_model 沿用有效 requested_model、無效 source 為 null, null / 物件 / 字串 / 空陣列 attempts 均不產生預覽或計數, 原始 prompt / body 不出現在投影
 
 Linux / Rust 1.100.0、原 Cargo.lock, Python 合成資料與 JEV 模組單輪 10 項通過 (0.06 秒), runtime 位元組比較與 diff 檢查通過, 本輪未重跑 HTTP 或完整 service suites, 不代表跨來源一致性或完整驗收
+
+### Model API 診斷欄位的優先順序
+
+以 `7fdcd76` 為基底, LAM main `5c03daf` 與 workbench-workspace main `4616074` 核對未變, 直接執行 Python `api_diagnostic` 取得 10 組完整輸出, 將固定結果保存為 Rust 結構比對 oracle, 不以 Rust projector 產生預期結果
+
+涵蓋重複 key 的最後有效值、先選 alias 再驗證而不回退、HTTP status 優先於 success、無效主要 endpoint 不改採次要 alias、token 整數限制、duration 小數、retry / connection 移除 request 專用欄位, 以及未結束的引號不覆寫先前有效 model
+
+Linux / Rust 1.100.0、原 Cargo.lock, Model API 模組單輪 7 項通過 (0.21 秒), runtime 位元組比較與 diff 檢查通過, 本輪只有測試與文件, 未新增外部 API 請求或修改資料來源、欄位與查詢次數, 未重跑 HTTP / 完整 service 或實際平台驗收
