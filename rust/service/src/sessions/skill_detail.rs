@@ -172,6 +172,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn document_limit_preserves_raw_digest_bom_and_utf8_boundary() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let path = root.join("SKILL.md");
+        let candidate = lam_session_core::SkillRead {
+            name: "fixture".into(),
+            path: path.to_string_lossy().into_owned(),
+            workdir: None,
+        };
+        for size in [262143, 262144, 262145] {
+            let mut content = vec![b'x'; size];
+            content[..3].copy_from_slice(b"\xef\xbb\xbf");
+            fs::write(&path, &content).unwrap();
+            let detail = render("fixture", &candidate, None).unwrap();
+            let documents = detail["documents"].as_array().unwrap();
+            assert_eq!(documents.len(), 1);
+            let document = &documents[0];
+            let limit = size.min(262144);
+            assert_eq!(document["bytes"], size);
+            assert_eq!(document["read_bytes"], limit);
+            assert_eq!(document["truncated"], size > limit);
+            assert_eq!(document["text"], "x".repeat(limit - 3));
+            assert_eq!(
+                document["sha256"],
+                format!("{:x}", Sha256::digest(&content[..limit]))
+            );
+            assert_eq!(fs::read(&path).unwrap(), content);
+        }
+        let mut content = vec![b'x'; 262143];
+        content.extend_from_slice("界".as_bytes());
+        fs::write(&path, &content).unwrap();
+        let detail = render("fixture", &candidate, Some("SKILL.md")).unwrap();
+        let document = &detail["documents"][0];
+        assert_eq!(document["read_bytes"], 262144);
+        assert_eq!(document["truncated"], true);
+        assert_eq!(document["text"], format!("{}�", "x".repeat(262143)));
+        assert_eq!(
+            document["sha256"],
+            format!("{:x}", Sha256::digest(&content[..262144]))
+        );
+        assert_eq!(fs::read(&path).unwrap(), content);
+    }
+
+    #[test]
     fn observed_unicode_skill_filename_remains_a_primary_document() {
         let home = tempfile::tempdir().unwrap();
         let root = home.path().canonicalize().unwrap();

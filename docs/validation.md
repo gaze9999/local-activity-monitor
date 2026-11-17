@@ -2261,3 +2261,14 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, `skill_suffixes_follow_unicode_lowercase_
 - Python collector 與排序來源已使用合成資料核對, 未增加未觀察來源、執行 recorded command 或變更文件讀取上限
 
 Linux / Rust 1.100.0 / 原 Cargo.lock, `sessions::skill_detail::tests` 通過 2 項、437 項未選取, 0.07 秒, 包含前項副檔名排除回歸, git diff --check 通過, 未重跑完整 HTTP 或平台檔名正規化驗收
+
+### Skill 文件原始位元組上限
+
+基準 `07e2119`, 新增獨立 render fixture, 不改 production 邏輯, 依同一 Python `CodexCollector.skill_detail` 核對原始內容截取與文件 metadata
+
+- UTF-8 BOM 合成文件分別為 262143 / 262144 / 262145 bytes, bytes 保留完整檔案大小, read_bytes 上限為 262144, 只有超過上限才標 truncated
+- 本文移除開頭 BOM, sha256 仍以包含 BOM 的原始截取內容計算, 不以解碼後本文計算
+- 三位元組中文字跨越上限時, 僅保留第一個位元組再以 replacement character 解碼, digest 仍對應原始截取內容, 不多讀完整字元來擴大上限
+- 實際 Python collector 的四組合成來源輸出已核對, Rust 同時驗證來源內容未被修改, 未擴大已觀察 Skill 的來源範圍或變更 API 查詢
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, `sessions::skill_detail::tests` 通過 3 項、437 項未選取, 1.71 秒, 包含兩項 Unicode 回歸, git diff --check 通過, 未重跑 HTTP、完整套件或平台檔案系統驗收
