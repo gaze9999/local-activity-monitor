@@ -313,11 +313,11 @@ selected_overflow_projections 在來源 signature 全部驗證成功後, 將 mut
 | thread / project / schedule / plugin / worktree / dots metadata | worker 更新的 thread_metadata、project_details、schedules、plugins、worktrees、dots 與相應 reports | 不只 capture calls, 相同 call 集合下 metadata 與狀態仍會改變輸出 |
 | tracking / MCP source / customization / feature flags | SnapshotSourceSettings、applied flags 與 tool/files atomics | 目前只有部分同步擷取, 尚未提供共同設定版本, error_windows 還會另讀 mcp_sources |
 | account / cloud / public / platform | SnapshotQueries 在四 window 前取得 8 個獨立 paired capture | 不宣稱 8 個來源共同時點或結果對目前設定的 provenance |
-| journal / debug | snapshots 開頭讀 events/debug, error_windows 再鎖 journal 取 entries/source/events, 後續另取 journal source | 不可僅凍結其中一次讀取就說明細/logs/monitor 都屬同一來源版本 |
+| journal / debug | snapshots 開頭同一 journal lock 擷取 events/entries/source, error_windows 與 logs overview 共用該 owned capture, debug 仍另外擷取 | journal 三個視圖共用單次讀取邊界, 不代表與 debug、其他來源或跨輪 candidate 具有共同版本 |
 | JEV telemetry | 每個 window 呼叫 jev::snapshot, 重新讀 config, active 路徑開唯讀 SQLite 並查 summary/recent/series | 這是實際 I/O, 不是 worker 已保存的 Value, 後續須設計同批來源快照與設定/DB identity 驗證, 保留唯讀、安全旗標及錯誤行為 |
 | credential availability | 每個 window 呼叫 platform::credentials 讀環境變數並只輸出可用狀態 | 不新增憑證輸出或查詢, 若要固定整批讀取點須單獨驗證現有結果語意 |
 | fonts / GPUs / device completion | 每個 window 取得共用讀鎖與 ready_at | 保留初始化完成語意, 不與 render 的即時更新混為同一種靜態輸入 |
 | render telemetry | Snapshots::render 依 uptime、traffic revision、collection revision 更新 cache, 並取 memory / process usage | 仍屬刻意即時資料, 不放進靜態 payload 相等 oracle 或藉此取消所有 candidate |
 | source registry / worktree snapshot | source_registry::augment 整理已載入的參數與 snapshot, worktrees::snapshot 複製既有 result/items | 此兩者不是新增檔案 I/O, 應連同其真正上游狀態驗證, 不重複發明來源 revision |
 
-下一個跨輪整合步驟必須先處理上述實際讀取邊界, 尤其 JEV 與 journal 的多次讀取, 不能只為 active calls 加 counter 就宣稱完整 snapshot 一致, 本次僅完成 owner 稽核與現況修正, 未改變讀取時機或查詢次數
+下一個跨輪整合步驟仍須處理上述實際讀取邊界, 尤其 JEV 的多次讀取, 不能只為 active calls 加 counter 就宣稱完整 snapshot 一致, owner 稽核後已將 journal 合併為開頭一次擷取, 未變更 JEV、credentials 或 render 的讀取時機與查詢次數

@@ -1940,6 +1940,13 @@ struct SnapshotSourceSettings {
     switches: McpSwitches,
 }
 
+// One journal read boundary shared by all snapshot views, not a global revision.
+struct SnapshotJournal {
+    events: Vec<Value>,
+    entries: Vec<Value>,
+    source: Value,
+}
+
 // Owned query values captured at the existing synchronous snapshot boundary.
 // Each settings/result pair is read together, not an eight-source or cross-round token.
 #[derive(Debug, PartialEq)]
@@ -3667,21 +3674,25 @@ impl Collector {
         }
     }
 
+    #[cfg(test)]
     fn error_windows(&self, health: &str, reference: chrono::DateTime<Utc>, threads: &BTreeMap<&str, (Projection, bool)>, session: &[Value]) -> [(Value, Bytes); 4] {
+        self.error_windows_captured(&self.capture_snapshot_journal(), health, reference, threads, session)
+    }
+
+    fn capture_snapshot_journal(&self) -> SnapshotJournal {
+        let journal = self.journal.lock().unwrap_or_else(|error| error.into_inner());
+        SnapshotJournal { events: journal.events(), entries: journal.entries(), source: journal.source() }
+    }
+
+    fn error_windows_captured(&self, journal: &SnapshotJournal, health: &str, reference: chrono::DateTime<Utc>, threads: &BTreeMap<&str, (Projection, bool)>, session: &[Value]) -> [(Value, Bytes); 4] {
         let sources = self
             .mcp_sources
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
-        let journal = self
-            .journal
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let monitor_entries = journal.entries();
-        let monitor_source = journal.source();
-        let monitor_errors: Vec<Value> = journal
-            .events()
-            .into_iter()
+        let monitor_entries = &journal.entries;
+        let monitor_source = &journal.source;
+        let monitor_errors: Vec<Value> = journal.events.iter()
             .filter_map(|event| {
                 let kind = event["kind"].as_str()?;
                 if !matches!(kind, "refresh_failed" | "http_response_error" | "frontend_error") {
@@ -3692,7 +3703,6 @@ impl Collector {
                     "http_status":event["http_status"],"reason":kind}))
             })
             .collect();
-        drop(journal);
         let complete_source_order = self.has_complete_source_order();
         let tool_errors: Vec<_> = threads
             .iter()
@@ -3776,7 +3786,7 @@ impl Collector {
                         .iter()
                         .filter(|_| health != "disabled")
                         .chain(self.desktop.logs.iter().filter(|_| health != "disabled"))
-                        .chain(&monitor_entries)
+                        .chain(monitor_entries)
                         .chain(errors.iter().copied()),
                     boundary,
                 )
@@ -4703,11 +4713,8 @@ impl Collector {
     }
 
     fn snapshots(&self, health: &str, watch_health: &str, version: u64) -> Snapshots {
-        let monitor_events = self
-            .journal
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .events();
+        let journal = self.capture_snapshot_journal();
+        let monitor_events = &journal.events;
         let debug = self
             .debug
             .lock()
@@ -4966,7 +4973,7 @@ impl Collector {
                 session_errors.extend(Session::projection_error_events(&item.projection, path, &item.projection.errors));
             }
         }
-        let errors = self.error_windows(health, reference, &threads, &session_errors);
+        let errors = self.error_windows_captured(&journal, health, reference, &threads, &session_errors);
         let activity = json!({
             "paused":false, "health":health, "last_activity_at":threads.values().filter_map(|(row,_)| row.updated()).max().map(stamp),
             "update_mode":"source_events","watch_health":watch_health,"code_revision":self.backend_revision
@@ -4996,7 +5003,7 @@ impl Collector {
             .chain(self.core.source_location())
             .map(Path::to_path_buf)
             .collect();
-        let journal_source = self.journal.lock().unwrap_or_else(|error| error.into_inner()).source();
+        let journal_source = &journal.source;
         let mut log_desktop = self.desktop.source.clone();
         let mut log_core = self.core.source();
         if !self.logs_enabled || health == "disabled" {
@@ -7855,6 +7862,37 @@ mod log_tests {
         assert_eq!(value["errors"]["events"].as_array().unwrap().len(), 1000);
         assert_eq!(snapshots.error_details.len(), 1001);
         assert!(snapshots.error_details.contains_key(&format!("{:064x}", 1000)));
+    }
+
+    #[test]
+    fn snapshot_journal_capture_keeps_events_entries_and_source_together() {
+        let directory = tempfile::tempdir().unwrap();
+        let collector = Collector::new(directory.path().to_path_buf(), false, None);
+        let captured = collector.capture_snapshot_journal();
+        {
+            let journal = collector.journal.lock().unwrap();
+            assert_eq!(captured.events, journal.events());
+            assert_eq!(captured.entries, journal.entries());
+            assert_eq!(captured.source, journal.source());
+        }
+        let reference = now();
+        let before = collector.error_windows_captured(&captured, "ok", reference, &BTreeMap::new(), &[]);
+        {
+            let mut journal = collector.journal.lock().unwrap();
+            assert!(journal.http_error(503));
+            journal.set_enabled(false);
+        }
+        let retained = collector.error_windows_captured(&captured, "ok", reference, &BTreeMap::new(), &[]);
+        assert_eq!(before, retained);
+        let current = collector.capture_snapshot_journal();
+        assert_eq!(current.source["health"], "disabled");
+        assert!(current.entries.is_empty());
+        assert_eq!(current.source["retained"].as_u64(), captured.source["retained"].as_u64().map(|count| count + 1));
+        assert_eq!(current.events.len(), captured.events.len() + 1);
+        assert!(!captured.events.iter().any(|event| event["http_status"] == 503));
+        let after = collector.error_windows_captured(&current, "ok", now(), &BTreeMap::new(), &[]);
+        assert_eq!(after[3].0["total"], before[3].0["total"].as_u64().unwrap() + 1);
+        assert!(after[3].0["events"].as_array().unwrap().iter().any(|event| event["http_status"] == 503));
     }
 
     #[test]

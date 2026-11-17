@@ -1389,3 +1389,13 @@ watch 可能合併未讀通知, 此測試只驗證實際讀到的兩批更新, �
 新確認的剩餘邊界包括每個 window 的 JEV config/唯讀 SQLite I/O、credential availability 環境讀取, 以及 error_windows 額外讀 mcp_sources / journal, 明確區分已載入 registry/worktree projection 與即時 render telemetry
 
 本輪只有文件修改與來源稽核, diff 檢查通過, 未執行新 runtime 驗收、未調整查詢/鎖定順序、未將來源生命週期風險描述為已觀察到錯誤, 既有跨輪/容量/原生平台與 browser 界線保留
+
+### Journal 單次擷取與視圖共用
+
+在原 snapshots 開頭讀取 journal events 的邊界, 同一既有鎖一併擷取 entries 與 source, error_windows 與 logs overview 改用同一 owned capture, journal 鎖由每批 3 次改成 1 次, events 不再重複複製, schema、時間窗過濾、排序、monitor error 與停用規則保留
+
+這會讓擷取後抵達的 journal 事件於下一批發布才出現, 避免同批 monitor events、errors 與 logs source 分別讀到前後狀態, 不將 journal capture 宣稱為跨來源或跨輪 revision, JEV、credentials、debug 與即時 render 未變更
+
+新增測試逐一比較擷取值與原 Journal getters, 之後加入 HTTP 503 並停用 journal, 原擷取的 error/log bytes 保持不變, 新擷取保留 live error、entries 為空、source disabled 與正確 retained count, 針對性單輪 1 項通過 (0.01 秒)
+
+完整 service 單輪 398 項通過 (63.72 秒), 接續完整 serial HTTP 單輪 226 項通過 (138.78 秒), Linux / Rust 1.100.0, diff 檢查通過, 未重試已受阻 browser 或改變原生平台、16 MiB 與跨輪驗收界線
