@@ -4162,6 +4162,58 @@ fn mcp_document_edit_rejects_yaml_toml_and_origin_failures() {
 }
 
 #[test]
+fn mcp_json_string_edits_preserve_types_and_digest_through_http() {
+    let home = tempdir().unwrap();
+    let root = tempdir().unwrap();
+    let file = root.path().canonicalize().unwrap().join("settings.json");
+    let original = r#"{"example":"{\"enabled\": true}"}"#;
+    let changed = r#"{"example":"{\"enabled\": false}"}"#;
+    fs::write(&file, original).unwrap();
+    fs::write(
+        home.path().join("config.toml"),
+        format!("[mcp_servers.fixture]\nargs = [{}]\n", serde_json::to_string(file.to_str().unwrap()).unwrap()),
+    ).unwrap();
+    let service = Service::start(home.path(), true, None);
+    let list = service.get("/api/mcp/files?server=fixture").json();
+    let id = list["files"].as_array().unwrap().iter()
+        .find(|entry| entry["name"] == "settings.json").unwrap()["id"].as_str().unwrap();
+    let detail = service.get(&format!("/api/mcp/files?server=fixture&document={id}")).json();
+    assert_eq!(detail["editable"], true);
+    assert_eq!(detail["masked"], false);
+    assert_eq!(detail["text"], original);
+    assert_eq!(detail["parsed"]["example"]["enabled"], true);
+    let post = |text: &str, sha: &str| {
+        let body = json!({"server":"fixture","document":id,"sha256":sha,"text":text}).to_string();
+        service.request_body(
+            &format!("POST /api/mcp/file HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()),
+            &body,
+        )
+    };
+    let initial_sha = detail["sha256"].as_str().unwrap();
+    let saved = post(changed, initial_sha);
+    assert_eq!(saved.status, 200);
+    let saved = saved.json();
+    assert_eq!(saved["text"], changed);
+    assert_eq!(saved["parsed"]["example"]["enabled"], false);
+    assert_eq!(saved["editable"], true);
+    assert_ne!(saved["sha256"], detail["sha256"]);
+    assert_eq!(saved["sha256"], format!("{:x}", Sha256::digest(changed.as_bytes())));
+    assert_eq!(fs::read_to_string(&file).unwrap(), changed);
+    assert_eq!(post(original, initial_sha).status, 409);
+    for sensitive in [
+        r#"{"example":"{\"password\": \"PRIVATE\"}"}"#,
+        r#"{"example":"password,name\nPRIVATE,visible"}"#,
+    ] {
+        assert_eq!(post(sensitive, saved["sha256"].as_str().unwrap()).status, 409);
+        assert_eq!(fs::read_to_string(&file).unwrap(), changed);
+    }
+    let current = service.get(&format!("/api/mcp/files?server=fixture&document={id}")).json();
+    assert_eq!(current["sha256"], saved["sha256"]);
+    assert_eq!(current["text"], changed);
+    assert!(serde_json::from_str::<Value>(current["text"].as_str().unwrap()).unwrap()["example"].is_string());
+}
+
+#[test]
 fn mcp_unavailable_document_is_not_advertised_as_editable() {
     let home = tempdir().unwrap();
     let root = tempdir().unwrap();

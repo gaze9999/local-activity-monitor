@@ -2314,3 +2314,15 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, yaml_validation filter 通過 2 項、439
 Linux / Rust 1.100.0 / 原 Cargo.lock, 新 fixture 通過 1 項、441 項未選取, 0.07 秒, diagnostic 文字遮蔽回歸通過 1 項、441 項未選取, 0.03 秒, mcp_document HTTP filter 通過 4 項、224 項未選取, 0.22 秒, git diff --check 通過
 
 GET /api/mcp/files 與 POST /api/mcp/file 來源、document ID 與查詢次數不變, 新字串寫入案例直接呼叫實際 write_document, HTTP 使用既有整合 fixture, 未宣稱新案例的瀏覽器驗收或完整套件通過
+
+### MCP JSON 字串編輯的 HTTP 整合
+
+基準 `099e71e`, 補齊前項新行為的真實服務路由驗證, 僅新增測試與本節記錄, 不改 production
+
+- GET 文件 detail 保留原 JSON text 與內層字串型別, editable=true / masked=false, parsed 預覽仍顯示內層 object
+- POST 修改成功回傳 200, 來源精確等於送入文字, 回覆 digest 等於實際修改內容的 SHA-256, 後續 GET 保留相同 digest 與本文
+- 舊 digest 再寫入回傳 409, 使用目前 digest 提交含 password 的 JSON 字串或 CSV 字串也回傳 409, 均保留已成功儲存的來源
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, `mcp_json_string_edits_preserve_types_and_digest_through_http` 通過 1 項、228 項未選取, 0.10 秒, 維持 8 個既有 warnings, git diff --check 通過
+
+測試使用臨時 launcher 設定與合成檔案, 不新增 API 或 production 查詢, 未執行瀏覽器、完整套件或其他平台驗收, metadata recursion 候選與原停止工作未變
