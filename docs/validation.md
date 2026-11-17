@@ -1609,3 +1609,13 @@ Linux / Rust 1.100.0、原 Cargo.lock, 該 focused 測試通過 (0.15 秒), runt
 Linux / Rust 1.100.0、原 Cargo.lock, snapshot_payload_ 篩選 2 項通過 (0.15 秒), diff 檢查通過, 未執行延後的 HTTP 測試或完整套件
 
 僅變更既有 epoch query 失敗時的清理, 不改變 query、查詢次數、selection hash、16 MiB budget、正常成功資料或 response schema, 不代表共同 candidate 或整體記憶體上限完成
+
+### Compact detail stage 的 epoch 失敗清理
+
+以 `345f160` 為基底, LAM main `5c03daf` 與 workbench-workspace main `4616074` 核對未變, sibling selected_detail_index_with_limit 同樣在 epoch query 失敗時過早返回, 未清除既有 compact stage 與 reader
+
+沿用 40-call、每筆額外 1 MiB 合法 JSON 空白的既有分頁 fixture, 第一輪保留 reader 後注入不可讀取的 epoch, 先重現 stage 未清除, 修正後只清除 selected_detail_scan 再返回 None, 不變更已發布的 completed_detail_index
+
+恢復 epoch 後重新開始, 第二輪完成所有 40 calls 與 signature 驗證, 原有 previous-publication 選取遮罩、不改寫舊 index、signature 失效及容量 / source / validation 邊界 assertions 保留
+
+Linux / Rust 1.100.0、原 Cargo.lock, selected_details_ 篩選 2 項通過 (2.85 秒), diff 檢查通過, 未執行任何延後的 HTTP 測試或完整套件, 正常 query / 次數 / budget / response schema 不變, 不代表整體 payload staging 容量已解除

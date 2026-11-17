@@ -4248,7 +4248,13 @@ impl Collector {
     fn selected_detail_index_with_limit(&self, root: &Path, selection: &CallSelection, stage_limit: usize) -> Option<(details::Index, BTreeSet<String>)> {
         if !selection.complete || self.discovery.is_some() || !self.source_membership_complete { return None; }
         let membership = self.source_membership.as_ref()?;
-        let epoch: i64 = membership.db.query_row("SELECT value FROM selection_epoch", [], |row| row.get(0)).ok()?;
+        let epoch: i64 = match membership.db.query_row("SELECT value FROM selection_epoch", [], |row| row.get(0)) {
+            Ok(epoch) => epoch,
+            Err(_) => {
+                *self.selected_detail_scan.lock().unwrap_or_else(|error| error.into_inner()) = None;
+                return None;
+            }
+        };
         let mut hash = Sha256::new();
         hash.update(membership.identity.to_le_bytes());
         hash.update(epoch.to_le_bytes());
@@ -6214,6 +6220,13 @@ mod log_tests {
             assert!(scan.reader.is_some());
             assert!(scan.index.files[id][0].calls.len() < 40);
         }
+        let membership = collector.source_membership.as_ref().unwrap();
+        let epoch: i64 = membership.db.query_row("SELECT value FROM selection_epoch", [], |row| row.get(0)).unwrap();
+        membership.db.execute("UPDATE selection_epoch SET value='unreadable'", []).unwrap();
+        assert!(collector.selected_detail_index(&root, &selection).is_none());
+        assert!(collector.selected_detail_scan.lock().unwrap().is_none());
+        membership.db.execute("UPDATE selection_epoch SET value=?", [epoch]).unwrap();
+        assert!(collector.selected_detail_index(&root, &selection).is_none());
         let (index, _) = collector.selected_detail_index(&root, &selection).expect("second round completes remaining calls and validation");
         assert_eq!(index.files[id].len(), 1, "pages coalesce into one source");
         assert_eq!(index.files[id][0].calls.len(), 40);
