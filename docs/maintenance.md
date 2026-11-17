@@ -340,6 +340,10 @@ OwnedStatistics 已由 cfg(test) 移至正常編譯範圍, 演算法、exact dur
 
 正式 snapshot 仍使用原 borrowed ToolStatistics, 新 encoder 入口尚未接到 worker, 不以移出 cfg(test) 宣稱 production candidate 已啟用, CompletedStatistics 持有完成後的統計 JSON 而非 calls, 其輸出 allocation 與 retained duration / key logical charge 不等於完整 RSS 上限
 
+ObservationMerge 已提供 retained/current observation 的 owned incremental state, new 先合併 history、extend 依原來源先後接收 recent events、finish 才依原 timestamp / projected-key 順序輸出, combine_observations 保持原介面並同步使用同一 state
+
+此 reducer 保留現有 merge_event 的 null 不覆蓋、object 遞迴、array 去重 / 截短與 scalar 後者優先, 不改 MCP / Web / SQL projected identity, 不可為方便分頁任意反轉同 observation key 的來源順序, 此步只移除單一 recent iterator 的生命週期需求, 仍持有全部 distinct projected observations, 不是固定記憶體上限或完整 MCP / SQL summary 串接
+
 ### 共同 capture / mutation 邊界設計草案
 
 此設計起於 `2427f5e` 的 producer 與 server reader 稽核, 共同 publication 部分已實作並通過限定範圍驗證, 下列跨輪 capture / mutation 部分仍為待整合規格, 不視為全部架構驗收

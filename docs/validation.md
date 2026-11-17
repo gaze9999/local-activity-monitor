@@ -1935,3 +1935,14 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, 未執行 HTTP、完整套件或 deferred
 - Linux / Rust 1.100.0 / 原 Cargo.lock, cargo check 通過並保留前輪 6 個 warnings, 無本輪失敗, 未執行 HTTP、完整套件或 deferred 檢查
 
 此為 runtime 可用的 owned-result 編碼入口, production worker 仍使用原 borrowed statistics 路徑, 未切換 aggregation / fallback / 16 MiB staging, 完成 JSON 的 allocation、全部 metadata / reducers 與 worker / 資源驗收尚未完成
+
+### Incremental retained/current observation merge
+
+基準 `14fe8e2`, history-store ObservationMerge 擁有合併後的 projected metadata, combine_observations 原介面同步共用 new / extend / finish, 無額外 SQLite 查詢、retention 或 source identity 規則變動
+
+- 保留原 combine 實作為 test-only oracle, 同順序 recent 資料以每批 1 到全部筆數切分後均相等, history buffer 在建立後可丟棄, 原 history 不被修改
+- 驗證 MCP / SQL / Web distinct identities、無效輸入跳過、同 key scalar 後者優先、null 保留舊值、object merge 與 array 去重, 反轉來源順序必須產生不同結果, 不將 merge 誤當可交換
+- 最初 fixture 改變作為 MCP identity 一部分的 tool, 因而建立不同 key, 斷言失敗 0.00 秒, 已保留固定 tool 改測非 identity label, 未改 projected_key 或 merge 規則
+- Linux / Rust 1.100.0 / 原 service Cargo.lock, `cargo test --locked --manifest-path rust/service/Cargo.toml -p lam-history-store --lib incremental_observation_merge` 最終 1 項通過、9 項未選取, 0.00 秒, service cargo check 通過並保留 6 個 warnings
+
+未執行 HTTP、完整套件或 deferred 檢查, 此 reducer 仍保留全部 distinct projected events 並在 finish 排序, 尚未量測資源或串接跨來源 candidate 的 MCP / SQL summary, production aggregation / fallback 不變

@@ -290,29 +290,45 @@ fn recent(db: &Connection, cutoff: Option<&str>) -> Result<Vec<Value>> {
     Ok(events)
 }
 
-pub fn combine_observations(history: &[Value], recent: impl Iterator<Item = Value>) -> Vec<Value> {
-    let mut result = HashMap::<String, Object>::new();
-    for event in history.iter().cloned().chain(recent) {
-        let Value::Object(event) = event else {
-            continue;
-        };
-        let Some(section) = section(&event) else {
-            continue;
-        };
-        if let Ok(key) = projected_key(section, &event) {
-            merge_event(result.entry(key).or_default(), event);
+/// Incremental form of the existing retained/current observation merge.
+/// Feed history first, then recent events in source order: merge_event is not
+/// commutative. Own projected metadata only; this does not impose a memory cap.
+#[derive(Default)]
+pub struct ObservationMerge {
+    events: HashMap<String, Object>,
+}
+impl ObservationMerge {
+    pub fn new(history: &[Value]) -> Self {
+        let mut merged = Self::default();
+        merged.extend(history.iter().cloned());
+        merged
+    }
+
+    pub fn extend(&mut self, recent: impl IntoIterator<Item = Value>) {
+        for event in recent {
+            let Value::Object(event) = event else { continue; };
+            let Some(section) = section(&event) else { continue; };
+            if let Ok(key) = projected_key(section, &event) {
+                merge_event(self.events.entry(key).or_default(), event);
+            }
         }
     }
-    let mut result: Vec<_> = result.into_iter().collect();
-    result.sort_by(|(left_key, left), (right_key, right)| {
-        text(right, "timestamp")
-            .cmp(&text(left, "timestamp"))
-            .then_with(|| left_key.cmp(right_key))
-    });
-    result
-        .into_iter()
-        .map(|(_, event)| Value::Object(event))
-        .collect()
+
+    pub fn finish(self) -> Vec<Value> {
+        let mut result: Vec<_> = self.events.into_iter().collect();
+        result.sort_by(|(left_key, left), (right_key, right)| {
+            text(right, "timestamp")
+                .cmp(&text(left, "timestamp"))
+                .then_with(|| left_key.cmp(right_key))
+        });
+        result.into_iter().map(|(_, event)| Value::Object(event)).collect()
+    }
+}
+
+pub fn combine_observations(history: &[Value], recent: impl Iterator<Item = Value>) -> Vec<Value> {
+    let mut merged = ObservationMerge::new(history);
+    merged.extend(recent);
+    merged.finish()
 }
 
 #[derive(Clone, PartialEq)]
@@ -579,5 +595,73 @@ fn boundary_changes(
             params![first, last],
             |row| row.get(0),
         )
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn legacy_combine(history: &[Value], recent: impl Iterator<Item = Value>) -> Vec<Value> {
+        let mut result = HashMap::<String, Object>::new();
+        for event in history.iter().cloned().chain(recent) {
+            let Value::Object(event) = event else {
+                continue;
+            };
+            let Some(section) = section(&event) else {
+                continue;
+            };
+            if let Ok(key) = projected_key(section, &event) {
+                merge_event(result.entry(key).or_default(), event);
+            }
+        }
+        let mut result: Vec<_> = result.into_iter().collect();
+        result.sort_by(|(left_key, left), (right_key, right)| {
+            text(right, "timestamp")
+                .cmp(&text(left, "timestamp"))
+                .then_with(|| left_key.cmp(right_key))
+        });
+        result
+            .into_iter()
+            .map(|(_, event)| Value::Object(event))
+            .collect()
+    }
+
+    #[test]
+    fn incremental_observation_merge_preserves_source_order_and_owned_history() {
+        let history = vec![json!({"server":"fixture","thread_id":"thread","call_id":"call",
+            "timestamp":"2026-11-13T01:00:00Z","tool":"fixture_tool","label":"old","result":{"keep":1,"replace":1},"tags":["old"]})];
+        let recent = vec![
+            Value::Null, json!({"ignored":true}),
+            json!({"server":"fixture","thread_id":"thread","call_id":"call",
+                "timestamp":"2026-11-13T01:00:00Z","tool":"fixture_tool","label":"new","result":{"keep":null,"replace":2},"tags":["new","old"]}),
+            json!({"engine":"sqlite","statement":"SELECT","thread_id":"thread","call_id":"sql",
+                "timestamp":"2026-11-13T01:00:00Z","index":0}),
+            json!({"server":"web","thread_id":"thread","call_id":"web","timestamp":null,"tool":"search"}),
+            json!({"server":"fixture","thread_id":"thread","call_id":"call",
+                "timestamp":"2026-11-13T01:00:00Z","tool":"fixture_tool","result":{"replace":3}}),
+        ];
+        let expected = legacy_combine(&history, recent.clone().into_iter());
+        for chunk_size in 1..=recent.len() {
+            let transient = history.clone();
+            let mut merged = ObservationMerge::new(&transient);
+            drop(transient);
+            for chunk in recent.chunks(chunk_size) {
+                let temporary = chunk.to_vec();
+                merged.extend(temporary);
+            }
+            assert_eq!(merged.finish(), expected);
+        }
+        assert_eq!(expected.len(), 3, "MCP, SQL and Web identities stay separate");
+        assert_ne!(legacy_combine(&history, recent.iter().rev().cloned()), expected,
+            "chunking may not reorder source precedence");
+        assert_eq!(combine_observations(&history, recent.into_iter()), expected);
+        let merged = expected.iter().find(|row| row["server"] == "fixture").unwrap();
+        assert_eq!(merged["label"], "new");
+        assert_eq!(merged["result"], json!({"keep":1,"replace":3}));
+        assert_eq!(merged["tags"], json!(["old","new"]));
+        assert_eq!(history[0]["label"], "old");
+        assert!(ObservationMerge::default().finish().is_empty());
     }
 }

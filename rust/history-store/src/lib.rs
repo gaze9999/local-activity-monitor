@@ -24,7 +24,7 @@ pub use error_history::{sanitize_error_identifiers, ERROR_PREVIEW_HOURS, ERROR_P
 pub use history::{HistoryItem, HistoryWrite, Namespace, Page, PageQuery, Position, Section};
 pub use observations::{
     combine_observations, sql_event_id, ObservationBatch, ObservationStore, ObservationView,
-    ObservationWrite,
+    ObservationWrite, ObservationMerge,
 };
 pub use timestamp::{normalize_utc_stamp, parse_utc_stamp};
 
