@@ -1959,6 +1959,7 @@ struct SelectedSnapshotScan {
     after: String,
     reader: Option<lam_history_store::SelectedCheckpointReader>,
     projections: Vec<checkpoint::SnapshotProjection>,
+    completed: Option<Arc<Vec<checkpoint::SnapshotProjection>>>,
     signatures: BTreeMap<String, String>,
     staged_bytes: usize,
     validating: bool,
@@ -4438,13 +4439,13 @@ impl Collector {
         self.overflow_projections_with_limit(active_calls, INPUT_LIMIT)
     }
 
-    fn selected_overflow_projections(&self, selection: &CallSelection) -> Option<Vec<checkpoint::SnapshotProjection>> {
+    fn selected_overflow_projections(&self, selection: &CallSelection) -> Option<Arc<Vec<checkpoint::SnapshotProjection>>> {
         self.selected_overflow_projections_with_limits(selection, 16, 16 * 1024 * 1024)
     }
 
     fn selected_overflow_projections_with_limits(
         &self, selection: &CallSelection, page_limit: usize, stage_limit: usize,
-    ) -> Option<Vec<checkpoint::SnapshotProjection>> {
+    ) -> Option<Arc<Vec<checkpoint::SnapshotProjection>>> {
         if !selection.complete || self.discovery.is_some() || !self.source_membership_complete {
             *self.selected_snapshot_scan.lock().unwrap_or_else(|error| error.into_inner()) = None;
             return None;
@@ -4465,7 +4466,7 @@ impl Collector {
         if cached.as_ref().is_none_or(|scan| scan.input_hash != input_hash || !scan.valid) {
             // Replacing the stage releases any obsolete SQLite read transaction.
             *cached = Some(SelectedSnapshotScan { input_hash, after: String::new(), reader: None,
-                projections: Vec::new(), signatures: BTreeMap::new(), staged_bytes: 0,
+                projections: Vec::new(), completed: None, signatures: BTreeMap::new(), staged_bytes: 0,
                 validating: false, finished: false, valid: true });
         }
         let scan = cached.as_mut()?;
@@ -4532,21 +4533,24 @@ impl Collector {
         }
         if scan.validating && !scan.finished {
             let Some(store) = self.checkpoints.snapshot_reader().ok().flatten() else {
-                scan.valid = false; scan.finished = true; scan.projections.clear(); return None;
+                scan.valid = false; scan.finished = true; scan.projections.clear(); scan.completed = None; return None;
             };
             let batch: Vec<_> = scan.signatures.range((std::ops::Bound::Excluded(scan.after.clone()), std::ops::Bound::Unbounded))
                 .take(64).map(|(key, signature)| (key.clone(), signature.clone())).collect();
             for (key, signature) in &batch {
                 if store.checkpoint_signature(key).ok().flatten().as_ref() != Some(signature) {
-                    scan.valid = false; scan.finished = true; scan.projections.clear(); return None;
+                    scan.valid = false; scan.finished = true; scan.projections.clear(); scan.completed = None; return None;
                 }
                 scan.after = key.clone();
             }
             if batch.len() < 64 { scan.finished = true; }
         }
-        if !scan.valid { scan.reader = None; scan.projections.clear(); return None; }
+        if !scan.valid { scan.reader = None; scan.projections.clear(); scan.completed = None; return None; }
         if !scan.finished { return None; }
-        Some(scan.projections.clone())
+        // Freeze only after full signature validation. Subsequent successful
+        // validation reuses the allocation; readers cannot mutate staged data.
+        let completed = scan.completed.get_or_insert_with(|| Arc::new(std::mem::take(&mut scan.projections)));
+        Some(Arc::clone(completed))
     }
 
     fn overflow_projections_with_limit(
@@ -4724,12 +4728,15 @@ impl Collector {
             None
         };
         let selection = selection.filter(|_| selected_overflow.is_some());
-        let (overflow, overflow_incomplete) = if health == "disabled" {
-            (Vec::new(), false)
-        } else if let Some(overflow) = selected_overflow {
-            (overflow, false)
+        let fallback;
+        let (overflow, overflow_incomplete): (&[checkpoint::SnapshotProjection], bool) = if health == "disabled" {
+            (&[], false)
+        } else if let Some(overflow) = &selected_overflow {
+            (overflow.as_slice(), false)
         } else {
-            self.overflow_projections(active_calls)
+            let (projections, incomplete) = self.overflow_projections(active_calls);
+            fallback = projections;
+            (&fallback, incomplete)
         };
         // Source-backed details and complete metadata for overflow projections are not yet assembled.
         let overflow_incomplete = overflow_incomplete || !overflow.is_empty();
@@ -4762,7 +4769,7 @@ impl Collector {
                 *partial |= state.pending() || state.discard;
             }
         }
-        for item in &overflow {
+        for item in overflow {
             if let Some(id) = item.projection.id.as_deref() {
                 let (projection, partial) = threads
                     .entry(id)
@@ -4954,7 +4961,7 @@ impl Collector {
             .flat_map(|(path, state)| state.error_events(path, &state.projection.errors))
             .collect();
         if let Some(root) = &self.session_root {
-            for item in &overflow {
+            for item in overflow {
                 let Some(path) = self.overflow_path(root, item) else { continue };
                 session_errors.extend(Session::projection_error_events(&item.projection, path, &item.projection.errors));
             }
@@ -5731,12 +5738,18 @@ mod log_tests {
         assert_eq!(serde_json::to_value(&complete[0].projection).unwrap(),serde_json::to_value(&expected.projection).unwrap());
         assert_eq!(serde_json::to_value(&complete[0].projection.calls).unwrap(),serde_json::to_value(&expected.projection.calls).unwrap());
         assert_eq!(serde_json::to_value(&complete[0].projection).unwrap()["agent_incoming"].as_array().unwrap().len(),1);
-        assert_eq!(collector.selected_overflow_projections(&selection).unwrap().len(), 1);
+        let revalidated = collector.selected_overflow_projections(&selection).unwrap();
+        assert!(Arc::ptr_eq(&complete, &revalidated));
+        assert!(collector.selected_snapshot_scan.lock().unwrap().as_ref().unwrap().projections.is_empty());
         let mut replaced = original.cursor.clone();
         replaced.signature = "changed-after-completion".into();
         store.save_checkpoints(&[replaced], &[], &[]).unwrap();
         assert!(collector.selected_overflow_projections(&selection).is_none());
         assert!(collector.selected_snapshot_scan.lock().unwrap().as_ref().unwrap().projections.is_empty());
+        assert!(collector.selected_snapshot_scan.lock().unwrap().as_ref().unwrap().completed.is_none());
+        // Invalidation releases cache ownership, not a previously captured value.
+        assert_eq!(complete[0].projection.calls.len(), 600);
+        assert!(Arc::ptr_eq(&complete, &revalidated));
         store.save_checkpoints(std::slice::from_ref(&original.cursor), &calls, &[]).unwrap();
         collector.source_membership.as_ref().unwrap().db.execute("UPDATE selection_epoch SET value=value+1", []).unwrap();
         assert!(collector.selected_overflow_projections_with_limits(&selection,1,16*1024*1024).is_none());
@@ -5966,7 +5979,8 @@ mod log_tests {
                 let scan = scan.as_ref().unwrap();
                 assert!(!scan.finished && scan.validating && scan.valid);
                 assert_eq!(scan.signatures.range(..=scan.after.clone()).count(), 64);
-                assert_eq!(scan.projections.len(), 65);
+                assert!(scan.projections.is_empty());
+                assert_eq!(scan.completed.as_ref().unwrap().len(), 65);
                 assert!(scan.reader.is_none());
             }
             assert!(collector.recent_call_refresh_pending());
@@ -5982,7 +5996,7 @@ mod log_tests {
         {
             let scan = collector.selected_snapshot_scan.lock().unwrap();
             let scan = scan.as_ref().unwrap();
-            assert!(scan.finished && !scan.valid && scan.projections.is_empty());
+            assert!(scan.finished && !scan.valid && scan.projections.is_empty() && scan.completed.is_none());
         }
         assert!(collector.selected_overflow_projections_with_limits(&selection,16,4096).is_none());
         {

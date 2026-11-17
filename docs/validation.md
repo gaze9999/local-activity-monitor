@@ -1347,3 +1347,17 @@ Shared 以同一個 QueryState RwLock 保存 settings 與 retained result, 新 c
 watch 可能合併未讀通知, 此測試只驗證實際讀到的兩批更新, 不宣稱覆蓋所有交錯、任意 worker fault injection、跨輪 candidate 取消或 16 MiB staging, 保留既有失敗與阻擋紀錄, 未重試 browser
 
 完整 service 單輪 397 項通過 (61.53 秒), Linux / Rust 1.100.0, 本輪只新增測試與文件, 未重跑前輪已通過的 serial HTTP 226 項, 未擴稱原生平台或 browser 驗收
+
+### 已完成 payload stage 的共用驗證
+
+在完整來源驗證成功後 move staged vector 到 Arc, snapshots 只借用 slice, 沒有變更 selector、winner、merge、HTTP 欄位或外部查詢次數
+
+首次針對性執行 2 項失敗: 新增的 completed cache 在 signature-mismatch early return 未清除, 以及既有 65-source 測試仍檢查舊 mutable Vec 的保存位置, 尚未發布此實作
+
+已修正該 early return 清除 completed, 並把內部保存位置斷言改為 mutable Vec 必須為空、completed 必須有 65 筆, 來源/完整性 oracle 未放寬, 修正後針對性單輪 2 項通過 (0.09 秒)
+
+既有 600-call materialized oracle 保留, 新增 Arc::ptr_eq 確認成功再驗證共用同一個 allocation, signature 改變後必須回傳 None 並清除 completed, 先前交付的 600-call Arc 內容不變, 65-source 跨輪驗證、取消、預算不足與 source signature 檢查仍保留
+
+此證據驗證 allocation 共用與生命週期, 未量測程序 RSS、端點延遲或宣稱全部輸入同時一致, 原 16 MiB staging 與跨輪 candidate 一致性缺口仍存在
+
+完整 service 單輪 397 項通過 (77.04 秒), 結束後完整 serial HTTP 單輪 226 項通過 (129.22 秒), Linux / Rust 1.100.0, 初始 2 項失敗記錄保留, 未重試 browser 或改動原生平台驗收界線

@@ -293,3 +293,11 @@ account::Shared 的 settings 與 retained result 已合併到同一個 RwLock<Qu
 相較最初的擷取順序, public / platform 現在各來源 settings/result 成對讀取, 不再先讀完整 settings array 再讀 results array, 不增加 result clone 次數, 不持有多來源鎖
 
 此步使單一來源的當前設定與保留結果具有共同讀取點, 但設定變更不會清除既有結果, 查詢仍可能在先前設定下啟動, 因此不代表 result 的設定 provenance、completed 的原子讀取、8 個來源共同時點或跨輪版本 token, 更不能直接將 signal counter 當 candidate revision
+
+### 已驗證 payload stage 的共用擁有權
+
+selected_overflow_projections 在來源 signature 全部驗證成功後, 將 mutable Projection vector 移入 immutable Arc, 後續成功再驗證只 clone Arc, snapshots 借用同一個 slice 進行既有合併, 不再為每次回傳深複製整個 staged payload
+
+正在讀頁或驗證的 candidate 仍不能回傳, signature 不符、儲存讀取失敗、選取改變、停用或取消仍清除 cache 擁有權, 已交付的舊 Arc 不被改寫, 下一次新 candidate 仍獨立重建
+
+原 16 MiB charge、每輪頁數與 signature 批次、source limit、保留策略及精確統計皆未調整, staging 仍保存完整 payload, 合併 thread 與最後四個 window 仍可能另有配置, 不將移除一次 deep clone 描述成已解決 staging 容量或程序記憶體上限
