@@ -347,3 +347,19 @@ selected_overflow_projections 在來源 signature 全部驗證成功後, 將 mut
 未改變 config 讀取、DB identity、open flags / pragmas、80 ms busy timeout、SQL / cutoff / row limits / privacy projection, 只增加每次成功資料庫讀取的 BEGIN 與 ROLLBACK, 不跨 window 或跨輪保留 transaction
 
 實際 read_snapshot 的 test-only summary 後注入點已驗證 writer commit 不會讓當次 details 跳到新資料, 下一次 read_snapshot 可見新資料, 另驗證 summary / details query failure 會釋放 transaction, BEGIN failure 不會結束呼叫端原有 transaction, 四 window 仍各自開啟讀取, 未提供跨窗共同版本
+
+### JEV 同批擷取的待決邊界
+
+依 `203b466` 重新核對 `sessions/mod.rs` 的兩條 worker 路徑, 每輪先由 `refresh_jev_errors` 單獨讀取 all-window、寫入 diagnostics, 再 refresh error history, 之後 `snapshots` 才為四個 window 各讀一次 JEV, 啟動初始快照另有直接呼叫路徑
+
+因此只合併四窗仍不會讓 JEV error history 與 telemetry 共用同一份外部資料庫視圖, 若要涵蓋 errors, 必須先決定擷取、diagnostics 寫入與 history refresh 的順序, 不將第五次讀取直接刪除或改成只使用目前 recent 預覽
+
+| 選擇 | 可保留的行為 | 需要決定的差異 |
+| --- | --- | --- |
+| 保持每窗短 transaction | 已驗證的單次讀取一致性、各窗健康狀態與獨立釋放 | 四窗與 error history 仍可觀察到不同外部版本 |
+| 單次同步四窗 capture | 可保持既有 SQL、cutoff、80 / 168 上限與四窗 owned 結果 | config / DB identity 擷取時點、16 個 SELECT 共用 transaction 的存活時間、其中一窗失敗時保留哪些結果 |
+| 將 error history 納入共同 capture | 可從同一批 all-window 產生 error events | diagnostics 寫入失敗、舊 error history 的保留與初始快照路徑, 不能只搬移 helper 而略過原持久化 |
+
+來源 LAM main `5c03daf` 的 `server.py` cache comprehension 與 `collectors.py::JevCollector.snapshot` 使用各窗獨立 connection, 沒有規定整批成功或失敗, 現行跨輪計畫也尚未決定上述外部來源失敗規格
+
+本節僅列出來源與設計選擇, 未改動 runtime, 四窗 capture 的失敗規格與 errors 範圍應在實作前確認, transaction 不跨 worker 輪次保留
