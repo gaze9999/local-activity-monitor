@@ -1997,3 +1997,17 @@ Candidate 尚未將 failure list、session errors 與全部 diagnostics / histor
 Linux / Rust 1.100.0 / 原 Cargo.lock, 修正後 targeted 通過 1 項、424 項未選取, 70.35 秒, 加入 active 頁間停止後最終 targeted 通過 1 項、424 項未選取, 67.10 秒, cargo check 通過且維持 8 個既有未使用項目 warnings
 
 Active payload 每頁最多 512 calls 的暫時複本, 未新增完整 Session clone, 不是 16 MiB encoded page 或 RSS 保證, 未執行 HTTP、完整套件或 deferred fixtures, production caller、fallback 與既有 staging 未切換
+
+
+### Candidate 的實體來源 metadata 驗證
+
+基準 `a0c7e5c`, 候選現在使用既有 open_source 與 source_fingerprint, 對照已觀察路徑、root identity、membership fingerprint 及 active 讀取狀態, 在 header / payload 消費前後與最後分批 sweep 核對, 不讀取 JSONL 本文或改變正式收集流程
+
+- 新增的 metadata guard 測試涵蓋原來源、移除、相同 bytes 的另一個 file identity、還原原 owner, Linux 另檢查 parent directory symlink 即使指向同一來源仍拒絕
+- 雙 checkpoint / mixed active 八情境保留原完整 oracles, 另在 payload 完成後只改動實際 JSONL, 不 refresh Collector 或更新 checkpoint, 新候選的 header 與既有候選的最後 physical sweep 都必須拒絕, 不交付半成品
+- 開發期間 cargo check 與已啟動的 targeted 編譯均遇到相同 E0283, 原因為 PathBuf range 的 borrowed bound 型別不明確, 改為 owned cursor bound, 原錯誤記錄保留
+- 首次串接測試在 0.43 秒拒絕候選, 原 fixture 直接建立 membership 卻未設定對應 root identity, 補上實際 root identity 使 fixture 與 refresh 的成對設定一致, 未放寬實體來源 guard
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, metadata guard targeted 通過 1 項、425 項未選取, 0.00 秒, 修正 fixture 後八情境串接 targeted 通過 1 項、425 項未選取, 67.69 秒, cargo check 通過並維持 8 個既有 warnings
+
+此 guard 只核對 metadata stamp, 不偵測 identity / size / modified 全部保留的本文變更, 最後 sweep 為依序觀察而非全域原子版本, 未宣稱完整來源競態、Windows / macOS 或資源驗收, 未執行 deferred fixtures, production caller 與 fallback 未切換

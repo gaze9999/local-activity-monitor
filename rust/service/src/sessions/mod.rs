@@ -5863,6 +5863,7 @@ mod log_tests {
             membership.mark_verified(&[VerifiedMembership { key:key.clone(), fingerprint, checkpoint_signature:original.cursor.signature.clone(),
                 materialized:true, call_headers:Some(calls.iter().map(|row| lam_history_store::CallHeader {call_id:row.call_id.clone(),event_time:row.event_time.clone()}).collect()) }]).unwrap();
             collector.source_membership = Some(membership);
+            collector.source_membership_root = Some(file_identity(&std::fs::metadata(&root).unwrap()));
             collector.source_membership_complete = true;
             collector.discovered_files = Some(1);
             collector.discovery = None;
@@ -6221,6 +6222,24 @@ mod log_tests {
                 assert_eq!(window["codex"]["checks"], expected_commands[index]["checks"]);
                 assert_eq!(window["codex"]["skills"], expected_skills[index]);
             }
+            // No Collector refresh or checkpoint update: only the real JSONL changes.
+            let make = || selected_candidate::SelectedCandidate::new(&collector, &selection,
+                SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
+                    selected_candidate::Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
+                skill_names.clone(), false, 10_000, 10_000, true, &stopped).unwrap();
+            let initial = make();
+            let mut candidate = make();
+            for _ in 0..32 {
+                if candidate.awaiting_physical_validation() { break; }
+                candidate = match candidate.advance(&collector, &selection, true, &stopped, 1).unwrap() {
+                    selected_candidate::Advance::Pending(next) => next,
+                    selected_candidate::Advance::Complete(_) => panic!("emitted before physical validation"),
+                };
+            }
+            assert!(candidate.awaiting_physical_validation());
+            std::fs::write(&path, b"changed JSONL fixture\n").unwrap();
+            assert!(initial.advance(&collector, &selection, true, &stopped, 1).is_none());
+            assert!(candidate.advance(&collector, &selection, true, &stopped, 1).is_none());
         }
     }
 

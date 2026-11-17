@@ -354,13 +354,14 @@ ToolErrorSummary 已由 resolved winners 擷取 failure_event 的 owned metadata
 
 ### Runtime SelectedCandidate 的已實作範圍
 
-selected_candidate.rs 現在擁有原 test-only orchestration 的 Headers → Payload → Validate 狀態, Advance 只回傳 Pending(state) 或 Complete(components), 任一失敗 / 取消回傳 None 並丟棄 reader、plan 與 reducers, 正式 snapshot worker 尚未呼叫此入口
+selected_candidate.rs 現在擁有原 test-only orchestration 的 Headers → Payload → Physical → Validate 狀態, Advance 只回傳 Pending(state) 或 Complete(components), 任一失敗 / 取消回傳 None 並丟棄 reader、plan 與 reducers, 正式 snapshot worker 尚未呼叫此入口
 
 | 階段 | 行為與限制 |
 | --- | --- |
 | 建立 | 呼叫端提供已確認來源順序與 signature 的清單、完整 selection、固定時間及 owned names, 來源數須等於 membership materialized count, 每個 key / signature 須符合目前 verified materialized row, 拒絕重複 key、遺漏 selection key、超過既有 WALK_LIMIT / CALL_LIMIT, 不自行發明 discovery 順序 |
 | Headers | 讀取 empty-call cursor metadata, 依來源順序合併 metadata / partial, 以 (thread, call) 定案後來源 winner 並保留 first insertion slot, 不讀 call payload 來判斷 thread |
 | Payload | plan 完成後才開啟 selected reader, 使用既有每頁 512 calls / 16 MiB 驗證, 逐 winner 餵入所有已串接 reducers, reducer 使用 guard 保存的開關值而非頁中重讀 atomic |
+| Physical | Header / payload 前後依現有 open_source 核對 root identity 與來源 fingerprint, payload 結束後再以每輪 budget 做完整來源 metadata sweep, 不讀 JSONL 本文 |
 | Validate | 每輪重新驗證 owner / selection, 最後逐來源 signature sweep, 建立完成 components 後再驗證一次 owner / 停止狀態, 不公開半成品 |
 
 每次 advance 的 budget 上限為 16 個 header / payload-page 操作或 signature checks, budget=0 拒絕, source 內 winner planning、reducer 初始化與最後 components 組合仍為同步工作, 尚未證明所有 round 的時間 / allocation / RSS 上限, logical statistics budget 不是完整記憶體計量
@@ -371,7 +372,11 @@ Active header 依 ordered_calls 建立第一個 insertion slot 並合併 metadat
 
 Active 批次限制的是 call 數, 不是 encoded bytes / allocation / RSS, source 內排序與 metadata 整理仍同步, 不宣稱資源上限驗收, overflow Session map 非空與無 ID header 仍拒絕而非略過, 額外 metadata-only / 無 ID 來源、完整 logs / error windows、catalog / names augmentation 與 production 發布仍待完成, deferred fixtures 未因此重跑
 
-CompletedCandidate 是內部 components 而非完整 Snapshots, 額外 metadata owner、來源實體 identity 與 production fallback / freshness 決策仍須完成, 此入口沒有改動原 snapshots、worker 或 HTTP caller
+來源路徑只從既有 active / session_paths / duplicate_session_paths 解析, 以 checkpoint key 核對, 缺少已觀察路徑、fingerprint 或 active 與 membership stamp 不同時拒絕, 不重新 discovery 或猜測來源位置
+
+Physical guard 使用既有 identity / size / modified fingerprint, 檢查 regular file、no-follow 開啟、目前路徑與開啟檔案的 stamp, 最後 sweep 與 signature sweep 都是依序觀察, 不是全域原子快照, 不能偵測保持 fingerprint 的本文修改或保證通過後來源永不改變
+
+CompletedCandidate 是內部 components 而非完整 Snapshots, 額外 metadata owner、來源競態 / 平台與 production fallback / freshness 驗收仍須完成, 此入口沒有改動原 snapshots、worker 或 HTTP caller
 
 ### 共同 capture / mutation 邊界設計草案
 

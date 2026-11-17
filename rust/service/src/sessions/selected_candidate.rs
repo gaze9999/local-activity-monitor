@@ -15,7 +15,7 @@ pub(super) struct Source {
     pub signature: String,
 }
 
-enum Phase { Headers, Payload, Validate }
+enum Phase { Headers, Payload, Physical, Validate }
 
 struct Reducers {
     files: [project::FileSummary; 4],
@@ -35,6 +35,9 @@ pub(super) struct SelectedCandidate {
     sources: Vec<Source>,
     active: Vec<std::path::PathBuf>,
     active_offset: usize,
+    source_paths: Vec<std::path::PathBuf>,
+    physical: BTreeMap<std::path::PathBuf, String>,
+    physical_after: Option<std::path::PathBuf>,
     phase: Phase,
     next: usize,
     reader: Option<lam_history_store::SelectedCheckpointReader>,
@@ -89,8 +92,26 @@ impl SelectedCandidate {
             inputs = inputs.source(source.key.clone(), source.signature.clone())?;
         }
         if selection.calls.keys().any(|key| !keys.contains(key)) { return None; }
-        let active = collector.ordered_working_sources().into_iter().map(|(path, _)| path.clone()).collect();
-        Some(Self { inputs:Some(inputs), sources, active, active_offset:0, phase:Phase::Headers, next:0, reader:None,
+        let root = collector.session_root.as_deref()?;
+        let paths: BTreeMap<_,_> = collector.files.keys().chain(collector.session_paths.values())
+            .chain(collector.duplicate_session_paths.values())
+            .map(|path| Some((checkpoint::key(root, path)?, path.clone()))).collect::<Option<_>>()?;
+        let mut physical = BTreeMap::new();
+        let mut source_paths = Vec::new();
+        for source in &sources {
+            let path = paths.get(&source.key)?.clone();
+            let fingerprint: String = membership.db.query_row("SELECT fingerprint FROM sources WHERE source_key=?",
+                [&source.key], |row| row.get(0)).ok()?;
+            physical.insert(path.clone(), fingerprint);
+            source_paths.push(path);
+        }
+        let active = collector.ordered_working_sources().into_iter().map(|(path, state)| {
+            let fingerprint = super::source_fingerprint(state.identity?, state.size, state.modified)?;
+            if physical.get(path).is_some_and(|saved| saved != &fingerprint) { return None; }
+            physical.insert(path.clone(), fingerprint);
+            Some(path.clone())
+        }).collect::<Option<Vec<_>>>()?;
+        Some(Self { inputs:Some(inputs), sources, active, active_offset:0, source_paths, physical, physical_after:None, phase:Phase::Headers, next:0, reader:None,
             metadata:BTreeMap::new(), partial:BTreeMap::new(), winners:BTreeMap::new(), slots:BTreeMap::new(),
             next_slots:BTreeMap::new(), thread_slots:BTreeMap::new(), source_threads:Vec::new(), names, ordered,
             statistics_units, statistics_key_bytes, reducers:None })
@@ -101,6 +122,15 @@ impl SelectedCandidate {
 
     #[cfg(test)]
     pub(super) fn active_payload_in_progress(&self) -> bool { self.active_offset != 0 }
+
+    #[cfg(test)]
+    pub(super) fn awaiting_physical_validation(&self) -> bool { matches!(self.phase, Phase::Physical) }
+
+    fn valid_path(&self, collector: &Collector, path: &std::path::Path) -> bool {
+        collector.session_root.as_deref().zip(collector.source_membership_root)
+            .zip(self.physical.get(path)).is_some_and(|((root, identity), fingerprint)|
+                physical_matches(root, identity, path, fingerprint))
+    }
 
     fn initialize(&mut self, collector: &Collector) {
         let cutoffs = self.inputs.as_ref().unwrap().time.cutoffs;
@@ -132,6 +162,9 @@ impl SelectedCandidate {
                 for _ in 0..budget {
                     if stopped.load(Ordering::Acquire) { return None; }
                     if self.next == self.active.len() + self.sources.len() { break; }
+                    let path = if self.next < self.active.len() { self.active[self.next].clone() }
+                        else { self.source_paths[self.next - self.active.len()].clone() };
+                    if !self.valid_path(collector, &path) { return None; }
                     let (projection, partial, ids) = if self.next < self.active.len() {
                         let path = &self.active[self.next];
                         let state = collector.files.get(path)?;
@@ -165,6 +198,7 @@ impl SelectedCandidate {
                         self.slots.entry(key.clone()).or_insert_with(|| { let slot = *next; *next += 1; slot });
                         self.winners.insert(key, self.next);
                     }
+                    if !self.valid_path(collector, &path) { return None; }
                     self.source_threads.push(thread);
                     self.next += 1;
                 }
@@ -178,12 +212,15 @@ impl SelectedCandidate {
                 for _ in 0..budget {
                     if stopped.load(Ordering::Acquire) { return None; }
                     if self.next == self.active.len() + self.sources.len() {
-                        self.phase = Phase::Validate;
+                        self.phase = Phase::Physical;
                         break;
                     }
                     // Reverse payload arrival is safe only after the source-order
                     // winner and first-insertion slot plan has been completed.
                     let source_index = self.active.len() + self.sources.len() - self.next - 1;
+                    let path = if source_index < self.active.len() { self.active[source_index].clone() }
+                        else { self.source_paths[source_index - self.active.len()].clone() };
+                    if !self.valid_path(collector, &path) { return None; }
                     let (mut projection, complete) = if source_index < self.active.len() {
                         let state = collector.files.get(&self.active[source_index])?;
                         let mut projection = Projection::for_id(state.projection.id.clone());
@@ -233,7 +270,22 @@ impl SelectedCandidate {
                         reducers.failures.observe(thread, id, call);
                         reducers.observations.extend(call.activities(thread, id));
                     }
+                    if !self.valid_path(collector, &path) { return None; }
                     if complete { self.reader = None; self.active_offset = 0; self.next += 1; }
+                }
+            }
+            Phase::Physical => {
+                use std::ops::Bound::{Excluded, Unbounded};
+                let paths: Vec<_> = match &self.physical_after {
+                    Some(after) => self.physical.range((Excluded(after.clone()), Unbounded)).map(|(path, _)| path).take(budget).cloned().collect(),
+                    None => self.physical.keys().take(budget).cloned().collect(),
+                };
+                for path in paths {
+                    if stopped.load(Ordering::Acquire) || !self.valid_path(collector, &path) { return None; }
+                    self.physical_after = Some(path);
+                }
+                if self.physical.last_key_value().is_none_or(|(path, _)| self.physical_after.as_ref() == Some(path)) {
+                    self.phase = Phase::Validate;
                 }
             }
             Phase::Validate => {
@@ -278,5 +330,56 @@ impl SelectedCandidate {
             "sql":sqlite::window(&sql_events,cutoff,collector.activity_history_health)}));
         let failures: Vec<_> = reducers.failures.finish().into_iter().map(|(start,event)| json!({"start":start.map(project::stamp),"event":event})).collect();
         Some(CompletedCandidate { files,series,statistics,commands,skills,rows,observations,failures:json!(failures) })
+    }
+}
+
+// Metadata-only physical guard, using the collector's no-follow source opening.
+// A sequential observation is not an atomic filesystem snapshot or content hash.
+fn physical_matches(root: &std::path::Path, root_identity: (u64, u64), path: &std::path::Path, expected: &str) -> bool {
+    let check = || -> Option<bool> {
+        let root_before = std::fs::symlink_metadata(root).ok()?;
+        if !root_before.is_dir() || super::redirected(&root_before) || super::file_identity(&root_before) != root_identity { return Some(false); }
+        let file = super::open_source(root, path).ok()?;
+        let opened = file.metadata().ok()?;
+        let current = std::fs::symlink_metadata(path).ok()?;
+        let root_after = std::fs::symlink_metadata(root).ok()?;
+        let stamp = |metadata: &std::fs::Metadata| super::source_fingerprint(super::file_identity(metadata), metadata.len(), metadata.modified().ok());
+        Some(opened.is_file() && current.is_file() && !super::redirected(&current)
+            && root_after.is_dir() && !super::redirected(&root_after) && super::file_identity(&root_after) == root_identity
+            && stamp(&opened).as_deref() == Some(expected) && stamp(&current).as_deref() == Some(expected))
+    };
+    check() == Some(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn physical_guard_rejects_replacement_removal_and_redirection() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let root_identity = super::super::file_identity(&std::fs::metadata(&root).unwrap());
+        let directory = root.join("sessions");
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("fixture.jsonl");
+        std::fs::write(&path, b"fixture\n").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let expected = super::super::source_fingerprint(super::super::file_identity(&metadata), metadata.len(), metadata.modified().ok()).unwrap();
+        assert!(physical_matches(&root, root_identity, &path, &expected));
+        let saved = directory.join("saved.jsonl");
+        std::fs::rename(&path, &saved).unwrap();
+        assert!(!physical_matches(&root, root_identity, &path, &expected));
+        std::fs::write(&path, b"fixture\n").unwrap();
+        assert!(!physical_matches(&root, root_identity, &path, &expected), "same bytes are not the same source owner");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&saved, &path).unwrap();
+        assert!(physical_matches(&root, root_identity, &path, &expected));
+        #[cfg(unix)] {
+            let renamed = root.join("renamed");
+            std::fs::rename(&directory, &renamed).unwrap();
+            std::os::unix::fs::symlink(&renamed, &directory).unwrap();
+            assert!(!physical_matches(&root, root_identity, &path, &expected), "same file through a redirected parent is rejected");
+        }
     }
 }
