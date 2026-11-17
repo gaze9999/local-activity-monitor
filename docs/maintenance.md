@@ -260,6 +260,19 @@ Cloud 測試不取代 Windows watcher、真實來源、SSE、Host/Origin 與持�
 
 已新增 producer 測試驗證同 call key / timestamp 的回覆錯誤及 context 修改, 並確認有效但無 payload 的行可回傳 true 而不修改 Projection, 此證據不代表 source replacement、transaction conflict、history refresh 或跨輪取消的完整驗收, 這些仍需依原有專項測試與後續共同發布測試分別確認
 
+### Active session 的內容 revision 前置實作
+
+在 `5a429e7` / `2deab87` 後補上實際 Session owner 的 process-local identity 與 Projection content revision, 不使用 checkpoint_dirty、解析成功或最大時間戳代替內容變更, 不切換 aggregation、跨輪 candidate 或 fallback
+
+- Metadata 欄位、context、lifecycle、usage、call replacement / completion、error preview 與 retirement 於既有修改點比較內容, 同 ID / timestamp 更新仍會失效, 完全相同的欄位與 locator replay 不增加 revision
+- 一般新 response locator 已足以證明變更, 不複製 Call, 只有相同 locator replay 才暫時比較該筆 Call, error 比較限原有最多 50 筆 preview, 不 clone 全部 Projection
+- Checkpoint restore 在現有 owner 內使 revision 失效, reset / 刪除後重建建立新 owner, 搬移同一 Session 不改 owner, 舊 stamp 保持 owner 存活以避免位置重用被誤認成同一物件
+- Revision 不寫入 checkpoint 或 HTTP, 溢位後永久不可快取, 不 wrap 或把無 revision 當成相同版本
+- 半行、malformed、cursor / partial / read-state 進度、checkpoint 成功後的 dirty / pending 清理不屬此 projected-content revision, 原狀態照常更新, 未來 candidate 必須另外擷取並驗證這些輸入
+- 此 token 只供實際 active Session owner, 暫時合併的 Projection、retained history / health、設定 / 查詢、已提交 signature、source membership、JEV / 裝置仍有各自邊界, 不可將單一內容 stamp 當作完整 snapshot 版本
+
+實際 producer / restore / reset / retention 與限定 HTTP 驗證見 [驗證紀錄](validation.md#active-session-content-revision), 不將此必要前置工作視為 16 MiB staging、完整跨輪 mutation 覆蓋或 production 切換完成
+
 ### 共同 capture / mutation 邊界設計草案
 
 此設計起於 `2427f5e` 的 producer 與 server reader 稽核, 共同 publication 部分已實作並通過限定範圍驗證, 下列跨輪 capture / mutation 部分仍為待整合規格, 不視為全部架構驗收

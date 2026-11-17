@@ -50,21 +50,21 @@ const CHECK_EXECUTABLES: &[&str] = &[
     "pytest", "mypy", "tsc", "ruff",
 ];
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CommandMetadata {
     pub git: Vec<GitOperation>,
     pub checks: Vec<CheckOperation>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct GitOperation {
     pub operation: String,
     pub repository: Option<String>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CheckOperation {
     pub operation: String,

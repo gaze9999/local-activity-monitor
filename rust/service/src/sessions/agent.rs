@@ -32,7 +32,7 @@ fn action(tool: &str) -> Option<&'static str> {
     None
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Outgoing {
     action: String,
@@ -113,7 +113,7 @@ impl Outgoing {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Incoming {
     message_type: String,

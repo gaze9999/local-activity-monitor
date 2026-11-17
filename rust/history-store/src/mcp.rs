@@ -547,7 +547,7 @@ fn credits(value: &Object, result: &mut Object) {
 static LINKS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"https?://[^\s\x1c-\x1f<>"\]\)]+"#).expect("reference pattern"));
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Observed {
     pub server: String,

@@ -251,7 +251,7 @@ pub fn filename_identity(name: &str) -> Option<String> {
     last
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Call {
     tool: String,
@@ -292,14 +292,14 @@ pub struct Call {
     pub(super) response_position: Option<super::details::Position>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct JevOperation {
     operation: JevKind,
     nested: bool,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum JevKind {
     Rank,
@@ -340,7 +340,7 @@ pub(super) fn jev_kind(tool: &str) -> Option<&'static str> {
     }
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ToolFailure {
     code: String,
@@ -392,14 +392,14 @@ fn tool_failure(output: &Value) -> Option<ToolFailure> {
     .and_then(|value| serde_json::from_value(Value::Object(value)).ok())
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct NestedEvent {
     tool: String,
     event: Observed,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct NestedActivity {
     tools: BTreeMap<String, usize>,
@@ -824,7 +824,7 @@ pub enum Severity {
     Warning,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SessionError {
     pub time: Option<Time>,
@@ -854,9 +854,24 @@ fn error_identifier(value: Option<&str>) -> Option<&str> {
     identifier(value).filter(|value| !value.starts_with("sk-") && !value.starts_with("sk_"))
 }
 
+// Local content revision only. Exhaustion is permanently uncacheable, never wraps.
+#[derive(Clone, Copy)]
+pub(super) struct ContentRevision(Option<u64>);
+impl Default for ContentRevision { fn default() -> Self { Self(Some(0)) } }
+impl ContentRevision {
+    pub(super) fn bump(&mut self) { self.0 = self.0.and_then(|value| value.checked_add(1)); }
+    fn assign<T: PartialEq>(&mut self, target: &mut T, value: T) {
+        if *target != value { *target = value; self.bump(); }
+    }
+    #[allow(dead_code)] // Prerequisite only: no production candidate switch.
+    pub(super) fn value(self) -> Option<u64> { self.0 }
+}
+
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Projection {
+    #[serde(skip)]
+    pub(super) content_revision: ContentRevision,
     pub id: Option<String>,
     #[serde(skip)]
     pub(super) workdir: Option<String>,
@@ -1207,13 +1222,23 @@ impl Projection {
     }
 
     pub(super) fn set_workdir(&mut self, value: Option<&str>) {
-        self.workdir = value
+        let workdir = value
             .filter(|value| {
                 !value.is_empty()
                     && value.chars().count() <= 4096
                     && !value.chars().any(char::is_control)
             })
             .map(str::to_owned);
+        self.content_revision.assign(&mut self.workdir, workdir);
+    }
+
+    fn extend_execution(&mut self, values: impl IntoIterator<Item = (String, Value)>) {
+        for (key, value) in values {
+            if self.execution.get(&key) != Some(&value) {
+                self.execution.insert(key, value);
+                self.content_revision.bump();
+            }
+        }
     }
 
     pub fn prune_order(&mut self) {
@@ -1351,12 +1376,13 @@ impl Projection {
         self.call_order = order.into_iter().map(|(_, id)| id.clone()).collect();
         self.next_presentation_sequence = calls.values().map(|call| call.presentation_sequence)
             .max().map_or(0, |last| last.saturating_add(1));
-        self.calls = calls;
+        self.content_revision.assign(&mut self.calls, calls);
         true
     }
 
     pub fn retire_call(&mut self, id: &str) {
         if let Some(call) = self.calls.remove(id) {
+            self.content_revision.bump();
             self.newly_trimmed_calls = self.newly_trimmed_calls.saturating_add(1);
             let count = call.observation_count();
             if self.dirty_calls.remove(id) && count > 0 {
@@ -1391,10 +1417,10 @@ impl Projection {
             return true;
         };
         if !errors_enabled {
-            self.errors_incomplete = true;
+            self.content_revision.assign(&mut self.errors_incomplete, true);
         }
         if !sqlite_enabled {
-            self.sqlite_incomplete = true;
+            self.content_revision.assign(&mut self.sqlite_incomplete, true);
         }
         if !command_switches.worktrees
             || !command_switches.git
@@ -1403,10 +1429,11 @@ impl Projection {
             || !command_switches.skills
             || !command_switches.usage
         {
-            self.commands_incomplete = true;
+            self.content_revision.assign(&mut self.commands_incomplete, true);
         }
         let when = timestamp(text(field(&record, "timestamp")));
-        self.updated = self.updated.max(when);
+        let updated = self.updated.max(when);
+        self.content_revision.assign(&mut self.updated, updated);
         let event = text(field(payload, "type"));
         match text(field(&record, "type")) {
             Some("session_meta") => {
@@ -1417,11 +1444,10 @@ impl Projection {
                             && !value.chars().any(char::is_control)
                     }) {
                         self.set_workdir(Some(cwd));
-                        self.workdir_position = Some(super::details::Position::new(offset, raw));
+                        self.content_revision.assign(&mut self.workdir_position, Some(super::details::Position::new(offset, raw)));
                     }
                 }
-                self.execution
-                    .extend(super::metadata::session(payload, true));
+                self.extend_execution(super::metadata::session(payload, true));
                 if let Some(id) = text(field(payload, "id")).filter(|id| uuid(id)) {
                     if self.id.as_deref() != Some(id) {
                         self.dirty_calls.extend(
@@ -1431,20 +1457,21 @@ impl Projection {
                                 .map(|(id, _)| id.clone()),
                         );
                     }
-                    self.id = Some(id.to_owned());
-                    self.created = when;
+                    self.content_revision.assign(&mut self.id, Some(id.to_owned()));
+                    self.content_revision.assign(&mut self.created, when);
                 }
-                self.kind = Some(match text(field(payload, "originator")) {
+                let kind = Some(match text(field(payload, "originator")) {
                     Some("codex_work_desktop") => ActivityKind::Work,
                     Some("Codex Desktop") => ActivityKind::Codex,
                     _ => ActivityKind::Unknown,
                 });
+                self.content_revision.assign(&mut self.kind, kind);
                 if let Some(
                     trigger @ ("user" | "subagent" | "guardian_review" | "dot" | "orbit"
                     | "automation" | "schedule" | "heartbeat"),
                 ) = text(field(payload, "thread_source"))
                 {
-                    self.trigger = Some(trigger.to_owned());
+                    self.content_revision.assign(&mut self.trigger, Some(trigger.to_owned()));
                 }
             }
             Some("turn_context") => self.context(payload, when),
@@ -1475,7 +1502,7 @@ impl Projection {
                             if let Some(value) =
                                 super::allowance::project(&json_value(limits), when)
                             {
-                                self.allowance = Some(value);
+                                self.content_revision.assign(&mut self.allowance, Some(value));
                             }
                         }
                     }
@@ -1483,7 +1510,7 @@ impl Projection {
                         self.usage(field(info, "total_token_usage"), when, 1);
                         if let Some(JsonValue::Int(value)) = field(info, "model_context_window") {
                             if *value > 0 {
-                                self.execution.insert("context_window".into(), json!(value));
+                                self.extend_execution(BTreeMap::from([("context_window".into(), json!(value))]));
                             }
                         }
                     }
@@ -1510,6 +1537,9 @@ impl Projection {
                                 if let Some(message) = text(field(item, "text"))
                                     .and_then(|text| super::agent::Incoming::parse(text, when))
                                 {
+                                    if self.agent_incoming.len() < 100 || self.agent_incoming.iter().any(|old| old != &message) {
+                                        self.content_revision.bump();
+                                    }
                                     self.agent_incoming.push(message);
                                     if self.agent_incoming.len() > 100 {
                                         self.agent_incoming.remove(0);
@@ -1537,6 +1567,16 @@ impl Projection {
             _ => {}
         }
         true
+    }
+
+    fn record_error(&mut self, error: SessionError) {
+        // The existing preview is capped at 50; pending persistence is separate.
+        let previous = self.errors.clone();
+        self.pending_errors.push(error.clone());
+        self.errors.push(error);
+        self.errors.sort_by_key(|error| std::cmp::Reverse(error.time));
+        self.errors.truncate(50);
+        if self.errors != previous { self.content_revision.bump(); }
     }
 
     fn session_error(
@@ -1572,23 +1612,19 @@ impl Projection {
             failure: None,
             call_id: None,
         };
-        self.pending_errors.push(error.clone());
-        self.errors.push(error);
-        self.errors
-            .sort_by_key(|error| std::cmp::Reverse(error.time));
-        self.errors.truncate(50);
+        self.record_error(error);
     }
 
     fn context(&mut self, value: &JsonValue<'_>, when: Option<Time>) {
         if when >= self.context_at {
-            self.context_seen = true;
-            self.context_at = when;
-            self.model = name(text(field(value, "model")));
-            self.effort = name(text(
+            self.content_revision.assign(&mut self.context_seen, true);
+            self.content_revision.assign(&mut self.context_at, when);
+            self.content_revision.assign(&mut self.model, name(text(field(value, "model"))));
+            let effort = name(text(
                 field(value, "reasoning_effort").or_else(|| field(value, "effort")),
             ));
-            self.execution
-                .extend(super::metadata::session(value, false));
+            self.content_revision.assign(&mut self.effort, effort);
+            self.extend_execution(super::metadata::session(value, false));
         }
     }
 
@@ -1596,18 +1632,19 @@ impl Projection {
         let Some(when) = when else { return };
         let latest = Some(when) >= self.status_at;
         if latest {
-            self.status_cached = false;
-            self.status_at = Some(when);
-            self.status = Some(if started {
+            self.content_revision.assign(&mut self.status_cached, false);
+            self.content_revision.assign(&mut self.status_at, Some(when));
+            let status = Some(if started {
                 Status::Running
             } else {
                 Status::Completed
             });
+            self.content_revision.assign(&mut self.status, status);
         }
         let start = timestamp(text(field(payload, "started_at")));
         if started {
             if latest {
-                self.task_start = start.or(Some(when));
+                self.content_revision.assign(&mut self.task_start, start.or(Some(when)));
             }
         } else {
             let end = timestamp(text(field(payload, "completed_at"))).unwrap_or(when);
@@ -1615,7 +1652,7 @@ impl Projection {
                 if !self.intervals.contains_key(&start) {
                     self.interval_order.push_back(start);
                 }
-                self.intervals.insert(start, end);
+                if self.intervals.insert(start, end) != Some(end) { self.content_revision.bump(); }
                 if self.intervals.len() > 1024 {
                     if let Some(first) = self.interval_order.pop_front() {
                         self.intervals.remove(&first);
@@ -1623,7 +1660,7 @@ impl Projection {
                 }
             }
             if latest {
-                self.task_start = None;
+                self.content_revision.assign(&mut self.task_start, None);
             }
         }
     }
@@ -1646,12 +1683,13 @@ impl Projection {
             Some("completed") => Status::Completed,
             _ => return,
         };
-        self.status = Some(status);
-        self.status_at = Some(time);
-        self.task_start = cached["task_start"]
+        self.content_revision.assign(&mut self.status, Some(status));
+        self.content_revision.assign(&mut self.status_at, Some(time));
+        let task_start = cached["task_start"]
             .as_str()
             .and_then(lam_history_store::parse_utc_stamp);
-        self.status_cached = true;
+        self.content_revision.assign(&mut self.task_start, task_start);
+        self.content_revision.assign(&mut self.status_cached, true);
     }
 
     pub(super) fn lifecycle_entry(&self, filename: &str, offset: u64) -> Option<Value> {
@@ -1678,9 +1716,9 @@ impl Projection {
             _ => None,
         });
         if counters.iter().any(Option::is_some) {
-            self.tokens = Some(counters);
-            self.tokens_at = Some(when);
-            self.token_priority = priority;
+            self.content_revision.assign(&mut self.tokens, Some(counters));
+            self.content_revision.assign(&mut self.tokens_at, Some(when));
+            self.content_revision.assign(&mut self.token_priority, priority);
         }
     }
 
@@ -1831,9 +1869,7 @@ impl Projection {
                     });
                 self.dirty_calls.insert(id.clone());
                 self.retired_calls.remove(&id);
-                self.calls.insert(
-                    id,
-                    Call {
+                let new_call = Call {
                         tool,
                         time: when,
                         completed,
@@ -1853,8 +1889,9 @@ impl Projection {
                         mcp_sources_incomplete: sources_incomplete,
                         request_position: Some(super::details::Position::new(offset, raw)),
                         response_position,
-                    },
-                );
+                    };
+                if self.calls.get(&id) != Some(&new_call) { self.content_revision.bump(); }
+                self.calls.insert(id, new_call);
                 if self.calls.len() > FILE_CALL_LIMIT {
                     if let Some(old) = self.call_order.pop_front() {
                         self.retire_call(&old);
@@ -1866,6 +1903,10 @@ impl Projection {
                 if let Some((id, call)) =
                     id.and_then(|id| self.calls.get_mut(id).map(|call| (id, call)))
                 {
+                    let position = super::details::Position::new(offset, raw);
+                    // A changed locator already proves mutation. Only an exact
+                    // locator replay needs a temporary copy of this one call.
+                    let previous = (call.response_position.as_ref() == Some(&position)).then(|| call.clone());
                     call.complete(
                         field(payload, "output"),
                         when,
@@ -1874,7 +1915,8 @@ impl Projection {
                         mcp_switches,
                         errors_enabled,
                     );
-                    call.response_position = Some(super::details::Position::new(offset, raw));
+                    call.response_position = Some(position);
+                    if previous.as_ref().is_none_or(|previous| call != previous) { self.content_revision.bump(); }
                     self.dirty_calls.insert(id.to_owned());
                 } else {
                     // Detail lookup accepts an empty or absent call_id followed by id,
@@ -1883,8 +1925,8 @@ impl Projection {
                         if let Some((id, call)) = text(field(payload, "id"))
                             .and_then(|id| self.calls.get_mut(id).map(|call| (id, call)))
                         {
-                            call.response_position =
-                                Some(super::details::Position::new(offset, raw));
+                            self.content_revision.assign(&mut call.response_position,
+                                Some(super::details::Position::new(offset, raw)));
                             self.dirty_calls.insert(id.to_owned());
                         }
                     }
@@ -1908,11 +1950,7 @@ impl Projection {
                             failure: Some(failure),
                             call_id: error_identifier(id).map(str::to_owned),
                         };
-                        self.pending_errors.push(error.clone());
-                        self.errors.push(error);
-                        self.errors
-                            .sort_by_key(|error| std::cmp::Reverse(error.time));
-                        self.errors.truncate(50);
+                        self.record_error(error);
                     }
                 }
             }
@@ -2146,6 +2184,60 @@ impl Projection {
 #[cfg(test)]
 mod snapshot_merge_tests {
     use super::*;
+
+    #[test]
+    fn content_revision_covers_metadata_replays_and_exhaustion() {
+        let id = "00000000-0000-4000-8000-000000000001";
+        let time = "2026-11-13T01:00:00Z";
+        let records = [
+            json!({"timestamp":time,"type":"session_meta","payload":{"id":id,"cwd":"/fixture","originator":"Codex Desktop"}}),
+            json!({"timestamp":time,"type":"turn_context","payload":{"model":"model","reasoning_effort":"high"}}),
+            json!({"timestamp":time,"type":"event_msg","payload":{"type":"task_started"}}),
+            json!({"timestamp":time,"type":"event_msg","payload":{"type":"task_complete","started_at":time}}),
+            json!({"timestamp":time,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":3},"model_context_window":100}}}),
+            json!({"timestamp":time,"type":"response_item","payload":{"type":"function_call","name":"fixture","call_id":"a","arguments":"{}"}}),
+            json!({"timestamp":time,"type":"response_item","payload":{"type":"function_call_output","call_id":"a","output":"ok"}}),
+        ];
+        let mut projection = Projection::default();
+        for (offset, record) in records.into_iter().enumerate() {
+            let raw = record.to_string();
+            let before = projection.content_revision.value();
+            let consume = |projection: &mut Projection| projection.consume(raw.as_bytes(), offset as u64,
+                true, true, &BTreeMap::new(), super::super::McpSwitches::default(), true, true, super::super::CommandSwitches::default());
+            assert!(consume(&mut projection));
+            assert_ne!(projection.content_revision.value(), before, "producer {offset}");
+            let after = projection.content_revision.value();
+            assert!(consume(&mut projection));
+            assert_eq!(projection.content_revision.value(), after, "unchanged replay {offset}");
+        }
+        let before = projection.content_revision.value();
+        let cached = json!({"thread_id":id,"task_time":"2026-11-13T02:00:00Z","status":"running","task_start":time});
+        projection.restore_cached_lifecycle(&cached);
+        assert_ne!(projection.content_revision.value(), before);
+        let after = projection.content_revision.value();
+        projection.restore_cached_lifecycle(&cached);
+        assert_eq!(projection.content_revision.value(), after);
+        let raw = json!({"timestamp":time,"type":"event_msg","payload":{"type":"error"}}).to_string();
+        for _ in 0..50 {
+            assert!(projection.consume(raw.as_bytes(), 0, true, true, &BTreeMap::new(),
+                super::super::McpSwitches::default(), true, true, super::super::CommandSwitches::default()));
+        }
+        let before = projection.content_revision.value();
+        assert!(projection.consume(raw.as_bytes(), 0, true, true, &BTreeMap::new(),
+            super::super::McpSwitches::default(), true, true, super::super::CommandSwitches::default()));
+        assert_eq!(projection.content_revision.value(), before, "unchanged capped preview");
+        assert_eq!(projection.pending_errors.len(), 51, "all persistence events remain queued");
+        let encoded = serde_json::to_value(&projection).unwrap();
+        assert!(encoded.get("content_revision").is_none());
+        let restored: Projection = serde_json::from_value(encoded).unwrap();
+        assert_eq!(restored.content_revision.value(), Some(0));
+        let mut revision = ContentRevision(Some(u64::MAX));
+        revision.bump();
+        assert_eq!(revision.value(), None);
+        revision.bump();
+        assert_eq!(revision.value(), None);
+    }
+
 
     // Executable contract for a future streamed snapshot path, not used by publication.
     // Selection is complete; callers must supply verified Python source traversal.

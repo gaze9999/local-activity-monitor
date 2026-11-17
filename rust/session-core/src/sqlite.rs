@@ -14,11 +14,11 @@ use std::sync::LazyLock;
 const COMMAND_LIMIT: usize = 65_536;
 const EVENT_LIMIT: usize = 80;
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(transparent)]
 pub struct SqlMetadata(pub Vec<SqlEvent>);
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SqlEvent {
     pub statement: String,

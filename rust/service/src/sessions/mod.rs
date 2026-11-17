@@ -1340,6 +1340,8 @@ fn start_watch(
 
 #[derive(Default)]
 struct Session {
+    // Local instance identity survives moves but not removal/recreation.
+    content_owner: Arc<()>,
     projection: Projection,
     offset: u64,
     size: u64,
@@ -1356,7 +1358,26 @@ struct Session {
     legacy_lifecycle_checked: bool,
 }
 
+#[derive(Clone)]
+struct SessionContentStamp {
+    owner: Arc<()>,
+    revision: Option<u64>,
+}
+
+impl SessionContentStamp {
+    #[allow(dead_code)] // No production candidate consumes this prerequisite yet.
+    fn matches(&self, session: &Session) -> bool {
+        self.revision.is_some() && self.revision == session.projection.content_revision.value()
+            && Arc::ptr_eq(&self.owner, &session.content_owner)
+    }
+}
+
 impl Session {
+    #[allow(dead_code)]
+    fn content_stamp(&self) -> SessionContentStamp {
+        SessionContentStamp { owner: self.content_owner.clone(), revision: self.projection.content_revision.value() }
+    }
+
     fn error_events<'a>(
         &'a self,
         path: &'a Path,
@@ -1488,7 +1509,10 @@ impl Session {
         if let Some(restored) = restored {
             self.offset = restored.anchor.offset;
             self.anchor = Some(restored.anchor);
+            let mut revision = self.projection.content_revision;
+            revision.bump();
             self.projection = restored.projection;
+            self.projection.content_revision = revision;
             self.discard = restored.discard;
             self.identity = Some(identity);
             self.size = size;
@@ -3651,6 +3675,9 @@ impl Collector {
             let state = self.files.get_mut(path).expect("discovered path");
             let count = state.projection.retired_activity_count;
             if retained + count > CALL_LIMIT {
+                if !state.projection.observation_overflow || !state.projection.retired_observations.is_empty() {
+                    state.projection.content_revision.bump();
+                }
                 state.projection.observation_overflow = true;
                 state.projection.retired_observations.clear();
                 state.projection.retired_activity_count = 0;
@@ -3690,11 +3717,13 @@ impl Collector {
             let mut index = 0;
             let state = self.files.get_mut(&path).expect("retained path");
             state.checkpoint_dirty = true;
+            let before = state.projection.errors.len();
             state.projection.errors.retain(|_| {
                 let keep = !indexes.contains(&index);
                 index += 1;
                 keep
             });
+            if state.projection.errors.len() != before { state.projection.content_revision.bump(); }
         }
     }
 
@@ -6411,6 +6440,96 @@ mod log_tests {
     }
 
     #[test]
+    fn session_content_revision_tracks_read_restore_reset_and_recreation() {
+        use std::io::Write;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let path = root.join("rollout-00000000-0000-4000-8000-000000000001.jsonl");
+        let line = json!({"timestamp":"2026-11-13T01:00:00Z","type":"response_item","payload":{"type":"function_call","name":"fixture","call_id":"a","arguments":"{}"}}).to_string()+"\n";
+        fs::write(&path, &line).unwrap();
+        let mut checkpoints = Checkpoints::new(root.join("monitoring"), true);
+        let read = |session: &mut Session, checkpoints: &mut Checkpoints| session.read(&root, &path, 1024 * 1024,
+            8192, true, true, &BTreeMap::new(), McpSwitches::default(), true, true,
+            CommandSwitches::default(), checkpoints).unwrap();
+        let mut session = Session::new(&path);
+        let initial = session.content_stamp();
+        read(&mut session, &mut checkpoints);
+        assert!(!initial.matches(&session));
+        let parsed = session.content_stamp();
+        assert_eq!(read(&mut session, &mut checkpoints), (0, 0, false));
+        assert!(parsed.matches(&session));
+        let mut files = BTreeMap::from([(path.clone(), session)]);
+        assert!(parsed.matches(&files[&path]), "moving the owner does not change its content");
+        checkpoints.save(&root, &mut files);
+        assert!(files[&path].checkpoint_signature.is_some());
+        assert!(parsed.matches(&files[&path]), "successful checkpoint bookkeeping is not a payload edit");
+        let mut restored = Session::new(&path);
+        let empty = restored.content_stamp();
+        let mut reader = Checkpoints::new(root.join("monitoring"), true);
+        assert_eq!(read(&mut restored, &mut reader).0, 0);
+        assert_eq!(restored.projection.calls.len(), 1);
+        assert!(!empty.matches(&restored));
+        assert!(!parsed.matches(&restored), "a different owner cannot reuse a local revision");
+        let complete = restored.content_stamp();
+        fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(b"{").unwrap();
+        assert_eq!(read(&mut restored, &mut reader).0, 1);
+        assert!(complete.matches(&restored), "partial framing is not projected content");
+        fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(b"\n").unwrap();
+        assert_eq!(read(&mut restored, &mut reader).1, 1);
+        assert!(complete.matches(&restored), "malformed framing is tracked separately");
+        let replacement = root.join("replacement.jsonl");
+        fs::write(&replacement, fs::read(&path).unwrap()).unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        read(&mut restored, &mut reader);
+        assert!(!complete.matches(&restored), "same-size replacement is a new owner");
+        let complete = restored.content_stamp();
+        fs::write(&path, b"").unwrap();
+        read(&mut restored, &mut reader);
+        assert!(restored.projection.calls.is_empty());
+        assert!(!complete.matches(&restored));
+        let truncated = restored.content_stamp();
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, &line).unwrap();
+        let mut recreated = Session::new(&path);
+        read(&mut recreated, &mut reader);
+        assert!(!truncated.matches(&recreated));
+        let retained = recreated.content_stamp();
+        recreated.projection.retire_call("a");
+        assert!(!retained.matches(&recreated));
+        let retired = recreated.content_stamp();
+        recreated.projection.retire_call("a");
+        assert!(retired.matches(&recreated), "missing call retirement is a no-op");
+        let uncacheable = SessionContentStamp { owner: recreated.content_owner.clone(), revision: None };
+        assert!(!uncacheable.matches(&recreated));
+    }
+
+    #[test]
+    fn session_content_revision_tracks_error_retention() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut collector = Collector::new(directory.path().join("monitoring"), true, None);
+        let record = json!({"timestamp":"2026-11-13T01:00:00Z","type":"event_msg","payload":{"type":"error"}}).to_string();
+        for n in 0..21 {
+            let path = directory.path().join(format!("source-{n}"));
+            let mut session = Session::new(&path);
+            for offset in 0..50 {
+                assert!(session.projection.consume(record.as_bytes(), offset, true, true, &BTreeMap::new(),
+                    McpSwitches::default(), true, true, CommandSwitches::default()));
+            }
+            collector.files.insert(path, session);
+        }
+        let stamps: HashMap<_,_> = collector.files.iter().map(|(path, session)| (path.clone(), session.content_stamp())).collect();
+        collector.bound_errors();
+        assert_eq!(collector.files.values().map(|session| session.projection.errors.len()).sum::<usize>(), ERROR_LIMIT);
+        for (path, session) in &collector.files {
+            assert_eq!(stamps[path].matches(session), session.projection.errors.len() == 50);
+            assert_eq!(session.projection.pending_errors.len(), 50, "retention must not discard pending writes");
+        }
+        let stamps: HashMap<_,_> = collector.files.iter().map(|(path, session)| (path.clone(), session.content_stamp())).collect();
+        collector.bound_errors();
+        assert!(collector.files.iter().all(|(path, session)| stamps[path].matches(session)));
+    }
+
+    #[test]
     fn payload_mutations_preserve_selection_keys_and_latest_timestamp() {
         let id = "00000000-0000-4000-8000-000000000001";
         let time = "2026-11-13T01:00:00Z";
@@ -6428,12 +6547,15 @@ mod log_tests {
         let keys = selection(&projection);
         let updated = projection.updated();
         assert!(!projection.calls["a"].has_failure());
+        let revision = projection.content_revision.value();
         assert!(consume(&mut projection, json!({"timestamp":time,"type":"response_item",
             "payload":{"type":"function_call_output","call_id":"a","output":{"exit_code":2,"output":"fixture failure"}}}), 200));
         assert_eq!(selection(&projection), keys);
         assert_eq!(projection.updated(), updated);
         assert_eq!(projection.calls["a"].failure_event(id, "a").unwrap()["exit_code"], 2);
         assert!(projection.dirty_calls.contains("a"));
+        assert_ne!(projection.content_revision.value(), revision);
+        let revision = projection.content_revision.value();
         let before = serde_json::to_value(&projection).unwrap();
         assert!(consume(&mut projection, json!({"timestamp":time,"type":"turn_context",
             "payload":{"model":"after","reasoning_effort":"high"}}), 300));
@@ -6443,12 +6565,19 @@ mod log_tests {
         assert_eq!(after["effort"], "high");
         assert_eq!(selection(&projection), keys);
         assert_eq!(projection.updated(), updated);
+        assert_ne!(projection.content_revision.value(), revision);
+        let revision = projection.content_revision.value();
+        assert!(consume(&mut projection, json!({"timestamp":time,"type":"turn_context",
+            "payload":{"model":"after","reasoning_effort":"high"}}), 300));
+        assert_eq!(projection.content_revision.value(), revision);
         // consume reports valid framing, not whether payload state changed.
         assert!(consume(&mut projection, json!({}), 400));
         assert_eq!(serde_json::to_value(&projection).unwrap(), after);
+        assert_eq!(projection.content_revision.value(), revision);
         assert!(!projection.consume(b"{", 500, true, true, &BTreeMap::new(),
             McpSwitches::default(), true, true, CommandSwitches::default()));
         assert_eq!(serde_json::to_value(&projection).unwrap(), after);
+        assert_eq!(projection.content_revision.value(), revision);
     }
 
     #[test]

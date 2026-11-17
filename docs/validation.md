@@ -1783,3 +1783,21 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 測試 1 筆通過、415 筆未�
 四個案例均經實際 selected reader 分頁, file / series / statistics 整組比對未修改 materialized 與 snapshots oracle, 保留 ordered / canonical、來源變更拒絕、statistics 預算拒絕與恢復條件, production 未修改
 
 Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 測試 1 筆通過、415 筆未選取, 耗時 7.11 秒, 未重跑 metadata-only、大型 padding、HTTP、完整套件或其他延後檢查, 不代表任意巢狀程式、所有 reducer、記憶體上限或 worker 發布驗收
+
+
+### Active session content revision
+
+新增實際 owner identity 與不持久化的內容 revision, 既有同步 snapshots、來源讀取數、HTTP 欄位、checkpoint 格式與 incomplete fallback 保持原路徑, PartialEq 僅用於被修改的欄位、單一 call 或既有 bounded preview 比較
+
+| 驗證 | 實際結果與界線 |
+| --- | --- |
+| Metadata / request / complete / context | 相同 call key 與時間下的 response failure、context 更新會改 revision, 完全相同 replay、不含 payload 與 malformed 不改 projected-content revision, 原 selection / timestamp assertions 保留 |
+| Owner / restore / reset | 真實 Session::read 與 checkpoint save / restore、同長度檔案 replacement、截短、刪除重建、owner 搬移及 call retirement 通過, 已保存 bookkeeping 不偽裝成 payload 修改 |
+| Retention / revision exhausted | 真實 Collector::bound_errors 修剪 1,050 筆至原 1,000 筆, 只使被修剪 owner 失效並保留 pending writes, 相同 capped error preview 不重複失效, revision 溢位不回繞 |
+| 序列化 / 原 oracle | Revision 不進入 checkpoint JSON, project 模組 32 項通過、387 項未選取, 耗時 6.03 秒, 原 materialized / merge / exact statistics 比對未修改 |
+| Targeted owner / payload | content_revision 3 項通過、416 項未選取, 耗時 0.03 秒, 同 key / timestamp producer 1 項通過、418 項未選取, 耗時 0.01 秒, 與 project 模組的 revision 測試有重疊, 不相加當獨立覆蓋數 |
+| HTTP | 原 execution metadata checkpoint restore 與 session / tool error identity / masking 各 1 項通過, 每次 225 項未選取, 分別 0.98 / 0.16 秒, 不代表完整 HTTP 或平台驗收 |
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 開發中 cargo check 曾因缺少 PartialEq 與 Map 型別不符失敗, 修正後通過, 測試編譯另曾因 OpenOptions / Write import 與 HashMap / BTreeMap 型別不符失敗, 修正後取得上述結果, 編譯失敗記錄保留, 未把它們算成已執行的行為測試
+
+未重跑 deferred Core WAL cursor、overflow metadata POST、metadata-only candidate、大型 padding、browser、完整套件或平台檢查, 未量測本輪配置成本, 不宣稱消除 16 MiB staging 或完成 retained history / 設定、跨輪取消及 production candidate 驗收
