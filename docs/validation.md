@@ -1824,3 +1824,17 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, Shared 原測試與新增內容版本測�
 原 HTTP account enabled scheduling 與 cloud first-page / disabled retention 各 1 項通過, 每次 225 項未選取, 耗時 0.08 / 0.07 秒, 使用既有隔離來源 fixture, 未重跑完整套件或任何 deferred 檢查
 
 單一來源內容與 revision 的鎖內一致性不包括 completed、查詢 provenance、其他設定 owner 或跨來源同時點, 未量測新增 Value 比較成本, production candidate、fallback 選擇與容量驗收仍未完成
+
+
+### Candidate mutable owner 驗證組合
+
+新內部 guard 組合實際 owner 版本與既有 source-settings capture, production snapshots、設定保存與 fallback 未呼叫此 guard, 未增加正式資料庫或網路查詢
+
+- 真實 Session::read 追加未完成行, projected-content revision 不變而 guard 拒絕舊 read progress, 同 call ID / timestamp 的 consume output 亦使舊 guard 失效
+- Active 搬至 overflow、同路徑重建、停止與停用均拒絕原 guard, 停止後確認原 Session owner 的 Arc handle 計數回到 capture 前, 不將此視為 SQLite reader 或程序記憶體量測
+- Account / cloud / public / platform 八個 Shared 分別 configure 後失效, 相同 cached result publish 保留 guard 且原 event version 仍增加, 替換 Shared owner 仍拒絕
+- 真實 SQLite error refresh 改變 history 使 guard 失效, 相同 refresh 不失效, tracking、requested disable 與 applied flag 變更分別拒絕, 未修改 persistence caller
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, cargo check 通過並保留原 5 個 warnings, 新 targeted 2 項通過、421 項未選取, 耗時 0.01 秒, 原 source-settings / query capture 各 1 項通過、422 項未選取, 各 0.00 秒
+
+未執行 HTTP、完整套件或任何 deferred 檢查, 未驗收完整來源清單 / 排序、其他 metadata / diagnostics owner、固定時間窗、頁間完整 reducer、worker 發布與容量, 此結果不構成 production 切換或全域一致性證據

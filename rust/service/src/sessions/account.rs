@@ -472,6 +472,9 @@ impl Shared {
         let state = self.state.read().unwrap_or_else(|error| error.into_inner());
         (state.settings, state.result.clone(), state.content_revision.value())
     }
+    pub(super) fn content_revision(&self) -> Option<u64> {
+        self.state.read().unwrap_or_else(|error| error.into_inner()).content_revision.value()
+    }
     pub fn version(&self) -> u64 {
         self.version.load(Ordering::Acquire)
     }

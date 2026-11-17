@@ -291,6 +291,21 @@ Account / cloud / public / platform 共用的 Shared, 在既有 QueryState 寫�
 
 此 revision 僅在同一 Shared owner 內使用, configure 後仍依 baseline 保留舊 result, 不宣稱 result 由目前設定產生, completed 與 scheduler 訊號仍獨立, 也不形成 account / cloud / public / platform 的共同同時點或完整 snapshot token
 
+### Candidate mutable owner 驗證組合
+
+`candidate_inputs.rs::CandidateInputs` 組合既有 active / overflow Session owner 與內容 revision、read progress、Collector-local history revision、八個 Shared owner / 內容 revision、SnapshotSourceSettings 與 requested / applied observation flags, 不新增 global revision counter
+
+Capture 完成後重新核對較早讀取的 owner, validate 消耗原 guard, 任一條件不符即丟棄整組 handles / 設定副本, 呼叫端每次都須提供當下 enabled 狀態與真正的 stopped flag, 不得沿用建立 candidate 時的 enabled 值
+
+| 已覆蓋輸入 | 實際條件 |
+| --- | --- |
+| Active / overflow | 路徑集合、實際 Session owner、內容 revision, 工作集搬移或同路徑重建拒絕舊 guard |
+| Read progress | offset、size、partial 長度、discard、identity、modified、anchor、checkpoint signature, 不複製未完成行本文 |
+| History / queries | 既有內容 revision 必須可比較, 八來源各核對同一 Shared owner, cached completion 不當成內容變更 |
+| Source settings / flags | 沿原讀鎖擷取 owned 值作相等比較, requested disable 與 worker applied 狀態分別檢查, 不改設定保存 / 失敗流程 |
+
+這是 mutable owner 範圍的必要組合, 尚未接入 production aggregation, 不替代 selection / membership / discovery order、外部檔案 identity 與最終 signature sweep、reference / cutoffs、其他 catalog / diagnostics metadata、JEV / device 或 route / publication guard, 逐來源驗證也不建立跨所有來源的單一 transaction
+
 ### 共同 capture / mutation 邊界設計草案
 
 此設計起於 `2427f5e` 的 producer 與 server reader 稽核, 共同 publication 部分已實作並通過限定範圍驗證, 下列跨輪 capture / mutation 部分仍為待整合規格, 不視為全部架構驗收

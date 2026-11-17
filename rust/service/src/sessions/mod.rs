@@ -1,6 +1,7 @@
 pub(crate) mod account;
 mod agent;
 pub(crate) mod allowance;
+mod candidate_inputs;
 mod checkpoint;
 pub(crate) mod cloud;
 mod commands;
