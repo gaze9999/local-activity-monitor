@@ -1399,3 +1399,13 @@ watch 可能合併未讀通知, 此測試只驗證實際讀到的兩批更新, �
 新增測試逐一比較擷取值與原 Journal getters, 之後加入 HTTP 503 並停用 journal, 原擷取的 error/log bytes 保持不變, 新擷取保留 live error、entries 為空、source disabled 與正確 retained count, 針對性單輪 1 項通過 (0.01 秒)
 
 完整 service 單輪 398 項通過 (63.72 秒), 接續完整 serial HTTP 單輪 226 項通過 (138.78 秒), Linux / Rust 1.100.0, diff 檢查通過, 未重試已受阻 browser 或改變原生平台、16 MiB 與跨輪驗收界線
+
+### JEV 四時間窗固定資料 oracle
+
+新增 172 筆合成 SQLite 資料: reference 往前 0 至 170 小時的整點資料, 加上 reference 後 30 分鐘一筆, 四窗預期 calls 分別 3 / 26 / 170 / 172
+
+完整比較 summary 的 calls、since、attempts / retries、known / unknown tokens、bytes、latency 與 statuses, 並驗證 recent 的完整 timestamp 順序與 80 筆上限、series 完整群組順序 / count 與 168 群組上限, 驗證 cutoff 包含邊界、沒有 future upper bound、enabled_at 不截斷歷史, 以及 privacy projection 與 paused 欄位差異
+
+初版 focused 單輪 1 項通過 (0.04 秒), 之後加強 recent / series 為完整順序比較, runtime 未修改
+
+加強後 JEV 模組單輪 4 項通過 (0.04 秒), diff 檢查通過, 本輪僅測試與文件, 未重跑前輪 service 398 / serial HTTP 226 項, 尚未執行並行 writer 的可見性驗收, 既有失敗與受阻項目紀錄保留

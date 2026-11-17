@@ -321,3 +321,17 @@ selected_overflow_projections 在來源 signature 全部驗證成功後, 將 mut
 | source registry / worktree snapshot | source_registry::augment 整理已載入的參數與 snapshot, worktrees::snapshot 複製既有 result/items | 此兩者不是新增檔案 I/O, 應連同其真正上游狀態驗證, 不重複發明來源 revision |
 
 下一個跨輪整合步驟仍須處理上述實際讀取邊界, 尤其 JEV 的多次讀取, 不能只為 active calls 加 counter 就宣稱完整 snapshot 一致, owner 稽核後已將 journal 合併為開頭一次擷取, 未變更 JEV、credentials 或 render 的讀取時機與查詢次數
+
+### JEV 讀取語意與擷取前置條件
+
+依 `sessions/jev.rs::snapshot` / `details` 目前來源, active 每個 window 重新讀取最多 8192 bytes config, 驗證 database metadata / identity, 開啟唯讀 SQLite, 依序執行 summary、statuses、series、recent 共 4 個 SELECT, 沒有包覆共同顯式 transaction
+
+- 時間條件是 `timestamp>=cutoff`, 1h / 24h / 7d 包含邊界, all 使用空 cutoff, 沒有 reference 上界, future rows 仍納入
+- enabled_at 只回傳設定時間, 不作為 query cutoff
+- summary / statuses 包含該窗所有符合資料, recent 只取最新 80 筆, series 先取最新 168 個小時群組再反轉為遞增順序, 不能用 recent / series 重算全窗 summary
+- paused 路徑仍讀 config, 回傳 empty summary / recent / series, 不包含 window 或 reader.checked_at, 不查詢 database
+- metadata projection 仍必須排除 prompt / body, 保留目前 bounded metadata / attempts 與錯誤行為
+
+四 window 固定資料 oracle 已加入, 下一步若改為同批讀取, 須先用可控制的 writer transaction 測試說明目前各 SELECT / windows 的可見性, 再決定 transaction 的範圍與釋放時機, 不延長 80 ms busy timeout、不讓跨輪候選長期持有 database read transaction, 並保留 config / DB identity 與 unavailable / unsupported 差異
+
+這是原始碼現況與後續驗收條件, 未宣稱已重現實際混批錯誤, 本輪未改動 runtime 或 SQLite transaction

@@ -667,6 +667,69 @@ mod tests {
     }
 
     #[test]
+    fn four_window_oracle_preserves_cutoffs_caps_and_metadata_only_enable_time() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join("monitoring")).unwrap();
+        let database = home.path().join("jev.sqlite");
+        let db = Connection::open(&database).unwrap();
+        db.execute_batch("CREATE TABLE jev_events(timestamp TEXT,status TEXT,http_attempts INTEGER,input_tokens INTEGER,output_tokens INTEGER,request_bytes INTEGER,response_bytes INTEGER,response_unknown_attempts INTEGER,latency_ms INTEGER,metadata TEXT)").unwrap();
+        let reference = lam_history_store::parse_utc_stamp("2026-11-13T12:00:00Z").unwrap();
+        // Exact hourly boundaries, plus one future row. The reader has no upper cutoff.
+        for age in -1..=170 {
+            let time = if age == -1 { reference + Duration::minutes(30) }
+                else { reference - Duration::hours(age) };
+            let time = super::super::project::stamp(time);
+            let metadata = json!({"timestamp":time,"status":"ok","operation":"rank",
+                "prompt":"PRIVATE_WINDOW_ORACLE","attempts":[{"status":"ok","http_status":200,"body":"PRIVATE_WINDOW_ORACLE"}]}).to_string();
+            db.execute("INSERT INTO jev_events VALUES(?,'ok',2,12,NULL,25,30,1,9,?)",
+                rusqlite::params![time, metadata]).unwrap();
+        }
+        let enabled_at = super::super::project::stamp(reference);
+        fs::write(home.path().join("monitoring/jev-monitor.json"),
+            json!({"version":1,"enabled":true,"database":database,"enabled_at":enabled_at}).to_string()).unwrap();
+        for (window, calls, oldest_hour, series_len) in [
+            ("1h", 3, 1, 2), ("24h", 26, 24, 25),
+            ("7d", 170, 168, 168), ("all", 172, 170, 168),
+        ] {
+            let value = snapshot(home.path(), window, reference, true);
+            assert_eq!(value["health"], "ok", "{window}");
+            assert_eq!(value["enabled_at"], enabled_at);
+            assert_eq!(value["summary"], json!({"calls":calls,
+                "since":super::super::project::stamp(reference - Duration::hours(oldest_hour)),
+                "http_attempts":calls*2,"retries":calls,"input_tokens":calls*12,
+                "output_tokens":null,"input_known_calls":calls,"output_known_calls":0,
+                "input_unknown_calls":0,"output_unknown_calls":calls,
+                "request_body_bytes":calls*25,"known_response_bytes":calls*30,
+                "response_unknown_attempts":calls,"average_latency_ms":9,"statuses":{"ok":calls}}), "{window}");
+            let recent = value["recent"].as_array().unwrap();
+            assert_eq!(recent.len(), usize::min(calls as usize, 80));
+            assert_eq!(recent[0]["timestamp"], super::super::project::stamp(reference + Duration::minutes(30)));
+            let expected_times: Vec<_> = std::iter::once(reference + Duration::minutes(30))
+                .chain((0..=i64::min(oldest_hour, 78)).map(|age| reference - Duration::hours(age)))
+                .map(super::super::project::stamp).collect();
+            assert_eq!(recent.iter().map(|item| item["timestamp"].as_str().unwrap()).collect::<Vec<_>>(), expected_times);
+            let series = value["series"].as_array().unwrap();
+            assert_eq!(series.len(), series_len);
+            let expected_series: Vec<_> = (0..=i64::min(oldest_hour, 167)).rev().map(|age| {
+                json!({"time":(reference - Duration::hours(age)).to_rfc3339_opts(SecondsFormat::Secs, true),
+                    "calls":if age == 0 {2} else {1}})
+            }).collect();
+            assert_eq!(series, &expected_series);
+            assert!(!value.to_string().contains("PRIVATE_WINDOW_ORACLE"));
+        }
+        // Pausing still reads configuration but does not expose window/reader query metadata.
+        let paused = snapshot(home.path(), "all", reference, false);
+        assert_eq!(paused["health"], "paused");
+        assert_eq!(paused["enabled"], true);
+        assert_eq!(paused["enabled_at"], enabled_at);
+        assert_eq!(paused["summary"], json!({}));
+        assert_eq!(paused["recent"], json!([]));
+        assert_eq!(paused["series"], json!([]));
+        assert!(paused.get("window").is_none());
+        assert!(paused["reader"].get("checked_at").is_none());
+    }
+
+    #[test]
     fn invalid_disabled_missing_and_unsupported_sources_are_distinct() {
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(home.path().join("monitoring")).unwrap();
