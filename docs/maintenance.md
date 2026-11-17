@@ -283,6 +283,14 @@ Activity revision 涵蓋 events、四窗 SQL / MCP aggregates、retention days�
 
 此值只在同一 Collector owner 內比較, 不寫入 API / checkpoint, 不代表資料庫 commit 版本、設定共同版本或完整 snapshot, 啟動初始化在 owner 對外可見前完成, 跨輪 candidate 與 production 切換仍未串接
 
+### 單一查詢來源的 paired content revision
+
+Account / cloud / public / platform 共用的 Shared, 在既有 QueryState 寫入鎖內更新 settings / result 的 content revision, capture_with_revision 於同一讀取鎖取得三者, 原 capture 仍回傳相同 settings / result, 不增加查詢或改動 snapshot 欄位
+
+相同 configure 與相同 result 不增加內容 revision, 但 publish 仍更新 completed、增加原 event version、notify 與 try_send wake, cache hit 仍是完成事件, queue 滿時也不省略原通知流程
+
+此 revision 僅在同一 Shared owner 內使用, configure 後仍依 baseline 保留舊 result, 不宣稱 result 由目前設定產生, completed 與 scheduler 訊號仍獨立, 也不形成 account / cloud / public / platform 的共同同時點或完整 snapshot token
+
 ### 共同 capture / mutation 邊界設計草案
 
 此設計起於 `2427f5e` 的 producer 與 server reader 稽核, 共同 publication 部分已實作並通過限定範圍驗證, 下列跨輪 capture / mutation 部分仍為待整合規格, 不視為全部架構驗收

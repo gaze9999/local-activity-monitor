@@ -1811,3 +1811,16 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, 開發中 cargo check 曾因缺少 Partia
 Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 測試 1 項通過、419 項未選取, 耗時 0.01 秒, 原 HTTP skill rollback / recovery 與 disabled future-history promotion 各 1 項通過、每次 225 項未選取, 分別 0.58 / 2.04 秒
 
 本輪未執行完整套件或任何 deferred 檢查, 未量測新增內容比較的成本, 不代表設定 / 查詢共同版本、跨來源 transaction、production candidate 或容量驗收完成
+
+
+### Query paired content revision
+
+在既有 Shared state lock 內比較 settings / result, 並以相同鎖擷取內容 revision, 原 event version、cached publish completion、force_due 與 wake 規格不變, 不修改查詢端點、參數、回應欄位或請求數
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, Shared 原測試與新增內容版本測試共 5 項通過、416 項未選取, 包含實際 read lock 阻擋 writer、full wake queue、相同 result 與 configure 後保留舊 result, 耗時 0.00 秒
+
+原 account cached-enable 1 項、cloud first-page / cursor cache 2 項、public offline cached publish 1 項與 snapshot query capture 1 項通過, 分別 0.00 / 0.00 / 0.01 / 0.00 秒, 只驗證各自範圍, 不代表所有來源網路或帳戶驗收
+
+原 HTTP account enabled scheduling 與 cloud first-page / disabled retention 各 1 項通過, 每次 225 項未選取, 耗時 0.08 / 0.07 秒, 使用既有隔離來源 fixture, 未重跑完整套件或任何 deferred 檢查
+
+單一來源內容與 revision 的鎖內一致性不包括 completed、查詢 provenance、其他設定 owner 或跨來源同時點, 未量測新增 Value 比較成本, production candidate、fallback 選擇與容量驗收仍未完成

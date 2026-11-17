@@ -430,6 +430,7 @@ impl Default for Settings {
 }
 
 struct QueryState {
+    content_revision: super::project::ContentRevision,
     settings: Settings,
     result: Option<Value>,
 }
@@ -445,7 +446,7 @@ pub(crate) struct Shared {
 impl Shared {
     pub fn new() -> Self {
         Self {
-            state: RwLock::new(QueryState { settings: Settings::default(), result: None }),
+            state: RwLock::new(QueryState { content_revision: super::project::ContentRevision::default(), settings: Settings::default(), result: None }),
             completed: RwLock::new(None),
             version: AtomicU64::new(0),
             force_due: AtomicBool::new(false),
@@ -462,8 +463,14 @@ impl Shared {
     // One source's current settings and retained result, not result provenance
     // or a version shared with other sources and scheduler completion state.
     pub fn capture(&self) -> (Settings, Option<Value>) {
+        let (settings, result, _) = self.capture_with_revision();
+        (settings, result)
+    }
+    // Revision and values share the same lock. Compare only within this Shared
+    // owner; scheduler completion/event versions and result provenance are separate.
+    pub(super) fn capture_with_revision(&self) -> (Settings, Option<Value>, Option<u64>) {
         let state = self.state.read().unwrap_or_else(|error| error.into_inner());
-        (state.settings, state.result.clone())
+        (state.settings, state.result.clone(), state.content_revision.value())
     }
     pub fn version(&self) -> u64 {
         self.version.load(Ordering::Acquire)
@@ -490,12 +497,17 @@ impl Shared {
                 self.force_due.store(settings.enabled, Ordering::Release);
             }
             current.settings = settings;
+            current.content_revision.bump();
             drop(current);
             self.signal();
         }
     }
     pub(super) fn publish(&self, result: Value) {
-        self.state.write().unwrap_or_else(|error| error.into_inner()).result = Some(result);
+        {
+            let mut state = self.state.write().unwrap_or_else(|error| error.into_inner());
+            if state.result.as_ref() != Some(&result) { state.content_revision.bump(); }
+            state.result = Some(result);
+        }
         *self
             .completed
             .write()
@@ -577,6 +589,47 @@ mod shared_version_tests {
     use super::*;
 
     #[test]
+    fn query_content_revision_is_atomic_but_cached_completion_still_signals() {
+        let shared = Shared::new();
+        let (wake, received) = std::sync::mpsc::sync_channel(1);
+        shared.set_wake(wake);
+        let initial = shared.capture_with_revision();
+        assert_eq!(initial, (Settings::default(), None, Some(0)));
+        shared.configure(Settings::default());
+        assert_eq!(shared.capture_with_revision(), initial);
+        let value = json!({"health":"ok","items":[{"count":0,"enabled":false,"missing":null}]});
+        shared.publish(value.clone());
+        let first = shared.capture_with_revision();
+        assert_eq!(first.1, Some(value.clone()));
+        assert_ne!(first.2, initial.2);
+        let completed = *shared.completed.read().unwrap();
+        // Retain the full wake queue and original event semantics.
+        shared.publish(value.clone());
+        assert_eq!(shared.capture_with_revision(), first);
+        assert_eq!(shared.version(), 2);
+        assert!(*shared.completed.read().unwrap() >= completed);
+        assert!(received.try_recv().is_ok());
+        assert!(received.try_recv().is_err());
+        let settings = Settings { enabled:true, interval:600 };
+        shared.configure(settings);
+        let configured = shared.capture_with_revision();
+        assert_eq!(configured.0, settings);
+        assert_eq!(configured.1, first.1, "retain old result after configure as before");
+        assert_ne!(configured.2, first.2);
+        shared.configure(settings);
+        assert_eq!(shared.capture_with_revision(), configured);
+        let mut changed = value;
+        changed["items"][0]["count"] = json!(1);
+        shared.publish(changed.clone());
+        let after = shared.capture_with_revision();
+        assert_ne!(after.2, configured.2);
+        assert_eq!(after.1, Some(changed));
+        assert_eq!(first.1.unwrap()["items"][0]["count"], 0);
+        assert_eq!(shared.version(), 4);
+    }
+
+
+    #[test]
     fn paired_query_capture_preserves_retained_result_and_owned_values() {
         let shared = Shared::new();
         assert_eq!(shared.capture(), (Settings::default(), None));
@@ -612,9 +665,13 @@ mod shared_version_tests {
         assert!(matches!(done.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
         assert_eq!(read.settings, Settings::default());
         assert_eq!(read.result, None);
+        assert_eq!(read.content_revision.value(), Some(0));
         drop(read);
         worker.join().unwrap();
         done.recv().unwrap();
+        let captured = shared.capture_with_revision();
+        assert_eq!(captured.2, Some(2));
+        assert_eq!((captured.0, captured.1), shared.capture());
         assert_eq!(shared.capture(), (Settings { enabled: true, interval: 600 }, Some(json!({"fixture":true}))));
         assert_eq!(shared.version(), 2);
         assert!(shared.completed.read().unwrap().is_some());
