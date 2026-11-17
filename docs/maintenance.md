@@ -324,7 +324,7 @@ selected_overflow_projections 在來源 signature 全部驗證成功後, 將 mut
 
 ### JEV 讀取語意與擷取前置條件
 
-依 `sessions/jev.rs::snapshot` / `details` 目前來源, active 每個 window 重新讀取最多 8192 bytes config, 驗證 database metadata / identity, 開啟唯讀 SQLite, 依序執行 summary、statuses、series、recent 共 4 個 SELECT, 沒有包覆共同顯式 transaction
+依 `892fe7f` 的 `sessions/jev.rs::snapshot` / `details` 來源, active 每個 window 重新讀取最多 8192 bytes config, 驗證 database metadata / identity, 開啟唯讀 SQLite, 依序執行 summary、statuses、series、recent 共 4 個 SELECT, 沒有包覆共同顯式 transaction
 
 - 時間條件是 `timestamp>=cutoff`, 1h / 24h / 7d 包含邊界, all 使用空 cutoff, 沒有 reference 上界, future rows 仍納入
 - enabled_at 只回傳設定時間, 不作為 query cutoff
@@ -334,10 +334,16 @@ selected_overflow_projections 在來源 signature 全部驗證成功後, 將 mut
 
 四 window 固定資料 oracle 已加入, 下一步若改為同批讀取, 須先用可控制的 writer transaction 測試說明目前各 SELECT / windows 的可見性, 再決定 transaction 的範圍與釋放時機, 不延長 80 ms busy timeout、不讓跨輪候選長期持有 database read transaction, 並保留 config / DB identity 與 unavailable / unsupported 差異
 
-這是原始碼現況與後續驗收條件, 未宣稱已重現實際混批錯誤, 本輪未改動 runtime 或 SQLite transaction
+這是 transaction 修正前的來源稽核與前置驗收條件, 當時未改動 runtime 或 SQLite transaction, 不代表已重現實際使用中的混批錯誤
 
 受控 WAL 可見性測試已確認: 同一唯讀 connection 的首個 SELECT 完成後, 第二個 writer connection commit 一筆新資料, autocommit 下既有 `details` 讀到新資料, 先前 materialized count 不會改變, 顯式 read transaction 則讓 details 與後續 count 保持舊資料, ROLLBACK 釋放後可讀新資料
 
 此測試採 production flags / pragmas / 80 ms timeout, 實際呼叫 details, 首個查詢以相同表與 cutoff 的 count 模擬 summary 讀取邊界, 不是在完整 snapshot / HTTP 中注入 writer, 也不是原生平台或 rollback-journal 模式的證據
 
 可評估的最小後續修正是先將單次 JEV snapshot 的 4 個 SELECT 放入短生命週期唯讀 transaction, 明確處理 transaction 開啟失敗並保持既有 error mapping, 仍不宣稱四個 window 共用同一來源版本, 若要共用四窗則須另外處理 config capture、identity 及 transaction 存活時間, 不把這次測試當作整批架構已核准或實作
+
+單次 snapshot transaction 已實作: `read_snapshot` 用預設 Deferred transaction 包覆原 4 個 SELECT, 成功後明確 ROLLBACK 釋放唯讀 transaction 再回傳 owned values, query 失敗由 RAII rollback, BEGIN / ROLLBACK 失敗沿用原 unavailable + OperationalError 分類, missing table / column 仍為 unsupported
+
+未改變 config 讀取、DB identity、open flags / pragmas、80 ms busy timeout、SQL / cutoff / row limits / privacy projection, 只增加每次成功資料庫讀取的 BEGIN 與 ROLLBACK, 不跨 window 或跨輪保留 transaction
+
+實際 read_snapshot 的 test-only summary 後注入點已驗證 writer commit 不會讓當次 details 跳到新資料, 下一次 read_snapshot 可見新資料, 另驗證 summary / details query failure 會釋放 transaction, BEGIN failure 不會結束呼叫端原有 transaction, 四 window 仍各自開啟讀取, 未提供跨窗共同版本

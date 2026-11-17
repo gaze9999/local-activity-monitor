@@ -461,6 +461,25 @@ fn details(
     Ok((recent, series))
 }
 
+// Release this read transaction before returning owned values, never across windows.
+fn read_snapshot(
+    db: &mut Connection,
+    cutoff: &str,
+    #[cfg(test)] after_summary: impl FnOnce(),
+) -> rusqlite::Result<(Value, Vec<Value>, Vec<Value>)> {
+    let transaction = db.transaction()?;
+    let query = "SELECT count(*), min(timestamp), sum(http_attempts), sum(max(http_attempts-1,0)), sum(input_tokens), sum(output_tokens), count(input_tokens), count(output_tokens), sum(request_bytes), sum(response_bytes), sum(response_unknown_attempts), avg(latency_ms) FROM jev_events WHERE timestamp>=?";
+    let mut summary = transaction.query_row(query, [cutoff], |row| {
+        let count:i64 = row.get(0)?; let since:Option<String> = row.get(1)?; let latency:Option<f64> = row.get(11)?;
+        Ok(json!({"calls":count,"since":since.as_deref().and_then(lam_history_store::parse_utc_stamp).map(super::project::stamp),"http_attempts":row.get::<_,Option<i64>>(2)?.unwrap_or(0),"retries":row.get::<_,Option<i64>>(3)?.unwrap_or(0),"input_tokens":row.get::<_,Option<i64>>(4)?,"output_tokens":row.get::<_,Option<i64>>(5)?,"input_known_calls":row.get::<_,i64>(6)?,"output_known_calls":row.get::<_,i64>(7)?,"input_unknown_calls":count-row.get::<_,i64>(6)?,"output_unknown_calls":count-row.get::<_,i64>(7)?,"request_body_bytes":row.get::<_,Option<i64>>(8)?.unwrap_or(0),"known_response_bytes":row.get::<_,Option<i64>>(9)?.unwrap_or(0),"response_unknown_attempts":row.get::<_,Option<i64>>(10)?.unwrap_or(0),"average_latency_ms":latency.map(|value|value.round() as i64)}))
+    })?;
+    #[cfg(test)]
+    after_summary();
+    let (recent, series) = details(&transaction, cutoff, &mut summary)?;
+    transaction.rollback()?;
+    Ok((summary, recent, series))
+}
+
 pub(crate) fn snapshot(home: &Path, window: &str, reference: DateTime<Utc>, active: bool) -> Value {
     let config_path = home.join("monitoring/jev-monitor.json");
     if !active {
@@ -565,7 +584,7 @@ pub(crate) fn snapshot(home: &Path, window: &str, reference: DateTime<Utc>, acti
         db.pragma_update(None, "trusted_schema", false)?;
         Ok(db)
     });
-    let db = match opened {
+    let mut db = match opened {
         Ok(db) => db,
         Err(_) => {
             result["health"] = json!("unavailable");
@@ -587,14 +606,7 @@ pub(crate) fn snapshot(home: &Path, window: &str, reference: DateTime<Utc>, acti
     }
     .map(|hours| (reference - Duration::hours(hours)).to_rfc3339_opts(SecondsFormat::Millis, true))
     .unwrap_or_default();
-    let query = "SELECT count(*), min(timestamp), sum(http_attempts), sum(max(http_attempts-1,0)), sum(input_tokens), sum(output_tokens), count(input_tokens), count(output_tokens), sum(request_bytes), sum(response_bytes), sum(response_unknown_attempts), avg(latency_ms) FROM jev_events WHERE timestamp>=?";
-    let summary = db.query_row(query, [&cutoff], |row| {
-        let count:i64 = row.get(0)?; let since:Option<String> = row.get(1)?; let latency:Option<f64> = row.get(11)?;
-        Ok(json!({"calls":count,"since":since.as_deref().and_then(lam_history_store::parse_utc_stamp).map(super::project::stamp),"http_attempts":row.get::<_,Option<i64>>(2)?.unwrap_or(0),"retries":row.get::<_,Option<i64>>(3)?.unwrap_or(0),"input_tokens":row.get::<_,Option<i64>>(4)?,"output_tokens":row.get::<_,Option<i64>>(5)?,"input_known_calls":row.get::<_,i64>(6)?,"output_known_calls":row.get::<_,i64>(7)?,"input_unknown_calls":count-row.get::<_,i64>(6)?,"output_unknown_calls":count-row.get::<_,i64>(7)?,"request_body_bytes":row.get::<_,Option<i64>>(8)?.unwrap_or(0),"known_response_bytes":row.get::<_,Option<i64>>(9)?.unwrap_or(0),"response_unknown_attempts":row.get::<_,Option<i64>>(10)?.unwrap_or(0),"average_latency_ms":latency.map(|value|value.round() as i64)}))
-    });
-    let read = summary.and_then(|mut summary| {
-        details(&db, &cutoff, &mut summary).map(|(recent, series)| (summary, recent, series))
-    });
+    let read = read_snapshot(&mut db, &cutoff, #[cfg(test)] || {});
     match read {
         Ok((summary, recent, series)) => {
             result["health"] = json!("ok");
@@ -742,7 +754,7 @@ mod tests {
                     rusqlite::params![time, json!({"timestamp":time,"status":"ok","operation":"rank"}).to_string()]).unwrap();
             };
             insert(&writer, "2026-11-13T12:00:00.000Z");
-            let reader = Connection::open_with_flags(&database,
+            let mut reader = Connection::open_with_flags(&database,
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW | OpenFlags::SQLITE_OPEN_NO_MUTEX).unwrap();
             reader.busy_timeout(StdDuration::from_millis(80)).unwrap();
             reader.pragma_update(None, "query_only", true).unwrap();
@@ -770,7 +782,43 @@ mod tests {
                 assert_eq!(count(), 2);
             }
             assert_eq!(writer.query_row("SELECT count(*) FROM jev_events", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+            // Exercise the production reader with a deterministic commit between its queries.
+            let (summary, recent, series) = read_snapshot(&mut reader, "", || {
+                let write = writer.transaction().unwrap();
+                insert(&write, "2026-11-13T14:00:00.000Z");
+                write.commit().unwrap();
+            }).unwrap();
+            assert_eq!(summary["calls"], 2);
+            assert_eq!(summary["statuses"]["ok"], 2);
+            assert_eq!(recent.len(), 2);
+            assert_eq!(series.len(), 2);
+            assert!(reader.is_autocommit());
+            let (next, recent, series) = read_snapshot(&mut reader, "", || {}).unwrap();
+            assert_eq!(next["calls"], 3);
+            assert_eq!(next["statuses"]["ok"], 3);
+            assert_eq!(recent.len(), 3);
+            assert_eq!(series.len(), 3);
+            assert!(reader.is_autocommit());
         }
+    }
+
+    #[test]
+    fn read_transaction_releases_on_query_failure_and_preserves_begin_failure() {
+        let mut db = Connection::open_in_memory().unwrap();
+        assert!(read_snapshot(&mut db, "", || panic!("summary must fail")).is_err());
+        assert!(db.is_autocommit());
+        // Summary succeeds, but the recent query fails on the missing metadata column.
+        db.execute_batch("CREATE TABLE jev_events(timestamp TEXT,status TEXT,http_attempts INTEGER,input_tokens INTEGER,output_tokens INTEGER,request_bytes INTEGER,response_bytes INTEGER,response_unknown_attempts INTEGER,latency_ms INTEGER)").unwrap();
+        let reached = std::cell::Cell::new(false);
+        let error = read_snapshot(&mut db, "", || reached.set(true)).unwrap_err();
+        assert!(reached.get());
+        assert!(error.to_string().starts_with("no such column:"));
+        assert!(db.is_autocommit());
+        db.execute_batch("BEGIN").unwrap();
+        assert!(read_snapshot(&mut db, "", || panic!("BEGIN must fail")).is_err());
+        assert!(!db.is_autocommit());
+        db.execute_batch("ROLLBACK").unwrap();
+        assert!(db.is_autocommit());
     }
 
     #[test]

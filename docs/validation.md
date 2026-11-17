@@ -1417,3 +1417,15 @@ watch 可能合併未讀通知, 此測試只驗證實際讀到的兩批更新, �
 首個 count SELECT 完成後由 writer transaction 新增資料並 commit, 再實際呼叫現有 details, autocommit 分支保留舊 calls=1 但 statuses / recent / series 與新 count 為 2, explicit BEGIN 分支全部仍為 1, ROLLBACK 釋放 reader 後讀到 2, writer 最終資料均為 2
 
 針對性單輪 1 項通過 (0.01 秒), 本輪沒有 runtime transaction 變更, 首個 count 僅模擬 summary 讀取邊界, 不宣稱已在完整 snapshot / HTTP 注入 writer 或驗證所有 SQLite journal modes, 未重跑先前 aggregate suites, diff 檢查通過, 既有受阻與歷史失敗不重試
+
+### JEV 單次 snapshot 短生命週期讀取 transaction
+
+將原 summary 與 details 的 4 個 SELECT 保留原文並移入 read_snapshot, 使用預設 Deferred transaction, 成功時顯式 ROLLBACK 後回傳 owned values, query failure 使用 RAII 清理, 原 config / identity / timeout / error mapping 不變
+
+受控 WAL 測試擴充為實際 production read_snapshot, 僅測試組態在 summary 完成後注入 writer commit, 當次 summary / statuses / recent / series 均維持 2 筆, 函式返回已回到 autocommit, 下一次讀取均為 3 筆
+
+另新增 summary 缺表、details 缺 metadata 欄位失敗後的 transaction 釋放, 與已有 transaction 造成 BEGIN 失敗時保留呼叫端 transaction 的測試, JEV 模組單輪 6 項通過 (0.06 秒), 原四窗 cutoff / cap / privacy oracle 保持通過
+
+這次注入涵蓋實際資料讀取 helper, 不是完整 HTTP 內注入, 不宣稱四個 window 或跨輪 candidate 原子一致, 並行 writer 驗證限於 WAL, 保留原 80 ms timeout 與原生平台、browser 驗收界線
+
+完整 service 單輪 401 項通過 (66.39 秒), 接續完整 serial HTTP 單輪 226 項通過 (134.54 秒), Linux / Rust 1.100.0, 另以程式比較確認 summary SQL 與 JSON 欄位 projection 和前版完全相同, diff 檢查通過
