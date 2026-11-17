@@ -1,6 +1,10 @@
 use serde_json::Value;
 
 pub(crate) fn parse(bytes: &[u8]) -> Option<Value> {
+    parse_as(bytes)
+}
+
+pub(crate) fn parse_as<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
     // Callers enforce raw byte limits first. Match Python's encoding prefixes,
     // but retain strict Unicode scalar validation.
     let utf32 = bytes.strip_prefix(b"\xff\xfe\x00\x00").map(|raw| (raw, false))
@@ -30,7 +34,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Option<Value> {
                 let unit = [unit[0], unit[1], unit[2], unit[3]];
                 char::from_u32(if big_endian { u32::from_be_bytes(unit) } else { u32::from_le_bytes(unit) })
             }).collect::<Option<String>>()
-                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|text| serde_json::from_str::<T>(&text).ok())
         }
     } else if let Some((raw, big_endian)) = utf16 {
         if raw.len() % 2 != 0 {
@@ -41,11 +45,11 @@ pub(crate) fn parse(bytes: &[u8]) -> Option<Value> {
                 if big_endian { u16::from_be_bytes(pair) } else { u16::from_le_bytes(pair) }
             }).collect();
             String::from_utf16(&units).ok()
-                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|text| serde_json::from_str::<T>(&text).ok())
         }
     } else {
         let payload = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
-        serde_json::from_slice::<Value>(payload).ok()
+        serde_json::from_slice::<T>(payload).ok()
     };
     value
 }

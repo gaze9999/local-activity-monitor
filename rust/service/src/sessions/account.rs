@@ -189,7 +189,8 @@ fn limit_order(line: &[u8]) -> Result<Option<Vec<String>>, serde_json::Error> {
             Ok(keys)
         }
     }
-    let raw: &serde_json::value::RawValue = serde_json::from_slice(line)?;
+    let raw: Box<serde_json::value::RawValue> = crate::json_bytes::parse_as(line)
+        .ok_or_else(|| <serde_json::Error as serde::de::Error>::custom("invalid JSON bytes"))?;
     let Some(result) = raw_member(raw.get(), "result")? else { return Ok(None) };
     let Some(mapped) = raw_member(result.get(), "rateLimitsByLimitId")? else { return Ok(None) };
     if !mapped.get().starts_with('{') {
@@ -244,8 +245,7 @@ impl Rpc {
             if count == 0 || self.read > LIMIT {
                 return Err(RpcError::Protocol);
             }
-            let line = line.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&line);
-            let value: Value = serde_json::from_slice(line).map_err(|_| RpcError::Protocol)?;
+            let value = crate::json_bytes::parse(&line).ok_or(RpcError::Protocol)?;
             if !value.is_object() {
                 return Err(RpcError::Protocol);
             }
@@ -258,7 +258,7 @@ impl Rpc {
             let payload = value.get("result").filter(|value| value.is_object())
                 .cloned().ok_or(RpcError::Protocol)?;
             let order = if method == "account/rateLimits/read" {
-                limit_order(line).map_err(|_| RpcError::Protocol)?
+                limit_order(&line).map_err(|_| RpcError::Protocol)?
             } else {
                 None
             };
@@ -649,11 +649,25 @@ done"#;
         exact.resize(LIMIT - prefix.iter().map(|row| row.len()).sum::<usize>(), b' ');
         let mut oversized = exact.clone();
         oversized.push(b' ');
-        let cases = [
+        let mut cases = vec![
             (base.to_vec(), "ok"), (cr, "ok"),
             (base[..base.len() - 1].to_vec(), "partial"), (Vec::new(), "partial"),
             (exact, "ok"), (oversized, "partial"),
         ];
+        let text = std::str::from_utf8(base).unwrap();
+        for wide in [false, true] {
+            for big in [false, true] {
+                for newline in [false, true] {
+                    let text = format!("{text}{}", if newline { "\n" } else { "" });
+                    let bytes: Vec<u8> = if wide {
+                        text.chars().flat_map(|ch| if big { (ch as u32).to_be_bytes() } else { (ch as u32).to_le_bytes() }).collect()
+                    } else {
+                        text.encode_utf16().flat_map(|ch| if big { ch.to_be_bytes() } else { ch.to_le_bytes() }).collect()
+                    };
+                    cases.push((bytes, if newline && !big { "partial" } else { "ok" }));
+                }
+            }
+        }
         for (index, (body, health)) in cases.into_iter().enumerate() {
             let (home, path) = fake(r#"while IFS= read -r line; do
 case "$line" in
@@ -710,6 +724,25 @@ done"#;
         assert_eq!(result["limit_id"], "zulu");
         assert_eq!(result["credits"]["balance"], "7");
         assert_eq!(result["plan_type"], "team");
+    }
+    #[test]
+    fn encoded_rpc_json_preserves_raw_bucket_order() {
+        let text = r#"{"id":2,"result":{"rateLimitsByLimitId":{"zulu":{"credits":{"balance":"9"}},"alpha":{},"zulu":{"credits":{"balance":"7"}}}}}"#;
+        for wide in [false, true] {
+            for big in [false, true] {
+                let bytes: Vec<u8> = if wide {
+                    text.chars().flat_map(|ch| if big { (ch as u32).to_be_bytes() } else { (ch as u32).to_le_bytes() }).collect()
+                } else {
+                    text.encode_utf16().flat_map(|ch| if big { ch.to_be_bytes() } else { ch.to_le_bytes() }).collect()
+                };
+                let value = crate::json_bytes::parse(&bytes).unwrap();
+                assert_eq!(value["result"]["rateLimitsByLimitId"]["zulu"]["credits"]["balance"], "7");
+                assert_eq!(limit_order(&bytes).unwrap().unwrap(), ["zulu", "alpha"]);
+                let mut truncated = bytes;
+                truncated.pop();
+                assert!(limit_order(&truncated).is_err());
+            }
+        }
     }
     #[tokio::test]
     async fn disabled_never_runs_and_timeout_cleans_child() {

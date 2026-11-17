@@ -1142,3 +1142,17 @@ Python 另以 6 組 BOM / EOF / 累計上限 fixture 驗證原始行為, Rust �
 僅補 UTF-8 BOM, 未擴大為 UTF-16/32 協定支援, 方法、參數、查詢次數、快取與白名單不變, 沒有真實帳戶請求, 前輪 fixture 未明失敗、其他歷史限制與跨平台驗收保留
 
 Linux / Rust 1.100.0 完整 service 單輪 385 項通過 (61.45 秒), 結束後執行完整 serial HTTP 單輪 226 項通過 (129.87 秒)
+
+### Account JSON bytes 與原始欄位順序
+
+沿用已核對的 LAM main `5c03daf`, account 的 readline 在原始 LF 分割後交給 json.loads, 最後 EOF 的 UTF-16/32 LE / BE JSON 可接受, 有編碼 LF 時 BE 可接受但 LE 會被截斷而拒絕, 不將此行為描述為任意多列寬字元協定支援
+
+既有私有 JSON bytes decoder 抽出相同的泛型解析流程, 原 Value 呼叫維持介面, account 的值與 RawValue 皆使用此流程, RawValue 保留原始 key 順序與重複值, 不由已排序的 Value 重新序列化
+
+Python 原始 source 的 8 組合成 app-server 編碼 / 分行 fixture 通過, Rust 對既有 EOF 回歸增加相同 8 組, 並另驗證四種編碼的 zulu / alpha 順序、重複 zulu 最後值與截斷拒絕, account 14 項通過 (0.51 秒)
+
+累計原始 1 MiB 上限、時限、LF framing、方法參數、請求次數、快取與投影不變, RawValue 現在使用 owned buffer, 原始輸入上限不等於整體程序記憶體上限, 未新增相依套件
+
+沒有真實帳戶或認證操作, surrogate 差異、先前 fixture 未明失敗、其他歷史限制與跨平台驗收保留
+
+Linux / Rust 1.100.0 完整 service 單輪 386 項通過 (59.19 秒), 結束後完整 serial HTTP 單輪 226 項通過 (136.64 秒)
