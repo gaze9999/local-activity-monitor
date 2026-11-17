@@ -361,7 +361,7 @@ selected_candidate.rs 現在擁有原 test-only orchestration 的 Headers → Pa
 
 | 階段 | 行為與限制 |
 | --- | --- |
-| 建立 | 呼叫端提供已確認來源順序與 signature 的清單、完整 selection、固定時間及 owned names, 來源數須等於 membership materialized count, 每個 key / signature 須符合目前 verified materialized row, 拒絕重複 key、遺漏 selection key、超過既有 WALK_LIMIT / CALL_LIMIT, 不自行發明 discovery 順序 |
+| 建立 | 呼叫端提供已確認來源順序與 signature 的清單、完整 selection 與固定時間, 來源數須等於 membership materialized count, 每個 key / signature 須符合目前 verified materialized row, 拒絕重複 key、遺漏 selection key、超過既有 WALK_LIMIT / CALL_LIMIT, 不自行發明 discovery 順序 |
 | Headers | 讀取 empty-call cursor metadata, 依來源順序合併 metadata / partial, 以 (thread, call) 定案後來源 winner 並保留 first insertion slot, 不讀 call payload 來判斷 thread |
 | Payload | plan 完成後才開啟 selected reader, 使用既有每頁 512 calls / 16 MiB 驗證, 逐 winner 餵入所有已串接 reducers, reducer 使用 guard 保存的開關值而非頁中重讀 atomic |
 | Physical | Header / payload 前後依現有 open_source 核對 root identity 與來源 fingerprint, payload 結束後再以每輪 budget 做完整來源 metadata sweep, 不讀 JSONL 本文 |
@@ -384,6 +384,12 @@ Active 批次限制的是 call 數, 不是 encoded bytes / allocation / RSS, sou
 | PhysicalSource | 實體 metadata guard 拒絕, 可能為變更、缺少來源或讀取失敗 |
 | CheckpointRead / CheckpointChanged | Store / reader 回傳錯誤或不可開啟, 與預期 signature / cursor 缺少或不符分開, reader 錯誤不進一步推定為 I/O 或 payload 問題 |
 | InvalidProjection / StatisticsCapacity / State | 投影 / winner 不相容、精確 statistics 超出 logical budget、內部必要狀態缺少 |
+
+Row / name 組合現在使用已受 revision guard 保護的 thread_metadata, 不接受 caller 提供另一份可能不一致的 names, header 完成後由 source threads 與 catalog keys 建立 owned names, retained skills 使用同一個可見 thread 集合
+
+完成 rows 時沿現有 apply_thread_metadata 處理觀察欄位與 catalog 預設值, 同步填入 row 內 file_changes / file_reads 名稱, catalog-only rows 沿既有 empty Projection 與 metadata_only 規則組合, files、Git / checks、skills、MCP / SQL event previews 使用同批名稱
+
+目前 rows 仍是 keyed components, 未包含最後排序與 status_backfill_pending / source_details_pending 等 readiness 標記, project summary、MCP catalog augmentation、完整 error windows 與正式發布仍待串接, raw failure components 不在此步套用名稱, 未因此重跑 deferred 額外 metadata-only / 無 ID 來源實驗
 
 建構 eligibility 仍用原 Option, SelectedInputs 的舊 validate_sources 亦保留 Option wrapper, 新 try_validate_sources 提供有類型的驗證結果, 不改動同步 snapshots 或原失敗 fallback
 

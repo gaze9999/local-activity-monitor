@@ -5932,6 +5932,9 @@ mod log_tests {
                 }
                 collector.files.insert(path.clone(), session);
             }
+            let mut metadata = Map::new();
+            metadata.insert(id.into(), json!({"name":"named current thread", "project_id":"fixture-project", "project_name":"Fixture", "execution":{"model_provider":"fixture"}}));
+            collector.replace_thread_metadata(metadata);
             let expected_winners = if same_thread { 900 } else if active { 1800 } else { 1200 };
             let mut materialized = BTreeMap::<String, Projection>::new();
             for (_, state) in collector.ordered_working_sources() {
@@ -5949,10 +5952,18 @@ mod log_tests {
                     .merge_snapshot(&projection.projection, None, &cutoffs);
             }
             assert_eq!(materialized.values().map(|projection| projection.calls.len()).sum::<usize>(), expected_winners);
+            let apply_names = |events: &mut Vec<Value>| {
+                for event in events {
+                    if let Some(id) = event["thread_id"].as_str() {
+                        event["thread_name"] = collector.thread_metadata.get(id).map_or(Value::Null, |row| row["name"].clone());
+                    }
+                }
+            };
             let expected = cutoffs.map(|cutoff| {
                 let mut summary = project::FileSummary::new(1000);
                 for projection in materialized.values() { summary.observe(projection, cutoff, true, None); }
-                let (events,total,operations) = summary.finish();
+                let (mut events,total,operations) = summary.finish();
+                apply_names(&mut events);
                 json!({"events":events,"total":total,"operations":operations})
             });
             let expected_series = cutoffs.map(|cutoff| {
@@ -5975,11 +5986,14 @@ mod log_tests {
                 assert!(!mcp_observations.is_empty(), "actual nested parser produces MCP metadata");
                 assert!(!sql_observations.is_empty(), "actual nested parser produces SQL metadata");
             }
-            let expected_observations = cutoffs.map(|cutoff| json!({
-                "mcp":mcp::summary(&mcp_observations, cutoff, collector.activity_history_health),
-                "sql":sqlite::window(&sql_observations, cutoff, collector.activity_history_health)
-            }));
-            let skill_names = statistics_threads.keys().map(|id| (id.to_string(), Value::Null)).collect();
+            let expected_observations = cutoffs.map(|cutoff| {
+                let mut mcp = mcp::summary(&mcp_observations, cutoff, collector.activity_history_health);
+                let mut sql = sqlite::window(&sql_observations, cutoff, collector.activity_history_health);
+                apply_names(mcp["events"].as_array_mut().unwrap());
+                apply_names(sql["events"].as_array_mut().unwrap());
+                json!({"mcp":mcp,"sql":sql})
+            });
+            let skill_names = statistics_threads.keys().map(|id| (id.to_string(), collector.thread_metadata.get(*id).map_or(Value::Null, |entry| entry["name"].clone()))).collect();
             let expected_skills = cutoffs.map(|cutoff| {
                 let (events, total, counts) = project::skill_summary(&statistics_threads, &collector.skill_history,
                     &skill_names, cutoff, true);
@@ -5988,7 +6002,9 @@ mod log_tests {
             assert_eq!(expected_skills[3]["total"], json!(expected_winners * 2));
             assert_eq!(expected_skills[3]["events"].as_array().unwrap().len(), 500);
             let expected_commands = cutoffs.map(|cutoff| {
-                let (git, checks) = commands::Calls::new(&statistics_threads).window(cutoff, None);
+                let (mut git, mut checks) = commands::Calls::new(&statistics_threads).window(cutoff, None);
+                apply_names(git["events"].as_array_mut().unwrap());
+                apply_names(&mut checks);
                 json!({"git":git,"checks":checks})
             });
             assert_eq!(expected_commands[3]["git"]["total"], json!(if nested { expected_winners * 2 } else { 0 }));
@@ -6050,9 +6066,13 @@ mod log_tests {
             assert!(row_metadata.values().all(|metadata| metadata.calls.is_empty()), "row metadata must not stage selected calls");
             let expected_rows = |ordered| cutoffs.map(|cutoff| {
                 let (mut totals, mut nested_totals) = Default::default();
-                let rows: BTreeMap<_,_> = materialized.iter().map(|(thread, projection)|
-                    (thread.clone(), projection.row(false, cutoff, reference, &mut totals, &mut nested_totals,
-                        true, true, true, ordered))).collect();
+                let rows: BTreeMap<_,_> = materialized.iter().map(|(thread, projection)| {
+                    let mut row = projection.row(false, cutoff, reference, &mut totals, &mut nested_totals,
+                        true, true, true, ordered);
+                    apply_thread_metadata(&mut row, collector.thread_metadata.get(thread), false);
+                    for field in ["file_changes", "file_reads"] { apply_names(row[field].as_array_mut().unwrap()); }
+                    (thread.clone(), row)
+                }).collect();
                 json!({"rows":rows,"totals":totals,"nested_totals":nested_totals})
             });
             let rows = expected_rows(false);
@@ -6079,7 +6099,7 @@ mod log_tests {
                 let mut candidate = SelectedCandidate::new(&collector, &selection,
                     SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
                         Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
-                    skill_names.clone(), ordered, statistics_units, 10_000, true, &stopped).ok_or(Failure::InputsRejected)?;
+                    ordered, statistics_units, 10_000, true, &stopped).ok_or(Failure::InputsRejected)?;
                 let mut validation_rounds = 0;
                 let mut injected = false;
                 for _ in 0..32 {
@@ -6125,12 +6145,15 @@ mod log_tests {
                     summary.ordered_thread(thread_slots[thread]);
                     summary.observe(projection, cutoff, true, None);
                 }
-                let (events,total,operations) = summary.finish();
+                let (mut events,total,operations) = summary.finish();
+                apply_names(&mut events);
                 json!({"events":events,"total":total,"operations":operations})
             });
             let ordered_ranks = thread_slots.iter().map(|(id, rank)| (id.as_str(), *rank)).collect();
             let ordered_commands = cutoffs.map(|cutoff| {
-                let (git, checks) = commands::Calls::new(&statistics_threads).window(cutoff, Some(&ordered_ranks));
+                let (mut git, mut checks) = commands::Calls::new(&statistics_threads).window(cutoff, Some(&ordered_ranks));
+                apply_names(git["events"].as_array_mut().unwrap());
+                apply_names(&mut checks);
                 json!({"git":git,"checks":checks})
             });
             let ordered_result = reduce(&mut store, false, true, 10_000).unwrap();
@@ -6148,14 +6171,14 @@ mod log_tests {
             assert!(selected_candidate::SelectedCandidate::new(&collector, &selection,
                 SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
                     selected_candidate::Source { key:key.clone(), signature:"not-the-membership-signature".into() }).collect(),
-                skill_names.clone(), false, 10_000, 10_000, true, &stopped).is_none());
+                false, 10_000, 10_000, true, &stopped).is_none());
             // Runtime orchestration returns no components at header/page boundaries.
             // Cancellation consumes the state, including an in-progress reader.
             for steps in [0, 1, 3] {
                 let mut candidate = selected_candidate::SelectedCandidate::new(&collector, &selection,
                     SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
                         selected_candidate::Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
-                    skill_names.clone(), false, 10_000, 10_000, true, &stopped).unwrap();
+                    false, 10_000, 10_000, true, &stopped).unwrap();
                 for _ in 0..steps {
                     candidate = match candidate.advance(&collector, &selection, true, &stopped, 1).unwrap() {
                         selected_candidate::Advance::Pending(next) => next,
@@ -6169,7 +6192,7 @@ mod log_tests {
             let mut candidate = selected_candidate::SelectedCandidate::new(&collector, &selection,
                 SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
                     selected_candidate::Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
-                skill_names.clone(), false, 10_000, 10_000, true, &stopped).unwrap();
+                false, 10_000, 10_000, true, &stopped).unwrap();
             for _ in 0..16 {
                 if candidate.awaiting_validation() { break; }
                 candidate = match candidate.advance(&collector, &selection, true, &stopped, 1).unwrap() {
@@ -6184,13 +6207,13 @@ mod log_tests {
             let candidate = selected_candidate::SelectedCandidate::new(&collector, &selection,
                 SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
                     selected_candidate::Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
-                skill_names.clone(), false, 10_000, 10_000, true, &stopped).unwrap();
+                false, 10_000, 10_000, true, &stopped).unwrap();
             assert_eq!(candidate.advance(&collector, &selection, false, &stopped, 1).err(), Some(Failure::Disabled));
             if active && !same_thread {
                 let mut candidate = selected_candidate::SelectedCandidate::new(&collector, &selection,
                     SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
                         selected_candidate::Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
-                    skill_names.clone(), false, 10_000, 10_000, true, &stopped).unwrap();
+                    false, 10_000, 10_000, true, &stopped).unwrap();
                 for _ in 0..32 {
                     if candidate.active_payload_in_progress() { break; }
                     candidate = match candidate.advance(&collector, &selection, true, &stopped, 1).unwrap() {
@@ -6207,7 +6230,7 @@ mod log_tests {
                 let mut candidate = selected_candidate::SelectedCandidate::new(&collector, &selection,
                     SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
                         selected_candidate::Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
-                    skill_names.clone(), false, 10_000, 10_000, true, &stopped).unwrap();
+                    false, 10_000, 10_000, true, &stopped).unwrap();
                 for _ in 0..32 {
                     if candidate.awaiting_validation() { break; }
                     candidate = match candidate.advance(&collector, &selection, true, &stopped, 1).unwrap() {
@@ -6237,7 +6260,7 @@ mod log_tests {
             let make = || selected_candidate::SelectedCandidate::new(&collector, &selection,
                 SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
                     selected_candidate::Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
-                skill_names.clone(), false, 10_000, 10_000, true, &stopped).unwrap();
+                false, 10_000, 10_000, true, &stopped).unwrap();
             assert_eq!(make().advance(&collector, &selection, true, &stopped, 0).err(), Some(Failure::InvalidBudget));
             let initial = make();
             let mut candidate = make();

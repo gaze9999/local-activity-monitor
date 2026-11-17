@@ -82,7 +82,7 @@ pub(super) struct CompletedCandidate {
 #[allow(dead_code)] // Not activated by the production snapshot worker.
 impl SelectedCandidate {
     pub(super) fn new(collector: &Collector, selection: &CallSelection, time: SnapshotTime,
-        sources: Vec<Source>, names: HashMap<String, Value>, ordered: bool,
+        sources: Vec<Source>, ordered: bool,
         statistics_units: usize, statistics_key_bytes: usize, enabled: bool, stopped: &AtomicBool) -> Option<Self>
     {
         // Never silently publish a checkpoint-only view of mutable active calls.
@@ -121,7 +121,7 @@ impl SelectedCandidate {
         }).collect::<Option<Vec<_>>>()?;
         Some(Self { inputs:Some(inputs), sources, active, active_offset:0, source_paths, physical, physical_after:None, phase:Phase::Headers, next:0, reader:None,
             metadata:BTreeMap::new(), partial:BTreeMap::new(), winners:BTreeMap::new(), slots:BTreeMap::new(),
-            next_slots:BTreeMap::new(), thread_slots:BTreeMap::new(), source_threads:Vec::new(), names, ordered,
+            next_slots:BTreeMap::new(), thread_slots:BTreeMap::new(), source_threads:Vec::new(), names:HashMap::new(), ordered,
             statistics_units, statistics_key_bytes, reducers:None })
     }
 
@@ -141,6 +141,10 @@ impl SelectedCandidate {
     }
 
     fn initialize(&mut self, collector: &Collector) {
+        // All windows use the same catalog name, including catalog-only rows.
+        // Its actual owner revision is checked before and after each advance.
+        self.names = self.metadata.keys().chain(collector.thread_metadata.keys()).map(|id|
+            (id.clone(), collector.thread_metadata.get(id).map_or(Value::Null, |entry| entry["name"].clone()))).collect();
         let cutoffs = self.inputs.as_ref().unwrap().time.cutoffs;
         let (tools, files, switches) = self.inputs.as_ref().unwrap().reducer_switches();
         self.reducers = Some(Reducers {
@@ -337,28 +341,57 @@ impl SelectedCandidate {
         let reducers = self.reducers.take().ok_or(Failure::State)?;
         let reference = self.inputs.as_ref().ok_or(Failure::State)?.time.reference;
         let cutoffs = self.inputs.as_ref().ok_or(Failure::State)?.time.cutoffs;
-        let files = reducers.files.map(|summary| { let (events,total,operations) = summary.finish(); json!({"events":events,"total":total,"operations":operations}) });
+        let files = reducers.files.map(|summary| {
+            let (mut events,total,operations) = summary.finish();
+            for event in &mut events {
+                if let Some(name) = event["thread_id"].as_str().and_then(|id| self.names.get(id)) { event["thread_name"] = name.clone(); }
+            }
+            json!({"events":events,"total":total,"operations":operations})
+        });
         let series = reducers.series.map(|series| { let (activity,tools) = series.finish(); json!({"activity":activity,"tools":tools}) });
         let statistics = reducers.statistics.into_iter().map(|summary| summary.finish()).collect::<Option<Vec<_>>>().ok_or(Failure::StatisticsCapacity)?.try_into().map_err(|_| Failure::State)?;
         let switches = self.inputs.as_ref().ok_or(Failure::State)?.reducer_switches().2;
         let commands = reducers.commands.map(|summary| {
             let (mut git,mut checks) = summary.finish();
+            for event in git["events"].as_array_mut().into_iter().flatten().chain(checks.iter_mut()) {
+                if let Some(name) = event["thread_id"].as_str().and_then(|id| self.names.get(id)) { event["thread_name"] = name.clone(); }
+            }
             if !switches.git { git = json!({"events":[],"operations":{},"total":0}); }
             if !switches.checks { checks.clear(); }
             json!({"git":git,"checks":checks})
         });
         let skills = reducers.skills.map(|summary| { let (events,total,counts) = summary.finish(&self.names); json!({"events":events,"total":total,"counts":counts}) });
-        let rows = reducers.rows.into_iter().zip(reducers.totals).zip(reducers.nested).map(|((summaries,totals),nested_totals)| {
-            let rows: BTreeMap<_,_> = summaries.into_iter().map(|(thread,summary)| {
-                let row = self.metadata[&thread].row_with_summary(self.partial[&thread], reference, summary);
+        let (tools, files_enabled, _) = self.inputs.as_ref().ok_or(Failure::State)?.reducer_switches();
+        let rows = reducers.rows.into_iter().zip(reducers.totals).zip(reducers.nested).enumerate().map(|(index,((summaries,mut totals),mut nested_totals))| {
+            let mut rows: BTreeMap<_,_> = summaries.into_iter().map(|(thread,summary)| {
+                let mut row = self.metadata[&thread].row_with_summary(self.partial[&thread], reference, summary);
+                super::apply_thread_metadata(&mut row, collector.thread_metadata.get(&thread), false);
+                let name = row["thread_name"].clone();
+                for key in ["file_changes", "file_reads"] {
+                    for event in row[key].as_array_mut().into_iter().flatten() { event["thread_name"] = name.clone(); }
+                }
                 (thread,row)
             }).collect();
+            for (thread, metadata) in &collector.thread_metadata {
+                if rows.contains_key(thread) { continue; }
+                let mut row = Projection::for_id(Some(thread.clone())).row(true, cutoffs[index], reference,
+                    &mut totals, &mut nested_totals, tools, files_enabled, switches.jev_calls, false);
+                super::apply_thread_metadata(&mut row, Some(metadata), true);
+                rows.insert(thread.clone(), row);
+            }
             json!({"rows":rows,"totals":totals,"nested_totals":nested_totals})
         }).collect::<Vec<_>>().try_into().map_err(|_| Failure::State)?;
         let (mcp_events,sql_events): (Vec<_>,Vec<_>) = reducers.observations.finish().into_iter().partition(|event| event.get("server").is_some());
         let sql_events = sqlite::identified(sql_events);
-        let observations = cutoffs.map(|cutoff| json!({"mcp":mcp::summary(&mcp_events,cutoff,collector.activity_history_health),
-            "sql":sqlite::window(&sql_events,cutoff,collector.activity_history_health)}));
+        let observations = cutoffs.map(|cutoff| {
+            let mut mcp = mcp::summary(&mcp_events,cutoff,collector.activity_history_health);
+            let mut sql = sqlite::window(&sql_events,cutoff,collector.activity_history_health);
+            for event in mcp["events"].as_array_mut().into_iter().flatten()
+                .chain(sql["events"].as_array_mut().into_iter().flatten()) {
+                if let Some(name) = event["thread_id"].as_str().and_then(|id| self.names.get(id)) { event["thread_name"] = name.clone(); }
+            }
+            json!({"mcp":mcp,"sql":sql})
+        });
         let failures: Vec<_> = reducers.failures.finish().into_iter().map(|(start,event)| json!({"start":start.map(project::stamp),"event":event})).collect();
         Ok(CompletedCandidate { files,series,statistics,commands,skills,rows,observations,failures:json!(failures) })
     }

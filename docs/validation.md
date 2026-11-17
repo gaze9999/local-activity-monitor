@@ -2037,3 +2037,16 @@ InputsRejected 與 PhysicalSource 只指出驗證失敗邊界, 不推定為特�
 Linux / Rust 1.100.0 / 原 Cargo.lock, 最終 owner targeted 通過 1 項、427 項未選取, 0.00 秒, 原 MCP / SQL / commands 名稱回歸通過 3 項、425 項未選取, 0.10 秒, cargo check 通過並維持 8 個既有 warnings, 本輪無失敗
 
 此步尚未把 candidate rows 串接完整 metadata / names finalizer, 不代表 project_details、MCP catalog、diagnostics 或其他 metadata owners 已覆蓋, production aggregation / fallback 不變, deferred fixtures 未執行
+
+
+### Guarded rows 與名稱組合
+
+基準 `aeadb9f`, SelectedCandidate 移除 caller names 參數, 改由 thread_metadata owner 與已定案 source threads 建立同批名稱, 完成 rows 使用現有 apply_thread_metadata, 名稱同步至 row file previews 與 files、Git / checks、skills、MCP / SQL previews
+
+- 原八情境只替已存在 thread 加入 catalog name、project 與 execution metadata, 同時保留其他未命名 thread, 未增加來源或重跑 deferred metadata-only / 無 ID source fixtures
+- 四窗仍對照 materialized Projection 與既有 serializer, 只按原 catalog 欄位補上預期名稱與 metadata, 原 winner、排序、計數與 failure oracles 保留, 最後同步 snapshots 的 file / command / skill 比較不放寬
+- Row metadata 在完成前後受原 CandidateInputs guard 驗證, raw failure components 保持原樣, 不提前套用尚未串接的 error-window 規則
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 八情境 targeted 通過 1 項、427 項未選取, 77.79 秒, cargo check 通過並維持 8 個既有 warnings, 本輪無失敗
+
+Keyed rows 尚未等同完整已排序的 snapshot threads, readiness markers、project summary、MCP catalog 與其餘 finalizer owners 仍待處理, catalog-only row 分支沿現有實作但本輪未增加該情境的候選驗收, production caller 與 fallback 未切換
