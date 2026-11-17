@@ -244,3 +244,34 @@ Cloud 測試不取代 Windows watcher、真實來源、SSE、Host/Origin 與持�
 最小後續設計應先區分 active 尚未保存變更、已提交 checkpoint、retained history 與設定/查詢事件四種來源, 再選擇共同 capture / mutation 邊界, 不是在任一現有 bool 或 counter 外加一層名稱即可完成
 
 已新增 producer 測試驗證同 call key / timestamp 的回覆錯誤及 context 修改, 並確認有效但無 payload 的行可回傳 true 而不修改 Projection, 此證據不代表 source replacement、transaction conflict、history refresh 或跨輪取消的完整驗收, 這些仍需依原有專項測試與後續共同發布測試分別確認
+
+### 共同 capture / mutation 邊界設計草案
+
+此草案依 `2427f5e` 的 producer 與 server reader 稽核提出, 尚未實作或視為架構驗收, 由主線整合時確認
+
+優先採用既有 Snapshots 作為共同發布擁有者, 保存該批 immutable detail index 的 Arc, 不新增另一套全域 counter 或第二個發布 channel
+
+1. Worker 同步段完成 detail_index 與 overflow readiness 後建立同一批 Snapshots, index 在 send_replace 前不得先寫入獨立公開位置, 無 detail 變更的批次重用前一個 immutable index
+2. Server 每次 detail request 從一次 watch borrow 取得所需摘要/事件及同批 index, 複製或 clone Arc 後釋放 borrow, 不持有 watch / index 寫鎖進行檔案或 SQLite I/O
+3. 保留現有 live disable、metadata / mask、來源 identity、locator hash 與 CheckpointGuard, 共同發布不能讓已被修改/刪除的實體來源通過檢查, 亦不承諾跨兩個 HTTP request 保留舊來源內容
+4. Disabled 啟動與執行中停用均需覆蓋, 舊 index 不得藉由共同擁有者繞過停用 guard, version 維持既有 snapshot 發布次序用途
+
+| 已盤點的 detail reader | 目前讀取組合 | 串接時的要求 |
+| --- | --- | --- |
+| `/api/codex/sql` | all-window SQLite event + detail candidates, diagnostics 另有既有來源 | 只合併 snapshot-backed 選取, 保留 diagnostics 來源驗證 |
+| `/api/codex/error` | error_details + detail candidates | 同批事件與 locator, 保留歷史/即時 winner 差異 |
+| `/api/codex/git`、`/api/codex/check`、`/api/codex/skill`、`/api/codex/jev` | window/history 選取 + detail candidates | 不更改 fallback、限制、thread / call key 或敏感內容遮罩 |
+| `/api/codex/mcp` | 先讀 candidates, 再讀 all-window event | 改為一次共同發布讀取, 不能只調換兩次獨立讀取的先後 |
+| `/api/codex/tool`、`/api/codex/context`、`/api/codex/agent-message` | detail candidates 與各自的選取/權限 guard | 保留每個 endpoint 既有允許範圍, 不新增隱含資料查詢 |
+
+此步只解決 publication 邊界, 尚不代表跨輪組裝的輸入一致性或移除 16 MiB staging
+
+跨輪 candidate 的建議邊界如下, 不提前建立未被 candidate 使用的 revision
+
+- active 與 retained history 由 worker 擁有, 在一個同步 capture 點建立 candidate 的 immutable 輸入或實際 producer revision, 不能單用 call time / checkpoint_dirty / 已提交 signature 代替尚未保存的 payload
+- 查詢 settings/result 必須在共同狀態鎖內擷取或具備涵蓋每個寫入起訖的協定, 現有 signal counter 不符合此條件, scheduler 的事件與 completed 行為須原樣保留
+- 設定 capture 尚未提供共同 revision, 需對照真實設定 setter/持久化完成點決定何時取消 candidate, 不在失敗寫入後假裝採用了新設定
+- overflow 每頁保持已選取 keys 與 signature 驗證, retained history 必須來自同批已確定的 view, 外部 SQLite 寫入與來源 replacement 不能用單一程序記憶體 counter 偵測
+- reference / cutoffs 固定於 candidate, discovery generation 在無資料變更時增加不能取消進度, 持續來源變更下的完成/取消策略仍須以實際大資料測試確認
+
+最小整合驗收: 在既有實際 worker 與 route 讀取點控制兩次發布, 證明 request 取得同批 event/index, 在來源已改變時仍拒絕過期 locator, 停用後仍拒絕內容, 舊可用快照在候選失敗時保留, 再跑完整 service / serial HTTP, 不用只比較假想 stamp 的測試代替

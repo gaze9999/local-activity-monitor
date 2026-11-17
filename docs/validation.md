@@ -1277,3 +1277,11 @@ Linux / Rust 1.100.0 針對性 2 項通過 (0.00 秒), 完整 service 單輪 392
 新增 `payload_mutations_preserve_selection_keys_and_latest_timestamp` 單輪通過 (0.01 秒), 真實 consume producer 在 call ID / time / 數量與 Projection updated 不變時接受錯誤回覆及相同時間戳的 model / effort 修改, 同時驗證有效無 payload 行與 malformed 的回傳值 / 狀態邊界
 
 此輪只新增測試與文件, 無 runtime 變更, 未重跑前輪 service 392 項或 HTTP 226 項, 不把針對性通過擴稱為 source replacement、儲存 rollback、跨輪取消或原子發布驗收, browser 阻擋項目未重試
+
+### 共同發布設計的 reader 稽核
+
+盤點 `server.rs` 8 個 detail index 讀取點, 涵蓋 SQL、error、Git/check、skill、JEV、MCP、tool、context/agent-message, 目前各自與 snapshots 分開讀取, MCP 先取 candidates 再取 all-window event
+
+maintenance 新增以既有 Snapshots 擁有 immutable detail index 的整合草案, 區分共同發布、跨輪 capture、實體來源驗證與 live disable, 不新增 counter、channel、runtime 或 endpoint, 不宣稱已重現混版回應
+
+此輪為來源碼/文件稽核, diff 檢查通過, 尚未執行草案的交界注入、跨輪或 HTTP 整合驗收, 既有測試結果沿用各自記錄範圍, 未重試 blocked browser
