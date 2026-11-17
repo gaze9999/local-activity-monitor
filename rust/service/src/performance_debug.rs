@@ -459,9 +459,13 @@ impl PerformanceDebug {
         value.insert("revision".into(), json!(self.revision));
         value.insert(
             "uptime_ms".into(),
-            json!(self.started.elapsed().as_secs_f64() * 1000.0),
+            json!(round_millis(self.started.elapsed().as_secs_f64() * 1000.0)),
         );
-        value.extend(process_metrics());
+        let mut process = process_metrics();
+        if let Some(cpu) = process.get("process_cpu_ms").and_then(Value::as_f64) {
+            process.insert("process_cpu_ms".into(), json!(round_millis(cpu)));
+        }
+        value.extend(process);
         let Some(record) = project(&Value::Object(value)) else {
             return;
         };
@@ -704,6 +708,34 @@ mod tests {
         assert!(debug.invalid);
         assert!(debug.records.is_empty());
         assert_eq!(fs::read(&path).unwrap(), raw);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn generated_debug_timing_precision_matches_persisted_records() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut debug = PerformanceDebug::new(folder.path(), "abcdef012345".into());
+        debug.set_enabled(true);
+        debug.record("collection", json!({"refresh_ms":1.234567,"secret":"PRIVATE"}));
+        let snapshot = debug.snapshot();
+        let records = snapshot["records"].as_array().unwrap();
+        let saved: Vec<Value> = fs::read_to_string(folder.path().join("performance-debug.jsonl"))
+            .unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(saved.len(), 2);
+        for (record, persisted) in records.iter().rev().zip(&saved) {
+            for key in ["uptime_ms", "process_cpu_ms"] {
+                if let Some(value) = record[key].as_f64() {
+                    assert_eq!(value, round_millis(value), "{key}");
+                }
+                assert_eq!(record.get(key), persisted.get(key));
+            }
+            assert!(record["peak_rss_bytes"].as_u64().is_some());
+            assert_eq!(record["peak_rss_bytes"], persisted["peak_rss_bytes"]);
+            assert!(!persisted.to_string().contains("PRIVATE"));
+        }
+        // Supplied measurements retain their own precision; only generated timing is rounded.
+        assert_eq!(records[0]["refresh_ms"], 1.234567);
     }
 
     #[cfg(any(unix, windows))]

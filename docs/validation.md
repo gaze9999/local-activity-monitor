@@ -1517,3 +1517,13 @@ Linux / Rust 1.100.0、原 Cargo.lock, performance_debug 模組 8 項通過 (0.0
 Linux / Rust 1.100.0、原 Cargo.lock, performance_debug 模組 9 項通過 (0.01 秒), HTTP monitor_snapshot_reports_idle_after_collection 通過 (0.07 秒), diff 檢查通過
 
 僅影響 `/api/snapshot` 與 SSE render 中 monitor.collection 的數值捨入, 未改變 render cache 條件、來源讀取或請求次數, 不固定即時 telemetry 或裝置 capture, 未重跑完整套件
+
+### Debug 記錄的產生時計時精度
+
+以 `2c040b8` 為基底, LAM main `5c03daf` 與 workbench-workspace main `4616074` 核對未變, Python PerformanceDebug.record 將產生的 uptime_ms / process_cpu_ms 捨入到兩位小數, Rust 原先將原始計時精度直接保存
+
+實際 Python record 的 5 組受控 clock 資料確認中點、二進位浮點差異與零, Rust 新測試先觀察到未捨入 uptime_ms, 修正後核對記憶體記錄與 JSONL 的產生時計時相符, peak_rss_bytes 保持整數, 呼叫端提供的 refresh_ms 精度與敏感欄位排除不變
+
+Linux / Rust 1.100.0、原 Cargo.lock, performance_debug 模組 10 項通過 (0.02 秒), serial HTTP debug_ 篩選 7 項通過 (0.54 秒), diff 檢查通過
+
+僅在 debug 記錄產生時轉換這兩個計時欄位, 不修改共用 process_metrics 原始樣本、既有匯入記錄或輪替規則, `/api/snapshot` 的 monitor.debug.records 與對應 JSONL 沿用原來源和請求次數, 完整套件未重跑
