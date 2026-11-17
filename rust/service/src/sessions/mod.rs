@@ -1964,6 +1964,13 @@ struct SnapshotTime {
     cutoffs: [Option<chrono::DateTime<Utc>>; 4],
 }
 
+// Already-observed metadata captured after query pairs and before window rendering.
+// The journal source comes from the opening capture, never a second journal read.
+struct SnapshotDiagnostics {
+    locations: Vec<PathBuf>,
+    logs_overview: Value,
+}
+
 // Owned query values captured at the existing synchronous snapshot boundary.
 // Each settings/result pair is read together, not an eight-source or cross-round token.
 #[derive(Debug, PartialEq)]
@@ -4766,6 +4773,27 @@ impl Collector {
         SnapshotTime { reference, cutoffs }
     }
 
+    fn capture_snapshot_diagnostics(&self, journal: &SnapshotJournal, health: &str) -> SnapshotDiagnostics {
+        let locations: Vec<_> = self.desktop.source_locations()
+            .chain(self.core.source_location())
+            .map(Path::to_path_buf)
+            .collect();
+        let journal_source = &journal.source;
+        let mut log_desktop = self.desktop.source.clone();
+        let mut log_core = self.core.source();
+        if !self.logs_enabled || health == "disabled" {
+            log_desktop["health"] = json!("disabled");
+            log_core["health"] = json!("disabled");
+        }
+        let logs_overview = json!({
+            "enabled":self.logs_enabled,
+            "sources":[log_desktop,log_core,journal_source],
+            "retained":self.desktop.logs.len() as u64 + self.core.logs.len() as u64
+                + journal_source["retained"].as_u64().expect("journal retained count")
+        });
+        SnapshotDiagnostics { locations, logs_overview }
+    }
+
     fn snapshots(&self, health: &str, watch_health: &str, version: u64) -> Snapshots {
         let SnapshotOpening { journal, debug } = self.capture_snapshot_opening();
         let monitor_events = &journal.events;
@@ -5047,23 +5075,9 @@ impl Collector {
             account_settings, account, cloud_settings, cloud,
             public_settings, public, platform_settings, platform,
         } = self.capture_snapshot_queries();
-        let diagnostic_locations: Vec<_> = self.desktop.source_locations()
-            .chain(self.core.source_location())
-            .map(Path::to_path_buf)
-            .collect();
+        let SnapshotDiagnostics { locations: diagnostic_locations, logs_overview } =
+            self.capture_snapshot_diagnostics(&journal, health);
         let journal_source = &journal.source;
-        let mut log_desktop = self.desktop.source.clone();
-        let mut log_core = self.core.source();
-        if !self.logs_enabled || health == "disabled" {
-            log_desktop["health"] = json!("disabled");
-            log_core["health"] = json!("disabled");
-        }
-        let logs_overview = json!({
-            "enabled":self.logs_enabled,
-            "sources":[log_desktop,log_core,journal_source],
-            "retained":self.desktop.logs.len() as u64 + self.core.logs.len() as u64
-                + journal_source["retained"].as_u64().expect("journal retained count")
-        });
         let windows: [Bytes; 4] = std::array::from_fn(|index| {
             let boundary = HOURS[index].map(|hours| reference - Duration::hours(hours));
             let mut totals = BTreeMap::new();
@@ -6775,6 +6789,37 @@ mod log_tests {
             assert_eq!(snapshots.window_bytes(3).as_ref(),original);
             assert!(snapshots.rendered.lock().unwrap()[3].as_ref().unwrap().4.is_none());
         }
+    }
+
+    #[test]
+    fn snapshot_diagnostic_capture_owns_metadata_and_reuses_opening_journal() {
+        let home = tempfile::tempdir().unwrap();
+        let mut collector = Collector::new(home.path().join("monitoring"), true, None);
+        collector.desktop.logs.push(json!({"source":"codex_desktop","record_id":1}));
+        collector.core.logs.push_back(json!({"source":"codex_core","record_id":2}));
+        let journal = collector.capture_snapshot_journal();
+        let captured = collector.capture_snapshot_diagnostics(&journal, "ok");
+        let paths: Vec<_> = collector.desktop.source_locations()
+            .chain(collector.core.source_location()).map(Path::to_path_buf).collect();
+        assert_eq!(captured.locations, paths);
+        let expected = json!({"enabled":collector.logs_enabled,
+            "sources":[collector.desktop.source.clone(),collector.core.source(),journal.source],
+            "retained":2 + journal.source["retained"].as_u64().unwrap()});
+        assert_eq!(captured.logs_overview, expected);
+        // A later journal write must not leak into this pre-window metadata capture.
+        collector.journal.lock().unwrap().event("after-opening");
+        assert_eq!(collector.capture_snapshot_diagnostics(&journal, "ok").logs_overview, expected);
+        collector.desktop.logs.clear();
+        collector.core.logs.clear();
+        collector.logs_enabled = false;
+        collector.desktop.source["health"] = json!("changed");
+        assert_eq!(captured.logs_overview, expected);
+        let current = collector.capture_snapshot_diagnostics(&journal, "ok");
+        assert_eq!(current.logs_overview["enabled"], false);
+        assert_eq!(current.logs_overview["retained"], journal.source["retained"]);
+        assert_eq!(current.logs_overview["sources"][0]["health"], "disabled");
+        assert_eq!(current.logs_overview["sources"][1]["health"], "disabled");
+        assert_eq!(current.logs_overview["sources"][2], journal.source);
     }
 
     #[test]

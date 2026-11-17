@@ -1641,3 +1641,15 @@ Linux / Rust 1.100.0、原 Cargo.lock, recent_call_selection_ 篩選 3 項通過
 Linux / Rust 1.100.0 / 原 Cargo.lock 下, `cargo test --locked --manifest-path rust/service/Cargo.toml --bin local-activity-monitor snapshot_` 通過 58 筆, 355 筆未選取, 測試耗時 6.19 秒, 涵蓋既有四窗 merge / series、winner、preview、journal 與 settings / query capture 回歸
 
 此為 filtered service 測試, 未執行 HTTP 或完整套件, 未重試已延後的 Core WAL cursor 與 overflow metadata POST 測試, 不代表跨輪一致性、staging 容量、裝置或平台驗收
+
+### 同步 diagnostic metadata capture 抽取
+
+以 `5509b7f` 為基準, 原 query capture 後的 diagnostic locations / logs overview 區塊移入私有 helper, 不移動呼叫位置、變更來源順序、增加 I/O 或共同版本, source registry 保留相同的 journal source
+
+新增 ownership 測試核對兩個 buffer 的保存數、來源 metadata 與停用狀態, 後續 journal 寫入不滲入開頭已擷取的 source, 清空 buffer / 改設定也不修改舊結果, 路徑測試使用空來源, 不宣稱已驗證平台探索
+
+首次編譯發現 source registry 仍需 journal_source 借用, 已在原四窗前補回同一 journal 欄位的借用, 未增加來源讀取, 原失敗記錄保留
+
+修正後在 Linux / Rust 1.100.0 / 原 Cargo.lock 執行 filtered `snapshot_` service 測試, 59 筆通過、355 筆未選取, 耗時 6.74 秒, 包含未修改的四窗 logs overview / disabled 與 merge / series oracle, 未執行 HTTP、完整套件或延後測試
+
+此步僅整理既有同步輸入, 跨輪 candidate、mutation revision、JEV / 裝置語意與 staging 容量仍未驗收

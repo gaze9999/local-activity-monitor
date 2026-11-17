@@ -381,3 +381,5 @@ Rust `main.rs` 的 font / GPU worker 各自先發布自己的結果, 再標記 D
 `SnapshotTime` 在原 overflow 狀態整理後、thread 合併前取得 reference 與四個 cutoffs, 保留 updated / started fallback 與時間精度, 既有 SnapshotSourceSettings 與 SnapshotQueries 仍各自在原位置擷取
 
 此步不把不同讀取點合併成全域 capture, 不新增 mutation revision 或 candidate, JEV、裝置、credentials 與 render 的行為、鎖順序、查詢次數均未調整, 16 MiB payload staging 與 reducer 串接仍待完成
+
+`SnapshotDiagnostics` 沿 query capture 後、四窗序列化前的原位置整理 Desktop / Core 已觀察路徑與 logs overview, 維持來源順序、disabled 覆寫與實際 buffer 保存數, 使用開頭已取得的 journal source, 不再次讀取 journal 或診斷本文, source registry 仍借用同一 journal source
