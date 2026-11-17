@@ -1222,3 +1222,15 @@ session-core manifest 加入既有 sqlite-python feature 的完整 locked 測試
 此補查涵蓋 service / HTTP 測試不會自動執行的相依套件測試, 不代表 Windows / macOS 或 Python extension 驗收, session-scan manifest 明確停用 test / doctest, 未將零測試視為 extension 通過
 
 16 MiB 稽核仍見 selected_overflow_projections 保存完整 Projection vector 並於完成後 clone, 現有 winner / reducer prototype 未接入執行期, 跨輪來源與設定版本、原子四 window / detail 發布仍需完整設計與驗證, 本輪不新增截斷、近似統計或儲存政策
+
+### Linux 合成介面的執行限制
+
+以既有 serve_loading_fixture 的資料產生段建立 12-session 合成 home, 改由 Rust 服務啟動, 未使用真實 Codex home 或帳戶, 原始與正式檔案未改寫
+
+Playwright / Chromium 在導航前因 Unix socket Operation not permitted 結束, 一次 supported escalation 重試得到相同限制, context-agent / context-refresh flow 均未執行, 不列為 UI 通過
+
+首次 fixture wrapper 因 stdin 結束而退出, 因此當時 browser 的 connection refused 不足以證明網路隔離, 後改為有時限的 fixture, 但 supported browser 的 failed-tab 檢視與新 origin 皆遭安全政策拒絕, 未繞過、變更隔離或切換裝置
+
+有時限 fixture 已在 120 秒後正常結束, 未留下服務程序, failed browser tab 的清理亦被政策阻擋, 未取得畫面或 visual acceptance
+
+目前工具鏈僅安裝 x86_64-unknown-linux-gnu target, 此環境未找到 Windows cross compiler, 不宣稱 Windows / macOS 編譯或原生驗收
