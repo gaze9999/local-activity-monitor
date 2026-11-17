@@ -2098,3 +2098,18 @@ Production caller、同步 snapshots、detail index publication 與 fallback 未
 Linux / Rust 1.100.0 / 原 Cargo.lock, 修正 assertion 型別後 owner targeted 通過 1 項、429 項未選取, 0.01 秒, 八情境串接 targeted 通過 1 項、429 項未選取, 72.56 秒, cargo check 通過並維持 8 個既有 warnings
 
 Production snapshots 的 project summary 實作未改, 無新增查詢或外部傳輸, 同步 aggregation、設定保存、detail publication 與 fallback 不變, MCP catalog / diagnostics owners、完整 error windows、同批 detail index 與資源 / 平台驗收仍待完成, deferred fixtures 未執行
+
+### Candidate observation 開關與 retained aggregates
+
+基準 `6a1828d`, candidate SQL window 改用已擷取的 applied sqlite 開關, activity_view 存在時補上四窗 MCP history_aggregate 與 SQL aggregate, 依既有來源開關選擇 retained view 或空 Aggregate, 不改同步 snapshots
+
+- 重用 CandidateInputs 的 history_revision、applied flags 與已擷取 MCP switches, 不新增 owner counter 或複製完整 retained view
+- 八情境改經實際 refresh_activity 取得 retained view, nested fixture 明確要求 MCP / SQL retained totals 大於 0, active 情境另將 applied sqlite 停用, 候選四窗比較完整 SQL 與 MCP retained aggregate, 最後再對照原同步 snapshots
+- MCP catalog / diagnostics、來源過濾與自訂欄位仍未在本步組合, 本 fixture 維持 MCP 啟用, 不宣稱完整 MCP window 相符或 disabled MCP preview 已驗收
+- 首次兩個已啟動 targeted 編譯均遇到相同 E0716, 原因為 expected SQL aggregate 的 temporary reference 生命週期, 改成明確 empty binding, 原錯誤記錄保留, 沒有執行或重試 deferred fixtures
+
+本輪來源再核對 LAM main `5c03daf`、workbench-workspace main `ce972bd`, 與前輪相同, consumer pin 未變更
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 修正 fixture temporary 後八情境 targeted 通過 1 項、429 項未選取, 83.20 秒, 既有 retained history owner / failure retention targeted 通過 1 項、429 項未選取, 0.01 秒, cargo check 通過並維持 8 個既有 warnings
+
+無新增資料庫查詢至 candidate finalizer, 未改查詢 subject、key、資料來源、production caller、設定保存或 fallback, full diagnostics / catalogs、同批 detail index、資源與平台驗收仍待完成

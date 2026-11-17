@@ -5938,6 +5938,13 @@ mod log_tests {
             assert_eq!(selection.calls.values().map(BTreeSet::len).sum::<usize>(), 1200);
             let reference = chrono::DateTime::parse_from_rfc3339("2026-11-13T02:00:00Z").unwrap().with_timezone(&Utc);
             let cutoffs = HOURS.map(|hours| hours.map(|hours| reference - Duration::hours(hours)));
+            collector.refresh_activity(reference);
+            assert!(collector.activity_view.is_some());
+            if nested {
+                assert!(collector.activity_view.as_ref().unwrap().mcp[3].total > 0);
+                assert!(collector.activity_view.as_ref().unwrap().sql[3].total > 0);
+            }
+            collector.applied_sqlite_enabled = !active;
             let sources = [&key, &second_key];
             if active {
                 let ids: Vec<_> = selection.calls[&key].iter().cloned().collect();
@@ -6026,11 +6033,16 @@ mod log_tests {
                 assert!(!mcp_observations.is_empty(), "actual nested parser produces MCP metadata");
                 assert!(!sql_observations.is_empty(), "actual nested parser produces SQL metadata");
             }
-            let expected_observations = cutoffs.map(|cutoff| {
+            let expected_observations = std::array::from_fn::<_, 4, _>(|index| {
+                let cutoff = cutoffs[index];
                 let mut mcp = mcp::summary(&mcp_observations, cutoff, collector.activity_history_health);
-                let mut sql = sqlite::window(&sql_observations, cutoff, collector.activity_history_health);
+                let mut sql = sqlite::window(if active { &[] } else { &sql_observations }, cutoff, collector.activity_history_health);
                 apply_names(mcp["events"].as_array_mut().unwrap());
                 apply_names(sql["events"].as_array_mut().unwrap());
+                let view = collector.activity_view.as_ref().unwrap();
+                mcp["history_aggregate"] = history_view::render(&view.mcp[index], WINDOWS[index]);
+                let empty = lam_history_store::Aggregate::default();
+                sql["aggregate"] = history_view::render(if active { &empty } else { &view.sql[index] }, WINDOWS[index]);
                 json!({"mcp":mcp,"sql":sql})
             });
             let skill_names = statistics_threads.keys().map(|id| (id.to_string(), collector.thread_metadata.get(*id).map_or(Value::Null, |entry| entry["name"].clone()))).collect();
@@ -6309,6 +6321,8 @@ mod log_tests {
                 assert_eq!(window["codex"]["checks"], expected_commands[index]["checks"]);
                 assert_eq!(window["codex"]["skills"], expected_skills[index]);
                 assert_eq!(window["codex"]["projects"], json!(expected_projects));
+                assert_eq!(window["codex"]["sqlite"], expected_observations[index]["sql"]);
+                assert_eq!(window["mcp"]["history_aggregate"], expected_observations[index]["mcp"]["history_aggregate"]);
             }
             if same_thread && !nested && !active {
                 let make_ready_candidate = |collector: &Collector| selected_candidate::SelectedCandidate::new(collector, &selection,

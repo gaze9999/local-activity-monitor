@@ -445,12 +445,19 @@ impl SelectedCandidate {
         }).collect::<Vec<_>>().try_into().map_err(|_| Failure::State)?;
         let (mcp_events,sql_events): (Vec<_>,Vec<_>) = reducers.observations.finish().into_iter().partition(|event| event.get("server").is_some());
         let sql_events = sqlite::identified(sql_events);
-        let observations = cutoffs.map(|cutoff| {
+        let (mcp_enabled, sqlite_enabled) = self.inputs.as_ref().ok_or(Failure::State)?.observation_switches();
+        let observations = std::array::from_fn(|index| {
+            let cutoff = cutoffs[index];
             let mut mcp = mcp::summary(&mcp_events,cutoff,collector.activity_history_health);
-            let mut sql = sqlite::window(&sql_events,cutoff,collector.activity_history_health);
+            let mut sql = sqlite::window(if sqlite_enabled { &sql_events } else { &[] },cutoff,collector.activity_history_health);
             for event in mcp["events"].as_array_mut().into_iter().flatten()
                 .chain(sql["events"].as_array_mut().into_iter().flatten()) {
                 if let Some(name) = event["thread_id"].as_str().and_then(|id| self.names.get(id)) { event["thread_name"] = name.clone(); }
+            }
+            if let Some(view) = &collector.activity_view {
+                let empty = lam_history_store::Aggregate::default();
+                mcp["history_aggregate"] = super::history_view::render(if mcp_enabled { &view.mcp[index] } else { &empty }, super::WINDOWS[index]);
+                sql["aggregate"] = super::history_view::render(if sqlite_enabled { &view.sql[index] } else { &empty }, super::WINDOWS[index]);
             }
             json!({"mcp":mcp,"sql":sql})
         });

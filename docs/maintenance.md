@@ -401,6 +401,8 @@ Project summary 已由完成的 rows 組合, catalog 優先提供 name / icon / 
 
 project_details 的初始化、metadata 停用清除與 refresh replacement 經同一內容 revision setter, refresh 沿原 BTreeMap equality 回報 changed, 保留 roots preservation、資料讀取與失敗處理順序, candidate 完成前後核對 owner revision
 
+Candidate SQL preview / summary 使用已擷取的 applied sqlite 開關, activity_view 存在時依既有四窗 render 加入 MCP history_aggregate 與 SQL aggregate, 停用對應來源時使用空 Aggregate, 不把 preview 當 retained total, 重用現有 history / settings guards 且不新增 revision
+
 MCP catalog augmentation、完整 error windows 與正式發布仍待串接, raw failure components 不在此步套用名稱, 未因此重跑 deferred 額外 metadata-only / 無 ID 來源實驗
 
 建構 eligibility 仍用原 Option, SelectedInputs 的舊 validate_sources 亦保留 Option wrapper, 新 try_validate_sources 提供有類型的驗證結果, 不改動同步 snapshots 或原失敗 fallback

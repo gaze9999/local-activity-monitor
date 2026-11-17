@@ -181,6 +181,9 @@ impl SelectedInputs {
     pub(super) fn reducer_switches(&self) -> (bool, bool, super::CommandSwitches) {
         (self.inputs.flags.tool_events, self.inputs.flags.files, self.inputs.flags.applied_commands)
     }
+    pub(super) fn observation_switches(&self) -> (bool, bool) {
+        (self.inputs.sources.switches.mcp, self.inputs.flags.applied_sqlite)
+    }
     pub(super) fn validate(mut self, collector: &Collector, selection: &super::CallSelection,
         enabled: bool, stopped: &AtomicBool) -> Option<Self>
     {
