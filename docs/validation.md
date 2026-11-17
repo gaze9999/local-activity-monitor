@@ -2011,3 +2011,16 @@ Active payload 每頁最多 512 calls 的暫時複本, 未新增完整 Session c
 Linux / Rust 1.100.0 / 原 Cargo.lock, metadata guard targeted 通過 1 項、425 項未選取, 0.00 秒, 修正 fixture 後八情境串接 targeted 通過 1 項、425 項未選取, 67.69 秒, cargo check 通過並維持 8 個既有 warnings
 
 此 guard 只核對 metadata stamp, 不偵測 identity / size / modified 全部保留的本文變更, 最後 sweep 為依序觀察而非全域原子版本, 未宣稱完整來源競態、Windows / macOS 或資源驗收, 未執行 deferred fixtures, production caller 與 fallback 未切換
+
+
+### Candidate advance 的有類型失敗結果
+
+基準 `c3da78d`, SelectedCandidate 的 advance 由 Option 改為 Result, 完成與 Pending 仍與原狀態相同, 失敗只提供內部原因分類, 不新增 retry / fallback 規格或對外訊息
+
+- 原八情境與四窗 materialized oracles 保留, failure injections 改為精確核對 Cancelled、Disabled、InputsRejected、CheckpointChanged、PhysicalSource、StatisticsCapacity 與 InvalidBudget, 不能只因任意錯誤出現就通過
+- 新增實際 Store 驗證測試, 缺少預期 source signature 為 Changed, 將暫存資料庫路徑替換為目錄造成開啟失敗時為 Read, 隨後還原原資料庫
+- SelectedInputs::validate_sources 保留原 Option wrapper, runtime candidate 改用 try_validate_sources, 來源 signature sweep 與 owner guard 次序不變
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 新增 Store 分類測試通過 1 項、426 項未選取, 0.01 秒, 八情境串接通過 1 項、426 項未選取, 76.72 秒, 受影響的原 single-source Option wrapper 測試通過 1 項、426 項未選取, 1.01 秒, cargo check 通過且維持 8 個既有 warnings, 本輪無失敗
+
+InputsRejected 與 PhysicalSource 只指出驗證失敗邊界, 不推定為特定 mutable owner 或特定 filesystem 原因, Constructor eligibility 仍未細分, production caller、既有 fallback 與 HTTP 資料格式不變, deferred fixtures 未執行

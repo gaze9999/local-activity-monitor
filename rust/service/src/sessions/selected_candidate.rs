@@ -60,6 +60,14 @@ pub(super) enum Advance {
     Complete(CompletedCandidate),
 }
 
+// Internal boundaries, not HTTP messages or retry/fallback policy. Physical and
+// input validation can reject missing/unreadable state as well as changed state.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Failure {
+    Cancelled, Disabled, InvalidBudget, InputsRejected, PhysicalSource,
+    CheckpointRead, CheckpointChanged, InvalidProjection, StatisticsCapacity, State,
+}
+
 pub(super) struct CompletedCandidate {
     pub files: [Value; 4],
     pub series: [Value; 4],
@@ -149,48 +157,63 @@ impl SelectedCandidate {
         });
     }
 
+    fn controls(enabled: bool, stopped: &AtomicBool) -> Result<(), Failure> {
+        if stopped.load(Ordering::Acquire) { Err(Failure::Cancelled) }
+        else if !enabled { Err(Failure::Disabled) } else { Ok(()) }
+    }
+
+    fn validate_inputs(&mut self, collector: &Collector, selection: &CallSelection,
+        enabled: bool, stopped: &AtomicBool) -> Result<(), Failure> {
+        Self::controls(enabled, stopped)?;
+        let inputs = self.inputs.take().ok_or(Failure::State)?.validate(collector, selection, enabled, stopped);
+        Self::controls(enabled, stopped)?;
+        self.inputs = Some(inputs.ok_or(Failure::InputsRejected)?);
+        Ok(())
+    }
+
     // Budget bounds source-header/page operations, not elapsed time or RSS. Each
     // reader page retains its existing 512-call / 16 MiB validation limits.
     pub(super) fn advance(mut self, collector: &Collector, selection: &CallSelection,
-        enabled: bool, stopped: &AtomicBool, budget: usize) -> Option<Advance>
+        enabled: bool, stopped: &AtomicBool, budget: usize) -> Result<Advance, Failure>
     {
-        if budget == 0 { return None; }
-        self.inputs = Some(self.inputs.take()?.validate(collector, selection, enabled, stopped)?);
+        Self::controls(enabled, stopped)?;
+        if budget == 0 { return Err(Failure::InvalidBudget); }
+        self.validate_inputs(collector, selection, enabled, stopped)?;
         let budget = budget.min(16);
         match self.phase {
             Phase::Headers => {
                 for _ in 0..budget {
-                    if stopped.load(Ordering::Acquire) { return None; }
+                    Self::controls(enabled, stopped)?;
                     if self.next == self.active.len() + self.sources.len() { break; }
                     let path = if self.next < self.active.len() { self.active[self.next].clone() }
                         else { self.source_paths[self.next - self.active.len()].clone() };
-                    if !self.valid_path(collector, &path) { return None; }
+                    if !self.valid_path(collector, &path) { return Err(Failure::PhysicalSource); }
                     let (projection, partial, ids) = if self.next < self.active.len() {
                         let path = &self.active[self.next];
-                        let state = collector.files.get(path)?;
-                        let key = checkpoint::key(collector.session_root.as_deref()?, path)?;
+                        let state = collector.files.get(path).ok_or(Failure::InputsRejected)?;
+                        let key = checkpoint::key(collector.session_root.as_deref().ok_or(Failure::InputsRejected)?, path).ok_or(Failure::InputsRejected)?;
                         let selected = selection.calls.get(&key);
                         let ids: Vec<_> = state.projection.ordered_calls().into_iter()
                             .filter(|(id, _)| selected.is_some_and(|ids| ids.contains(*id)))
                             .map(|(id, _)| id.clone()).collect();
                         let mut metadata = Projection::for_id(state.projection.id.clone());
-                        metadata.merge_snapshot(&state.projection, Some(&BTreeSet::new()), &self.inputs.as_ref()?.time.cutoffs);
+                        metadata.merge_snapshot(&state.projection, Some(&BTreeSet::new()), &self.inputs.as_ref().ok_or(Failure::State)?.time.cutoffs);
                         (metadata, state.pending() || state.discard, ids)
                     } else {
                         let source = &self.sources[self.next - self.active.len()];
-                        let mut store = collector.checkpoints.snapshot_reader().ok().flatten()?;
+                        let mut store = collector.checkpoints.snapshot_reader().map_err(|_| Failure::CheckpointRead)?.ok_or(Failure::CheckpointRead)?;
                         let header = store.selected_checkpoint(&lam_history_store::ExpectedCursor {
-                            source_key:&source.key, signature:Some(&source.signature) }, &[]).ok().flatten()?;
-                        let projection = checkpoint::snapshot_projection(header, false)?;
-                        if !projection.projection.calls.is_empty() { return None; }
+                            source_key:&source.key, signature:Some(&source.signature) }, &[]).map_err(|_| Failure::CheckpointRead)?.ok_or(Failure::CheckpointChanged)?;
+                        let projection = checkpoint::snapshot_projection(header, false).ok_or(Failure::InvalidProjection)?;
+                        if !projection.projection.calls.is_empty() { return Err(Failure::InvalidProjection); }
                         let ids = selection.calls.get(&source.key).into_iter().flatten().cloned().collect();
                         (projection.projection, projection.partial, ids)
                     };
-                    let thread = projection.id.clone()?;
+                    let thread = projection.id.clone().ok_or(Failure::InvalidProjection)?;
                     let next_thread = self.thread_slots.len();
                     self.thread_slots.entry(thread.clone()).or_insert(next_thread);
                     self.metadata.entry(thread.clone()).or_insert_with(|| Projection::for_id(Some(thread.clone())))
-                        .merge_snapshot(&projection, None, &self.inputs.as_ref()?.time.cutoffs);
+                        .merge_snapshot(&projection, None, &self.inputs.as_ref().ok_or(Failure::State)?.time.cutoffs);
                     *self.partial.entry(thread.clone()).or_default() |= partial;
                     for id in ids {
                         let key = (thread.clone(), id);
@@ -198,7 +221,7 @@ impl SelectedCandidate {
                         self.slots.entry(key.clone()).or_insert_with(|| { let slot = *next; *next += 1; slot });
                         self.winners.insert(key, self.next);
                     }
-                    if !self.valid_path(collector, &path) { return None; }
+                    if !self.valid_path(collector, &path) { return Err(Failure::PhysicalSource); }
                     self.source_threads.push(thread);
                     self.next += 1;
                 }
@@ -210,7 +233,7 @@ impl SelectedCandidate {
             }
             Phase::Payload => {
                 for _ in 0..budget {
-                    if stopped.load(Ordering::Acquire) { return None; }
+                    Self::controls(enabled, stopped)?;
                     if self.next == self.active.len() + self.sources.len() {
                         self.phase = Phase::Physical;
                         break;
@@ -220,13 +243,13 @@ impl SelectedCandidate {
                     let source_index = self.active.len() + self.sources.len() - self.next - 1;
                     let path = if source_index < self.active.len() { self.active[source_index].clone() }
                         else { self.source_paths[source_index - self.active.len()].clone() };
-                    if !self.valid_path(collector, &path) { return None; }
+                    if !self.valid_path(collector, &path) { return Err(Failure::PhysicalSource); }
                     let (mut projection, complete) = if source_index < self.active.len() {
-                        let state = collector.files.get(&self.active[source_index])?;
+                        let state = collector.files.get(&self.active[source_index]).ok_or(Failure::InputsRejected)?;
                         let mut projection = Projection::for_id(state.projection.id.clone());
                         let ids: Vec<_> = self.winners.iter().filter(|(_, winner)| **winner == source_index)
                             .map(|((_, id), _)| id).skip(self.active_offset).take(512).collect();
-                        for id in &ids { projection.calls.insert((*id).clone(), state.projection.calls.get(*id)?.clone()); }
+                        for id in &ids { projection.calls.insert((*id).clone(), state.projection.calls.get(*id).ok_or(Failure::InputsRejected)?.clone()); }
                         self.active_offset += ids.len();
                         let complete = ids.len() < 512;
                         (projection, complete)
@@ -235,42 +258,42 @@ impl SelectedCandidate {
                         if self.reader.is_none() {
                             let ids = self.winners.iter().filter(|(_, winner)| **winner == source_index)
                                 .map(|((_, id), _)| id.clone()).collect();
-                            self.reader = Some(collector.checkpoints.snapshot_reader().ok().flatten()?
+                            self.reader = Some(collector.checkpoints.snapshot_reader().map_err(|_| Failure::CheckpointRead)?.ok_or(Failure::CheckpointRead)?
                                 .into_selected_checkpoint_reader(&lam_history_store::ExpectedCursor {
-                                    source_key:&source.key, signature:Some(&source.signature) }, ids).ok().flatten()?);
+                                    source_key:&source.key, signature:Some(&source.signature) }, ids).map_err(|_| Failure::CheckpointRead)?.ok_or(Failure::CheckpointChanged)?);
                         }
-                        let reader = self.reader.as_mut()?;
-                        let page = reader.next_page().ok().flatten()?;
-                        (checkpoint::snapshot_projection(page, false)?.projection, reader.is_complete())
+                        let reader = self.reader.as_mut().ok_or(Failure::State)?;
+                        let page = reader.next_page().map_err(|_| Failure::CheckpointRead)?.ok_or(Failure::CheckpointChanged)?;
+                        (checkpoint::snapshot_projection(page, false).ok_or(Failure::InvalidProjection)?.projection, reader.is_complete())
                     };
-                    let thread = projection.id.as_deref()?;
-                    if thread != self.source_threads[source_index] { return None; }
+                    let thread = projection.id.as_deref().ok_or(Failure::InvalidProjection)?;
+                    if thread != self.source_threads[source_index] { return Err(Failure::InvalidProjection); }
                     for (id, call) in &mut projection.calls {
                         let key = (thread.to_owned(), id.clone());
-                        if self.winners.get(&key) != Some(&source_index) { return None; }
-                        if self.ordered { call.presentation_sequence = *self.slots.get(&key)?; }
+                        if self.winners.get(&key) != Some(&source_index) { return Err(Failure::InvalidProjection); }
+                        if self.ordered { call.presentation_sequence = *self.slots.get(&key).ok_or(Failure::State)?; }
                     }
-                    let reducers = self.reducers.as_mut()?;
-                    let time = &self.inputs.as_ref()?.time;
+                    let reducers = self.reducers.as_mut().ok_or(Failure::State)?;
+                    let time = &self.inputs.as_ref().ok_or(Failure::State)?.time;
                     for (index, cutoff) in time.cutoffs.iter().copied().enumerate() {
                         if self.ordered {
                             reducers.files[index].ordered_thread(self.thread_slots[thread]);
                             reducers.commands[index].ordered_thread(self.thread_slots[thread]);
                         }
-                        reducers.files[index].observe(&projection, cutoff, self.inputs.as_ref()?.reducer_switches().1, None);
+                        reducers.files[index].observe(&projection, cutoff, self.inputs.as_ref().ok_or(Failure::State)?.reducer_switches().1, None);
                         reducers.series[index].observe(&projection, cutoff);
                         for (id, call) in &projection.calls {
                             reducers.statistics[index].observe(thread, call);
                             reducers.commands[index].observe(thread, id, call);
                             reducers.skills[index].observe(thread, Some(thread), id, call);
-                            reducers.rows[index].get_mut(thread)?.observe(id, call, &mut reducers.totals[index], &mut reducers.nested[index]);
+                            reducers.rows[index].get_mut(thread).ok_or(Failure::State)?.observe(id, call, &mut reducers.totals[index], &mut reducers.nested[index]);
                         }
                     }
                     for (id, call) in &projection.calls {
                         reducers.failures.observe(thread, id, call);
                         reducers.observations.extend(call.activities(thread, id));
                     }
-                    if !self.valid_path(collector, &path) { return None; }
+                    if !self.valid_path(collector, &path) { return Err(Failure::PhysicalSource); }
                     if complete { self.reader = None; self.active_offset = 0; self.next += 1; }
                 }
             }
@@ -281,7 +304,8 @@ impl SelectedCandidate {
                     None => self.physical.keys().take(budget).cloned().collect(),
                 };
                 for path in paths {
-                    if stopped.load(Ordering::Acquire) || !self.valid_path(collector, &path) { return None; }
+                    Self::controls(enabled, stopped)?;
+                    if !self.valid_path(collector, &path) { return Err(Failure::PhysicalSource); }
                     self.physical_after = Some(path);
                 }
                 if self.physical.last_key_value().is_none_or(|(path, _)| self.physical_after.as_ref() == Some(path)) {
@@ -289,27 +313,34 @@ impl SelectedCandidate {
                 }
             }
             Phase::Validate => {
-                let (inputs, complete) = self.inputs.take()?.validate_sources(collector, selection, enabled, stopped, budget)?;
+                let (inputs, complete) = self.inputs.take().ok_or(Failure::State)?.try_validate_sources(collector, selection, enabled, stopped, budget).map_err(|error| {
+                    use super::candidate_inputs::SourceValidationError as Error;
+                    match error {
+                        Error::Inputs => if !enabled { Failure::Disabled } else { Failure::InputsRejected },
+                        Error::Read => Failure::CheckpointRead, Error::Changed => Failure::CheckpointChanged,
+                        Error::InvalidBudget => Failure::InvalidBudget, Error::Cancelled => Failure::Cancelled,
+                    }
+                })?;
                 self.inputs = Some(inputs);
                 if complete {
                     let completed = self.finish(collector)?;
-                    self.inputs.take()?.validate(collector, selection, enabled, stopped)?;
-                    return Some(Advance::Complete(completed));
+                    self.validate_inputs(collector, selection, enabled, stopped)?;
+                    return Ok(Advance::Complete(completed));
                 }
             }
         }
-        self.inputs = Some(self.inputs.take()?.validate(collector, selection, enabled, stopped)?);
-        Some(Advance::Pending(self))
+        self.validate_inputs(collector, selection, enabled, stopped)?;
+        Ok(Advance::Pending(self))
     }
 
-    fn finish(&mut self, collector: &Collector) -> Option<CompletedCandidate> {
-        let reducers = self.reducers.take()?;
-        let reference = self.inputs.as_ref()?.time.reference;
-        let cutoffs = self.inputs.as_ref()?.time.cutoffs;
+    fn finish(&mut self, collector: &Collector) -> Result<CompletedCandidate, Failure> {
+        let reducers = self.reducers.take().ok_or(Failure::State)?;
+        let reference = self.inputs.as_ref().ok_or(Failure::State)?.time.reference;
+        let cutoffs = self.inputs.as_ref().ok_or(Failure::State)?.time.cutoffs;
         let files = reducers.files.map(|summary| { let (events,total,operations) = summary.finish(); json!({"events":events,"total":total,"operations":operations}) });
         let series = reducers.series.map(|series| { let (activity,tools) = series.finish(); json!({"activity":activity,"tools":tools}) });
-        let statistics = reducers.statistics.into_iter().map(|summary| summary.finish()).collect::<Option<Vec<_>>>()?.try_into().ok()?;
-        let switches = self.inputs.as_ref()?.reducer_switches().2;
+        let statistics = reducers.statistics.into_iter().map(|summary| summary.finish()).collect::<Option<Vec<_>>>().ok_or(Failure::StatisticsCapacity)?.try_into().map_err(|_| Failure::State)?;
+        let switches = self.inputs.as_ref().ok_or(Failure::State)?.reducer_switches().2;
         let commands = reducers.commands.map(|summary| {
             let (mut git,mut checks) = summary.finish();
             if !switches.git { git = json!({"events":[],"operations":{},"total":0}); }
@@ -323,13 +354,13 @@ impl SelectedCandidate {
                 (thread,row)
             }).collect();
             json!({"rows":rows,"totals":totals,"nested_totals":nested_totals})
-        }).collect::<Vec<_>>().try_into().ok()?;
+        }).collect::<Vec<_>>().try_into().map_err(|_| Failure::State)?;
         let (mcp_events,sql_events): (Vec<_>,Vec<_>) = reducers.observations.finish().into_iter().partition(|event| event.get("server").is_some());
         let sql_events = sqlite::identified(sql_events);
         let observations = cutoffs.map(|cutoff| json!({"mcp":mcp::summary(&mcp_events,cutoff,collector.activity_history_health),
             "sql":sqlite::window(&sql_events,cutoff,collector.activity_history_health)}));
         let failures: Vec<_> = reducers.failures.finish().into_iter().map(|(start,event)| json!({"start":start.map(project::stamp),"event":event})).collect();
-        Some(CompletedCandidate { files,series,statistics,commands,skills,rows,observations,failures:json!(failures) })
+        Ok(CompletedCandidate { files,series,statistics,commands,skills,rows,observations,failures:json!(failures) })
     }
 }
 

@@ -5814,6 +5814,7 @@ mod log_tests {
 
     #[test]
     fn snapshot_file_candidate_resolves_two_source_winners_before_paging() {
+        use selected_candidate::Failure;
         for (same_thread, nested, active) in [(true, false, false), (false, false, false), (true, true, false), (false, true, false),
             (true, false, true), (false, false, true), (true, true, true), (false, true, true)] {
             let fixture_tool = if nested { "exec" } else { "fixture_tool" };
@@ -6063,12 +6064,12 @@ mod log_tests {
             }
             // Process winner sources in reverse to show reduction is independent of
             // page arrival once canonical-fallback winners have been fixed.
-            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool, statistics_units: usize| -> Option<([Value;4], [Value;4], [Value;4], [Value;4], [Value;4], [Value;4], [Value;4], Value)> {
+            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool, statistics_units: usize| -> Result<([Value;4], [Value;4], [Value;4], [Value;4], [Value;4], [Value;4], [Value;4], Value), Failure> {
                 use selected_candidate::{Advance, SelectedCandidate, Source};
                 let mut candidate = SelectedCandidate::new(&collector, &selection,
                     SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
                         Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
-                    skill_names.clone(), ordered, statistics_units, 10_000, true, &stopped)?;
+                    skill_names.clone(), ordered, statistics_units, 10_000, true, &stopped).ok_or(Failure::InputsRejected)?;
                 let mut validation_rounds = 0;
                 let mut injected = false;
                 for _ in 0..32 {
@@ -6087,7 +6088,7 @@ mod log_tests {
                         Advance::Pending(next) => candidate = next,
                         Advance::Complete(completed) => {
                             assert_eq!(validation_rounds, 2, "one-source final validation rounds");
-                            return Some((completed.files, completed.series, completed.statistics, completed.commands,
+                            return Ok((completed.files, completed.series, completed.statistics, completed.commands,
                                 completed.skills, completed.rows, completed.observations, completed.failures));
                         }
                     }
@@ -6103,8 +6104,8 @@ mod log_tests {
             assert_eq!(result.5, rows);
             assert_eq!(result.6, expected_observations);
             assert_eq!(result.7, tool_errors);
-            assert!(reduce(&mut store, false, false, 0).is_none(), "statistics overflow rejects the whole candidate");
-            assert!(reduce(&mut store, true, false, 10_000).is_none(), "a source changed after its own validation");
+            assert_eq!(reduce(&mut store, false, false, 0).err(), Some(Failure::StatisticsCapacity));
+            assert_eq!(reduce(&mut store, true, false, 10_000).err(), Some(Failure::CheckpointChanged));
             assert_eq!(result, (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone(), expected_skills.clone(), rows.clone(), expected_observations.clone(), tool_errors.clone()), "previously completed output is immutable");
             store.save_checkpoints(std::slice::from_ref(&second_cursor), &second_calls, &[]).unwrap();
             assert_eq!(reduce(&mut store, false, false, 10_000).unwrap(), (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone(), expected_skills.clone(), rows.clone(), expected_observations.clone(), tool_errors.clone()));
@@ -6152,7 +6153,7 @@ mod log_tests {
                     };
                 }
                 stopped.store(true, Ordering::Release);
-                assert!(candidate.advance(&collector, &selection, true, &stopped, 1).is_none());
+                assert_eq!(candidate.advance(&collector, &selection, true, &stopped, 1).err(), Some(Failure::Cancelled));
                 stopped.store(false, Ordering::Release);
             }
             let mut candidate = selected_candidate::SelectedCandidate::new(&collector, &selection,
@@ -6168,13 +6169,13 @@ mod log_tests {
             }
             assert!(candidate.awaiting_validation());
             stopped.store(true, Ordering::Release);
-            assert!(candidate.advance(&collector, &selection, true, &stopped, 1).is_none());
+            assert_eq!(candidate.advance(&collector, &selection, true, &stopped, 1).err(), Some(Failure::Cancelled));
             stopped.store(false, Ordering::Release);
             let candidate = selected_candidate::SelectedCandidate::new(&collector, &selection,
                 SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
                     selected_candidate::Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
                 skill_names.clone(), false, 10_000, 10_000, true, &stopped).unwrap();
-            assert!(candidate.advance(&collector, &selection, false, &stopped, 1).is_none());
+            assert_eq!(candidate.advance(&collector, &selection, false, &stopped, 1).err(), Some(Failure::Disabled));
             if active && !same_thread {
                 let mut candidate = selected_candidate::SelectedCandidate::new(&collector, &selection,
                     SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
@@ -6189,7 +6190,7 @@ mod log_tests {
                 }
                 assert!(candidate.active_payload_in_progress());
                 stopped.store(true, Ordering::Release);
-                assert!(candidate.advance(&collector, &selection, true, &stopped, 1).is_none());
+                assert_eq!(candidate.advance(&collector, &selection, true, &stopped, 1).err(), Some(Failure::Cancelled));
                 stopped.store(false, Ordering::Release);
             }
             if active {
@@ -6208,7 +6209,7 @@ mod log_tests {
                 let state = collector.files.get_mut(&path).unwrap();
                 let event = json!({"timestamp":"2026-11-13T01:59:00Z","type":"event_msg","payload":{"type":"task_complete"}});
                 state.projection.consume(event.to_string().as_bytes(), 0, true, true, &BTreeMap::new(), McpSwitches::default(), true, true, CommandSwitches::default());
-                assert!(candidate.advance(&collector, &selection, true, &stopped, 1).is_none());
+                assert_eq!(candidate.advance(&collector, &selection, true, &stopped, 1).err(), Some(Failure::InputsRejected));
             }
             collector.updated = Some(reference);
             let baseline = collector.snapshots("ok", "ok", 1);
@@ -6227,6 +6228,7 @@ mod log_tests {
                 SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
                     selected_candidate::Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
                 skill_names.clone(), false, 10_000, 10_000, true, &stopped).unwrap();
+            assert_eq!(make().advance(&collector, &selection, true, &stopped, 0).err(), Some(Failure::InvalidBudget));
             let initial = make();
             let mut candidate = make();
             for _ in 0..32 {
@@ -6238,8 +6240,8 @@ mod log_tests {
             }
             assert!(candidate.awaiting_physical_validation());
             std::fs::write(&path, b"changed JSONL fixture\n").unwrap();
-            assert!(initial.advance(&collector, &selection, true, &stopped, 1).is_none());
-            assert!(candidate.advance(&collector, &selection, true, &stopped, 1).is_none());
+            assert_eq!(initial.advance(&collector, &selection, true, &stopped, 1).err(), Some(Failure::PhysicalSource));
+            assert_eq!(candidate.advance(&collector, &selection, true, &stopped, 1).err(), Some(Failure::PhysicalSource));
         }
     }
 

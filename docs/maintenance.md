@@ -354,7 +354,7 @@ ToolErrorSummary 已由 resolved winners 擷取 failure_event 的 owned metadata
 
 ### Runtime SelectedCandidate 的已實作範圍
 
-selected_candidate.rs 現在擁有原 test-only orchestration 的 Headers → Payload → Physical → Validate 狀態, Advance 只回傳 Pending(state) 或 Complete(components), 任一失敗 / 取消回傳 None 並丟棄 reader、plan 與 reducers, 正式 snapshot worker 尚未呼叫此入口
+selected_candidate.rs 現在擁有原 test-only orchestration 的 Headers → Payload → Physical → Validate 狀態, advance 現在以 Result 回傳 Pending(state)、Complete(components) 或 typed Failure, 失敗仍丟棄 reader、plan 與 reducers, 正式 snapshot worker 尚未呼叫此入口
 
 | 階段 | 行為與限制 |
 | --- | --- |
@@ -371,6 +371,18 @@ selected_candidate.rs 現在擁有原 test-only orchestration 的 Headers → Pa
 Active header 依 ordered_calls 建立第一個 insertion slot 並合併 metadata / partial, checkpoint 仍可覆寫同 thread / call winner, active payload 每批最多複製 512 個勝出 calls, 處理後釋放, 不在輪次間保留借用或完整 Session clone, 頁前後與完成後沿既有 owner revision guard 驗證
 
 Active 批次限制的是 call 數, 不是 encoded bytes / allocation / RSS, source 內排序與 metadata 整理仍同步, 不宣稱資源上限驗收, overflow Session map 非空與無 ID header 仍拒絕而非略過, 額外 metadata-only / 無 ID 來源、完整 logs / error windows、catalog / names augmentation 與 production 發布仍待完成, deferred fixtures 未因此重跑
+
+候選 advance 的失敗類型只用於內部協調, 不決定 retry / fallback 或新增 HTTP 欄位
+
+| Failure | 實際識別邊界 |
+| --- | --- |
+| Cancelled / Disabled / InvalidBudget | 明確的停止旗標、enabled=false 或零 operation budget |
+| InputsRejected | 現有 owner / selection guard 拒絕, 包含不能驗證輸入的情況, 不猜測哪個 mutable owner 改變 |
+| PhysicalSource | 實體 metadata guard 拒絕, 可能為變更、缺少來源或讀取失敗 |
+| CheckpointRead / CheckpointChanged | Store / reader 回傳錯誤或不可開啟, 與預期 signature / cursor 缺少或不符分開, reader 錯誤不進一步推定為 I/O 或 payload 問題 |
+| InvalidProjection / StatisticsCapacity / State | 投影 / winner 不相容、精確 statistics 超出 logical budget、內部必要狀態缺少 |
+
+建構 eligibility 仍用原 Option, SelectedInputs 的舊 validate_sources 亦保留 Option wrapper, 新 try_validate_sources 提供有類型的驗證結果, 不改動同步 snapshots 或原失敗 fallback
 
 來源路徑只從既有 active / session_paths / duplicate_session_paths 解析, 以 checkpoint key 核對, 缺少已觀察路徑、fingerprint 或 active 與 membership stamp 不同時拒絕, 不重新 discovery 或猜測來源位置
 

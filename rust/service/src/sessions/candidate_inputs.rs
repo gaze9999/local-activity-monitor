@@ -157,6 +157,9 @@ pub(super) struct SelectedInputs {
     validated_after: Option<String>,
     sweep_complete: bool,
 }
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum SourceValidationError { Inputs, Read, Changed, InvalidBudget, Cancelled }
+
 #[allow(dead_code)]
 impl SelectedInputs {
     pub(super) fn capture(collector: &Collector, selection: &super::CallSelection,
@@ -190,26 +193,33 @@ impl SelectedInputs {
     }
     // Each call opens a fresh Store and retains no SQLite transaction across
     // rounds. Completion means a sequential sweep, not a database-wide snapshot.
-    pub(super) fn validate_sources(mut self, collector: &Collector, selection: &super::CallSelection,
+    pub(super) fn validate_sources(self, collector: &Collector, selection: &super::CallSelection,
         enabled: bool, stopped: &AtomicBool, limit: usize) -> Option<(Self, bool)>
     {
+        self.try_validate_sources(collector, selection, enabled, stopped, limit).ok()
+    }
+    pub(super) fn try_validate_sources(mut self, collector: &Collector, selection: &super::CallSelection,
+        enabled: bool, stopped: &AtomicBool, limit: usize) -> Result<(Self, bool), SourceValidationError>
+    {
         use std::ops::Bound::{Excluded, Unbounded};
-        if limit == 0 { return None; }
-        self = self.validate(collector, selection, enabled, stopped)?;
-        let store = collector.checkpoints.snapshot_reader().ok().flatten()?;
+        if limit == 0 { return Err(SourceValidationError::InvalidBudget); }
+        self = self.validate(collector, selection, enabled, stopped).ok_or_else(|| if stopped.load(Ordering::Acquire) { SourceValidationError::Cancelled } else { SourceValidationError::Inputs })?;
+        let store = collector.checkpoints.snapshot_reader().map_err(|_| SourceValidationError::Read)?.ok_or(SourceValidationError::Read)?;
         if self.sweep_complete { self.validated_after = Some(String::new()); }
         let after = self.validated_after.clone().unwrap_or_default();
         for (key, signature) in self.signatures.range((Excluded(after), Unbounded)).take(limit.min(64)) {
-            if stopped.load(Ordering::Acquire)
-                || store.checkpoint_signature(key).ok().flatten().as_ref() != Some(signature) { return None; }
+            if stopped.load(Ordering::Acquire) { return Err(SourceValidationError::Cancelled); }
+            if store.checkpoint_signature(key).map_err(|_| SourceValidationError::Read)?.as_ref() != Some(signature) {
+                return Err(SourceValidationError::Changed);
+            }
             self.validated_after = Some(key.clone());
         }
         let complete = self.signatures.last_key_value().is_none_or(|(key, _)| self.validated_after.as_ref() == Some(key));
         self.sweep_complete = complete;
         // The empty sweep is also closed to additional sources.
         if self.validated_after.is_none() { self.validated_after = Some(String::new()); }
-        self = self.validate(collector, selection, enabled, stopped)?;
-        Some((self, complete))
+        self = self.validate(collector, selection, enabled, stopped).ok_or_else(|| if stopped.load(Ordering::Acquire) { SourceValidationError::Cancelled } else { SourceValidationError::Inputs })?;
+        Ok((self, complete))
     }
 }
 
@@ -233,6 +243,24 @@ mod tests {
         }
         assert_eq!(collector.files[&path].projection.calls.len(), 1);
         (temporary, collector, path)
+    }
+
+    #[test]
+    fn source_validation_reports_read_failure_and_missing_signature_separately() {
+        let (temporary, collector, _) = fixture();
+        let stopped = AtomicBool::new(false);
+        let selection = super::super::CallSelection { calls:BTreeMap::new(), complete:true };
+        let make = || SelectedInputs::capture(&collector, &selection, collector.capture_snapshot_time(), true, &stopped)
+            .unwrap().source("missing-source".into(), "expected-signature".into()).unwrap();
+        assert_eq!(make().try_validate_sources(&collector, &selection, true, &stopped, 1).err(), Some(SourceValidationError::Changed));
+        let directory = temporary.path().join("monitoring");
+        let database = directory.join(lam_history_store::FILE_NAME);
+        let saved = directory.join("saved.sqlite3");
+        std::fs::rename(&database, &saved).unwrap();
+        std::fs::create_dir(&database).unwrap();
+        assert_eq!(make().try_validate_sources(&collector, &selection, true, &stopped, 1).err(), Some(SourceValidationError::Read));
+        std::fs::remove_dir(&database).unwrap();
+        std::fs::rename(&saved, &database).unwrap();
     }
 
     #[test]
