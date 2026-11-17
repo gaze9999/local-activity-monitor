@@ -2240,3 +2240,14 @@ LAM main `5c03daf`、workbench-workspace main `ce972bd` 再核對未變, consume
 Linux / Rust 1.100.0 / 原 Cargo.lock, `cargo test --manifest-path rust/service/Cargo.toml --locked --offline --test http model_api_settings_transition_preserves_four_window_source_identities -- --exact` 通過 1 項、226 項未選取, 0.77 秒, 維持 8 個既有 warnings, git diff --check 通過
 
 LAM main `5c03daf` 與 workspace main `383fbb9` 再核對未變, 後者相較前次只有 WBUI AI 導覽更新, consumer pin 不變, 未執行 session-error 失敗 fixture、完整套件或 candidate finalizer
+
+### Skill 文件副檔名的 Unicode 大小寫
+
+基準 `540260f`, 依 LAM main `5c03daf` 的 `CodexCollector.skill_detail` 對齊副檔名 `lower()`, Rust 改用 Unicode lowercase, 不改文件名稱排序或其他路徑規則
+
+- 修正前合成 `secret.KEY` 會進入 inventory, 暴露該檔案的 metadata, 因非 readable 文件而未輸出本文, 新 regression 先重現此差異再通過
+- 修正後 `.KEY` 與 `.KEY` / `.PEM` 一樣排除, 不把 `.κey` / `.İey` 視為 `.key`, `.KEY.txt` 仍為文字文件, `.MARKDOWN` 依來源投影為 markdown 並可按需閱讀
+- 實際 Python collector 的合成來源輸出已逐項核對, Rust render 測試同時檢查 inventory、format、readable、所選文件與來源檔案未改寫
+- `/api/codex/skill` 仍使用已觀察 skill 與 thread / call / file 選取, 不新增查詢或擴大來源目錄, 保留原遮蔽、symlink / identity、文件容量與 inventory 上限
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, `skill_suffixes_follow_unicode_lowercase_for_inventory_and_documents` 通過 1 項、437 項未選取, 0.05 秒, 既有 HTTP `skill_document_details_require_observed_source_and_filter_sensitive_files` 通過 1 項、226 項未選取, 0.25 秒, git diff --check 通過, 未執行完整套件或實際平台檔案系統驗收

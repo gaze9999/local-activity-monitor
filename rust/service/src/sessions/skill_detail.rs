@@ -32,7 +32,7 @@ fn describe(root: &Path, path: &Path) -> Option<Value> {
         .extension()
         .and_then(|v| v.to_str())
         .unwrap_or("")
-        .to_ascii_lowercase();
+        .to_lowercase();
     if ["auth.json", "credentials.json", "secrets.json"].contains(&lower.as_str())
         || ["pem", "key", "pfx", "p12"].contains(&suffix.as_str())
     {
@@ -165,4 +165,52 @@ pub(crate) fn render(
     Some(
         json!({"skill":skill,"root":root.to_string_lossy(),"files":inventory,"files_truncated":truncated,"documents":documents}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skill_suffixes_follow_unicode_lowercase_for_inventory_and_documents() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let path = root.join("SKILL.md");
+        fs::write(&path, "fixture skill").unwrap();
+        let candidate = lam_session_core::SkillRead {
+            name: "fixture".into(),
+            path: path.to_string_lossy().into_owned(),
+            workdir: None,
+        };
+        for (name, included, readable, format) in [
+            ("secret.KEY", false, false, "key"),
+            ("secret.KEY", false, false, "key"),
+            ("secret.PEM", false, false, "pem"),
+            ("secret.κey", true, false, "κey"),
+            ("secret.İey", true, false, "i\u{307}ey"),
+            ("secret.KEY.txt", true, true, "txt"),
+            ("guide.MARKDOWN", true, true, "markdown"),
+        ] {
+            let path = root.join(name);
+            fs::write(&path, "fixture content").unwrap();
+            let detail = render("fixture", &candidate, Some(name)).unwrap();
+            let file = detail["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["name"] == name);
+            assert_eq!(file.is_some(), included, "{name}");
+            if let Some(file) = file {
+                assert_eq!(file["readable"], readable, "{name}");
+                assert_eq!(file["format"], format, "{name}");
+            }
+            let documents = detail["documents"].as_array().unwrap();
+            assert_eq!(documents.len(), usize::from(included && readable), "{name}");
+            if included && readable {
+                assert_eq!(documents[0]["text"], "fixture content");
+                assert_eq!(documents[0]["relative_path"], name);
+            }
+            assert_eq!(fs::read_to_string(path).unwrap(), "fixture content");
+        }
+    }
 }
