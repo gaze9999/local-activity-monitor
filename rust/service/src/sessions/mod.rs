@@ -53,6 +53,10 @@ use std::time::SystemTime;
 use tokio::sync::watch;
 use walkdir::WalkDir;
 
+fn uptime_seconds(elapsed: std::time::Duration) -> u64 {
+    elapsed.as_secs_f64().round_ties_even() as u64
+}
+
 const SOURCE_LOCATION_LIMIT: usize = 20;
 const FILE_LIMIT: usize = 5000;
 const WALK_LIMIT: usize = 40_000;
@@ -207,7 +211,7 @@ impl Snapshots {
     }
 
     fn render(&self, window: usize, event_requested: bool) -> (Bytes, Option<Bytes>) {
-        let seconds = self.started_instant.elapsed().as_secs_f64().round() as u64;
+        let seconds = uptime_seconds(self.started_instant.elapsed());
         let traffic = *self
             .traffic
             .lock()
@@ -5223,7 +5227,7 @@ impl Collector {
                 "activity":activity,
                 "backend_revision":self.backend_revision,
                 "frontend_revision":self.frontend_revision,
-                "monitor":{"version":env!("CARGO_PKG_VERSION"),"pid":std::process::id(),"health":if self.refreshes == 0 {"starting"} else {"ok"},"refreshes":self.refreshes,"uptime_seconds":self.started_instant.elapsed().as_secs_f64().round() as u64},
+                "monitor":{"version":env!("CARGO_PKG_VERSION"),"pid":std::process::id(),"health":if self.refreshes == 0 {"starting"} else {"ok"},"refreshes":self.refreshes,"uptime_seconds":uptime_seconds(self.started_instant.elapsed())},
                 "model_api":model_api,
                 "errors":errors[index].0,
                 "mcp":mcp,
@@ -5615,6 +5619,18 @@ impl Drop for Collector {
 #[cfg(test)]
 mod log_tests {
     use super::*;
+
+    #[test]
+    fn uptime_seconds_matches_python_half_even_and_adjacent_boundaries() {
+        for (nanos, expected) in [
+            (0, 0), (499_999_999, 0), (500_000_000, 0), (500_000_001, 1),
+            (1_499_999_999, 1), (1_500_000_000, 2), (1_500_000_001, 2),
+            (2_499_999_999, 2), (2_500_000_000, 2), (2_500_000_001, 3),
+            (3_500_000_000, 4), (10_500_000_000, 10),
+        ] {
+            assert_eq!(super::uptime_seconds(std::time::Duration::from_nanos(nanos)), expected, "{nanos}");
+        }
+    }
 
     #[test]
     fn tool_failure_order_preserves_live_insertion_and_checkpoint_restore_order() {

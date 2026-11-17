@@ -1527,3 +1527,13 @@ Linux / Rust 1.100.0、原 Cargo.lock, performance_debug 模組 9 項通過 (0.0
 Linux / Rust 1.100.0、原 Cargo.lock, performance_debug 模組 10 項通過 (0.02 秒), serial HTTP debug_ 篩選 7 項通過 (0.54 秒), diff 檢查通過
 
 僅在 debug 記錄產生時轉換這兩個計時欄位, 不修改共用 process_metrics 原始樣本、既有匯入記錄或輪替規則, `/api/snapshot` 的 monitor.debug.records 與對應 JSONL 沿用原來源和請求次數, 完整套件未重跑
+
+### Uptime 秒數的中點取偶
+
+以 `a042f21` 為基底, LAM main `5c03daf` 與 workbench-workspace main `4616074` 核對未變, Python MonitorState.snapshot 對 uptime 使用 round, Rust 初始快照與即時 render 原先使用中點遠離零的 round, 在恰好 0.5 秒時回傳 1 而非 0
+
+受控 clock 執行實際 Python snapshot 的 12 組資料, 涵蓋零、數個半秒及相鄰 1 ns 邊界, Rust 新測試先重現差異, 兩個原有讀取點改為共用 Duration 到中點取偶秒數的轉換, 不變更 Instant 起點或取樣次數
+
+Linux / Rust 1.100.0、原 Cargo.lock, focused uptime 測試通過, HTTP idle_snapshot_and_new_stream_report_current_uptime 通過 (17.00 秒), 確認無新 collection 時 snapshot 與新 SSE stream 仍回報目前 uptime, diff 檢查通過
+
+影響 monitor.uptime_seconds 與其原有整秒 render cache key 的中點選擇, 不修改 cache 欄位、traffic / collection revision 或裝置發布, 未重跑完整套件
