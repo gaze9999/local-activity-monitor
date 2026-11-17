@@ -1631,3 +1631,13 @@ Linux / Rust 1.100.0、原 Cargo.lock, selected_details_ 篩選 2 項通過 (2.8
 Linux / Rust 1.100.0、原 Cargo.lock, recent_call_selection_ 篩選 3 項通過 (2.68 秒), 包含既有 100,000 筆以上同時間 header 的續讀與 generation-only discovery 保留進度, diff 檢查通過
 
 正常 SQL、查詢順序 / 次數、排序、top-K、epoch / input hash 與成功結果不變, 未執行延後 HTTP 或完整套件, 未新增 candidate 架構
+
+### 同步 opening / time capture 抽取
+
+以 `c8d83a1` 為基準, 保留原 journal → debug 與 overflow 後 reference / cutoffs 的讀取位置, 只抽取私有具名結果與 helper, settings / query capture 不移動, 不新增共同版本或 reducer
+
+新增針對性測試核對原 journal / debug 結果、started fallback、奈秒 reference 與四窗 cutoff, 並確認後續 journal / updated 變更不改寫已擷取值, 既有四窗 materialized 行為測試與 oracle 未修改
+
+Linux / Rust 1.100.0 / 原 Cargo.lock 下, `cargo test --locked --manifest-path rust/service/Cargo.toml --bin local-activity-monitor snapshot_` 通過 58 筆, 355 筆未選取, 測試耗時 6.19 秒, 涵蓋既有四窗 merge / series、winner、preview、journal 與 settings / query capture 回歸
+
+此為 filtered service 測試, 未執行 HTTP 或完整套件, 未重試已延後的 Core WAL cursor 與 overflow metadata POST 測試, 不代表跨輪一致性、staging 容量、裝置或平台驗收

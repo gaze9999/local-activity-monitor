@@ -373,3 +373,11 @@ Rust `main.rs` 的 font / GPU worker 各自先發布自己的結果, 再標記 D
 因此單純將裝置讀取搬到四窗前, 只能減少同批 window 間的差異, 不能稱為恢復 Python 的 response-time baseline, 也不能將共同 ready_at 當作兩個結果原子發布的證據
 
 本輪保留 runtime, 後續如要對齊 Python, 須先決定裝置結果的共同發布單位、response-time 讀取與 render cache 失效條件, 同時保留初始化完成、只設定第一次完成時間、worker 通知與刻意即時 telemetry, 不能藉批次 capture 默默延後可見性, 現有 DeviceCompletion 單元測試與 idle uptime HTTP 測試不代表此整體語意已驗收
+
+### 同步 capture 介面的保留邊界
+
+`SnapshotOpening` 僅整理原 snapshots 開頭依序進行的 journal 與 debug 讀取, journal lock 在 debug lock 前釋放, debug 的檔案 metadata 讀取仍在原位置, 不形成兩者共同版本
+
+`SnapshotTime` 在原 overflow 狀態整理後、thread 合併前取得 reference 與四個 cutoffs, 保留 updated / started fallback 與時間精度, 既有 SnapshotSourceSettings 與 SnapshotQueries 仍各自在原位置擷取
+
+此步不把不同讀取點合併成全域 capture, 不新增 mutation revision 或 candidate, JEV、裝置、credentials 與 render 的行為、鎖順序、查詢次數均未調整, 16 MiB payload staging 與 reducer 串接仍待完成

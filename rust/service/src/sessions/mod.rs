@@ -1951,6 +1951,19 @@ struct SnapshotJournal {
     source: Value,
 }
 
+// Sequential opening reads, not a joint journal/debug version. Keep this capture
+// before selection I/O; settings and queries retain their later read boundaries.
+struct SnapshotOpening {
+    journal: SnapshotJournal,
+    debug: Value,
+}
+
+#[derive(Debug, PartialEq)]
+struct SnapshotTime {
+    reference: chrono::DateTime<Utc>,
+    cutoffs: [Option<chrono::DateTime<Utc>>; 4],
+}
+
 // Owned query values captured at the existing synchronous snapshot boundary.
 // Each settings/result pair is read together, not an eight-source or cross-round token.
 #[derive(Debug, PartialEq)]
@@ -4737,14 +4750,25 @@ impl Collector {
         }
     }
 
-    fn snapshots(&self, health: &str, watch_health: &str, version: u64) -> Snapshots {
+    fn capture_snapshot_opening(&self) -> SnapshotOpening {
         let journal = self.capture_snapshot_journal();
-        let monitor_events = &journal.events;
         let debug = self
             .debug
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .snapshot();
+        SnapshotOpening { journal, debug }
+    }
+
+    fn capture_snapshot_time(&self) -> SnapshotTime {
+        let reference = self.updated.unwrap_or(self.started);
+        let cutoffs = HOURS.map(|hours| hours.map(|hours| reference - Duration::hours(hours)));
+        SnapshotTime { reference, cutoffs }
+    }
+
+    fn snapshots(&self, health: &str, watch_health: &str, version: u64) -> Snapshots {
+        let SnapshotOpening { journal, debug } = self.capture_snapshot_opening();
+        let monitor_events = &journal.events;
         let active_calls = self
             .files
             .values()
@@ -4782,8 +4806,7 @@ impl Collector {
             .filter(|item| item.calls_incomplete)
             .filter_map(|item| item.projection.id.as_deref())
             .collect();
-        let reference = self.updated.unwrap_or(self.started);
-        let cutoffs = HOURS.map(|hours| hours.map(|hours| reference - Duration::hours(hours)));
+        let SnapshotTime { reference, cutoffs } = self.capture_snapshot_time();
         let mut threads = BTreeMap::<&str, (Projection, bool)>::new();
         for (path, state) in self.ordered_working_sources().into_iter().filter(|_| health != "disabled") {
             if let Some(id) = state.projection.id.as_deref() {
@@ -5962,6 +5985,34 @@ mod log_tests {
         assert!(!projection.consume(b"{", 500, true, true, &BTreeMap::new(),
             McpSwitches::default(), true, true, CommandSwitches::default()));
         assert_eq!(serde_json::to_value(&projection).unwrap(), after);
+    }
+
+    #[test]
+    fn snapshot_opening_and_time_capture_preserve_existing_boundaries() {
+        let home = tempfile::tempdir().unwrap();
+        let mut collector = Collector::new(home.path().join("monitoring"), true, None);
+        let opening = collector.capture_snapshot_opening();
+        let journal = collector.capture_snapshot_journal();
+        assert_eq!(opening.journal.events, journal.events);
+        assert_eq!(opening.journal.entries, journal.entries);
+        assert_eq!(opening.journal.source, journal.source);
+        assert_eq!(opening.debug, collector.debug.lock().unwrap().snapshot());
+        let start = collector.capture_snapshot_time();
+        assert_eq!(start.reference, collector.started);
+        assert_eq!(start.cutoffs, HOURS.map(|hours| hours.map(|hours| collector.started - Duration::hours(hours))));
+        let reference = chrono::DateTime::parse_from_rfc3339("2026-11-13T02:00:00.123456789Z").unwrap().with_timezone(&Utc);
+        collector.updated = Some(reference);
+        let updated = collector.capture_snapshot_time();
+        assert_eq!(updated.reference, reference);
+        assert_eq!(updated.cutoffs, [Some(reference - Duration::hours(1)),
+            Some(reference - Duration::hours(24)), Some(reference - Duration::hours(168)), None]);
+        // Later writes must not revise the captured values or add a global token.
+        collector.updated = Some(reference + Duration::seconds(1));
+        assert_eq!(updated.reference, reference);
+        assert_ne!(collector.capture_snapshot_time(), updated);
+        assert!(collector.journal.lock().unwrap().http_error(503));
+        assert!(!opening.journal.events.iter().any(|event| event["http_status"] == 503));
+        assert!(collector.capture_snapshot_opening().journal.events.iter().any(|event| event["http_status"] == 503));
     }
 
     #[test]
