@@ -383,3 +383,58 @@ Rust `main.rs` 的 font / GPU worker 各自先發布自己的結果, 再標記 D
 此步不把不同讀取點合併成全域 capture, 不新增 mutation revision 或 candidate, JEV、裝置、credentials 與 render 的行為、鎖順序、查詢次數均未調整, 16 MiB payload staging 與 reducer 串接仍待完成
 
 `SnapshotDiagnostics` 沿 query capture 後、四窗序列化前的原位置整理 Desktop / Core 已觀察路徑與 logs overview, 維持來源順序、disabled 覆寫與實際 buffer 保存數, 使用開頭已取得的 journal source, 不再次讀取 journal 或診斷本文, source registry 仍借用同一 journal source
+
+### Candidate 串接提案與切換門檻
+
+以下依 `78f79fd` 的 worker、`snapshots`、`select_recent_calls`、`selected_detail_index_with_limit`、`selected_overflow_projections_with_limits` 與 `project.rs::snapshot_winner_plan` 重新核對, 屬待審設計, 不代表 runtime 已切換或新增失敗規格已核准
+
+目前 worker 在 history refresh 後設定 updated、更新 monitor / debug, 視需要建立 detail index, 最後呼叫 snapshots 並以 send_replace 發布, 初始與 disabled 另有入口, selected overflow 無結果時 snapshots 會走原 overflow fallback, 並標示 incomplete, 不一定保留上一份發布內容
+
+因此「候選失敗時永遠保留上一版」與目前 fallback 行為不同, 不能當成無語意變更的 refactor, 初始沒有舊版、停用要求與持續來源變更也必須分開處理
+
+#### 建議整合路徑
+
+1. 先以測試限定的 candidate 串接實際 selection / checkpoint reader / reducer / publication 組裝入口, 對照未改動的同步 materialized oracle, production 繼續原路徑, 不在正式服務額外執行兩套整理
+2. 優先讓 candidate 保存已定案的 winner descriptors、來源順序、reference / cutoffs、owned reducer state 與同批 detail index, 不保存第二份完整 overflow Projection vector, 每頁 payload 在 observation 後釋放
+3. Active payload 不先全面 deep clone, 建議在實際 mutation owner 建立內容 revision, 每一批處理前及發布前核對, borrowed Call 不跨 worker 輪次保留, 此選擇須先完成下表 mutation 覆蓋, 不能沿用 selection hash 當內容版本
+4. Retained history / metadata 先區分已有 immutable Arc 與仍會原地修改的容器, Arc 僅可在禁止原地改寫的擁有權規則下重用, 其他欄位須有實際 revision 或明確計量的 owned capture, 不把整個 Collector clone 當解法
+5. 四窗 JEV、device、credentials、uptime 與 render 保留既有同步讀取模式, 暫不移入跨輪狀態, account / cloud / public / platform 保留各自 paired capture, 不宣稱全域同時點, 若 candidate 的 finalizer 需要移動這些讀取或 diagnostics 持久化順序, 該步仍須另行確認
+6. 等 candidate 對固定輸入的結果、變更取消與資源釋放都通過後, 再審核 production 切換, 不將測試限定 candidate 或單項 reducer 通過視為容量問題已解決
+
+#### 必須成立的不變條件
+
+| 輸入 / 邊界 | Candidate 必須持有或核對 | 不可替代的既有規則 |
+| --- | --- | --- |
+| Selection | 完整 CallSelection、membership identity / revision / epoch 與來源路徑對應 | generation-only 重掃不等於內容變更, 不完整選取不能標成完成 |
+| Active calls | 覆蓋 consume、complete、context、reset / restore、retire 與工作集搬移的實際內容 revision | 相同 call ID / time 的回覆或 context 更新仍使 candidate 失效, consume bool 與 checkpoint_dirty 均不足 |
+| Checkpoint | 每頁來源 identity / signature, 最後分批重新驗證全部已用來源 | commit conflict 或 rollback 不能提升候選版本, 外部來源 replacement 不由記憶體 revision 代替 |
+| Winner / order | 先定案每個 thread / call winner, 再且只再 observe 一次 | Python first-insertion slots、Rust 既有 incomplete-order fallback 分開, test-only winner plan 不能無條件替代 production traversal |
+| 無 thread ID / metadata-only 來源 | 另保留 allowance、來源錯誤與 thread metadata 貢獻 | 不可因沒有選中 call 就丟掉來源, 保留現有優先順序 |
+| History / settings | retained view、健康狀態、設定與持久化成功後採用狀態的版本或 owned 值 | read failure 保留舊資料與 error health, 失敗設定寫入不假裝已採用, query signal 不當內容 revision |
+| Reducer | 精確計數、distinct-thread、p99 樣本、history identity 與 canonical ties | 不從 preview 回算總數、不近似、不提高上限掩蓋完整 payload 保留 |
+| Detail / publication | 同批四窗、logs、activity、error_details 與 immutable detail index 一次發布 | request 仍核對 live disable、來源 identity、locator hash 與 CheckpointGuard, 不允許舊索引繞過安全檢查 |
+
+#### Pending、失敗與取消
+
+內部結果必須能區分仍有分頁工作、來源已變更、讀取失敗、容量不足與完成, 目前多條 Option::None 路徑不可直接視為同一種可重試狀態, 此區分先限測試與內部狀態, 不新增 HTTP 欄位或猜測使用者訊息
+
+- Pending 只保留已計量的候選狀態, 不發布部分 reducer, 不重做已完成 winner observation
+- 偵測選取、active、signature、設定或 history 變更時丟棄整個受影響 candidate, 不混用舊 reducer 與新 metadata
+- 查詢錯誤、容量不足或取消時釋放 reader / transaction / payload / candidate index, 已發布物件保持不可變, 既有 selector / snapshot / detail 清理回歸仍保留
+- 停止時不再排入候選工作, 停用仍立即走原停用與內容 guard, 不能為保留舊版而繼續暴露已停用內容
+- 未變更的 discovery 重掃不得造成無限取消, 持續真實變更則不得以忽略 revision 換取完成, 應量測取消頻率、最舊可見版本與前景回應時間後再決定排程策略
+- Production 切換前須確認 fallback 選擇: 保持現有 incomplete fallback, 或候選 pending / 失敗時保留最後完整版本, 後者需要初始狀態與資料新鮮度規格, 本提案不預設採用
+
+#### 驗收矩陣
+
+| 真實注入點 | 必須觀察的結果 |
+| --- | --- |
+| Active read / complete / context / reset, 頁間同 ID / timestamp 更新 | 舊 candidate 被丟棄, 新 candidate 與原 serializer 相符, 無內容變更的 framing 不製造錯誤 revision |
+| Checkpoint 每頁前後、最後 signature 批次與 commit conflict | 來源替換 / 縮短 / 刪除 / 回復均不混批, reader 釋放, 恢復後重新完成 |
+| History refresh 與設定持久化成功 / 失敗 | 成功變更取消受影響 candidate, 失敗保留既有狀態及健康資訊, 不把 wake 次數當資料版本 |
+| Winner duplicate / tie / null / metadata-only / 無 thread ID | 固定 reference 下四窗、logs、activity、errors 與未修改 materialized oracle 逐項相符 |
+| Reducer 多頁及容量邊界 | 每個 winner 只計一次, 不發布部分統計, 精確 p99 與預覽順序不變, 分開記錄 reader、reducer、四窗及程序記憶體 |
+| 真實 worker send_replace 前與 route borrow 後 | 摘要 / index 同版, 舊 Arc 不改寫, 檔案已變更時仍拒絕舊 locator, 停用 guard 仍有效 |
+| Pending、停止、停用及持續變更 | 原未完成狀態不假裝完成, 無孤兒 reader / busy loop, 未變更重掃可以完成, settings 回應規格不放寬 |
+
+驗收應先執行新增且不重複受阻的 targeted tests, 再用明確列出排除項的 filtered service / HTTP 回歸, 已延後的 Core WAL cursor、overflow metadata POST、browser 與平台檢查不自動重跑, 原失敗與使用者測試責任保留, 不將排除結果標示成完整驗收
