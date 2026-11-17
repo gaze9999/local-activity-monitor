@@ -1361,3 +1361,13 @@ watch 可能合併未讀通知, 此測試只驗證實際讀到的兩批更新, �
 此證據驗證 allocation 共用與生命週期, 未量測程序 RSS、端點延遲或宣稱全部輸入同時一致, 原 16 MiB staging 與跨輪 candidate 一致性缺口仍存在
 
 完整 service 單輪 397 項通過 (77.04 秒), 結束後完整 serial HTTP 單輪 226 項通過 (129.22 秒), Linux / Rust 1.100.0, 初始 2 項失敗記錄保留, 未重試 browser 或改動原生平台驗收界線
+
+### 真實 worker 停用與重新啟用的發布
+
+擴充既有 worker publication 測試, 第二批發布後停用收集, 等待 disabled publication, 再於停用期間附加第三筆 call 並重新啟用, 驗證 version 繼續增加、新 index 可讀取第三筆, 保留的停用前 index 不會取得第三筆
+
+初次測試失敗是新增斷言假設 disabled 的 observed_tool_calls=0, 原始碼明確將 codex 換成精簡 disabled 物件並省略該欄位, 未因此修改 runtime 或 schema
+
+依實際來源修正為必須省略 observed_tool_calls、threads=[]、tools={}, 修正後針對性單輪 1 項通過 (0.11 秒), 原始新增測試的失敗紀錄保留
+
+本輪僅擴充測試與文件, 未重跑前輪 service 397 / serial HTTP 226 項, 不宣稱覆蓋每個交錯、跨輪候選取消或原生平台, worker 已透過 Drop 停止, 未重試 browser

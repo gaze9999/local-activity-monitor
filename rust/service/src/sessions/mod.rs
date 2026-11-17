@@ -5793,7 +5793,8 @@ mod log_tests {
                         let count = value["codex"]["observed_tool_calls"].as_u64().unwrap_or(0);
                         if count != 0 {
                             assert!(snapshot.detail_index.select_call(id, "a").is_some());
-                            assert_eq!(snapshot.detail_index.select_call(id, "b").is_some(), count == 2);
+                            assert_eq!(snapshot.detail_index.select_call(id, "b").is_some(), count >= 2);
+                            assert_eq!(snapshot.detail_index.select_call(id, "c").is_some(), count >= 3);
                         }
                         if count == expected {
                             return (snapshot.version(), snapshot.windows[3].clone(), Arc::clone(&snapshot.detail_index));
@@ -5816,6 +5817,36 @@ mod log_tests {
         assert!(old_index.select_call(id, "b").is_none());
         assert_eq!(serde_json::from_slice::<Value>(&old_window).unwrap()["codex"]["observed_tool_calls"], 1);
         assert!(new_index.select_call(id, "b").unwrap().tool("b", true, false).is_some());
+        monitor.codex_setting().store(false, Ordering::Release);
+        let _ = wake.try_send(());
+        let disabled_version = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                {
+                    let snapshot = receiver.borrow_and_update();
+                    if !snapshot.codex_enabled {
+                        let value: Value = serde_json::from_slice(&snapshot.windows[3]).unwrap();
+                        assert_eq!(value["codex"]["health"], "disabled");
+                        assert!(value["codex"].get("observed_tool_calls").is_none());
+                        assert_eq!(value["codex"]["tools"], json!({}));
+                        assert!(value["codex"]["threads"].as_array().unwrap().is_empty());
+                        return snapshot.version();
+                    }
+                }
+                receiver.changed().await.expect("disabled publication channel");
+            }
+        }).await.expect("worker must publish disabled state");
+        assert!(disabled_version > new_version);
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        std::io::Write::write_all(&mut file, record("c").as_bytes()).unwrap();
+        drop(file);
+        monitor.codex_setting().store(true, Ordering::Release);
+        manual.store(true, Ordering::Release);
+        let _ = wake.try_send(());
+        let (resumed_version, _, resumed_index) = next_count(&mut receiver, id, 3).await;
+        assert!(resumed_version > disabled_version);
+        assert!(!Arc::ptr_eq(&new_index, &resumed_index));
+        assert!(new_index.select_call(id, "c").is_none());
+        assert!(resumed_index.select_call(id, "c").unwrap().tool("c", true, false).is_some());
         drop(monitor);
     }
 
