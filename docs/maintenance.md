@@ -344,6 +344,10 @@ ObservationMerge 已提供 retained/current observation 的 owned incremental st
 
 此 reducer 保留現有 merge_event 的 null 不覆蓋、object 遞迴、array 去重 / 截短與 scalar 後者優先, 不改 MCP / Web / SQL projected identity, 不可為方便分頁任意反轉同 observation key 的來源順序, 此步只移除單一 recent iterator 的生命週期需求, 仍持有全部 distinct projected observations, 不是固定記憶體上限或完整 MCP / SQL summary 串接
 
+後續同一雙來源 candidate 已從真實 exec nested parser 取得 MCP / SQL call metadata, 逐 resolved winner 以 Call::activities 餵入 ObservationMerge, 最終沿原 server partition、SQL identified 與四窗 mcp::summary / sqlite::window 產生結果, 不持有原 call payload
+
+此 fixture 在 winner 後不同 call 的 observation keys 不相同, 可以逆來源頁到達後得到相同結果, 不代表 ObservationMerge 對同 key 可交換, retained history 仍先加入, Core / Desktop diagnostics、catalog customization、names 與 retained aggregate augmentation 尚未串接完整候選, 也尚未移除 distinct observation map 或終端排序
+
 ### 共同 capture / mutation 邊界設計草案
 
 此設計起於 `2427f5e` 的 producer 與 server reader 稽核, 共同 publication 部分已實作並通過限定範圍驗證, 下列跨輪 capture / mutation 部分仍為待整合規格, 不視為全部架構驗收

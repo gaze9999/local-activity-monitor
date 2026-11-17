@@ -5820,7 +5820,7 @@ mod log_tests {
     fn snapshot_file_candidate_resolves_two_source_winners_before_paging() {
         for (same_thread, nested) in [(true, false), (false, false), (true, true), (false, true)] {
             let fixture_tool = if nested { "exec" } else { "fixture_tool" };
-            let arguments = if nested { "await tools.fixture_tool({}); await tools.fixture_tool({}); await tools.exec({});" } else { "{}" };
+            let arguments = if nested { "await tools.fixture_tool({}); await tools.fixture_tool({}); await tools.exec({}); await tools.mcp__sqlite__query({query:\"SELECT 42\"});" } else { "{}" };
             let directory = tempfile::tempdir().unwrap();
             let root = directory.path().canonicalize().unwrap();
             let id = "00000000-0000-4000-8000-000000000001";
@@ -5833,7 +5833,7 @@ mod log_tests {
             let mut collector = Collector::new(root.join("monitoring"), true, None);
             let stopped = AtomicBool::new(false);
             for _ in 0..4 {
-                let (_, pending, _) = collector.refresh(&root, &stopped, true, false, CommandSwitches::default());
+                let (_, pending, _) = collector.refresh(&root, &stopped, true, true, CommandSwitches::default());
                 if !pending { break; }
             }
             let key = checkpoint::key(&root, &path).unwrap();
@@ -5935,6 +5935,20 @@ mod log_tests {
                 .map(|(id, projection)| (id.as_str(), (projection.clone(), false))).collect();
             let expected_statistics = cutoffs.map(|cutoff|
                 serde_json::to_value(project::ToolStatistics::new(&statistics_threads, cutoff, true)).unwrap());
+            let observed = lam_history_store::combine_observations(&collector.activity_history,
+                materialized.iter().flat_map(|(thread, projection)| projection.calls.iter()
+                    .flat_map(move |(id, call)| call.activities(thread, id))));
+            let (mcp_observations, sql_observations): (Vec<_>, Vec<_>) = observed.into_iter()
+                .partition(|event| event.get("server").is_some());
+            let sql_observations = sqlite::identified(sql_observations);
+            if nested {
+                assert!(!mcp_observations.is_empty(), "actual nested parser produces MCP metadata");
+                assert!(!sql_observations.is_empty(), "actual nested parser produces SQL metadata");
+            }
+            let expected_observations = cutoffs.map(|cutoff| json!({
+                "mcp":mcp::summary(&mcp_observations, cutoff, "fixture"),
+                "sql":sqlite::window(&sql_observations, cutoff, "fixture")
+            }));
             let skill_names = statistics_threads.keys().map(|id| (id.to_string(), Value::Null)).collect();
             let expected_skills = cutoffs.map(|cutoff| {
                 let (events, total, counts) = project::skill_summary(&statistics_threads, &collector.skill_history,
@@ -6005,12 +6019,13 @@ mod log_tests {
             }
             // Process winner sources in reverse to show reduction is independent of
             // page arrival once canonical-fallback winners have been fixed.
-            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool, statistics_units: usize| -> Option<([Value;4], [Value;4], [Value;4], [Value;4], [Value;4], [Value;4])> {
+            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool, statistics_units: usize| -> Option<([Value;4], [Value;4], [Value;4], [Value;4], [Value;4], [Value;4], [Value;4])> {
                 let mut inputs = candidate_inputs::SelectedInputs::capture(&collector, &selection,
                     SnapshotTime { reference, cutoffs }, true, &stopped)?;
                 for source in sources {
                     inputs = inputs.source(source.clone(), original.cursor.signature.clone())?;
                 }
+                let mut observations = lam_history_store::ObservationMerge::new(&collector.activity_history);
                 let mut row_summaries = cutoffs.map(|cutoff| row_metadata.iter().map(|(thread, metadata)|
                     (thread.clone(), project::RowSummary::new(metadata, cutoff, true, true, true, ordered))).collect::<BTreeMap<_,_>>());
                 let mut row_totals: [BTreeMap<String,usize>;4] = Default::default();
@@ -6046,6 +6061,8 @@ mod log_tests {
                             }
                         }
                         let thread = projection.projection.id.as_deref().unwrap();
+                        observations.extend(projection.projection.calls.iter()
+                            .flat_map(|(id, call)| call.activities(thread, id)));
                         for ((rows, totals), nested) in row_summaries.iter_mut().zip(&mut row_totals).zip(&mut row_nested) {
                             let summary = rows.get_mut(thread).unwrap();
                             for (id, call) in &projection.projection.calls { summary.observe(id, call, totals, nested); }
@@ -6108,7 +6125,14 @@ mod log_tests {
                     }).collect();
                     json!({"rows":rows,"totals":totals,"nested_totals":nested_totals})
                 }).collect::<Vec<_>>().try_into().ok()?;
-                Some((result, series, statistics, commands, skills, rows))
+                let (mcp_observations, sql_observations): (Vec<_>, Vec<_>) = observations.finish().into_iter()
+                    .partition(|event| event.get("server").is_some());
+                let sql_observations = sqlite::identified(sql_observations);
+                let observations = cutoffs.map(|cutoff| json!({
+                    "mcp":mcp::summary(&mcp_observations, cutoff, "fixture"),
+                    "sql":sqlite::window(&sql_observations, cutoff, "fixture")
+                }));
+                Some((result, series, statistics, commands, skills, rows, observations))
             };
             let result = reduce(&mut store, false, false, 10_000).unwrap();
             assert_eq!(result.0, expected);
@@ -6117,11 +6141,12 @@ mod log_tests {
             assert_eq!(result.3, expected_commands);
             assert_eq!(result.4, expected_skills);
             assert_eq!(result.5, rows);
+            assert_eq!(result.6, expected_observations);
             assert!(reduce(&mut store, false, false, 0).is_none(), "statistics overflow rejects the whole candidate");
             assert!(reduce(&mut store, true, false, 10_000).is_none(), "a source changed after its own validation");
-            assert_eq!(result, (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone(), expected_skills.clone(), rows.clone()), "previously completed output is immutable");
+            assert_eq!(result, (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone(), expected_skills.clone(), rows.clone(), expected_observations.clone()), "previously completed output is immutable");
             store.save_checkpoints(std::slice::from_ref(&second_cursor), &second_calls, &[]).unwrap();
-            assert_eq!(reduce(&mut store, false, false, 10_000).unwrap(), (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone(), expected_skills.clone(), rows.clone()));
+            assert_eq!(reduce(&mut store, false, false, 10_000).unwrap(), (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone(), expected_skills.clone(), rows.clone(), expected_observations.clone()));
             let ordered_expected = cutoffs.map(|cutoff| {
                 let mut summary = project::FileSummary::new(1000);
                 for (thread, projection) in &materialized {
@@ -6146,6 +6171,7 @@ mod log_tests {
             assert_eq!(ordered_result.3, ordered_commands);
             assert_eq!(ordered_result.4, expected_skills);
             assert_eq!(ordered_result.5, expected_rows(true));
+            assert_eq!(ordered_result.6, expected_observations);
             collector.updated = Some(reference);
             let baseline = collector.snapshots("ok", "ok", 1);
             for index in 0..4 {

@@ -1946,3 +1946,14 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, 未執行 HTTP、完整套件或 deferred
 - Linux / Rust 1.100.0 / 原 service Cargo.lock, `cargo test --locked --manifest-path rust/service/Cargo.toml -p lam-history-store --lib incremental_observation_merge` 最終 1 項通過、9 項未選取, 0.00 秒, service cargo check 通過並保留 6 個 warnings
 
 未執行 HTTP、完整套件或 deferred 檢查, 此 reducer 仍保留全部 distinct projected events 並在 finish 排序, 尚未量測資源或串接跨來源 candidate 的 MCP / SQL summary, production aggregation / fallback 不變
+
+### MCP / SQL page candidate 串接
+
+基準 `749aa3b`, 原雙來源 candidate 的 nested exec fixture 增加實際 mcp__sqlite__query 呼叫 metadata, 不執行 SQL 或外部工具, 維持原一般 / nested 與同 / 不同 thread 情境
+
+- 原 parser 透過真實 Collector::refresh 產生 MCP / SQL metadata, candidate 只從 resolved winner 的 Call::activities 逐頁合併, 不複製 materialized oracle 的 observation 輸入
+- Retained history 先加入, finish 後使用既有 partition、SQL id 與四窗 summary 函式, 比對 materialized combine_observations oracle, 原其他 summaries、winner / ordering 與整組拒絕條件保留
+- 首次 fixture 的 refresh SQLite 參數仍是 false, 非空 SQL 斷言失敗 6.63 秒, 已修正測試設定為 true, 未修改 parser、enable 規則或縮減斷言
+- Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 最終 1 項通過、423 項未選取, 18.66 秒, 未執行 HTTP、完整套件或 deferred 檢查
+
+此結果是 observation pipeline 在 augmentation 前的相容性證據, 不涵蓋 Core / Desktop diagnostics、catalog / customization、非 null names、retained aggregate augmentation 或完整 worker 發布, 原 distinct event map 與 finish 排序仍存在, production fallback / staging 不變
