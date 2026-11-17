@@ -270,6 +270,61 @@ mod tests {
     }
 
     #[test]
+    fn candidate_api_guard_allows_health_refresh_but_rejects_requested_and_applied_switches() {
+        let (_temporary, mut collector, _) = fixture();
+        let stopped = AtomicBool::new(false);
+        let reference = now();
+        collector.updated = Some(reference);
+        collector.model_api_enabled.store(true, Ordering::Release);
+        collector.applied_model_api_enabled = true;
+        collector.desktop.api_events.push(json!({"observation_id":"retained-api",
+            "timestamp":reference.to_rfc3339(),"event_kind":"request","status":"returned"}));
+        collector.collect_api_events();
+        collector.refresh_core(Ok(None), reference);
+        let capture = |collector: &Collector| CandidateInputs::capture(collector, true, &stopped).unwrap();
+        let api_windows = |collector: &Collector| {
+            let snapshots = collector.snapshots("waiting", "starting", 0);
+            std::array::from_fn::<_, 4, _>(|index| {
+                let value: serde_json::Value = serde_json::from_slice(&snapshots.window_bytes(index)).unwrap();
+                value["model_api"].clone()
+            })
+        };
+        let before = api_windows(&collector);
+        let guard = capture(&collector);
+        assert!(collector.refresh_core(Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            reference + chrono::Duration::seconds(1)));
+        assert!(guard.validate(&collector, true, &stopped).is_some());
+        let after = api_windows(&collector);
+        for (old, current) in before.iter().zip(&after) {
+            assert_eq!(old["requests"], 1);
+            assert_eq!(old["sources"][1]["health"], "missing");
+            assert_eq!(current["sources"][1]["health"], "unavailable");
+            assert_ne!(old["sources"][1]["checked_at"], current["sources"][1]["checked_at"]);
+            let mut expected = old.clone();
+            expected["sources"][1] = collector.core.source();
+            assert_eq!(*current, expected);
+        }
+        let guard = capture(&collector);
+        collector.model_api_enabled.store(false, Ordering::Release);
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        // Requested settings do not replace the already-applied snapshot state.
+        assert_eq!(api_windows(&collector), after);
+        let guard = capture(&collector);
+        collector.applied_model_api_enabled = false;
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        for current in api_windows(&collector) {
+            assert_eq!(current["enabled"], false);
+            assert_eq!(current["events"], json!([]));
+            assert_eq!(current["requests"], 0);
+            assert_eq!(current["sources"].as_array().unwrap().len(), 2);
+            for source in current["sources"].as_array().unwrap() {
+                assert_eq!(source["health"], "disabled");
+            }
+        }
+        assert_eq!(collector.api_events.len(), 1);
+    }
+
+    #[test]
     fn candidate_inputs_track_retained_api_adoption_not_pending_queues() {
         let (_temporary, mut collector, _) = fixture();
         let stopped = AtomicBool::new(false);

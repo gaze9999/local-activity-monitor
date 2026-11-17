@@ -2215,3 +2215,14 @@ LAM main `5c03daf`、workbench-workspace main `ce972bd` 再核對未變, consume
 - LAM main 與 `5c03daf` 相同, workspace main 相較 `ce972bd` 僅新增 AI.md 導覽, 未變更來源實作、gitlinks 或 consumer pin
 
 這是既有 summary 的獨立單元驗證, source health 由合成參數提供, 未執行真實 quiet refresh 或四窗完整 finalizer, 未重跑 session-error 失敗測試、HTTP 或完整套件, candidate 整合與 production 切換仍待完成
+
+### Model API health-only refresh 與開關 guard
+
+基準 `542e856`, 新增 candidate_inputs.rs 的獨立測試, 透過實際 Collector::snapshots 比較四窗 model_api 區段, 不修改 production 或保留中的 session-error 實驗
+
+- 合成來源先採用一筆 API 事件, Core refresh 由 missing 轉為注入的 PermissionDenied / unavailable, retained API 不變時 CandidateInputs 仍有效, 四窗只有 Core source 的 health / checked_at / error_type 隨現行 source 更新
+- requested model_api 開關變更會拒絕舊 guard, 但尚未套用時正式 snapshot 保留原 applied 行為, 測試直接變更 applied 欄位後也拒絕舊 guard, 四窗輸出空 API events / 零 requests 且兩個來源都標 disabled, retained queue 未被 summary 清除
+- Linux / Rust 1.100.0 / 原 Cargo.lock, 精確新測試通過 1 項、436 項未選取, candidate_inputs filter 通過 12 項、425 項未選取, 0.14 秒, git diff --check 通過
+- LAM main 與 `5c03daf` 相同, workspace main 仍只比 `ce972bd` 多出前次已審的 AI.md 導覽新增
+
+來源錯誤為 fixture 注入, applied 切換由測試設定, 未驗證實際 OS 權限、設定 HTTP / worker 套用或 candidate 最終發布, 未重跑 session-error 失敗測試或完整套件, production 切換仍待完成
