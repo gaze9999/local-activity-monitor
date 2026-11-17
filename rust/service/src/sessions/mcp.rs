@@ -294,7 +294,7 @@ fn server_summary<'a>(server: &str, events: &[&'a Value]) -> (Value, Option<Reco
         let next = (lower + 1).min(durations.len() - 1);
         let value =
             durations[lower] + (durations[next] - durations[lower]) * (position - lower as f64);
-        (value * 100.0).round_ties_even() / 100.0
+        format!("{value:.2}").parse::<f64>().expect("finite MCP percentile")
     });
     (
         json!({
@@ -620,6 +620,34 @@ mod connection_tests {
             Some((first.flatten(), Value::Object(current)))
         });
         (metrics, recording)
+    }
+
+    #[test]
+    fn p99_rounds_original_float_like_python_without_changing_other_statistics() {
+        for (values, expected, average, p95) in [
+            (vec![2.675], json!(2.67), json!(3.0), json!(2.675)),
+            (vec![1.005], json!(1.0), json!(1.0), json!(1.005)),
+            (vec![0.125], json!(0.12), json!(0.0), json!(0.125)),
+            (vec![0.375], json!(0.38), json!(0.0), json!(0.375)),
+            (vec![1.225], json!(1.23), json!(1.0), json!(1.225)),
+            (vec![8.5, 9.5], json!(9.49), json!(9.0), json!(9.5)),
+            (vec![], Value::Null, Value::Null, Value::Null),
+            (vec![0.0], json!(0.0), json!(0.0), json!(0.0)),
+        ] {
+            let mut events: Vec<_> = values.iter().map(|duration| json!({
+                "nested":false,"result":{},"duration_ms":duration,"tool":"rank",
+                "timestamp":"2026-11-13T12:00:00Z","completed_at":"2026-11-13T12:00:01Z"
+            })).collect();
+            // Recognized nested calls do not contribute to direct-call latency statistics.
+            events.push(json!({"nested":true,"result":{},"duration_ms":99999,"tool":"rank"}));
+            let references: Vec<_> = events.iter().collect();
+            let (row, _) = server_summary("jev", &references);
+            assert_eq!(row["p99_ms"], expected, "{values:?}");
+            assert_eq!(row["average_ms"], average);
+            assert_eq!(row["p95_ms"], p95);
+            assert_eq!(row["calls"], values.len());
+            assert_eq!(row["recognized"], 1);
+        }
     }
 
     #[test]

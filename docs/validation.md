@@ -1477,3 +1477,13 @@ Linux / Rust 1.100.0、原 Cargo.lock, Python 合成資料與 JEV 模組單輪 1
 涵蓋重複 key 的最後有效值、先選 alias 再驗證而不回退、HTTP status 優先於 success、無效主要 endpoint 不改採次要 alias、token 整數限制、duration 小數、retry / connection 移除 request 專用欄位, 以及未結束的引號不覆寫先前有效 model
 
 Linux / Rust 1.100.0、原 Cargo.lock, Model API 模組單輪 7 項通過 (0.21 秒), runtime 位元組比較與 diff 檢查通過, 本輪只有測試與文件, 未新增外部 API 請求或修改資料來源、欄位與查詢次數, 未重跑 HTTP / 完整 service 或實際平台驗收
+
+### MCP p99 的原始浮點數捨入
+
+以 `13df697` 為基底, LAM main `5c03daf` 與 workbench-workspace main `4616074` 核對未變, Python `mcp_records.server_summary` 對插值後的原始浮點數直接 round(value, 2), Rust 原先先乘 100 再捨入, 會使 2.675 的 p99 變成 2.68 而非 Python 的 2.67
+
+實際 Python server_summary 的 8 組資料確認 2.675、1.005、精確中點、1.225、雙值插值、空集合與零, Rust 新測試先重現差異, 改用兩位小數格式化再解析後通過, 同時核對 average / p95、direct calls 計數與 nested call 排除
+
+Linux / Rust 1.100.0、原 Cargo.lock, `sessions::mcp` 篩選共 16 項通過 (包含 mcp_documents, 2.09 秒), serial HTTP `mcp_` 篩選 21 項通過 (7.23 秒), 既有 legacy scalar-summary oracle 未修改且通過, runtime diff 確認只有 production p99 的捨入運算改變
+
+`/api/snapshot` 的 mcp.servers[].p99_ms 仍取自選定 window 中各 server 的 direct-call duration_ms, cutoff、插值、平均值、p95、來源讀取與請求次數未變, 未重跑完整 service / HTTP suites, 不代表記憶體上限或跨來源一致性驗收
