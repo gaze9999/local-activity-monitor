@@ -3782,16 +3782,11 @@ impl Collector {
             })
             .collect();
         let complete_source_order = self.has_complete_source_order();
-        let tool_errors: Vec<_> = threads
-            .iter()
-            .flat_map(|(thread, (projection, _))| {
-                let calls = if complete_source_order { projection.ordered_calls() }
-                    else { projection.calls.iter().collect() };
-                calls.into_iter().filter_map(move |(id, call)| {
-                    call.failure_event(thread, id).map(|event| (call.time, event))
-                })
-            })
-            .collect();
+        let mut tool_errors = project::ToolErrorSummary::new(complete_source_order);
+        for (thread, (projection, _)) in threads {
+            for (id, call) in &projection.calls { tool_errors.observe(thread, id, call); }
+        }
+        let tool_errors = tool_errors.finish();
         let mut live_errors: Vec<_> = session.iter().map(|event| (false, None, event))
             .chain(tool_errors.iter().map(|(start, event)| (true, *start, event))).collect();
         if complete_source_order {
@@ -5825,10 +5820,11 @@ mod log_tests {
             let root = directory.path().canonicalize().unwrap();
             let id = "00000000-0000-4000-8000-000000000001";
             let path = root.join(format!("rollout-{id}.jsonl"));
-            std::fs::write(&path, format!("{}\n{}\n{}\n",
+            std::fs::write(&path, format!("{}\n{}\n{}\n{}\n",
                 json!({"timestamp":"2026-11-13T01:00:00Z","type":"session_meta","payload":{"id":id}}),
                 json!({"timestamp":"2026-11-13T01:00:01Z","type":"response_item","payload":{"type":"function_call","name":fixture_tool,"call_id":"call00","arguments":arguments}}),
-                json!({"timestamp":"2026-11-13T01:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Message Type: MESSAGE\nTask name: fixture\nSender: source\nPayload:\nPRIVATE_BODY"}]}})
+                json!({"timestamp":"2026-11-13T01:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Message Type: MESSAGE\nTask name: fixture\nSender: source\nPayload:\nPRIVATE_BODY"}]}}),
+                json!({"timestamp":"2026-11-13T01:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call00","output":{"exit_code":2}}})
             )).unwrap();
             let mut collector = Collector::new(root.join("monitoring"), true, None);
             let stopped = AtomicBool::new(false);
@@ -6012,6 +6008,17 @@ mod log_tests {
                 json!({"rows":rows,"totals":totals,"nested_totals":nested_totals})
             });
             let rows = expected_rows(false);
+            let expected_tool_errors = |ordered| {
+                let events: Vec<_> = materialized.iter().flat_map(|(thread, projection)| {
+                    let calls = if ordered { projection.ordered_calls() } else { projection.calls.iter().collect() };
+                    calls.into_iter().filter_map(move |(id, call)| call.failure_event(thread, id)
+                        .map(|event| json!({"start":call.time.map(stamp),"event":event})))
+                }).collect();
+                json!(events)
+            };
+            let tool_errors = expected_tool_errors(false);
+            assert_eq!(tool_errors.as_array().unwrap().len(), expected_winners);
+
             assert_eq!(winners.len(), expected_winners);
             assert_eq!(winners[&(second_id.to_owned(), "call0300".to_owned())], &second_key);
             if !same_thread {
@@ -6019,12 +6026,13 @@ mod log_tests {
             }
             // Process winner sources in reverse to show reduction is independent of
             // page arrival once canonical-fallback winners have been fixed.
-            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool, statistics_units: usize| -> Option<([Value;4], [Value;4], [Value;4], [Value;4], [Value;4], [Value;4], [Value;4])> {
+            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool, statistics_units: usize| -> Option<([Value;4], [Value;4], [Value;4], [Value;4], [Value;4], [Value;4], [Value;4], Value)> {
                 let mut inputs = candidate_inputs::SelectedInputs::capture(&collector, &selection,
                     SnapshotTime { reference, cutoffs }, true, &stopped)?;
                 for source in sources {
                     inputs = inputs.source(source.clone(), original.cursor.signature.clone())?;
                 }
+                let mut tool_errors = project::ToolErrorSummary::new(ordered);
                 let mut observations = lam_history_store::ObservationMerge::new(&collector.activity_history);
                 let mut row_summaries = cutoffs.map(|cutoff| row_metadata.iter().map(|(thread, metadata)|
                     (thread.clone(), project::RowSummary::new(metadata, cutoff, true, true, true, ordered))).collect::<BTreeMap<_,_>>());
@@ -6061,6 +6069,7 @@ mod log_tests {
                             }
                         }
                         let thread = projection.projection.id.as_deref().unwrap();
+                        for (id, call) in &projection.projection.calls { tool_errors.observe(thread, id, call); }
                         observations.extend(projection.projection.calls.iter()
                             .flat_map(|(id, call)| call.activities(thread, id)));
                         for ((rows, totals), nested) in row_summaries.iter_mut().zip(&mut row_totals).zip(&mut row_nested) {
@@ -6132,7 +6141,9 @@ mod log_tests {
                     "mcp":mcp::summary(&mcp_observations, cutoff, "fixture"),
                     "sql":sqlite::window(&sql_observations, cutoff, "fixture")
                 }));
-                Some((result, series, statistics, commands, skills, rows, observations))
+                let tool_errors: Vec<_> = tool_errors.finish().into_iter()
+                    .map(|(start, event)| json!({"start":start.map(stamp),"event":event})).collect();
+                Some((result, series, statistics, commands, skills, rows, observations, json!(tool_errors)))
             };
             let result = reduce(&mut store, false, false, 10_000).unwrap();
             assert_eq!(result.0, expected);
@@ -6142,11 +6153,12 @@ mod log_tests {
             assert_eq!(result.4, expected_skills);
             assert_eq!(result.5, rows);
             assert_eq!(result.6, expected_observations);
+            assert_eq!(result.7, tool_errors);
             assert!(reduce(&mut store, false, false, 0).is_none(), "statistics overflow rejects the whole candidate");
             assert!(reduce(&mut store, true, false, 10_000).is_none(), "a source changed after its own validation");
-            assert_eq!(result, (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone(), expected_skills.clone(), rows.clone(), expected_observations.clone()), "previously completed output is immutable");
+            assert_eq!(result, (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone(), expected_skills.clone(), rows.clone(), expected_observations.clone(), tool_errors.clone()), "previously completed output is immutable");
             store.save_checkpoints(std::slice::from_ref(&second_cursor), &second_calls, &[]).unwrap();
-            assert_eq!(reduce(&mut store, false, false, 10_000).unwrap(), (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone(), expected_skills.clone(), rows.clone(), expected_observations.clone()));
+            assert_eq!(reduce(&mut store, false, false, 10_000).unwrap(), (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone(), expected_skills.clone(), rows.clone(), expected_observations.clone(), tool_errors.clone()));
             let ordered_expected = cutoffs.map(|cutoff| {
                 let mut summary = project::FileSummary::new(1000);
                 for (thread, projection) in &materialized {
@@ -6172,6 +6184,7 @@ mod log_tests {
             assert_eq!(ordered_result.4, expected_skills);
             assert_eq!(ordered_result.5, expected_rows(true));
             assert_eq!(ordered_result.6, expected_observations);
+            assert_eq!(ordered_result.7, expected_tool_errors(true));
             collector.updated = Some(reference);
             let baseline = collector.snapshots("ok", "ok", 1);
             for index in 0..4 {

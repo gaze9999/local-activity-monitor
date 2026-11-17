@@ -1235,6 +1235,26 @@ impl CommunicationSummary {
     fn finish(self) -> Vec<Value> { self.preview.into_values().collect() }
 }
 
+/// Retain only projected tool failures from resolved winners, not call payloads.
+/// Final order matches threads plus ordered_calls (or canonical call IDs).
+pub(super) struct ToolErrorSummary {
+    presentation_order: bool,
+    events: BTreeMap<(String, u64, String), (Option<Time>, Value)>,
+}
+impl ToolErrorSummary {
+    pub(super) fn new(presentation_order: bool) -> Self {
+        Self { presentation_order, events:BTreeMap::new() }
+    }
+    pub(super) fn observe(&mut self, thread: &str, id: &str, call: &Call) {
+        if let Some(event) = call.failure_event(thread, id) {
+            self.events.insert((thread.to_owned(),
+                if self.presentation_order { call.presentation_sequence } else { 0 }, id.to_owned()),
+                (call.time, event));
+        }
+    }
+    pub(super) fn finish(self) -> Vec<(Option<Time>, Value)> { self.events.into_values().collect() }
+}
+
 /// Call-derived fields for one thread/window, retaining only bounded previews.
 /// Seed from final merged metadata once, then feed resolved winners exactly once.
 pub(super) struct RowSummary {
@@ -2251,6 +2271,37 @@ impl Projection {
 #[cfg(test)]
 mod snapshot_merge_tests {
     use super::*;
+
+    #[test]
+    fn tool_error_summary_owns_failure_events_and_preserves_call_order() {
+        let mut projection = Projection::for_id(Some("fixture".into()));
+        for (id, sequence) in [("z", 0), ("a", 1), ("healthy", 2)] {
+            let mut value: Call = serde_json::from_value(json!({"tool":"exec_command",
+                "time":"2026-11-13T01:00:00Z","sequence":sequence,
+                "failure":if id == "healthy" {Value::Null} else {json!({"code":"exit_code","exit_code":2})}})).unwrap();
+            value.presentation_sequence = sequence;
+            projection.calls.insert(id.into(), value);
+        }
+        for ordered in [false, true] {
+            let mut summary = ToolErrorSummary::new(ordered);
+            for (id, call) in projection.calls.iter().rev() {
+                let temporary = call.clone();
+                summary.observe("fixture", id, &temporary);
+            }
+            let calls = if ordered { projection.ordered_calls() } else { projection.calls.iter().collect() };
+            let expected: Vec<_> = calls.into_iter().filter_map(|(id, call)|
+                call.failure_event("fixture", id).map(|event| (call.time, event))).collect();
+            assert_eq!(summary.finish(), expected);
+        }
+        let mut summary = ToolErrorSummary::new(true);
+        for (id, call) in &projection.calls { summary.observe("fixture", id, call); }
+        drop(projection);
+        let events = summary.finish();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].1["call_id"], "z");
+        assert_eq!(events[1].1["call_id"], "a");
+        assert_eq!(events[0].1["exit_code"], 2);
+    }
 
     #[test]
     fn content_revision_covers_metadata_replays_and_exhaustion() {

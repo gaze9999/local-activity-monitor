@@ -1957,3 +1957,14 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, 未執行 HTTP、完整套件或 deferred
 - Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 最終 1 項通過、423 項未選取, 18.66 秒, 未執行 HTTP、完整套件或 deferred 檢查
 
 此結果是 observation pipeline 在 augmentation 前的相容性證據, 不涵蓋 Core / Desktop diagnostics、catalog / customization、非 null names、retained aggregate augmentation 或完整 worker 發布, 原 distinct event map 與 finish 排序仍存在, production fallback / staging 不變
+
+### Tool-result failure owned reducer 與 candidate 串接
+
+基準 `28a0138`, error_windows_captured 的 tool failure 擷取改用 ToolErrorSummary, 保留後續錯誤合併與全部現行開關, 不改 failure_event 欄位或實體明細驗證
+
+- 新 owned / ordering 測試 1 項通過、424 項未選取, 0.00 秒, 反向輸入仍符合原 ordered_calls 或 canonical 排序, healthy call 不產生事件, 丟棄 projection 後保留失敗 metadata
+- 原 summary/detail 不同 Python winners、live null/history-only merge、tool start window/source switch 各 1 項通過、各 424 項未選取, 分別 0.03 / 0.01 / 0.00 秒
+- 原雙來源 candidate 透過真實 function_call_output exit_code=2 產生失敗, 逐相同 resolved winner 擷取 900 / 1,200 個 failure events, canonical / presentation order 與 materialized 原有 failure_event 管線相等, 其他 reducers 與整組拒絕規則保留
+- Linux / Rust 1.100.0 / 原 Cargo.lock, candidate targeted 1 項通過、424 項未選取, 29.42 秒, 本輪無失敗, 未執行 HTTP、完整套件或 deferred 檢查
+
+Candidate 尚未將 failure list、session errors 與全部 diagnostics / history 綁成共同 error-window 發布, 亦未完成 metadata / logs / worker / 資源驗收, production aggregation / fallback / 16 MiB staging 不變, failure metadata 的額外排序 key 與全部保留量未作 RSS 量測

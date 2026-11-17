@@ -348,6 +348,10 @@ ObservationMerge 已提供 retained/current observation 的 owned incremental st
 
 此 fixture 在 winner 後不同 call 的 observation keys 不相同, 可以逆來源頁到達後得到相同結果, 不代表 ObservationMerge 對同 key 可交換, retained history 仍先加入, Core / Desktop diagnostics、catalog customization、names 與 retained aggregate augmentation 尚未串接完整候選, 也尚未移除 distinct observation map 或終端排序
 
+ToolErrorSummary 已由 resolved winners 擷取 failure_event 的 owned metadata 與原 call start, 以 thread / presentation_sequence / call ID 維持原排序, canonical 模式只依 thread / call ID, 不保留 Call 或建立每個 thread 的全量 call-reference 排序陣列
+
+正式 error_windows_captured 同步使用該 reducer, 後續 session / retained history / Core / Desktop / JEV / monitor 合併、start cutoff、來源開關與 summary/detail 不同 winner 規則維持原樣, 同一 page candidate 也在其他 reducers 的 winner 頁擷取失敗事件, 此 reducer 仍保存全部已選取 failure metadata, 不是固定 RSS 上限
+
 ### 共同 capture / mutation 邊界設計草案
 
 此設計起於 `2427f5e` 的 producer 與 server reader 稽核, 共同 publication 部分已實作並通過限定範圍驗證, 下列跨輪 capture / mutation 部分仍為待整合規格, 不視為全部架構驗收
