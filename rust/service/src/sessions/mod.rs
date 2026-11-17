@@ -5764,157 +5764,174 @@ mod log_tests {
 
     #[test]
     fn snapshot_file_candidate_resolves_two_source_winners_before_paging() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let id = "00000000-0000-4000-8000-000000000001";
-        let path = root.join(format!("rollout-{id}.jsonl"));
-        std::fs::write(&path, format!("{}\n{}\n{}\n",
-            json!({"timestamp":"2026-11-13T01:00:00Z","type":"session_meta","payload":{"id":id}}),
-            json!({"timestamp":"2026-11-13T01:00:01Z","type":"response_item","payload":{"type":"function_call","name":"fixture_tool","call_id":"call00","arguments":"{}"}}),
-            json!({"timestamp":"2026-11-13T01:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Message Type: MESSAGE\nTask name: fixture\nSender: source\nPayload:\nPRIVATE_BODY"}]}})
-        )).unwrap();
-        let mut collector = Collector::new(root.join("monitoring"), true, None);
-        let stopped = AtomicBool::new(false);
-        for _ in 0..4 {
-            let (_, pending, _) = collector.refresh(&root, &stopped, true, false, CommandSwitches::default());
-            if !pending { break; }
-        }
-        let key = checkpoint::key(&root, &path).unwrap();
-        let mut store = lam_history_store::Store::open(&root.join("monitoring"), lam_history_store::Access::ReadWrite).unwrap().unwrap();
-        let original = store.checkpoint(&key, 10).unwrap().unwrap();
-        assert_eq!(original.calls.len(), 1);
-        let calls: Vec<_> = (0..600).map(|n| {
-            let mut row = original.calls[0].clone();
-            row.call_id = format!("call{n:04}");
-            let time = [Some("2026-11-13T01:30:00Z"), Some("2026-11-13T00:00:00Z"),
-                Some("2026-11-11T02:00:00Z"), None][n % 4];
-            row.event_time = time.map(str::to_owned);
-            let mut payload: Value = serde_json::from_str(&row.payload).unwrap();
-            payload["time"] = json!(time);
-            payload["files"] = json!([{"operation":"read","path":format!("fixture-{n}"),"tool":"fixture_tool","nested":false}]);
-            row.payload = payload.to_string();
-            row
-        }).collect();
-        store.save_checkpoints(std::slice::from_ref(&original.cursor), &calls, &[]).unwrap();
-        let metadata = std::fs::metadata(&path).unwrap();
-        let fingerprint = source_fingerprint(file_identity(&metadata), metadata.len(), metadata.modified().ok()).unwrap();
-        let mut membership = SourceMembership::new().unwrap();
-        membership.insert(&[MembershipRecord { key:key.clone(), fingerprint:Some(fingerprint.clone()) }]).unwrap();
-        membership.mark_verified(&[VerifiedMembership { key:key.clone(), fingerprint, checkpoint_signature:original.cursor.signature.clone(),
-            materialized:true, call_headers:Some(calls.iter().map(|row| lam_history_store::CallHeader {call_id:row.call_id.clone(),event_time:row.event_time.clone()}).collect()) }]).unwrap();
-        collector.source_membership = Some(membership);
-        collector.source_membership_complete = true;
-        collector.discovered_files = Some(1);
-        collector.discovery = None;
-        collector.files.clear();
-        let second_path = root.join(format!("z-rollout-{id}.jsonl"));
-        std::fs::copy(&path, &second_path).unwrap();
-        let second_key = checkpoint::key(&root, &second_path).unwrap();
-        assert!(key < second_key);
-        let mut second_cursor = original.cursor.clone();
-        second_cursor.source_key = second_key.clone();
-        let second_calls: Vec<_> = calls.iter().enumerate().map(|(n, call)| {
-            let mut row = call.clone();
-            row.source_key = second_key.clone();
-            row.call_id = format!("call{:04}", n + 300);
-            let mut payload: Value = serde_json::from_str(&row.payload).unwrap();
-            payload["files"][0]["path"] = json!(format!("second-{n}"));
-            row.payload = payload.to_string();
-            row
-        }).collect();
-        store.save_checkpoints(std::slice::from_ref(&second_cursor), &second_calls, &[]).unwrap();
-        let metadata = std::fs::metadata(&second_path).unwrap();
-        let fingerprint = source_fingerprint(file_identity(&metadata), metadata.len(), metadata.modified().ok()).unwrap();
-        let membership = collector.source_membership.as_mut().unwrap();
-        membership.insert(&[MembershipRecord {key:second_key.clone(),fingerprint:Some(fingerprint.clone())}]).unwrap();
-        membership.mark_verified(&[VerifiedMembership {key:second_key.clone(),fingerprint,
-            checkpoint_signature:second_cursor.signature.clone(),materialized:true,
-            call_headers:Some(second_calls.iter().map(|row| lam_history_store::CallHeader {
-                call_id:row.call_id.clone(),event_time:row.event_time.clone()}).collect())}]).unwrap();
-        collector.discovered_files = Some(2);
-        collector.duplicate_session_paths.insert("fixture-second".into(), second_path);
-        let selection = collector.select_recent_calls(1200, 2000).unwrap();
-        assert!(selection.complete);
-        assert_eq!(selection.calls.values().map(BTreeSet::len).sum::<usize>(), 1200);
-        let reference = chrono::DateTime::parse_from_rfc3339("2026-11-13T02:00:00Z").unwrap().with_timezone(&Utc);
-        let cutoffs = HOURS.map(|hours| hours.map(|hours| reference - Duration::hours(hours)));
-        let sources = [&key, &second_key];
-        let mut materialized = Projection::for_id(Some(id.into()));
-        for source in sources {
-            let ids: Vec<_> = selection.calls[source].iter().cloned().collect();
-            let checkpoint = store.selected_checkpoint(&lam_history_store::ExpectedCursor {
-                source_key:source,signature:Some(&original.cursor.signature)}, &ids).unwrap().unwrap();
-            let projection = checkpoint::snapshot_projection(checkpoint, false).unwrap();
-            materialized.merge_snapshot(&projection.projection, None, &cutoffs);
-        }
-        assert_eq!(materialized.calls.len(), 900);
-        let expected = cutoffs.map(|cutoff| {
-            let mut summary = project::FileSummary::new(1000);
-            summary.observe(&materialized, cutoff, true, None);
-            let (events,total,operations) = summary.finish();
-            json!({"events":events,"total":total,"operations":operations})
-        });
-        // Known single-thread fixture. Resolve source winners from selected IDs
-        // before reading payloads, following existing canonical overflow traversal.
-        let mut winners = BTreeMap::new();
-        for source in sources {
-            for call in &selection.calls[source] { winners.insert(call.clone(), source); }
-        }
-        assert_eq!(winners.len(), 900);
-        assert_eq!(winners["call0300"], &second_key);
-        // Process winner sources in reverse to show reduction is independent of
-        // page arrival once canonical-fallback winners have been fixed.
-        let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool| -> Option<[Value;4]> {
-            let mut summaries = std::array::from_fn::<_,4,_>(|_| project::FileSummary::new(1000));
-            let mut observed = 0;
-            for source in sources.into_iter().rev() {
-                let ids: Vec<_> = winners.iter().filter(|(_, winner)| **winner == source)
-                    .map(|(call,_)| call.clone()).collect();
-                let mut reader = collector.checkpoints.snapshot_reader().unwrap().unwrap()
-                    .into_selected_checkpoint_reader(&lam_history_store::ExpectedCursor {
-                        source_key:source,signature:Some(&original.cursor.signature)}, ids).unwrap().unwrap();
-                while !reader.is_complete() {
-                    let page = reader.next_page().unwrap().unwrap();
-                    let projection = checkpoint::snapshot_projection(page, false).unwrap();
-                    observed += projection.projection.calls.len();
-                    for (summary, cutoff) in summaries.iter_mut().zip(cutoffs) {
-                        summary.observe(&projection.projection, cutoff, true, None);
-                    }
-                }
-                assert_eq!(store.checkpoint_signature(source).unwrap().as_deref(), Some(original.cursor.signature.as_str()));
+        for same_thread in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let id = "00000000-0000-4000-8000-000000000001";
+            let path = root.join(format!("rollout-{id}.jsonl"));
+            std::fs::write(&path, format!("{}\n{}\n{}\n",
+                json!({"timestamp":"2026-11-13T01:00:00Z","type":"session_meta","payload":{"id":id}}),
+                json!({"timestamp":"2026-11-13T01:00:01Z","type":"response_item","payload":{"type":"function_call","name":"fixture_tool","call_id":"call00","arguments":"{}"}}),
+                json!({"timestamp":"2026-11-13T01:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Message Type: MESSAGE\nTask name: fixture\nSender: source\nPayload:\nPRIVATE_BODY"}]}})
+            )).unwrap();
+            let mut collector = Collector::new(root.join("monitoring"), true, None);
+            let stopped = AtomicBool::new(false);
+            for _ in 0..4 {
+                let (_, pending, _) = collector.refresh(&root, &stopped, true, false, CommandSwitches::default());
+                if !pending { break; }
             }
-            assert_eq!(observed, 900, "duplicate losers must never reach the reducer");
-            if replace_completed_source {
-                let mut changed = second_cursor.clone();
-                let mut signature: Value = serde_json::from_str(&changed.signature).unwrap();
-                signature["revision"] = json!(signature["revision"].as_u64().unwrap() + 1);
-                changed.signature = signature.to_string();
-                store.save_checkpoints(&[changed], &[], &[]).unwrap();
-            }
-            // Recheck every used source after all reducers are complete, not
-            // only the source whose page was just consumed.
-            let validation = collector.checkpoints.snapshot_reader().ok().flatten()?;
+            let key = checkpoint::key(&root, &path).unwrap();
+            let mut store = lam_history_store::Store::open(&root.join("monitoring"), lam_history_store::Access::ReadWrite).unwrap().unwrap();
+            let original = store.checkpoint(&key, 10).unwrap().unwrap();
+            assert_eq!(original.calls.len(), 1);
+            let calls: Vec<_> = (0..600).map(|n| {
+                let mut row = original.calls[0].clone();
+                row.call_id = format!("call{n:04}");
+                let time = [Some("2026-11-13T01:30:00Z"), Some("2026-11-13T00:00:00Z"),
+                    Some("2026-11-11T02:00:00Z"), None][n % 4];
+                row.event_time = time.map(str::to_owned);
+                let mut payload: Value = serde_json::from_str(&row.payload).unwrap();
+                payload["time"] = json!(time);
+                payload["files"] = json!([{"operation":"read","path":format!("fixture-{n}"),"tool":"fixture_tool","nested":false}]);
+                row.payload = payload.to_string();
+                row
+            }).collect();
+            store.save_checkpoints(std::slice::from_ref(&original.cursor), &calls, &[]).unwrap();
+            let metadata = std::fs::metadata(&path).unwrap();
+            let fingerprint = source_fingerprint(file_identity(&metadata), metadata.len(), metadata.modified().ok()).unwrap();
+            let mut membership = SourceMembership::new().unwrap();
+            membership.insert(&[MembershipRecord { key:key.clone(), fingerprint:Some(fingerprint.clone()) }]).unwrap();
+            membership.mark_verified(&[VerifiedMembership { key:key.clone(), fingerprint, checkpoint_signature:original.cursor.signature.clone(),
+                materialized:true, call_headers:Some(calls.iter().map(|row| lam_history_store::CallHeader {call_id:row.call_id.clone(),event_time:row.event_time.clone()}).collect()) }]).unwrap();
+            collector.source_membership = Some(membership);
+            collector.source_membership_complete = true;
+            collector.discovered_files = Some(1);
+            collector.discovery = None;
+            collector.files.clear();
+            let second_path = root.join(format!("z-rollout-{id}.jsonl"));
+            std::fs::copy(&path, &second_path).unwrap();
+            let second_key = checkpoint::key(&root, &second_path).unwrap();
+            assert!(key < second_key);
+            let mut second_cursor = original.cursor.clone();
+            second_cursor.source_key = second_key.clone();
+            let second_id = if same_thread { id } else { "00000000-0000-4000-8000-000000000002" };
+            let mut cursor_payload: Value = serde_json::from_str(&second_cursor.payload).unwrap();
+            cursor_payload["projection"]["id"] = json!(second_id);
+            second_cursor.payload = cursor_payload.to_string();
+            let second_calls: Vec<_> = calls.iter().enumerate().map(|(n, call)| {
+                let mut row = call.clone();
+                row.source_key = second_key.clone();
+                row.call_id = format!("call{:04}", n + 300);
+                let mut payload: Value = serde_json::from_str(&row.payload).unwrap();
+                payload["files"][0]["path"] = json!(format!("second-{n}"));
+                row.payload = payload.to_string();
+                row
+            }).collect();
+            store.save_checkpoints(std::slice::from_ref(&second_cursor), &second_calls, &[]).unwrap();
+            let metadata = std::fs::metadata(&second_path).unwrap();
+            let fingerprint = source_fingerprint(file_identity(&metadata), metadata.len(), metadata.modified().ok()).unwrap();
+            let membership = collector.source_membership.as_mut().unwrap();
+            membership.insert(&[MembershipRecord {key:second_key.clone(),fingerprint:Some(fingerprint.clone())}]).unwrap();
+            membership.mark_verified(&[VerifiedMembership {key:second_key.clone(),fingerprint,
+                checkpoint_signature:second_cursor.signature.clone(),materialized:true,
+                call_headers:Some(second_calls.iter().map(|row| lam_history_store::CallHeader {
+                    call_id:row.call_id.clone(),event_time:row.event_time.clone()}).collect())}]).unwrap();
+            collector.discovered_files = Some(2);
+            collector.duplicate_session_paths.insert("fixture-second".into(), second_path);
+            let selection = collector.select_recent_calls(1200, 2000).unwrap();
+            assert!(selection.complete);
+            assert_eq!(selection.calls.values().map(BTreeSet::len).sum::<usize>(), 1200);
+            let reference = chrono::DateTime::parse_from_rfc3339("2026-11-13T02:00:00Z").unwrap().with_timezone(&Utc);
+            let cutoffs = HOURS.map(|hours| hours.map(|hours| reference - Duration::hours(hours)));
+            let sources = [&key, &second_key];
+            let expected_winners = if same_thread { 900 } else { 1200 };
+            let mut materialized = BTreeMap::<String, Projection>::new();
             for source in sources {
-                if validation.checkpoint_signature(source).ok().flatten().as_deref()
-                    != Some(original.cursor.signature.as_str()) { return None; }
+                let ids: Vec<_> = selection.calls[source].iter().cloned().collect();
+                let checkpoint = store.selected_checkpoint(&lam_history_store::ExpectedCursor {
+                    source_key:source,signature:Some(&original.cursor.signature)}, &ids).unwrap().unwrap();
+                let projection = checkpoint::snapshot_projection(checkpoint, false).unwrap();
+                let thread = projection.projection.id.as_ref().unwrap();
+                materialized.entry(thread.clone()).or_insert_with(|| Projection::for_id(Some(thread.clone())))
+                    .merge_snapshot(&projection.projection, None, &cutoffs);
             }
-            let result = summaries.map(|summary| {
+            assert_eq!(materialized.values().map(|projection| projection.calls.len()).sum::<usize>(), expected_winners);
+            let expected = cutoffs.map(|cutoff| {
+                let mut summary = project::FileSummary::new(1000);
+                for projection in materialized.values() { summary.observe(projection, cutoff, true, None); }
                 let (events,total,operations) = summary.finish();
                 json!({"events":events,"total":total,"operations":operations})
             });
-            Some(result)
-        };
-        let result = reduce(&mut store, false).unwrap();
-        assert_eq!(result, expected);
-        assert!(reduce(&mut store, true).is_none(), "a source changed after its own validation");
-        assert_eq!(result, expected, "previously completed output is immutable");
-        store.save_checkpoints(std::slice::from_ref(&second_cursor), &second_calls, &[]).unwrap();
-        assert_eq!(reduce(&mut store, false).unwrap(), expected);
-        collector.updated = Some(reference);
-        let baseline = collector.snapshots("ok", "ok", 1);
-        for index in 0..4 {
-            let window: Value = serde_json::from_slice(&baseline.window_bytes(index)).unwrap();
-            assert_eq!(window["codex"]["file_activity"], expected[index]);
+            // Read each source's thread identity from its verified cursor metadata,
+            // without loading call payloads merely to arbitrate duplicate IDs.
+            let mut winners = BTreeMap::new();
+            for source in sources {
+                let header = store.selected_checkpoint(&lam_history_store::ExpectedCursor {
+                    source_key:source,signature:Some(&original.cursor.signature)}, &[]).unwrap().unwrap();
+                assert!(header.calls.is_empty());
+                let projection = checkpoint::snapshot_projection(header, false).unwrap();
+                let thread = projection.projection.id.unwrap();
+                for call in &selection.calls[source] { winners.insert((thread.clone(), call.clone()), source); }
+            }
+            assert_eq!(winners.len(), expected_winners);
+            assert_eq!(winners[&(second_id.to_owned(), "call0300".to_owned())], &second_key);
+            if !same_thread {
+                assert_eq!(winners[&(id.to_owned(), "call0300".to_owned())], &key);
+            }
+            // Process winner sources in reverse to show reduction is independent of
+            // page arrival once canonical-fallback winners have been fixed.
+            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool| -> Option<[Value;4]> {
+                let mut summaries = std::array::from_fn::<_,4,_>(|_| project::FileSummary::new(1000));
+                let mut observed = 0;
+                for source in sources.into_iter().rev() {
+                    let ids: Vec<_> = winners.iter().filter(|(_, winner)| **winner == source)
+                        .map(|((_,call),_)| call.clone()).collect();
+                    let mut reader = collector.checkpoints.snapshot_reader().unwrap().unwrap()
+                        .into_selected_checkpoint_reader(&lam_history_store::ExpectedCursor {
+                            source_key:source,signature:Some(&original.cursor.signature)}, ids).unwrap().unwrap();
+                    while !reader.is_complete() {
+                        let page = reader.next_page().unwrap().unwrap();
+                        let projection = checkpoint::snapshot_projection(page, false).unwrap();
+                        observed += projection.projection.calls.len();
+                        for (summary, cutoff) in summaries.iter_mut().zip(cutoffs) {
+                            summary.observe(&projection.projection, cutoff, true, None);
+                        }
+                    }
+                    assert_eq!(store.checkpoint_signature(source).unwrap().as_deref(), Some(original.cursor.signature.as_str()));
+                }
+                assert_eq!(observed, expected_winners, "duplicate losers must never reach the reducer");
+                if replace_completed_source {
+                    let mut changed = second_cursor.clone();
+                    let mut signature: Value = serde_json::from_str(&changed.signature).unwrap();
+                    signature["revision"] = json!(signature["revision"].as_u64().unwrap() + 1);
+                    changed.signature = signature.to_string();
+                    store.save_checkpoints(&[changed], &[], &[]).unwrap();
+                }
+                // Recheck every used source after all reducers are complete, not
+                // only the source whose page was just consumed.
+                let validation = collector.checkpoints.snapshot_reader().ok().flatten()?;
+                for source in sources {
+                    if validation.checkpoint_signature(source).ok().flatten().as_deref()
+                        != Some(original.cursor.signature.as_str()) { return None; }
+                }
+                let result = summaries.map(|summary| {
+                    let (events,total,operations) = summary.finish();
+                    json!({"events":events,"total":total,"operations":operations})
+                });
+                Some(result)
+            };
+            let result = reduce(&mut store, false).unwrap();
+            assert_eq!(result, expected);
+            assert!(reduce(&mut store, true).is_none(), "a source changed after its own validation");
+            assert_eq!(result, expected, "previously completed output is immutable");
+            store.save_checkpoints(std::slice::from_ref(&second_cursor), &second_calls, &[]).unwrap();
+            assert_eq!(reduce(&mut store, false).unwrap(), expected);
+            collector.updated = Some(reference);
+            let baseline = collector.snapshots("ok", "ok", 1);
+            for index in 0..4 {
+                let window: Value = serde_json::from_slice(&baseline.window_bytes(index)).unwrap();
+                assert_eq!(window["codex"]["file_activity"], expected[index]);
+            }
         }
     }
 

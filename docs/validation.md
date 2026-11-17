@@ -1718,3 +1718,15 @@ Test-only candidate 改為所有 reducer 完成後另開既有唯讀 snapshot_re
 此檢查對齊 production staging 已有的最後 signature 驗證原則, 不改 production, 不宣稱來源在檢查後不再變動、跨來源共同 transaction 或 HTTP 發布原子性, live locator guard 仍不可省略
 
 Linux / Rust 1.100.0 / 原 Cargo.lock, fail-before 0.35 秒, test-only 修正後 targeted 測試 1 筆通過、415 筆未選取, 耗時 0.69 秒, 記錄均保留, 未執行大型 padding、HTTP、完整套件或其他延後檢查
+
+### Candidate winner 的 thread identity
+
+沿兩來源 fixture 同時保留原本同 thread 的 900 winners 案例, 新增不同 thread 但 call ID 重疊的案例, 預期為 1,200 winners, 不將不同對話的相同 call ID 當成同一呼叫
+
+Test-only planner 先以實際 selected_checkpoint 的空 call ID 查詢讀取 cursor metadata, 驗證 calls 為空並經原 snapshot_projection 取得 thread ID, winner key 改為 thread ID / call ID 組合, 不為判斷 identity 提前載入全部 call payload
+
+兩案例均反向讀取來源、完整比對四窗 materialized 與 snapshots oracle, 並保留來源最後驗證、變更拒絕與恢復測試, 不改 production 或同 thread 原預期
+
+此步仍限已存在有效 thread ID 的 checkpoint fixture, 不包含無 ID / metadata-only 來源、完整來源 first-insertion slots 或實體檔案 identity, 空 calls metadata 查詢是 test-only 新增讀取, 不增加正式服務的查詢次數
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 測試 1 筆通過、415 筆未選取, 包含兩種 thread identity 案例, 耗時 2.30 秒, 未執行大型 padding、HTTP、完整套件或其他延後檢查
