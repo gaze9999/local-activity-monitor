@@ -5865,13 +5865,23 @@ mod log_tests {
             // Read each source's thread identity from its verified cursor metadata,
             // without loading call payloads merely to arbitrate duplicate IDs.
             let mut winners = BTreeMap::new();
+            let mut thread_slots = BTreeMap::new();
+            let mut call_slots = BTreeMap::new();
+            let mut next_slots = BTreeMap::<String,u64>::new();
             for source in sources {
                 let header = store.selected_checkpoint(&lam_history_store::ExpectedCursor {
                     source_key:source,signature:Some(&original.cursor.signature)}, &[]).unwrap().unwrap();
                 assert!(header.calls.is_empty());
                 let projection = checkpoint::snapshot_projection(header, false).unwrap();
                 let thread = projection.projection.id.unwrap();
-                for call in &selection.calls[source] { winners.insert((thread.clone(), call.clone()), source); }
+                let next_thread = thread_slots.len();
+                thread_slots.entry(thread.clone()).or_insert(next_thread);
+                for call in &selection.calls[source] {
+                    let key = (thread.clone(), call.clone());
+                    let next_call = next_slots.entry(thread.clone()).or_default();
+                    call_slots.entry(key.clone()).or_insert_with(|| { let slot = *next_call; *next_call += 1; slot });
+                    winners.insert(key, source);
+                }
             }
             assert_eq!(winners.len(), expected_winners);
             assert_eq!(winners[&(second_id.to_owned(), "call0300".to_owned())], &second_key);
@@ -5880,7 +5890,7 @@ mod log_tests {
             }
             // Process winner sources in reverse to show reduction is independent of
             // page arrival once canonical-fallback winners have been fixed.
-            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool| -> Option<[Value;4]> {
+            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool| -> Option<[Value;4]> {
                 let mut summaries = std::array::from_fn::<_,4,_>(|_| project::FileSummary::new(1000));
                 let mut observed = 0;
                 for source in sources.into_iter().rev() {
@@ -5891,9 +5901,16 @@ mod log_tests {
                             source_key:source,signature:Some(&original.cursor.signature)}, ids).unwrap().unwrap();
                     while !reader.is_complete() {
                         let page = reader.next_page().unwrap().unwrap();
-                        let projection = checkpoint::snapshot_projection(page, false).unwrap();
+                        let mut projection = checkpoint::snapshot_projection(page, false).unwrap();
+                        if ordered {
+                            let thread = projection.projection.id.as_ref().unwrap();
+                            for (id, call) in &mut projection.projection.calls {
+                                call.presentation_sequence = call_slots[&(thread.clone(), id.clone())];
+                            }
+                        }
                         observed += projection.projection.calls.len();
                         for (summary, cutoff) in summaries.iter_mut().zip(cutoffs) {
+                            if ordered { summary.ordered_thread(thread_slots[projection.projection.id.as_ref().unwrap()]); }
                             summary.observe(&projection.projection, cutoff, true, None);
                         }
                     }
@@ -5920,12 +5937,26 @@ mod log_tests {
                 });
                 Some(result)
             };
-            let result = reduce(&mut store, false).unwrap();
+            let result = reduce(&mut store, false, false).unwrap();
             assert_eq!(result, expected);
-            assert!(reduce(&mut store, true).is_none(), "a source changed after its own validation");
+            assert!(reduce(&mut store, true, false).is_none(), "a source changed after its own validation");
             assert_eq!(result, expected, "previously completed output is immutable");
             store.save_checkpoints(std::slice::from_ref(&second_cursor), &second_calls, &[]).unwrap();
-            assert_eq!(reduce(&mut store, false).unwrap(), expected);
+            assert_eq!(reduce(&mut store, false, false).unwrap(), expected);
+            let ordered_expected = cutoffs.map(|cutoff| {
+                let mut summary = project::FileSummary::new(1000);
+                for (thread, projection) in &materialized {
+                    summary.ordered_thread(thread_slots[thread]);
+                    summary.observe(projection, cutoff, true, None);
+                }
+                let (events,total,operations) = summary.finish();
+                json!({"events":events,"total":total,"operations":operations})
+            });
+            let ordered_result = reduce(&mut store, false, true).unwrap();
+            for index in 0..4 {
+                assert!(ordered_result[index] == ordered_expected[index],
+                    "cross-source insertion slots changed, same_thread={same_thread}, window={index}");
+            }
             collector.updated = Some(reference);
             let baseline = collector.snapshots("ok", "ok", 1);
             for index in 0..4 {

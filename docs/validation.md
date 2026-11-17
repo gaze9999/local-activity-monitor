@@ -1730,3 +1730,15 @@ Test-only planner 先以實際 selected_checkpoint 的空 call ID 查詢讀取 c
 此步仍限已存在有效 thread ID 的 checkpoint fixture, 不包含無 ID / metadata-only 來源、完整來源 first-insertion slots 或實體檔案 identity, 空 calls metadata 查詢是 test-only 新增讀取, 不增加正式服務的查詢次數
 
 Linux / Rust 1.100.0 / 原 Cargo.lock, targeted 測試 1 筆通過、415 筆未選取, 包含兩種 thread identity 案例, 耗時 2.30 秒, 未執行大型 padding、HTTP、完整套件或其他延後檢查
+
+### 兩來源 first-insertion slots
+
+沿 `918da61` 的同 thread / 不同 thread fixture, 加入明確來源順序的 ordered reducer 分支, 原 canonical fallback 與實際 snapshots 比對仍保留, ordered 分支另外使用未修改的 merge_snapshot / FileSummary 作為 oracle
+
+只套用來源 thread 順序仍會重現同 thread 第 1 小時 window 的差異, 因為 payload winner 來自後一來源, 但 presentation slot 應保留該 thread / call 首次插入的位置, 不能使用後一來源的頁內序號或 winner 到達順序
+
+Test-only planner 在已選 calls 的來源遍歷中建立 thread slot 與 call slot, 重複 key 只更新 winner source, 不改首次 slot, reader 仍反向處理來源, observe 前將原 slot 套回 call, 同 thread 與不同 thread 的四窗完整結果皆須符合原 materialized oracle
+
+來源遍歷與每個來源 call 順序在此 fixture 明確固定, 此證據不代表 production 已取得 overflow 的完整全域 discovery 順序, 也未涵蓋 live parse 與 checkpoint restore 混合、metadata-only 或無 thread ID 來源, production 未修改
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, fail-before 0.55 秒, test-only 修正後 targeted 測試 1 筆通過、415 筆未選取, 耗時 3.07 秒, 記錄均保留, 未執行大型 padding、HTTP、完整套件或其他延後檢查
