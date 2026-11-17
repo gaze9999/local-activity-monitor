@@ -1923,6 +1923,16 @@ struct RecentCallScan {
     finished: bool,
 }
 
+// Preserve the existing tracking / MCP lock scopes and read order.
+// The fields are owned, but the capture is not a joint configuration revision.
+#[derive(PartialEq, Eq)]
+struct SnapshotSourceSettings {
+    tracking: TrackingSettings,
+    sources: BTreeMap<String, bool>,
+    customizations: McpCustomizations,
+    switches: McpSwitches,
+}
+
 // Owned query values captured at the existing synchronous snapshot boundary.
 // This is not an atomic settings/result read or a cross-round version token.
 #[derive(Debug, PartialEq)]
@@ -4641,6 +4651,29 @@ impl Collector {
         sources
     }
 
+    fn capture_snapshot_source_settings(&self) -> SnapshotSourceSettings {
+        let tracking = *self
+            .tracking
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        let (sources, customizations) = {
+            let sources = self
+                .mcp_sources
+                .read()
+                .unwrap_or_else(|error| error.into_inner());
+            let customizations = self
+                .customizations
+                .read()
+                .unwrap_or_else(|error| error.into_inner());
+            (sources.clone(), customizations.clone())
+        };
+        let switches = *self
+            .mcp_switches
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        SnapshotSourceSettings { tracking, sources, customizations, switches }
+    }
+
     fn capture_snapshot_queries(&self) -> SnapshotQueries {
         let account_settings = self.account.settings();
         let account = self.account.result();
@@ -4782,25 +4815,8 @@ impl Collector {
                 .chain(self.core.sql.iter().cloned())
                 .chain(self.desktop.sql.iter().cloned()),
         );
-        let tracking = *self
-            .tracking
-            .read()
-            .unwrap_or_else(|error| error.into_inner());
-        let (sources, customizations) = {
-            let sources = self
-                .mcp_sources
-                .read()
-                .unwrap_or_else(|error| error.into_inner());
-            let customizations = self
-                .customizations
-                .read()
-                .unwrap_or_else(|error| error.into_inner());
-            (sources.clone(), customizations.clone())
-        };
-        let switches = *self
-            .mcp_switches
-            .read()
-            .unwrap_or_else(|error| error.into_inner());
+        let SnapshotSourceSettings { tracking, sources, customizations, switches } =
+            self.capture_snapshot_source_settings();
         let (mut mcp_events, sql_events): (Vec<_>, Vec<_>) = observed_activity
             .into_iter()
             .partition(|event| event.get("server").is_some());
@@ -5732,6 +5748,41 @@ mod log_tests {
         let scan = scan.as_ref().unwrap();
         assert!(scan.finished && !scan.valid && scan.reader.is_none());
         assert!(scan.projections.is_empty());
+    }
+
+    #[test]
+    fn snapshot_source_settings_capture_matches_existing_reads_and_owns_maps() {
+        let home = tempfile::tempdir().unwrap();
+        let collector = Collector::new(home.path().join("monitoring"), true, None);
+        let original = || SnapshotSourceSettings {
+            tracking: *collector.tracking.read().unwrap(),
+            sources: collector.mcp_sources.read().unwrap().clone(),
+            customizations: collector.customizations.read().unwrap().clone(),
+            switches: *collector.mcp_switches.read().unwrap(),
+        };
+        assert!(collector.capture_snapshot_source_settings() == original());
+        *collector.tracking.write().unwrap() = TrackingSettings { max_files: 37, track_all: true };
+        collector.mcp_sources.write().unwrap().insert("fixture".into(), false);
+        {
+            let mut custom = collector.customizations.write().unwrap();
+            custom.mcp_categories.insert("fixture".into(), "category".into());
+            custom.mcp_descriptions.insert("fixture".into(), "description".into());
+            custom.mcp_tags.insert("fixture".into(), vec!["tag".into()]);
+            custom.tool_descriptions.insert("fixture.tool".into(), "tool".into());
+        }
+        *collector.mcp_switches.write().unwrap() = McpSwitches { mcp: false, web: true };
+        let captured = collector.capture_snapshot_source_settings();
+        let expected = original();
+        assert!(captured == expected);
+        assert!(!captured.switches.allows("fixture"));
+        assert!(captured.switches.allows("web"));
+        assert_eq!(captured.sources["fixture"], false);
+        collector.mcp_sources.write().unwrap().clear();
+        *collector.customizations.write().unwrap() = McpCustomizations::default();
+        *collector.tracking.write().unwrap() = TrackingSettings::default();
+        *collector.mcp_switches.write().unwrap() = McpSwitches::default();
+        assert!(captured == expected);
+        assert!(collector.capture_snapshot_source_settings() != captured);
     }
 
     #[test]

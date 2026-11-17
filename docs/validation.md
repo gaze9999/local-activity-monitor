@@ -1246,3 +1246,15 @@ Playwright / Chromium 在導航前因 Unix socket Operation not permitted 結束
 此物件不是 settings/result 的原子讀取或跨輪 token, 未改 reference、cutoffs、裝置讀取、detail_writer、send_replace 或 HTTP schema, 尚未實作其餘 capture 範圍及跨輪發布
 
 Linux / Rust 1.100.0 完整 service 單輪 389 項通過 (70.58 秒), 結束後完整 serial HTTP 單輪 226 項通過 (131.59 秒), 未重試已記錄的 browser 阻擋項目
+
+### 來源設定 capture 的同步前置實作
+
+私有 SnapshotSourceSettings 保存既有 tracking、MCP source 開關、customizations 與 MCP / web 開關, 仍在活動合併後、MCP 篩選前的原位置擷取
+
+原 tracking→sources / customizations→switches 讀取段逐 byte 保留, sources 與 customizations 的同時持鎖範圍及釋放位置不變, 沒有合併或延長到跨輪的鎖
+
+針對性 1 項通過 (0.01 秒), 原直接讀取 oracle 比較預設與已設定值, 涵蓋四種 customization map、false source、MCP / web 分流與 tracking, 後續來源變更不改寫已保存的 map
+
+此步不提供共同設定 revision 或 atomic publication, 沒有改動 source query、HTTP schema、metadata / detail 隱私 guard 或即時 telemetry, 跨輪與 16 MiB 待辦保留
+
+Linux / Rust 1.100.0 完整 service 單輪 390 項通過 (64.71 秒), 結束後完整 serial HTTP 單輪 226 項通過 (129.67 秒)
