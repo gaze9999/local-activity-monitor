@@ -1170,3 +1170,15 @@ Rust 新回歸先於 CR 案例失敗, 修正後 1 項通過 (0.01 秒), 涵蓋�
 受影響的 /api/codex/skill 仍依 skill、thread_id、call_id 選取已觀察來源, 沒有新增來源查詢或放寬文件允許條件, surrogate 與歷史限制保留
 
 Linux / Rust 1.100.0 完整 service 單輪 387 項通過 (65.10 秒), 結束後完整 serial HTTP 單輪 226 項通過 (130.32 秒), 包含既有保留 Skill 尾段 HTTP 查詢回歸
+
+### 索引 detail 原始列的 1 MiB 上限
+
+核對 LAM main `5c03daf` 的 detail_lines, 已觀察 offset 的 readline 結果須包含 LF 且原始長度不超過 1 MiB, Rust 原先移除 LF 後才檢查長度, 多接受 1 byte
+
+read_record 改在移除 LF 前檢查原始長度, LF / CRLF 均計入上限, hash 仍針對移除最後 LF 後的原始內容, 不修改 offset、hash 格式或 JSON 解碼, 無 LF 的索引列仍拒絕
+
+Python detail_lines 的 LF / CRLF 精確上限與超出 1 byte 共 4 組 fixture 通過, Rust 新回歸先重現超限接受, 修正後 1 項通過 (0.20 秒), 同時驗證錯誤 hash 與缺少 LF 拒絕
+
+影響共用索引列讀取的工具、SQL、訊息、錯誤及 context detail 呼叫者, 僅縮回來源既有邊界, 查詢參數、讀取次數、權限與保存資料不變, 沒有擴大或修改 legacy tail fallback, 歷史限制保留
+
+Linux / Rust 1.100.0 完整 service 單輪 388 項通過 (59.81 秒), 結束後完整 serial HTTP 單輪 226 項通過 (138.39 秒)

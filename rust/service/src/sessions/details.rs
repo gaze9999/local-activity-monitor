@@ -926,13 +926,11 @@ pub(super) fn read_record(file: &mut fs::File, position: &Position) -> Option<se
     BufReader::new(file.take(CONTEXT_LIMIT + 1))
         .read_until(b'\n', &mut record)
         .ok()?;
-    if record.last() != Some(&b'\n') {
+    if record.last() != Some(&b'\n') || record.len() > CONTEXT_LIMIT as usize {
         return None;
     }
     record.pop();
-    if record.len() > CONTEXT_LIMIT as usize
-        || format!("{:x}", Sha256::digest(&record)) != position.hash
-    {
+    if format!("{:x}", Sha256::digest(&record)) != position.hash {
         return None;
     }
     let raw = record.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&record);
@@ -1802,6 +1800,28 @@ impl DetailFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexed_record_byte_limit_includes_line_ending() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("record.jsonl");
+        for ending in [b"\n".as_slice(), b"\r\n".as_slice()] {
+            for extra in [0, 1] {
+                let mut raw = b"{}".to_vec();
+                raw.resize(CONTEXT_LIMIT as usize - ending.len() + extra, b' ');
+                raw.extend_from_slice(ending);
+                let position = Position::new(0, &raw[..raw.len() - 1]);
+                fs::write(&path, &raw).unwrap();
+                let mut file = fs::File::open(&path).unwrap();
+                assert_eq!(read_record(&mut file, &position).is_some(), extra == 0, "{ending:?} +{extra}");
+                let bad = Position { offset: 0, hash: "0".repeat(64) };
+                assert!(read_record(&mut file, &bad).is_none());
+            }
+        }
+        fs::write(&path, b"{}").unwrap();
+        let mut file = fs::File::open(&path).unwrap();
+        assert!(read_record(&mut file, &Position::new(0, b"{}")).is_none());
+    }
 
     #[test]
     fn retained_skill_tail_accepts_cr_and_bom_rows() {
