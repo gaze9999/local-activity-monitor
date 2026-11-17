@@ -2146,3 +2146,17 @@ Production aggregation caller、fallback、diagnostics / telemetry 時機與設�
 Linux / Rust 1.100.0 / 原 Cargo.lock, Core owner targeted 通過 1 項、431 項未選取, 0.03 秒, Desktop failed-storage owner targeted 通過 1 項、431 項未選取, 0.03 秒, 修正具名 diagnostic fixture 後八情境串接通過 1 項、431 項未選取, 68.97 秒, cargo check 通過並維持 8 個既有 warnings
 
 此 owner revision 不包含 logs / API queues、source health 或 detail source identity, 不宣稱完整 diagnostics snapshot 一致性, 同步 telemetry / JEV、production caller、fallback 與原保存失敗處理保留, deferred checks 未執行
+
+### Owned failures 的 error rendering 入口
+
+基準 `18b37fc`, 將 error_windows_captured 的 rendering 分離為 render_error_windows_captured, 接受只執行一次的 tool-failure producer, production wrapper 沿原位置與 complete-source-order 選擇建立 ToolErrorSummary, source-settings read 與 journal 準備仍先於 reducer, 未移動 source health、JEV 或 telemetry 讀取
+
+- 比對 rendering 來源文字, 除原 reducer 區段改為一次性 producer 呼叫外其餘逐 byte 相同
+- 新 fixture 先由原 wrapper 取得四窗 oracle, 再移除完整 Projection 容器, 用 owned failures 渲染, producer 期間改變 MCP source setting 並新增 journal event, 當次四窗仍與原 capture 相同, producer 只呼叫一次, 下次 render 才看到 source setting 變更
+- 既有 error source-order、summary / detail 不同 winners、名稱、null fields、tool-start cutoff、source disable、超出 summary limit 的 detail 斷言保留, 另核對 complete-source grouping、disabled history health 與 monitor error 可見性
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, error targeted 7 項通過、426 項未選取, 0.76 秒, 另 3 項精確 targeted 各通過 1 項、432 項未選取, 分別 0.09 / 0.00 / 0.00 秒, cargo check 通過並維持 8 個既有 warnings, 本輪無失敗
+
+本輪來源再核對 LAM main `5c03daf`、workbench-workspace main `ce972bd`, 與前輪相同, consumer pin 未變更
+
+此步僅完成渲染入口, candidate 尚未串接 error windows, session error source-order 與 logs / API guard 尚未完成, volatile source.checked_at 不當成穩定 payload revision, production caller / fallback 保留, deferred checks 未執行

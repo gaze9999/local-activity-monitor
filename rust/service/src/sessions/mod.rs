@@ -3769,6 +3769,20 @@ impl Collector {
     }
 
     fn error_windows_captured(&self, journal: &SnapshotJournal, health: &str, reference: chrono::DateTime<Utc>, threads: &BTreeMap<&str, (Projection, bool)>, session: &[Value]) -> [(Value, Bytes); 4] {
+        self.render_error_windows_captured(journal, health, reference, session, |complete_source_order| {
+            let mut tool_errors = project::ToolErrorSummary::new(complete_source_order);
+            for (thread, (projection, _)) in threads {
+                for (id, call) in &projection.calls { tool_errors.observe(thread, id, call); }
+            }
+            tool_errors.finish()
+        })
+    }
+
+    // Invoke the producer at the original reduction point, after source/journal
+    // preparation. Owned candidate failures can enter here without moving reads.
+    fn render_error_windows_captured(&self, journal: &SnapshotJournal, health: &str, reference: chrono::DateTime<Utc>,
+        session: &[Value], tool_errors: impl FnOnce(bool) -> Vec<(Option<chrono::DateTime<Utc>>, Value)>) -> [(Value, Bytes); 4]
+    {
         let sources = self
             .mcp_sources
             .read()
@@ -3788,11 +3802,7 @@ impl Collector {
             })
             .collect();
         let complete_source_order = self.has_complete_source_order();
-        let mut tool_errors = project::ToolErrorSummary::new(complete_source_order);
-        for (thread, (projection, _)) in threads {
-            for (id, call) in &projection.calls { tool_errors.observe(thread, id, call); }
-        }
-        let tool_errors = tool_errors.finish();
+        let tool_errors = tool_errors(complete_source_order);
         let mut live_errors: Vec<_> = session.iter().map(|event| (false, None, event))
             .chain(tool_errors.iter().map(|(start, event)| (true, *start, event))).collect();
         if complete_source_order {
@@ -8302,6 +8312,42 @@ mod log_tests {
                 assert!(!std::str::from_utf8(&logs).unwrap().contains("thread_name"));
             }
         }
+    }
+
+    #[test]
+    fn error_renderer_accepts_owned_failures_without_moving_capture_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let collector = Collector::new(directory.path().to_path_buf(), true, None);
+        let reference = lam_history_store::parse_utc_stamp("2026-11-13T02:00:00Z").unwrap();
+        let call: project::Call = serde_json::from_value(json!({"tool":"exec_command",
+            "time":"2026-11-13T01:00:00Z","completed":"2026-11-13T01:30:00Z","sequence":0,
+            "failure":{"code":"exit_code","exit_code":2}})).unwrap();
+        let mut projection = Projection::for_id(Some("fixture".into()));
+        projection.calls.insert("a".into(), call);
+        let threads = BTreeMap::from([("fixture", (projection, false))]);
+        let session = [json!({"timestamp":"2026-11-13T01:30:00Z","thread_id":"fixture",
+            "source":"tool_result","server":"blocked","category":"mcp","severity":"error","code":"blocked"})];
+        let journal = collector.capture_snapshot_journal();
+        let expected = collector.error_windows_captured(&journal, "ok", reference, &threads, &session);
+        let mut producer = project::ToolErrorSummary::new(false);
+        for (thread, (projection, _)) in &threads {
+            for (id, call) in &projection.calls { producer.observe(thread, id, call); }
+        }
+        let failures = producer.finish();
+        drop(threads);
+        let calls = std::cell::Cell::new(0);
+        let actual = collector.render_error_windows_captured(&journal, "ok", reference, &session, |ordered| {
+            assert!(!ordered);
+            calls.set(calls.get() + 1);
+            collector.mcp_sources.write().unwrap().insert("blocked".into(), false);
+            collector.journal.lock().unwrap().event("after-capture");
+            failures
+        });
+        assert_eq!(calls.get(), 1);
+        assert_eq!(actual, expected);
+        assert!(actual[3].0["events"].as_array().unwrap().iter().any(|event| event["code"] == "blocked"));
+        let next = collector.render_error_windows_captured(&journal, "ok", reference, &session, |_| Vec::new());
+        assert!(!next[3].0["events"].as_array().unwrap().iter().any(|event| event["code"] == "blocked"));
     }
 
     #[test]

@@ -409,6 +409,10 @@ Candidate 已在 call observations 後合併 Core / Desktop SQL queues, MCP diag
 
 Core / Desktop observation revision 僅涵蓋 accepted errors / SQL queues 與 rescan clear, Core 沿原 refresh 接受事件, Desktop 沿原持久化成功後採用, save failure 不提升 revision, unchanged refresh / 空 clear 不取消, logs、source health、API queues 與完整 diagnostic publication 不在此 revision 的覆蓋範圍
 
+Error windows 已分離為可接受 owned tool failures 的 render_error_windows_captured, production 經原 wrapper 提供一次性 reducer, 仍在原來源設定 / journal 準備後才執行 reducer, 其餘 rendering 區段未改, candidate 尚未呼叫此入口
+
+Desktop source.checked_at 在無新事件的 refresh 也可能改變, 不能將完整 source report 當成跨輪穩定 payload revision, session error 來源順序、logs / API guards 與 source metadata 的同步 finalization 邊界須先確立, 不先替 candidate 加入容易反覆失效的 volatile report guard
+
 完整 error windows 與正式發布仍待串接, raw failure components 不在此步套用名稱, 未因此重跑 deferred 額外 metadata-only / 無 ID 來源實驗
 
 建構 eligibility 仍用原 Option, SelectedInputs 的舊 validate_sources 亦保留 Option wrapper, 新 try_validate_sources 提供有類型的驗證結果, 不改動同步 snapshots 或原失敗 fallback
