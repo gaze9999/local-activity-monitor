@@ -137,7 +137,8 @@ pub struct Snapshots {
     pub windows: [Bytes; 4],
     pub logs: [Bytes; 4],
     pub activity: Bytes,
-    pub error_details: BTreeMap<String, Value>,
+    pub error_details: Arc<BTreeMap<String, Value>>,
+    pub detail_index: Arc<details::Index>,
     pub codex_enabled: bool,
     pub metadata_enabled: bool,
     pub tool_events_enabled: bool,
@@ -325,7 +326,6 @@ pub struct Monitor {
     tracking: Arc<RwLock<TrackingSettings>>,
     journal: Arc<Mutex<crate::journal::Journal>>,
     debug: Arc<Mutex<crate::performance_debug::PerformanceDebug>>,
-    details: Arc<RwLock<details::Index>>,
     core_source: Arc<RwLock<Option<core_logs::Source>>>,
     desktop_sources: Arc<RwLock<Vec<desktop::ObservedSource>>>,
 }
@@ -346,9 +346,6 @@ impl Monitor {
     }
     pub fn fonts(&self) -> Arc<RwLock<Option<Vec<String>>>> {
         Arc::clone(&self.fonts)
-    }
-    pub fn detail_index(&self) -> Arc<RwLock<details::Index>> {
-        Arc::clone(&self.details)
     }
     pub fn desktop_sources(&self) -> Arc<RwLock<Vec<desktop::ObservedSource>>> {
         Arc::clone(&self.desktop_sources)
@@ -452,8 +449,6 @@ impl Monitor {
         let tracking = Arc::clone(&collector.tracking);
         let journal = Arc::clone(&collector.journal);
         let debug = Arc::clone(&collector.debug);
-        let details = Arc::new(RwLock::new(details::Index::default()));
-        let detail_writer = Arc::clone(&details);
         let core_source = Arc::new(RwLock::new(None));
         let core_source_writer = Arc::clone(&core_source);
         let desktop_sources = Arc::new(RwLock::new(Vec::new()));
@@ -1159,7 +1154,7 @@ impl Monitor {
                         if changed || selection_pending || schedule_changed || metadata_changed || previous_checkpoint != collector.checkpoints.report {
                             let (index, ready) = collector.detail_index(&root);
                             collector.overflow_details_ready = ready;
-                            *detail_writer.write().unwrap_or_else(|error| error.into_inner()) = index;
+                            collector.published_detail_index = Arc::new(index);
                             collector.recent_call_details_dirty.store(false, Ordering::Release);
                         }
                         version += 1;
@@ -1208,7 +1203,6 @@ impl Monitor {
                 tracking,
                 journal,
                 debug,
-                details,
                 core_source,
                 desktop_sources,
                 worker: Some(Worker {
@@ -1221,6 +1215,19 @@ impl Monitor {
             snapshots,
         ))
     }
+}
+
+#[cfg(test)]
+pub(crate) fn detail_publication_fixture(root: &Path) -> Snapshots {
+    let mut collector = Collector::new(root.join("monitoring"), true, None);
+    collector.tool_events_enabled.store(true, Ordering::Release);
+    for _ in 0..4 {
+        collector.refresh(root, &AtomicBool::new(false), true, true, CommandSwitches::default());
+    }
+    let (index, ready) = collector.detail_index(root);
+    collector.overflow_details_ready = ready;
+    collector.published_detail_index = Arc::new(index);
+    collector.snapshots("ok", "ok", 1)
 }
 
 impl Drop for Monitor {
@@ -2482,6 +2489,7 @@ struct Collector {
     recent_call_details_dirty: AtomicBool,
     selected_detail_scan: Mutex<Option<SelectedDetailScan>>,
     completed_detail_index: Mutex<Option<details::Index>>,
+    published_detail_index: Arc<details::Index>,
     selected_snapshot_scan: Mutex<Option<SelectedSnapshotScan>>,
     overflow_files: BTreeMap<PathBuf, Session>,
     overflow_cursor: String,
@@ -2826,6 +2834,7 @@ impl Collector {
             recent_call_details_dirty: AtomicBool::new(false),
             selected_detail_scan: Mutex::new(None),
             completed_detail_index: Mutex::new(None),
+            published_detail_index: Arc::new(details::Index::default()),
             selected_snapshot_scan: Mutex::new(None),
             overflow_files: BTreeMap::new(),
             overflow_cursor: String::new(),
@@ -5546,7 +5555,8 @@ impl Collector {
             windows,
             logs,
             activity: activity.to_string().into(),
-            error_details,
+            error_details: Arc::new(error_details),
+            detail_index: Arc::clone(&self.published_detail_index),
             traffic: Arc::clone(&self.traffic),
             memory: Arc::clone(&self.memory),
             collection: Arc::clone(&self.collection),

@@ -722,7 +722,6 @@ async fn run(options: Options) -> Result<(), Box<dyn Error>> {
         metadata_lock: tokio::sync::Mutex::new(()),
         journal: monitor.journal(),
         debug: monitor.debug(),
-        details: monitor.detail_index(),
         core_source: monitor.core_source(),
         desktop_sources: monitor.desktop_sources(),
         event_clients: Arc::new(tokio::sync::Semaphore::new(events::CLIENT_LIMIT)),

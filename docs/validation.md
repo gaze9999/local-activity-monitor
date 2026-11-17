@@ -1285,3 +1285,19 @@ Linux / Rust 1.100.0 針對性 2 項通過 (0.00 秒), 完整 service 單輪 392
 maintenance 新增以既有 Snapshots 擁有 immutable detail index 的整合草案, 區分共同發布、跨輪 capture、實體來源驗證與 live disable, 不新增 counter、channel、runtime 或 endpoint, 不宣稱已重現混版回應
 
 此輪為來源碼/文件稽核, diff 檢查通過, 尚未執行草案的交界注入、跨輪或 HTTP 整合驗收, 既有測試結果沿用各自記錄範圍, 未重試 blocked browser
+
+### 快照與明細的共同發布
+
+Snapshots 現在以 Arc 擁有 detail index 與 error_details, 移除 Monitor / server State 的獨立 detail RwLock, worker 不再先公開明細再發布快照, 沒有變更 index 的批次保留原 Arc
+
+SQL、error、Git/check、skill、JEV、MCP、tool、context/agent-message 的 8 個 reader 位置統一擷取同批 all-window / error map / index, request 只做 Bytes / Arc clone, 在來源 I/O 前釋放 watch borrow, 未修改 endpoint 參數、查詢主體、response 欄位來源或外部查詢次數
+
+`detail_request_keeps_one_publication_across_replacement_and_live_guards` 使用兩組真實 session 檔案經 Collector 建立的發布物件, 在 request capture 與 route 讀取之間替換 watch 發布, 驗證舊 request 的 tool / error 仍對應舊內容, 新 request 對應新內容, 移除舊來源後拒絕過期明細, capture 後停用仍回傳 conflict
+
+針對性初版與補強 error coupling 後各 1 項通過 (各 0.06 秒), 完整 service 單輪 394 項通過 (75.99 秒), 完整 service 執行後僅補強同一測試的 error assertions, runtime 未再修改
+
+首次 serial HTTP 在建置期間遇執行中斷, 記錄僅有編譯警告而無測試結果, 不列為通過或失敗, 恢復後執行未完成的必要 HTTP 檢查, 非重試 browser 阻擋項目
+
+此處交界注入使用實際 watch 與 route, 不是 worker 任意階段的 fault injection, 尚未驗證跨輪 candidate 失敗/取消、共同輸入 revision、全部來源同時一致或移除 16 MiB staging, 原待辦保留
+
+恢復後完整 serial HTTP 單輪 226 項通過 (132.39 秒), 涵蓋既有真實 worker / HTTP 明細、停用、checkpoint、來源保護與 5 秒設定等待回歸, Linux / Rust 1.100.0, 未執行原生 Windows / macOS 或 browser 驗收

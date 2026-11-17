@@ -275,3 +275,11 @@ Cloud 測試不取代 Windows watcher、真實來源、SSE、Host/Origin 與持�
 - reference / cutoffs 固定於 candidate, discovery generation 在無資料變更時增加不能取消進度, 持續來源變更下的完成/取消策略仍須以實際大資料測試確認
 
 最小整合驗收: 在既有實際 worker 與 route 讀取點控制兩次發布, 證明 request 取得同批 event/index, 在來源已改變時仍拒絕過期 locator, 停用後仍拒絕內容, 舊可用快照在候選失敗時保留, 再跑完整 service / serial HTTP, 不用只比較假想 stamp 的測試代替
+
+### 共同發布的已實作範圍
+
+後續實作已將 detail index 移入 Snapshots 的 immutable Arc, 取代獨立 Monitor / server State RwLock, worker 在同一個 send_replace 發布 windows、logs、error_details 與 index, 沒有 index 變更時重用現有 Arc
+
+前述 8 個 reader 均先擷取同批 all-window、error_details Arc 與 index Arc, 釋放 watch borrow 後才執行既有查詢與來源 I/O, error map 不在每次 request 完整複製, live disable、mask、locator 與 checkpoint guard 保留
+
+這取代前文描述的獨立 detail_writer 發布方式, 但跨輪 capture / mutation revision、候選取消及 16 MiB staging 仍未完成, 同一發布物件不保證所有外部輸入在同一時刻產生, 也不保證跨 request 或實體來源變更後仍能讀取舊明細

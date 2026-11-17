@@ -73,7 +73,6 @@ pub struct State {
     pub metadata_lock: tokio::sync::Mutex<()>,
     pub journal: Arc<std::sync::Mutex<crate::journal::Journal>>,
     pub debug: Arc<std::sync::Mutex<crate::performance_debug::PerformanceDebug>>,
-    pub details: Arc<std::sync::RwLock<crate::sessions::details::Index>>,
     pub core_source: Arc<std::sync::RwLock<Option<crate::sessions::core_logs::Source>>>,
     pub desktop_sources: Arc<std::sync::RwLock<Vec<crate::sessions::desktop::ObservedSource>>>,
     pub assets: Option<Assets>,
@@ -2231,7 +2230,29 @@ fn bounded_decimal(value: &str, max_digits: usize) -> Option<usize> {
     crate::history::decimal_digits(value, max_digits).and_then(|number| usize::try_from(number).ok())
 }
 
+struct DetailSnapshot {
+    window: bytes::Bytes,
+    errors: Arc<std::collections::BTreeMap<String, Value>>,
+    index: Arc<crate::sessions::details::Index>,
+}
+
+impl DetailSnapshot {
+    fn capture(snapshot: &Snapshots) -> Self {
+        Self { window: snapshot.windows[3].clone(), errors: Arc::clone(&snapshot.error_details),
+            index: Arc::clone(&snapshot.detail_index) }
+    }
+}
+
 fn route(state: &State, path: &str, query: &str, gzip: bool) -> Response<Body> {
+    let detail = matches!(path, "/api/codex/sql" | "/api/codex/error" | "/api/codex/git"
+        | "/api/codex/check" | "/api/codex/skill" | "/api/codex/jev" | "/api/codex/mcp"
+        | "/api/codex/tool" | "/api/codex/context" | "/api/codex/agent-message")
+        .then(|| DetailSnapshot::capture(&state.snapshots.borrow()));
+    // Release the watch borrow before source validation or disk I/O.
+    route_captured(state, path, query, gzip, detail)
+}
+
+fn route_captured(state: &State, path: &str, query: &str, gzip: bool, detail: Option<DetailSnapshot>) -> Response<Body> {
     let (status, body, mime, policy) = match path {
         "/api/codex/sql" => {
             let params: Vec<_> = form_urlencoded::parse(query.as_bytes()).collect();
@@ -2300,7 +2321,7 @@ fn route(state: &State, path: &str, query: &str, gzip: bool) -> Response<Body> {
                 (StatusCode::CONFLICT, "null".into(), JSON, POLICY)
             } else {
                 let snapshot = serde_json::from_slice::<serde_json::Value>(
-                    &state.snapshots.borrow().windows[3],
+                    &detail.as_ref().expect("detail route").window,
                 )
                 .ok();
                 let event = snapshot
@@ -2346,10 +2367,7 @@ fn route(state: &State, path: &str, query: &str, gzip: bool) -> Response<Body> {
                         let candidates = event["thread_id"]
                             .as_str()
                             .map(|thread| {
-                                state
-                                    .details
-                                    .read()
-                                    .unwrap_or_else(|error| error.into_inner())
+                                detail.as_ref().expect("detail route").index
                                     .candidates(thread)
                             })
                             .unwrap_or_default();
@@ -2453,16 +2471,13 @@ fn route(state: &State, path: &str, query: &str, gzip: bool) -> Response<Body> {
             {
                 (StatusCode::CONFLICT, "null".into(), JSON, POLICY)
             } else {
-                let event = id.and_then(|id| state.snapshots.borrow().error_details.get(id).cloned());
+                let event = id.and_then(|id| detail.as_ref().expect("detail route").errors.get(id).cloned());
                 if let Some(event) = event {
                     let source = event["source"].as_str().unwrap_or("unknown");
                     let candidates = event["thread_id"]
                         .as_str()
                         .map(|thread| {
-                            state
-                                .details
-                                .read()
-                                .unwrap_or_else(|error| error.into_inner())
+                            detail.as_ref().expect("detail route").index
                                 .candidates(thread)
                         })
                         .unwrap_or_default();
@@ -2731,10 +2746,7 @@ fn route(state: &State, path: &str, query: &str, gzip: bool) -> Response<Body> {
                 (StatusCode::CONFLICT, "null".into(), JSON, POLICY)
             } else {
                 let call = call.expect("validated call");
-                let selected = state
-                    .details
-                    .read()
-                    .unwrap_or_else(|error| error.into_inner())
+                let selected = detail.as_ref().expect("detail route").index
                     .select_call(thread.expect("validated thread"), call);
                 let result = selected.and_then(|file| file.command(call, operation.expect("validated operation"), checks, mask == "1", lazy.is_some())).or_else(|| Some(json!({"commands":[],"request":null,"response":null,"output":null,"output_scope":null,"result_scope":null,"truncated":false,"content_status":"unavailable"})));
                 match result {
@@ -2921,17 +2933,14 @@ fn route(state: &State, path: &str, query: &str, gzip: bool) -> Response<Body> {
             } else {
                 let skill = skill.expect("validated skill");
                 let snapshot =
-                    serde_json::from_slice::<Value>(&state.snapshots.borrow().windows[3]).ok();
+                    serde_json::from_slice::<Value>(&detail.as_ref().expect("detail route").window).ok();
                 let events = snapshot
                     .as_ref()
                     .and_then(|value| value["codex"]["skills"]["events"].as_array());
                 let mut candidates = Vec::new();
                 let mut tail_budget = 8 * 1024 * 1024;
                 if let Some(events) = events {
-                    let index = state
-                        .details
-                        .read()
-                        .unwrap_or_else(|error| error.into_inner());
+                    let index = &detail.as_ref().expect("detail route").index;
                     for event in events {
                         let (Some(event_thread), Some(event_call)) =
                             (event["thread_id"].as_str(), event["call_id"].as_str())
@@ -3056,7 +3065,7 @@ fn route(state: &State, path: &str, query: &str, gzip: bool) -> Response<Body> {
                 let call = call.expect("validated call");
                 let index = index.expect("validated index");
                 let snapshot = serde_json::from_slice::<serde_json::Value>(
-                    &state.snapshots.borrow().windows[3],
+                    &detail.as_ref().expect("detail route").window,
                 )
                 .ok();
                 let event = snapshot
@@ -3074,10 +3083,7 @@ fn route(state: &State, path: &str, query: &str, gzip: bool) -> Response<Body> {
                 let detail = event
                     .and_then(|event| event["operation"].as_str())
                     .and_then(|operation| {
-                        state
-                            .details
-                            .read()
-                            .unwrap_or_else(|error| error.into_inner())
+                        detail.as_ref().expect("detail route").index
                             .select_call(thread, call)
                             .and_then(|file| file.jev(call, index, operation, mask == "1", lazy.is_some()))
                     });
@@ -3182,15 +3188,12 @@ fn route(state: &State, path: &str, query: &str, gzip: bool) -> Response<Body> {
                 (StatusCode::CONFLICT, "null".into(), JSON, POLICY)
             } else {
                 let call = call.expect("validated call");
-                let selected = state
-                    .details
-                    .read()
-                    .unwrap_or_else(|error| error.into_inner())
+                let selected = detail.as_ref().expect("detail route").index
                     .select_call(thread.expect("validated thread"), call);
                 let index = bounded_decimal(index.expect("validated index"), 2)
                     .expect("bounded index");
                 let snapshot = serde_json::from_slice::<serde_json::Value>(
-                    &state.snapshots.borrow().windows[3],
+                    &detail.as_ref().expect("detail route").window,
                 )
                 .ok();
                 let event = snapshot
@@ -3327,10 +3330,7 @@ fn route(state: &State, path: &str, query: &str, gzip: bool) -> Response<Body> {
                 (StatusCode::CONFLICT, "null".into(), JSON, POLICY)
             } else {
                 let call = call.expect("validated call");
-                let selected = state
-                    .details
-                    .read()
-                    .unwrap_or_else(|error| error.into_inner())
+                let selected = detail.as_ref().expect("detail route").index
                     .select_call(thread.expect("validated thread"), call);
                 let result = selected.and_then(|file| file.tool(call, mask == "1", lazy.is_some()));
                 match result {
@@ -3407,10 +3407,7 @@ fn route(state: &State, path: &str, query: &str, gzip: bool) -> Response<Body> {
             {
                 (StatusCode::CONFLICT, "null".into(), JSON, POLICY)
             } else {
-                let detail_index = state
-                    .details
-                    .read()
-                    .unwrap_or_else(|error| error.into_inner());
+                let detail_index = &detail.as_ref().expect("detail route").index;
                 let selected = if path == "/api/codex/agent-message" {
                     call.and_then(|call| {
                         detail_index.select_call(thread.expect("validated thread"), call)
@@ -3418,7 +3415,6 @@ fn route(state: &State, path: &str, query: &str, gzip: bool) -> Response<Body> {
                 } else {
                     detail_index.select(thread.expect("validated thread"))
                 };
-                drop(detail_index);
                 let result = selected.and_then(|file| {
                     if path == "/api/codex/agent-message" {
                         file.agent_message(
@@ -3812,8 +3808,7 @@ fn reply(
 mod tests {
     use super::*;
 
-    #[test]
-    fn accepted_batch_response_uses_applied_state_when_snapshot_is_stale() {
+    fn fixture_state() -> (tempfile::TempDir, crate::sessions::Monitor, State) {
         let home = tempfile::tempdir().unwrap();
         let (monitor, snapshots) =
             crate::sessions::Monitor::start(home.path(), false, None, 20).unwrap();
@@ -3872,7 +3867,6 @@ mod tests {
             metadata_lock: tokio::sync::Mutex::new(()),
             journal: monitor.journal(),
             debug: monitor.debug(),
-            details: monitor.detail_index(),
             core_source: monitor.core_source(),
             desktop_sources: monitor.desktop_sources(),
             assets: None,
@@ -3880,6 +3874,12 @@ mod tests {
             refresh: monitor.refresh_sender(),
             event_clients: Arc::new(Semaphore::new(events::CLIENT_LIMIT)),
         };
+        (home, monitor, state)
+    }
+
+    #[test]
+    fn accepted_batch_response_uses_applied_state_when_snapshot_is_stale() {
+        let (_home, _monitor, state) = fixture_state();
         state
             .files_enabled
             .store(false, std::sync::atomic::Ordering::Release);
@@ -3913,4 +3913,59 @@ mod tests {
         assert_eq!(body["debug_mode"], true);
         assert_eq!(body["refresh_pending"], true);
     }
+    #[test]
+    fn detail_request_keeps_one_publication_across_replacement_and_live_guards() {
+        let (_home, _monitor, mut state) = fixture_state();
+        let old = tempfile::tempdir().unwrap();
+        let new = tempfile::tempdir().unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        let write = |root: &std::path::Path, marker: &str| {
+            let path = root.join(format!("rollout-{id}.jsonl"));
+            let records = [
+                json!({"type":"session_meta","payload":{"id":id}}),
+                json!({"timestamp":"2026-11-17T00:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"a","arguments":"{}"}}),
+                json!({"timestamp":"2026-11-17T00:00:01Z","type":"response_item","payload":{"type":"function_call_output","call_id":"a","output":{"exit_code":2,"output":marker}}}),
+            ];
+            std::fs::write(&path, records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+            path
+        };
+        let old_path = write(old.path(), "OLD_PUBLICATION");
+        write(new.path(), "NEW_PUBLICATION");
+        let first = crate::sessions::detail_publication_fixture(old.path());
+        let second = crate::sessions::detail_publication_fixture(new.path());
+        let (publish, receive) = tokio::sync::watch::channel(first);
+        state.snapshots = receive;
+        state.codex.store(true, std::sync::atomic::Ordering::Release);
+        state.tool_events_enabled.store(true, std::sync::atomic::Ordering::Release);
+        let captured = DetailSnapshot::capture(&state.snapshots.borrow());
+        let captured_error = DetailSnapshot::capture(&state.snapshots.borrow());
+        let error_id = captured_error.errors.keys().next().expect("tool failure event").clone();
+        let captured_window = captured.window.clone();
+        let captured_index = Arc::clone(&captured.index);
+        publish.send_replace(second);
+        assert!(!Arc::ptr_eq(&captured_index, &state.snapshots.borrow().detail_index));
+        assert_eq!(captured.window, captured_window);
+        let query = format!("thread_id={id}&call_id=a&mask=0");
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let body = |response: Response<Body>| {
+            assert_eq!(response.status(), StatusCode::OK);
+            String::from_utf8(runtime.block_on(response.into_body().collect()).unwrap().to_bytes().to_vec()).unwrap()
+        };
+        let old_body = body(route_captured(&state, "/api/codex/tool", &query, false, Some(captured)));
+        assert!(old_body.contains("OLD_PUBLICATION"), "{old_body}");
+        assert!(!old_body.contains("NEW_PUBLICATION"));
+        assert!(body(route(&state, "/api/codex/tool", &query, false)).contains("NEW_PUBLICATION"));
+        let error_query = format!("id={error_id}&mask=0");
+        let old_error = body(route_captured(&state, "/api/codex/error", &error_query, false, Some(captured_error)));
+        assert!(old_error.contains("OLD_PUBLICATION"), "{old_error}");
+        assert!(!old_error.contains("NEW_PUBLICATION"));
+        // A frozen publication does not authorize a source that was removed.
+        std::fs::remove_file(old_path).unwrap();
+        let stale = DetailSnapshot { window: captured_window, errors: Arc::new(Default::default()), index: captured_index };
+        assert_eq!(route_captured(&state, "/api/codex/tool", &query, false, Some(stale)).status(), StatusCode::CONFLICT);
+        let captured = DetailSnapshot::capture(&state.snapshots.borrow());
+        state.codex.store(false, std::sync::atomic::Ordering::Release);
+        assert_eq!(route_captured(&state, "/api/codex/tool", &query, false, Some(captured)).status(), StatusCode::CONFLICT);
+    }
+
 }
