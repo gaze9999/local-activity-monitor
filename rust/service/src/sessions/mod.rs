@@ -5848,6 +5848,10 @@ mod log_tests {
                 row.event_time = time.map(str::to_owned);
                 let mut payload: Value = serde_json::from_str(&row.payload).unwrap();
                 payload["time"] = json!(time);
+                if nested {
+                    payload["commands"] = json!({"git":[{"operation":"status"},{"operation":"diff","repository":"fixture"}],
+                        "checks":[{"operation":"cargo test","category":"runtime"},{"operation":"cargo check","category":"runtime"}]});
+                }
                 payload["files"] = json!([{"operation":"read","path":format!("fixture-{n}"),"tool":fixture_tool,"nested":false}]);
                 row.payload = payload.to_string();
                 row
@@ -5930,6 +5934,13 @@ mod log_tests {
                 .map(|(id, projection)| (id.as_str(), (projection.clone(), false))).collect();
             let expected_statistics = cutoffs.map(|cutoff|
                 serde_json::to_value(project::ToolStatistics::new(&statistics_threads, cutoff, true)).unwrap());
+            let expected_commands = cutoffs.map(|cutoff| {
+                let (git, checks) = commands::Calls::new(&statistics_threads).window(cutoff, None);
+                json!({"git":git,"checks":checks})
+            });
+            assert_eq!(expected_commands[3]["git"]["total"], json!(if nested { expected_winners * 2 } else { 0 }));
+            assert_eq!(expected_commands[3]["git"]["events"].as_array().unwrap().len(), if nested { 500 } else { 0 });
+            assert_eq!(expected_commands[3]["checks"].as_array().unwrap().len(), if nested { 500 } else { 0 });
             if nested {
                 let all = expected_statistics[3].as_array().unwrap();
                 let primary = all.iter().find(|row| row["tool"] == "exec" && row["nested"] == false).unwrap();
@@ -5973,12 +5984,13 @@ mod log_tests {
             }
             // Process winner sources in reverse to show reduction is independent of
             // page arrival once canonical-fallback winners have been fixed.
-            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool, statistics_units: usize| -> Option<([Value;4], [Value;4], [Value;4])> {
+            let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool, statistics_units: usize| -> Option<([Value;4], [Value;4], [Value;4], [Value;4])> {
                 let mut inputs = candidate_inputs::SelectedInputs::capture(&collector, &selection,
                     SnapshotTime { reference, cutoffs }, true, &stopped)?;
                 for source in sources {
                     inputs = inputs.source(source.clone(), original.cursor.signature.clone())?;
                 }
+                let mut command_summaries = cutoffs.map(commands::WindowSummary::new);
                 let mut statistics = cutoffs.map(|cutoff| project::OwnedStatistics::new(cutoff, true, statistics_units, 10_000));
                 let mut series = std::array::from_fn::<_,4,_>(|_| project::ActivitySeries::new());
                 let mut summaries = std::array::from_fn::<_,4,_>(|_| project::FileSummary::new(1000));
@@ -6006,6 +6018,11 @@ mod log_tests {
                             for call in projection.projection.calls.values() {
                                 statistics.observe(projection.projection.id.as_deref().unwrap(), call);
                             }
+                        }
+                        let thread = projection.projection.id.as_deref().unwrap();
+                        for summary in &mut command_summaries {
+                            if ordered { summary.ordered_thread(thread_slots[thread]); }
+                            for (id, call) in &projection.projection.calls { summary.observe(thread, id, call); }
                         }
                         observed += projection.projection.calls.len();
                         for (summary, cutoff) in summaries.iter_mut().zip(cutoffs) {
@@ -6043,17 +6060,22 @@ mod log_tests {
                 });
                 let statistics: [Value;4] = statistics.into_iter().map(|value| value.finish())
                     .collect::<Option<Vec<_>>>()?.try_into().ok()?;
-                Some((result, series, statistics))
+                let commands = command_summaries.map(|summary| {
+                    let (git, checks) = summary.finish();
+                    json!({"git":git,"checks":checks})
+                });
+                Some((result, series, statistics, commands))
             };
             let result = reduce(&mut store, false, false, 10_000).unwrap();
             assert_eq!(result.0, expected);
             assert_eq!(result.1, expected_series);
             assert_eq!(result.2, expected_statistics);
+            assert_eq!(result.3, expected_commands);
             assert!(reduce(&mut store, false, false, 0).is_none(), "statistics overflow rejects the whole candidate");
             assert!(reduce(&mut store, true, false, 10_000).is_none(), "a source changed after its own validation");
-            assert_eq!(result, (expected.clone(), expected_series.clone(), expected_statistics.clone()), "previously completed output is immutable");
+            assert_eq!(result, (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone()), "previously completed output is immutable");
             store.save_checkpoints(std::slice::from_ref(&second_cursor), &second_calls, &[]).unwrap();
-            assert_eq!(reduce(&mut store, false, false, 10_000).unwrap(), (expected.clone(), expected_series.clone(), expected_statistics.clone()));
+            assert_eq!(reduce(&mut store, false, false, 10_000).unwrap(), (expected.clone(), expected_series.clone(), expected_statistics.clone(), expected_commands.clone()));
             let ordered_expected = cutoffs.map(|cutoff| {
                 let mut summary = project::FileSummary::new(1000);
                 for (thread, projection) in &materialized {
@@ -6063,6 +6085,11 @@ mod log_tests {
                 let (events,total,operations) = summary.finish();
                 json!({"events":events,"total":total,"operations":operations})
             });
+            let ordered_ranks = thread_slots.iter().map(|(id, rank)| (id.as_str(), *rank)).collect();
+            let ordered_commands = cutoffs.map(|cutoff| {
+                let (git, checks) = commands::Calls::new(&statistics_threads).window(cutoff, Some(&ordered_ranks));
+                json!({"git":git,"checks":checks})
+            });
             let ordered_result = reduce(&mut store, false, true, 10_000).unwrap();
             for index in 0..4 {
                 assert!(ordered_result.0[index] == ordered_expected[index],
@@ -6070,6 +6097,7 @@ mod log_tests {
             }
             assert_eq!(ordered_result.1, expected_series);
             assert_eq!(ordered_result.2, expected_statistics);
+            assert_eq!(ordered_result.3, ordered_commands);
             collector.updated = Some(reference);
             let baseline = collector.snapshots("ok", "ok", 1);
             for index in 0..4 {
@@ -6078,6 +6106,8 @@ mod log_tests {
                 assert_eq!(window["codex"]["activity_series"], expected_series[index]["activity"]);
                 assert_eq!(window["codex"]["tool_series"], expected_series[index]["tools"]);
                 assert_eq!(window["codex"]["tool_statistics"], expected_statistics[index]);
+                assert_eq!(window["codex"]["git"], expected_commands[index]["git"]);
+                assert_eq!(window["codex"]["checks"], expected_commands[index]["checks"]);
             }
         }
     }

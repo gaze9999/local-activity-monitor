@@ -320,6 +320,10 @@ SelectedInputs 將完整 CallSelection 與固定 SnapshotTime 納入候選擁有
 
 原單來源 / 雙來源 candidate 已使用此共用邊界, 雙來源以每輪 1 個來源完成兩輪 final sweep, 這仍是依序來源驗證而非全域 SQLite snapshot, 完整 production 串接還須保留所有實體來源身份檢查、metadata / reducers 與發布條件, 不把本章 test-only 結果當成切換授權
 
+Git / check command 的既有 WindowSummary 已提供內部逐 winner 呼叫介面, production Calls::window 與 page candidate 共用同一 ordered_thread 設定, 不另建 command 計數邏輯, candidate 在相同 resolved winner 頁上同時整理 FileSummary、ActivitySeries、ToolStatistics 與四窗 command summaries, Git 全量 total / operation counts 與 Git / check 各 500 筆預覽保持獨立
+
+此串接尚未取代 production materialized threads, command thread-name 仍由既有 snapshot metadata 階段補入, 完整命名 metadata 與其他 reducers 仍待整批串接, 不以目前 fixture 的 null 名稱取代命名語意
+
 ### 共同 capture / mutation 邊界設計草案
 
 此設計起於 `2427f5e` 的 producer 與 server reader 稽核, 共同 publication 部分已實作並通過限定範圍驗證, 下列跨輪 capture / mutation 部分仍為待整合規格, 不視為全部架構驗收

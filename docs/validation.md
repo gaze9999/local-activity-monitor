@@ -1876,3 +1876,15 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, cargo check 通過並保留原 5 個 warn
 此結果不涵蓋 production worker、完整 metadata / diagnostics、全部 reducers、跨來源共同 transaction 或資源上限量測, 現有 16 MiB staging 與 fallback 尚未切換
 
 `cargo check --locked --manifest-path rust/service/Cargo.toml --bin local-activity-monitor` 通過, 共 6 個 warnings, 含原 5 個與 SelectedInputs.time 尚未被 production 使用的 dead-code warning, 不宣稱正式 worker 已採用
+
+### Page candidate 共用 Git / check command reducer
+
+基準 `1165f1e`, 將既有 WindowSummary 的逐 call / ordered-thread / finish 介面開放給 sessions 內部, production Calls::window 沿用同一演算法, 未修改 command 分類器、500 筆限制、欄位格式或設定流程
+
+- 原雙來源 candidate 的同 thread / 不同 thread、一般 / nested 四種情境均保留, 只在合法 exec payload 放入合成 git status / diff 與 cargo test / check metadata
+- 最初對一般 fixture_tool 也放入 commands, checkpoint::snapshot_projection 依既有 tool 相容性驗證拒絕, 測試失敗 0.13 秒, 已限定合法 exec 情境, 未移除或弱化 checkpoint 驗證
+- 與 FileSummary / ActivitySeries / ToolStatistics 共用相同 winner 與頁邊界, 同 thread 900 winners、不同 thread 1,200 winners 的 Git 全量計數各為 1,800 / 2,400, 預覽仍各 500 筆, 一般 fixture_tool 保持空 commands
+- 四窗 command 輸出對照原 materialized Calls::window, canonical 與完整 source presentation order 均相等, production snapshots 的 git / checks 欄位亦逐窗相等, 原統計超限 / source replacement 拒絕整組結果與已交付輸出不變仍通過
+- Linux / Rust 1.100.0 / 原 Cargo.lock, page candidate targeted 1 項通過、423 項未選取, 8.79 秒, 原 command reducer 2 項通過、422 項未選取, 0.36 秒
+
+未執行 HTTP、完整套件或 deferred 檢查, fixture 不涵蓋真實 shell 執行、所有 command parser 輸入或非 null thread-name enrichment, production worker、其他 metadata / reducers、16 MiB staging 與資源驗收尚未完成

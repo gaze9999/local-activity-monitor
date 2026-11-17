@@ -18,7 +18,7 @@ fn retain_preview<K: Ord, V>(preview: &mut BTreeMap<K, V>, rank: K, render: impl
 
 /// Feed one resolved call winner per (thread, call). Preview ownership permits
 /// releasing each call after observation; full operation counts remain exact.
-struct WindowSummary {
+pub(super) struct WindowSummary {
     boundary: Option<DateTime<Utc>>,
     presentation_order: bool,
     thread_order: usize,
@@ -29,11 +29,16 @@ struct WindowSummary {
 }
 
 impl WindowSummary {
-    fn new(boundary: Option<DateTime<Utc>>) -> Self {
+    pub(super) fn new(boundary: Option<DateTime<Utc>>) -> Self {
         Self { boundary, presentation_order: false, thread_order: 0, git: BTreeMap::new(), checks: BTreeMap::new(), operations: BTreeMap::new(), total: 0 }
     }
 
-    fn observe(&mut self, thread: &str, id: &str, call: &Call) {
+    pub(super) fn ordered_thread(&mut self, order: usize) {
+        self.presentation_order = true;
+        self.thread_order = order;
+    }
+
+    pub(super) fn observe(&mut self, thread: &str, id: &str, call: &Call) {
         if call.commands.is_empty() || self.boundary.is_some_and(|cutoff| call.time.is_none_or(|time| time < cutoff)) { return; }
         self.total += call.commands.git.len();
         for (index, event) in call.commands.git.iter().enumerate() {
@@ -55,7 +60,7 @@ impl WindowSummary {
         }
     }
 
-    fn finish(self) -> (Value, Vec<Value>) {
+    pub(super) fn finish(self) -> (Value, Vec<Value>) {
         let git: Vec<_> = self.git.into_values().collect();
         (json!({"events":git,"operations":self.operations,"total":self.total}), self.checks.into_values().collect())
     }
@@ -71,8 +76,7 @@ impl<'a> Calls<'a> {
         let mut summary = WindowSummary::new(boundary);
         for (&thread, (projection, _)) in self.0 {
             if let Some(order) = thread_order {
-                summary.presentation_order = true;
-                summary.thread_order = order.get(thread).copied().unwrap_or(usize::MAX);
+                summary.ordered_thread(order.get(thread).copied().unwrap_or(usize::MAX));
             }
             for (id, call) in &projection.calls { summary.observe(thread, id, call); }
         }
