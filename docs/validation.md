@@ -1561,3 +1561,27 @@ cargo test --locked --manifest-path rust/service/Cargo.toml --test http overflow
 ```
 
 此失敗紀錄不撤銷 `081d3ef` 的歷史 407 / 226 通過, 也不以舊通過覆蓋目前結果, 四窗共同擷取、跨輪 candidate、記憶體與平台驗收仍未完成
+
+### Linux 合成工作量的記憶體基線
+
+在 `35823b4` 文件 checkpoint、runtime `af7c18e` 的 Linux / Rust 1.100.0 debug binary 執行六個獨立程序, 每種工作量兩次, 沒有執行兩項延後測試或變更 runtime
+
+| 已驗證 tool calls | 來源檔案 | 來源 bytes | 第一次 RSS / HWM bytes | 第二次 RSS / HWM bytes | 回應 bytes 範圍 |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 0 | 0 | 30,224,384 | 30,261,248 | 26,607–26,728 |
+| 1,000 | 2 | 391,018 | 38,084,608 | 38,105,088 | 60,696–60,765 |
+| 5,000 | 10 | 1,963,970 | 56,692,736 | 56,307,712 | 196,597–196,599 |
+
+每次使用全新 temporary home 與獨立程序, 每個 JSONL 最多 500 組 function_call / function_call_output, arguments 僅有 64 個 x 字元, 以 loopback snapshot 確認 observed_tool_calls 等於預期、device_ready=true 與 collection=idle, 隨後讀取該 child 的 `/proc/PID/status`, VmRSS / VmHWM 在這六次擷取時相同, 原生 kB 乘 1024 換成 bytes
+
+從啟動到量測的觀察時間為 0-call 0.412–0.550 秒、1,000-call 0.462–0.472 秒、5,000-call 1.222–1.562 秒, 各次 GET 次數為 8–25, 每次量測均包含硬體初始化與 GET / JSON 序列化影響, 不是純 collector 耗時或 release benchmark, 不用兩次樣本推論統計顯著性
+
+六個 child 均於關閉自有 stdin 後正常退出 0, temporary homes 已移除, binary SHA-256 為 `065b19be64fd4451fbb96d3f8db0aa0eb91ca80e0c23ed1041a6b1f6c8096534`
+
+重現方式保存在 [measure_rust_memory.py](../tools/measure_rust_memory.py), 使用已建置的 Rust binary, 腳本不安裝套件、不啟動 browser、不存取真實 Codex home, 執行者另記錄實際 revision、build profile 與 Rust 版本
+
+```sh
+python tools/measure_rust_memory.py --binary rust/service/target/debug/local-activity-monitor
+```
+
+本輪樣本未超過 active working set 或 16 MiB payload staging, 不能由約 30–57 MB 的觀察值推論記憶體上限、overflow / candidate 正確性、跨平台或完整重建驗收, 原 411 pass / HTTP 224 pass + 2 fail 結果不變
