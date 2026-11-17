@@ -1158,7 +1158,7 @@ impl Monitor {
                             .record("collection", metrics);
                         if changed || selection_pending || schedule_changed || metadata_changed || previous_checkpoint != collector.checkpoints.report {
                             let (index, ready) = collector.detail_index(&root);
-                            collector.overflow_details_ready = ready;
+                            collector.replace_overflow_details_ready(ready);
                             collector.published_detail_index = Arc::new(index);
                             collector.recent_call_details_dirty.store(false, Ordering::Release);
                         }
@@ -1230,7 +1230,7 @@ pub(crate) fn detail_publication_fixture(root: &Path) -> Snapshots {
         collector.refresh(root, &AtomicBool::new(false), true, true, CommandSwitches::default());
     }
     let (index, ready) = collector.detail_index(root);
-    collector.overflow_details_ready = ready;
+    collector.replace_overflow_details_ready(ready);
     collector.published_detail_index = Arc::new(index);
     collector.snapshots("ok", "ok", 1)
 }
@@ -2555,6 +2555,7 @@ struct Collector {
     related_lifecycle: BTreeMap<String, RelatedLifecycle>,
     related_budget: usize,
     overflow_details_ready: BTreeSet<String>,
+    overflow_details_revision: project::ContentRevision,
     overflow_workdirs: BTreeMap<String, CachedOverflowWorkdir>,
     overflow_workdir_scan: Option<OverflowWorkdirScan>,
     overflow_thread_workdirs: BTreeMap<String, String>,
@@ -2903,6 +2904,7 @@ impl Collector {
             related_lifecycle: BTreeMap::new(),
             related_budget: 0,
             overflow_details_ready: BTreeSet::new(),
+            overflow_details_revision: project::ContentRevision::default(),
             overflow_workdirs: BTreeMap::new(),
             overflow_workdir_scan: None,
             overflow_thread_workdirs: BTreeMap::new(),
@@ -4770,6 +4772,11 @@ impl Collector {
         sources
     }
 
+    fn replace_overflow_details_ready(&mut self, ready: BTreeSet<String>) {
+        if self.overflow_details_ready != ready { self.overflow_details_revision.bump(); }
+        self.overflow_details_ready = ready;
+    }
+
     fn replace_thread_metadata(&mut self, metadata: Map<String, Value>) -> bool {
         // Preserve the existing refresh comparison, including top-level row order.
         // A successful unchanged refresh does not invalidate an in-progress batch.
@@ -6066,13 +6073,19 @@ mod log_tests {
             assert!(row_metadata.values().all(|metadata| metadata.calls.is_empty()), "row metadata must not stage selected calls");
             let expected_rows = |ordered| cutoffs.map(|cutoff| {
                 let (mut totals, mut nested_totals) = Default::default();
-                let rows: BTreeMap<_,_> = materialized.iter().map(|(thread, projection)| {
+                let mut rows: Vec<_> = materialized.iter().map(|(thread, projection)| {
                     let mut row = projection.row(false, cutoff, reference, &mut totals, &mut nested_totals,
                         true, true, true, ordered);
                     apply_thread_metadata(&mut row, collector.thread_metadata.get(thread), false);
                     for field in ["file_changes", "file_reads"] { apply_names(row[field].as_array_mut().unwrap()); }
-                    (thread.clone(), row)
+                    row["status_backfill_pending"] = json!(collector.files.values()
+                        .any(|state| state.pending() && state.projection.id.as_ref() == Some(thread)));
+                    row
                 }).collect();
+                rows.sort_by(|left, right| right["updated_at"].as_str().cmp(&left["updated_at"].as_str())
+                    .then_with(|| if ordered {
+                        thread_slots[left["thread_id"].as_str().unwrap()].cmp(&thread_slots[right["thread_id"].as_str().unwrap()])
+                    } else { std::cmp::Ordering::Equal }));
                 json!({"rows":rows,"totals":totals,"nested_totals":nested_totals})
             });
             let rows = expected_rows(false);
@@ -8710,7 +8723,7 @@ mod log_tests {
         let selected = detail_index.select_call(&id, "outside-call").unwrap();
         let detail = selected.tool("outside-call", true, false).unwrap();
         assert!(!detail.to_string().contains("PRIVATE_MARKER"));
-        collector.overflow_details_ready = ready;
+        collector.replace_overflow_details_ready(ready);
         collector.updated = Some(now());
         let snapshot = collector.snapshots("partly_unavailable", "ok", 1);
         let value: Value = serde_json::from_slice(&snapshot.window_bytes(3)).unwrap();

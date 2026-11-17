@@ -389,7 +389,11 @@ Row / name 組合現在使用已受 revision guard 保護的 thread_metadata, �
 
 完成 rows 時沿現有 apply_thread_metadata 處理觀察欄位與 catalog 預設值, 同步填入 row 內 file_changes / file_reads 名稱, catalog-only rows 沿既有 empty Projection 與 metadata_only 規則組合, files、Git / checks、skills、MCP / SQL event previews 使用同批名稱
 
-目前 rows 仍是 keyed components, 未包含最後排序與 status_backfill_pending / source_details_pending 等 readiness 標記, project summary、MCP catalog augmentation、完整 error windows 與正式發布仍待串接, raw failure components 不在此步套用名稱, 未因此重跑 deferred 額外 metadata-only / 無 ID 來源實驗
+Rows 已改為 stable updated_at 降冪陣列, canonical ties 保留 observed thread key 順序再接 catalog insertion order, complete-source ties 使用 first-observed thread slots, status_backfill_pending 由受 Session guard 保護的 pending() 計算
+
+Detail readiness 的實際 owner overflow_details_ready 經 setter 追蹤內容 revision, production detail index assignment 與原讀取時機不變, 相同 set 不取消候選, 但 source_details_pending 仍未串接: checkpoint::snapshot_projection 會採用全部 selected calls 的 request / response locator, 包含後來被其他來源取代的 call, empty header 與 winners-only payload 都不能推導完整標記, 下一步須提供同一 signature 下的來源 descriptor, 不得從 winners 猜測或提前宣稱 ready
+
+Project summary、MCP catalog augmentation、完整 error windows 與正式發布仍待串接, raw failure components 不在此步套用名稱, 未因此重跑 deferred 額外 metadata-only / 無 ID 來源實驗
 
 建構 eligibility 仍用原 Option, SelectedInputs 的舊 validate_sources 亦保留 Option wrapper, 新 try_validate_sources 提供有類型的驗證結果, 不改動同步 snapshots 或原失敗 fallback
 

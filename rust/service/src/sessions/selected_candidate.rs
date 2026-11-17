@@ -363,22 +363,36 @@ impl SelectedCandidate {
         let skills = reducers.skills.map(|summary| { let (events,total,counts) = summary.finish(&self.names); json!({"events":events,"total":total,"counts":counts}) });
         let (tools, files_enabled, _) = self.inputs.as_ref().ok_or(Failure::State)?.reducer_switches();
         let rows = reducers.rows.into_iter().zip(reducers.totals).zip(reducers.nested).enumerate().map(|(index,((summaries,mut totals),mut nested_totals))| {
-            let mut rows: BTreeMap<_,_> = summaries.into_iter().map(|(thread,summary)| {
+            let mut rows: Vec<_> = summaries.into_iter().map(|(thread,summary)| {
                 let mut row = self.metadata[&thread].row_with_summary(self.partial[&thread], reference, summary);
                 super::apply_thread_metadata(&mut row, collector.thread_metadata.get(&thread), false);
                 let name = row["thread_name"].clone();
                 for key in ["file_changes", "file_reads"] {
                     for event in row[key].as_array_mut().into_iter().flatten() { event["thread_name"] = name.clone(); }
                 }
-                (thread,row)
+                row
             }).collect();
             for (thread, metadata) in &collector.thread_metadata {
-                if rows.contains_key(thread) { continue; }
+                if self.metadata.contains_key(thread) { continue; }
                 let mut row = Projection::for_id(Some(thread.clone())).row(true, cutoffs[index], reference,
                     &mut totals, &mut nested_totals, tools, files_enabled, switches.jev_calls, false);
                 super::apply_thread_metadata(&mut row, Some(metadata), true);
-                rows.insert(thread.clone(), row);
+                rows.push(row);
             }
+            let pending: BTreeSet<_> = collector.files.values().filter(|state| state.pending())
+                .filter_map(|state| state.projection.id.as_deref()).collect();
+            for row in &mut rows {
+                row["status_backfill_pending"] = json!(row["thread_id"].as_str().is_some_and(|id| pending.contains(id)));
+            }
+            // Stable canonical ties retain BTreeMap source rows followed by catalog
+            // insertion order. Complete-source ties use first-observed thread slots.
+            rows.sort_by(|left, right| right["updated_at"].as_str().cmp(&left["updated_at"].as_str())
+                .then_with(|| {
+                    if !self.ordered { return std::cmp::Ordering::Equal; }
+                    let rank = |row: &Value| row["thread_id"].as_str()
+                        .and_then(|id| self.thread_slots.get(id)).copied().unwrap_or(usize::MAX);
+                    rank(left).cmp(&rank(right))
+                }));
             json!({"rows":rows,"totals":totals,"nested_totals":nested_totals})
         }).collect::<Vec<_>>().try_into().map_err(|_| Failure::State)?;
         let (mcp_events,sql_events): (Vec<_>,Vec<_>) = reducers.observations.finish().into_iter().partition(|event| event.get("server").is_some());

@@ -2050,3 +2050,17 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, 最終 owner targeted 通過 1 項、427 
 Linux / Rust 1.100.0 / 原 Cargo.lock, 八情境 targeted 通過 1 項、427 項未選取, 77.79 秒, cargo check 通過並維持 8 個既有 warnings, 本輪無失敗
 
 Keyed rows 尚未等同完整已排序的 snapshot threads, readiness markers、project summary、MCP catalog 與其餘 finalizer owners 仍待處理, catalog-only row 分支沿現有實作但本輪未增加該情境的候選驗收, production caller 與 fallback 未切換
+
+### Candidate rows 的排序與 readiness owner
+
+基準 `e80bf9d`, rows 由 keyed components 改為 stable updated_at 降冪陣列, 相同時間保留 canonical 順序或 first-observed thread slots, catalog-only rows 保留原 catalog insertion order, 新增 status_backfill_pending 並維持受 Session guard 保護的 pending() 語意
+
+- 原八情境與四窗 materialized oracle 改比較實際 row 陣列, 保留 metadata、winner、精確計數、ordered / canonical 分支與 completed-only / cancellation 斷言, 本 fixture 的 status marker 為 false, 未宣稱已覆蓋 pending true 或 deferred 額外來源
+- overflow_details_ready 的 production assignment 與兩個既有測試入口改經同一 setter, 只有 set 內容變更才增加 owner revision, CandidateInputs 不複製整組 set, 新測試核對改變、相同 replacement、清空及重複清空
+- source_details_pending 尚未組合, 實際 snapshot_projection 會使用全部 selected checkpoint calls 的 locator flags, losers 也可能影響標記, 不能只從目前 winners-only payload 推定, 此差異保留為後續來源 descriptor 工作
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, owner targeted 通過 1 項、428 項未選取, 0.00 秒, 八情境 targeted 通過 1 項、428 項未選取, 63.42 秒, cargo check 通過並維持 8 個既有 warnings, 本輪無失敗, deferred fixtures 未執行
+
+2026-11-17 再核對來源, LAM main 仍為 `5c03daf`, workbench-workspace 從 `4616074` 前進至 `ce972bd`, 單一 commit 僅更新 WBUI 交付文件及 gitlink 至 `4392a57`, LAM consumer pin 仍為 `e9741c6`, 本輪沒有前端採用或 Rust 規格變更
+
+Production snapshots、detail publication 時機、設定保存與 fallback 不變, 完整 detail markers、其他 catalog / diagnostics owners、完整快照與資源驗收仍待完成

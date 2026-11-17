@@ -97,6 +97,7 @@ pub(super) struct CandidateInputs {
     overflow: Sessions,
     history_revision: u64,
     thread_metadata_revision: u64,
+    overflow_details_revision: u64,
     queries: [(Arc<account::Shared>, u64); 8],
     sources: SnapshotSourceSettings,
     flags: ObservationFlags,
@@ -125,6 +126,7 @@ impl CandidateInputs {
             active:Self::sessions(&collector.files)?, overflow:Self::sessions(&collector.overflow_files)?,
             history_revision:collector.history_revision.value()?,
             thread_metadata_revision:collector.thread_metadata_revision.value()?,
+            overflow_details_revision:collector.overflow_details_revision.value()?,
             queries:Self::queries(collector).into_iter().map(|source|
                 Some((Arc::clone(source), source.content_revision()?)))
                 .collect::<Option<Vec<_>>>()?.try_into().ok()?,
@@ -139,6 +141,7 @@ impl CandidateInputs {
             && SourceTopology::capture(collector).as_ref() == Some(&self.topology)
             && collector.history_revision.value() == Some(self.history_revision)
             && collector.thread_metadata_revision.value() == Some(self.thread_metadata_revision)
+            && collector.overflow_details_revision.value() == Some(self.overflow_details_revision)
             && Self::sessions_match(&self.active, &collector.files)
             && Self::sessions_match(&self.overflow, &collector.overflow_files)
             && self.queries.iter().zip(Self::queries(collector)).all(|((owner, revision), current)|
@@ -246,6 +249,30 @@ mod tests {
         }
         assert_eq!(collector.files[&path].projection.calls.len(), 1);
         (temporary, collector, path)
+    }
+
+    #[test]
+    fn candidate_inputs_track_detail_readiness_replacement_and_clear() {
+        let (_temporary, mut collector, _) = fixture();
+        let stopped = AtomicBool::new(false);
+        let capture = |collector: &Collector| CandidateInputs::capture(collector, true, &stopped).unwrap();
+        let ready = ["first".to_owned()].into_iter().collect();
+        let guard = capture(&collector);
+        collector.replace_overflow_details_ready(ready);
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let revision = collector.overflow_details_revision.value();
+        let guard = capture(&collector);
+        collector.replace_overflow_details_ready(collector.overflow_details_ready.clone());
+        assert_eq!(collector.overflow_details_revision.value(), revision);
+        assert!(guard.validate(&collector, true, &stopped).is_some());
+        let guard = capture(&collector);
+        collector.replace_overflow_details_ready(Default::default());
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let revision = collector.overflow_details_revision.value();
+        let guard = capture(&collector);
+        collector.replace_overflow_details_ready(Default::default());
+        assert_eq!(collector.overflow_details_revision.value(), revision);
+        assert!(guard.validate(&collector, true, &stopped).is_some());
     }
 
     #[test]
