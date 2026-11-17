@@ -61,7 +61,6 @@ impl ActivitySeries {
         counts.insert(key, 1);
     }
 
-    #[cfg(test)]
     pub(super) fn finish(self) -> (Vec<Value>, Vec<Value>) {
         let minute_stamp = |minute| DateTime::<Utc>::from_timestamp(minute * 60, 0)
             .expect("minute from a valid call timestamp")

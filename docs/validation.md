@@ -1968,3 +1968,17 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, 未執行 HTTP、完整套件或 deferred
 - Linux / Rust 1.100.0 / 原 Cargo.lock, candidate targeted 1 項通過、424 項未選取, 29.42 秒, 本輪無失敗, 未執行 HTTP、完整套件或 deferred 檢查
 
 Candidate 尚未將 failure list、session errors 與全部 diagnostics / history 綁成共同 error-window 發布, 亦未完成 metadata / logs / worker / 資源驗收, production aggregation / fallback / 16 MiB staging 不變, failure metadata 的額外排序 key 與全部保留量未作 RSS 量測
+
+### Runtime SelectedCandidate orchestration
+
+基準 `4d154cc`, 將原雙來源 fixture 的 winner / metadata / reducer / signature orchestration 移至正常編譯的 selected_candidate.rs, fixture 改為實際呼叫 runtime state, 保留原 materialized oracles 而非以新 reducer 自我比對
+
+- 原四情境保留同 thread 900 winners / 不同 thread 1,200 winners、一般 / nested、canonical / presentation order 與全部四窗 rows / files / activity / exact statistics / commands / skills / MCP / SQL / failure components
+- Header plan 完成前不讀 winner payload, reducer 每頁使用 guard 已保存的開關, 每輪驗證 exact inputs / selection, 完成 components 後再次驗證 owner / stop
+- 來源清單必須涵蓋全部 materialized membership 且 signature 相符, 錯誤 signature 的清單在建構時拒絕, 不只比對來源存在
+- 每輪 budget=1 的兩來源 final sweep 需兩輪, source 在 payload 完成後改變仍拒絕整組結果, statistics budget=0 仍無完成結果, 已交付輸出不變
+- 取消覆蓋初始、header、中途 reader page 與 final-validation 前, 每個中間結果只能是 Pending, disabled 拒絕消耗 state, 不對外暴露部分 components
+- Fixture 不新增額外 metadata-only / 無 ID 來源, 不重跑 deferred 實驗, runtime 對目前未支援的 active / overflow Session overlays 與無 ID header 採明確拒絕
+- Linux / Rust 1.100.0 / 原 Cargo.lock, 最終 runtime candidate targeted 1 項通過、424 項未選取, 33.46 秒, cargo check 通過, 共 8 個 warnings, 包含尚未被 production 消費的 Advance / CompletedCandidate 欄位, 本輪無失敗
+
+未執行 HTTP、完整套件或 deferred 檢查, budget 僅限制每輪來源 / 頁 / signature 操作數, source 內 planning、初始化與完成編碼仍同步, 不宣稱回應延遲 / RSS 驗收, 完整來源實體驗證、mixed active / metadata 與 augmentation / worker 發布仍待完成, production caller / fallback / 16 MiB staging 未切換

@@ -166,6 +166,9 @@ impl SelectedInputs {
         Some(Self { inputs:CandidateInputs::capture(collector, enabled, stopped)?,
             selection:selection.clone(), time, signatures:BTreeMap::new(), validated_after:None, sweep_complete:false })
     }
+    pub(super) fn reducer_switches(&self) -> (bool, bool, super::CommandSwitches) {
+        (self.inputs.flags.tool_events, self.inputs.flags.files, self.inputs.flags.applied_commands)
+    }
     pub(super) fn validate(mut self, collector: &Collector, selection: &super::CallSelection,
         enabled: bool, stopped: &AtomicBool) -> Option<Self>
     {

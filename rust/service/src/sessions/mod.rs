@@ -2,6 +2,7 @@ pub(crate) mod account;
 mod agent;
 pub(crate) mod allowance;
 mod candidate_inputs;
+mod selected_candidate;
 mod checkpoint;
 pub(crate) mod cloud;
 mod commands;
@@ -5942,8 +5943,8 @@ mod log_tests {
                 assert!(!sql_observations.is_empty(), "actual nested parser produces SQL metadata");
             }
             let expected_observations = cutoffs.map(|cutoff| json!({
-                "mcp":mcp::summary(&mcp_observations, cutoff, "fixture"),
-                "sql":sqlite::window(&sql_observations, cutoff, "fixture")
+                "mcp":mcp::summary(&mcp_observations, cutoff, collector.activity_history_health),
+                "sql":sqlite::window(&sql_observations, cutoff, collector.activity_history_health)
             }));
             let skill_names = statistics_threads.keys().map(|id| (id.to_string(), Value::Null)).collect();
             let expected_skills = cutoffs.map(|cutoff| {
@@ -6027,123 +6028,35 @@ mod log_tests {
             // Process winner sources in reverse to show reduction is independent of
             // page arrival once canonical-fallback winners have been fixed.
             let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool, statistics_units: usize| -> Option<([Value;4], [Value;4], [Value;4], [Value;4], [Value;4], [Value;4], [Value;4], Value)> {
-                let mut inputs = candidate_inputs::SelectedInputs::capture(&collector, &selection,
-                    SnapshotTime { reference, cutoffs }, true, &stopped)?;
-                for source in sources {
-                    inputs = inputs.source(source.clone(), original.cursor.signature.clone())?;
-                }
-                let mut tool_errors = project::ToolErrorSummary::new(ordered);
-                let mut observations = lam_history_store::ObservationMerge::new(&collector.activity_history);
-                let mut row_summaries = cutoffs.map(|cutoff| row_metadata.iter().map(|(thread, metadata)|
-                    (thread.clone(), project::RowSummary::new(metadata, cutoff, true, true, true, ordered))).collect::<BTreeMap<_,_>>());
-                let mut row_totals: [BTreeMap<String,usize>;4] = Default::default();
-                let mut row_nested: [BTreeMap<String,usize>;4] = Default::default();
-                let mut skill_summaries = cutoffs.map(|cutoff| project::SkillSummary::new(&collector.skill_history, &skill_names, cutoff, true));
-                let mut command_summaries = cutoffs.map(commands::WindowSummary::new);
-                let mut statistics = cutoffs.map(|cutoff| project::OwnedStatistics::new(cutoff, true, statistics_units, 10_000));
-                let mut series = std::array::from_fn::<_,4,_>(|_| project::ActivitySeries::new());
-                let mut summaries = std::array::from_fn::<_,4,_>(|_| project::FileSummary::new(1000));
-                let mut observed = 0;
-                for source in sources.into_iter().rev() {
-                    let ids: Vec<_> = winners.iter().filter(|(_, winner)| **winner == source)
-                        .map(|((_,call),_)| call.clone()).collect();
-                    let mut reader = collector.checkpoints.snapshot_reader().unwrap().unwrap()
-                        .into_selected_checkpoint_reader(&lam_history_store::ExpectedCursor {
-                            source_key:source,signature:Some(&original.cursor.signature)}, ids).unwrap().unwrap();
-                    while !reader.is_complete() {
-                        inputs = inputs.validate(&collector, &selection, true, &stopped)?;
-                        let page = reader.next_page().unwrap().unwrap();
-                        let mut projection = checkpoint::snapshot_projection(page, false).unwrap();
-                        if ordered {
-                            let thread = projection.projection.id.as_ref().unwrap();
-                            for (id, call) in &mut projection.projection.calls {
-                                call.presentation_sequence = call_slots[&(thread.clone(), id.clone())];
-                            }
-                        }
-                        for (series, cutoff) in series.iter_mut().zip(cutoffs) {
-                            series.observe(&projection.projection, cutoff);
-                        }
-                        for (statistics, _) in statistics.iter_mut().zip(cutoffs) {
-                            for call in projection.projection.calls.values() {
-                                statistics.observe(projection.projection.id.as_deref().unwrap(), call);
-                            }
-                        }
-                        let thread = projection.projection.id.as_deref().unwrap();
-                        for (id, call) in &projection.projection.calls { tool_errors.observe(thread, id, call); }
-                        observations.extend(projection.projection.calls.iter()
-                            .flat_map(|(id, call)| call.activities(thread, id)));
-                        for ((rows, totals), nested) in row_summaries.iter_mut().zip(&mut row_totals).zip(&mut row_nested) {
-                            let summary = rows.get_mut(thread).unwrap();
-                            for (id, call) in &projection.projection.calls { summary.observe(id, call, totals, nested); }
-                        }
-                        for summary in &mut skill_summaries {
-                            for (id, call) in &projection.projection.calls { summary.observe(thread, Some(thread), id, call); }
-                        }
-                        for summary in &mut command_summaries {
-                            if ordered { summary.ordered_thread(thread_slots[thread]); }
-                            for (id, call) in &projection.projection.calls { summary.observe(thread, id, call); }
-                        }
-                        observed += projection.projection.calls.len();
-                        for (summary, cutoff) in summaries.iter_mut().zip(cutoffs) {
-                            if ordered { summary.ordered_thread(thread_slots[projection.projection.id.as_ref().unwrap()]); }
-                            summary.observe(&projection.projection, cutoff, true, None);
+                use selected_candidate::{Advance, SelectedCandidate, Source};
+                let mut candidate = SelectedCandidate::new(&collector, &selection,
+                    SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
+                        Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
+                    skill_names.clone(), ordered, statistics_units, 10_000, true, &stopped)?;
+                let mut validation_rounds = 0;
+                let mut injected = false;
+                for _ in 0..32 {
+                    if candidate.awaiting_validation() {
+                        validation_rounds += 1;
+                        if replace_completed_source && !injected {
+                            let mut changed = second_cursor.clone();
+                            let mut signature: Value = serde_json::from_str(&changed.signature).unwrap();
+                            signature["revision"] = json!(signature["revision"].as_u64().unwrap() + 1);
+                            changed.signature = signature.to_string();
+                            store.save_checkpoints(&[changed], &[], &[]).unwrap();
+                            injected = true;
                         }
                     }
-                    assert_eq!(store.checkpoint_signature(source).unwrap().as_deref(), Some(original.cursor.signature.as_str()));
+                    match candidate.advance(&collector, &selection, true, &stopped, 1)? {
+                        Advance::Pending(next) => candidate = next,
+                        Advance::Complete(completed) => {
+                            assert_eq!(validation_rounds, 2, "one-source final validation rounds");
+                            return Some((completed.files, completed.series, completed.statistics, completed.commands,
+                                completed.skills, completed.rows, completed.observations, completed.failures));
+                        }
+                    }
                 }
-                assert_eq!(observed, expected_winners, "duplicate losers must never reach the reducer");
-                if replace_completed_source {
-                    let mut changed = second_cursor.clone();
-                    let mut signature: Value = serde_json::from_str(&changed.signature).unwrap();
-                    signature["revision"] = json!(signature["revision"].as_u64().unwrap() + 1);
-                    changed.signature = signature.to_string();
-                    store.save_checkpoints(&[changed], &[], &[]).unwrap();
-                }
-                // Recheck every used source after all reducers are complete, not
-                // only the source whose page was just consumed.
-                let mut validation_rounds = 0;
-                loop {
-                    let (next, complete) = inputs.validate_sources(&collector, &selection, true, &stopped, 1)?;
-                    inputs = next;
-                    validation_rounds += 1;
-                    if complete { break; }
-                }
-                assert_eq!(validation_rounds, 2, "final sweep stays bounded to one source per round");
-                let result = summaries.map(|summary| {
-                    let (events,total,operations) = summary.finish();
-                    json!({"events":events,"total":total,"operations":operations})
-                });
-                let series = series.map(|series| {
-                    let (activity, tools) = series.finish();
-                    json!({"activity":activity,"tools":tools})
-                });
-                let statistics: [Value;4] = statistics.into_iter().map(|value| value.finish())
-                    .collect::<Option<Vec<_>>>()?.try_into().ok()?;
-                let commands = command_summaries.map(|summary| {
-                    let (git, checks) = summary.finish();
-                    json!({"git":git,"checks":checks})
-                });
-                let skills = skill_summaries.map(|summary| {
-                    let (events, total, counts) = summary.finish(&skill_names);
-                    json!({"events":events,"total":total,"counts":counts})
-                });
-                let rows: [Value;4] = row_summaries.into_iter().zip(row_totals).zip(row_nested).map(|((summaries, totals), nested_totals)| {
-                    let rows: BTreeMap<_,_> = summaries.into_iter().map(|(thread, summary)| {
-                        let row = row_metadata[&thread].row_with_summary(false, reference, summary);
-                        (thread, row)
-                    }).collect();
-                    json!({"rows":rows,"totals":totals,"nested_totals":nested_totals})
-                }).collect::<Vec<_>>().try_into().ok()?;
-                let (mcp_observations, sql_observations): (Vec<_>, Vec<_>) = observations.finish().into_iter()
-                    .partition(|event| event.get("server").is_some());
-                let sql_observations = sqlite::identified(sql_observations);
-                let observations = cutoffs.map(|cutoff| json!({
-                    "mcp":mcp::summary(&mcp_observations, cutoff, "fixture"),
-                    "sql":sqlite::window(&sql_observations, cutoff, "fixture")
-                }));
-                let tool_errors: Vec<_> = tool_errors.finish().into_iter()
-                    .map(|(start, event)| json!({"start":start.map(stamp),"event":event})).collect();
-                Some((result, series, statistics, commands, skills, rows, observations, json!(tool_errors)))
+                panic!("bounded fixture did not complete");
             };
             let result = reduce(&mut store, false, false, 10_000).unwrap();
             assert_eq!(result.0, expected);
@@ -6185,6 +6098,47 @@ mod log_tests {
             assert_eq!(ordered_result.5, expected_rows(true));
             assert_eq!(ordered_result.6, expected_observations);
             assert_eq!(ordered_result.7, expected_tool_errors(true));
+            assert!(selected_candidate::SelectedCandidate::new(&collector, &selection,
+                SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
+                    selected_candidate::Source { key:key.clone(), signature:"not-the-membership-signature".into() }).collect(),
+                skill_names.clone(), false, 10_000, 10_000, true, &stopped).is_none());
+            // Runtime orchestration returns no components at header/page boundaries.
+            // Cancellation consumes the state, including an in-progress reader.
+            for steps in [0, 1, 3] {
+                let mut candidate = selected_candidate::SelectedCandidate::new(&collector, &selection,
+                    SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
+                        selected_candidate::Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
+                    skill_names.clone(), false, 10_000, 10_000, true, &stopped).unwrap();
+                for _ in 0..steps {
+                    candidate = match candidate.advance(&collector, &selection, true, &stopped, 1).unwrap() {
+                        selected_candidate::Advance::Pending(next) => next,
+                        selected_candidate::Advance::Complete(_) => panic!("premature component emission"),
+                    };
+                }
+                stopped.store(true, Ordering::Release);
+                assert!(candidate.advance(&collector, &selection, true, &stopped, 1).is_none());
+                stopped.store(false, Ordering::Release);
+            }
+            let mut candidate = selected_candidate::SelectedCandidate::new(&collector, &selection,
+                SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
+                    selected_candidate::Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
+                skill_names.clone(), false, 10_000, 10_000, true, &stopped).unwrap();
+            for _ in 0..16 {
+                if candidate.awaiting_validation() { break; }
+                candidate = match candidate.advance(&collector, &selection, true, &stopped, 1).unwrap() {
+                    selected_candidate::Advance::Pending(next) => next,
+                    selected_candidate::Advance::Complete(_) => panic!("emitted before final validation"),
+                };
+            }
+            assert!(candidate.awaiting_validation());
+            stopped.store(true, Ordering::Release);
+            assert!(candidate.advance(&collector, &selection, true, &stopped, 1).is_none());
+            stopped.store(false, Ordering::Release);
+            let candidate = selected_candidate::SelectedCandidate::new(&collector, &selection,
+                SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
+                    selected_candidate::Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
+                skill_names.clone(), false, 10_000, 10_000, true, &stopped).unwrap();
+            assert!(candidate.advance(&collector, &selection, false, &stopped, 1).is_none());
             collector.updated = Some(reference);
             let baseline = collector.snapshots("ok", "ok", 1);
             for index in 0..4 {
