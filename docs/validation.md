@@ -1619,3 +1619,15 @@ Linux / Rust 1.100.0、原 Cargo.lock, snapshot_payload_ 篩選 2 項通過 (0.1
 恢復 epoch 後重新開始, 第二輪完成所有 40 calls 與 signature 驗證, 原有 previous-publication 選取遮罩、不改寫舊 index、signature 失效及容量 / source / validation 邊界 assertions 保留
 
 Linux / Rust 1.100.0、原 Cargo.lock, selected_details_ 篩選 2 項通過 (2.85 秒), diff 檢查通過, 未執行任何延後的 HTTP 測試或完整套件, 正常 query / 次數 / budget / response schema 不變, 不代表整體 payload staging 容量已解除
+
+### Header selector 前置查詢失敗的暫存清理
+
+以 `8e65de7` 為基底, LAM main `5c03daf` 與 workbench-workspace main `4616074` 核對未變, select_recent_calls 的 epoch / unverified_count 查詢在 heap / cursor 已存在時可能直接返回 None, 留下 pending scan
+
+新增獨立三筆同時間 header fixture, 每輪只讀一筆, 在第一輪後分別注入不可讀 epoch 與暫時不可用的 sources table, 先重現 epoch 失敗後仍保留 scan, 修正後任一前置查詢失敗均清除 recent_call_scan, pending 變成 false, 恢復來源後從頭掃描並選出原排序要求的 b / c
+
+此 selector 不持有 SQLite reader, 清理對象是記憶體 heap / cursor 與其 pending 狀態, 不混同前兩項 snapshot / detail reader 修正
+
+Linux / Rust 1.100.0、原 Cargo.lock, recent_call_selection_ 篩選 3 項通過 (2.68 秒), 包含既有 100,000 筆以上同時間 header 的續讀與 generation-only discovery 保留進度, diff 檢查通過
+
+正常 SQL、查詢順序 / 次數、排序、top-K、epoch / input hash 與成功結果不變, 未執行延後 HTTP 或完整套件, 未新增 candidate 架構

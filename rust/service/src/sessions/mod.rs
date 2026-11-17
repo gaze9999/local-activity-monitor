@@ -3913,8 +3913,17 @@ impl Collector {
         let root = self.session_root.as_deref()?;
         let index = self.source_membership.as_ref()
             .filter(|_| self.discovery.is_none() && self.source_membership_complete)?;
-        let epoch: i64 = index.db.query_row("SELECT value FROM selection_epoch", [], |row| row.get(0)).ok()?;
-        let mut valid = index.unverified_count().ok()? == 0;
+        let (epoch, unverified) = match index.db
+            .query_row("SELECT value FROM selection_epoch", [], |row| row.get::<_, i64>(0))
+            .and_then(|epoch| index.unverified_count().map(|unverified| (epoch, unverified)))
+        {
+            Ok(values) => values,
+            Err(_) => {
+                *self.recent_call_scan.lock().unwrap_or_else(|error| error.into_inner()) = None;
+                return None;
+            }
+        };
+        let mut valid = unverified == 0;
         let mut paths = BTreeMap::<String, Arc<str>>::new();
         for path in self.files.keys().chain(self.session_paths.values()).chain(self.duplicate_session_paths.values()) {
             if let (Some(key), Some(text)) = (checkpoint::key(root, path), path.to_str()) {
@@ -6427,6 +6436,46 @@ mod log_tests {
         assert!(collector.recent_call_scan.lock().unwrap().is_none());
         assert!(!collector.recent_call_details_dirty.load(Ordering::Acquire));
         assert!(!collector.recent_call_refresh_pending());
+    }
+
+    #[test]
+    fn recent_call_selection_releases_pending_state_on_prerequisite_query_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let path = root.join("source.jsonl");
+        let key = checkpoint::key(&root, &path).unwrap();
+        let mut collector = Collector::new(root.join("monitoring"), true, None);
+        collector.session_root = Some(root.clone());
+        let mut membership = SourceMembership::new().unwrap();
+        membership.insert(&[MembershipRecord {key:key.clone(),fingerprint:Some("same".into())}]).unwrap();
+        membership.mark_verified(&[VerifiedMembership {key:key.clone(),fingerprint:"same".into(),
+            checkpoint_signature:"anchor".into(),materialized:true,
+            call_headers:Some(["a","b","c"].map(|id| lam_history_store::CallHeader {call_id:id.into(),event_time:None}).into())}]).unwrap();
+        collector.source_membership = Some(membership);
+        collector.source_membership_complete = true;
+        collector.discovered_files = Some(1);
+        collector.duplicate_session_paths.insert(key.clone(), path);
+        for count_failure in [false, true] {
+            assert!(!collector.select_recent_calls(2, 1).unwrap().complete);
+            assert!(collector.recent_call_scan_pending());
+            let db = &collector.source_membership.as_ref().unwrap().db;
+            let epoch: i64 = db.query_row("SELECT value FROM selection_epoch", [], |row| row.get(0)).unwrap();
+            if count_failure { db.execute_batch("ALTER TABLE sources RENAME TO unavailable_sources").unwrap(); }
+            else { db.execute("UPDATE selection_epoch SET value='unreadable'", []).unwrap(); }
+            assert!(collector.select_recent_calls(2, 1).is_none());
+            assert!(collector.recent_call_scan.lock().unwrap().is_none());
+            assert!(!collector.recent_call_scan_pending());
+            if count_failure { db.execute_batch("ALTER TABLE unavailable_sources RENAME TO sources").unwrap(); }
+            else { db.execute("UPDATE selection_epoch SET value=?", [epoch]).unwrap(); }
+        }
+        let mut result = collector.select_recent_calls(2, 1).unwrap();
+        assert!(!result.complete);
+        for _ in 0..3 {
+            if result.complete { break; }
+            result = collector.select_recent_calls(2, 1).unwrap();
+        }
+        assert!(result.complete);
+        assert_eq!(result.calls[&key], ["b".to_owned(),"c".to_owned()].into());
     }
 
     #[test]
