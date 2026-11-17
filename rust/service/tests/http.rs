@@ -3309,7 +3309,9 @@ fn mcp_and_web_observation_switches_filter_independently_and_replay() {
             .status,
         409
     );
-    fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(event(&stamp, "response_item", json!({"type":"function_call","name":"mcp__workspace_inspection__read","call_id":"while_off","arguments":{"max_files":444}})).as_bytes()).unwrap();
+    let offset = fs::metadata(&path).unwrap().len();
+    let record = event(&stamp, "response_item", json!({"type":"function_call","name":"mcp__workspace_inspection__read","call_id":"while_off","arguments":{"max_files":444}}));
+    fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(record.as_bytes()).unwrap();
     snapshot_when(&service, |value| value["codex"]["observed_tool_calls"] == 3);
     let db = rusqlite::Connection::open(
         home.path()
@@ -3324,7 +3326,23 @@ fn mcp_and_web_observation_switches_filter_independently_and_replay() {
             |row| row.get(0),
         )
         .unwrap();
-    assert!(!stored.contains("444"));
+    // Validate the complete persisted call, not digits that can legitimately
+    // occur in its timestamp, offset or SHA256. No observation or arguments
+    // may survive while MCP is disabled; unknown payload fields also fail.
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored, json!({
+        "tool":"mcp__workspace_inspection__read",
+        "time":stamp.parse::<chrono::DateTime<chrono::Utc>>().unwrap(),
+        "completed":null,
+        "sequence":2,
+        "observation":null,
+        "sql_failed":false,
+        "mcp_sources_incomplete":true,
+        "request_position":{
+            "offset":offset,
+            "hash":format!("{:x}", Sha256::digest(record.strip_suffix('\n').unwrap().as_bytes()))
+        }
+    }));
     drop(db);
     assert_eq!(set_observation("mcp", true).status, 200);
     snapshot_when(&service, |value| {

@@ -1323,3 +1323,15 @@ Shared 以同一個 QueryState RwLock 保存 settings 與 retained result, 新 c
 這只證明原斷言存在誤判可能, 沒有重現或解決原失敗, 診斷暫時程式碼已移出產品 diff 並保留證據, 尚未放寬或替換驗證
 
 後續人工測試應保留失敗時的原始 stored JSON 與 fixture 時間, 先判定 444 位於 time/hash/offset 或真正 metadata, 同時核對 observation、mcp_sources_incomplete 與禁用資料是否落盤, 不以單次重跑成功推翻本次失敗, 此 checkpoint 不列為完整 HTTP 驗收通過
+
+### 禁用 MCP 保存驗證的結構化 oracle
+
+依 Call serde 欄位、Projection::tool_event 的禁用分支與 Checkpoints::save 的序列化來源, 將上述失敗測試的 substring 斷言改為完整 persisted Call JSON 相等比較, 不是只刪除數字檢查或忽略任意欄位
+
+預期完整結構包含 tool、正規化 time、completed=null、sequence=2、observation=null、sql_failed=false、mcp_sources_incomplete=true 與精確 request_position, offset 取附加前檔案大小, hash 由實際附加紀錄去掉最後 LF 後計算
+
+因此多出的 arguments / metadata / 觀測值或任何未知欄位都會失敗, time / offset / hash 中合法出現 444 則依實際來源值驗證, 不造成 substring 誤判, runtime 與禁用行為未修改
+
+修改後針對性實際 HTTP 測試單輪通過 (0.34 秒), 原始失敗的 stored 值已遺失, 仍不宣稱原始失敗原因已確定, 此次是基於已確認 oracle 缺陷的測試修正
+
+最小測試修正後, 完整 serial HTTP 單輪 226 項通過 (131.97 秒), service runtime 未變更, 沿用前輪 396 項通過的範圍, 不抹除前輪 225/1 與原始失敗未知的紀錄, 未重試 browser 或擴大至跨平台驗收
