@@ -1234,3 +1234,15 @@ Playwright / Chromium 在導航前因 Unix socket Operation not permitted 結束
 有時限 fixture 已在 120 秒後正常結束, 未留下服務程序, failed browser tab 的清理亦被政策阻擋, 未取得畫面或 visual acceptance
 
 目前工具鏈僅安裝 x86_64-unknown-linux-gnu target, 此環境未找到 Windows cross compiler, 不宣稱 Windows / macOS 編譯或原生驗收
+
+### 查詢輸入 capture 的最小前置實作
+
+依跨輪計畫先抽取既有同步 snapshots 內的查詢讀取段, 私有 SnapshotQueries 保存 account / cloud / public / platform 共 8 個來源的 settings 與 owned result, 仍在原有四 window 前的位置擷取
+
+原讀取段逐 byte 比對相同, 保持 account settings→result、cloud settings→result、public settings→results、platform settings→results 的順序與既有 clone 次數, 不新增查詢、鎖或依賴
+
+針對性 1 項通過, 以原直接讀取流程為 oracle 比較預設缺值、已設定來源、零值 / false / null, capture 不改變來源 version, 之後修改來源不改變已擷取結果
+
+此物件不是 settings/result 的原子讀取或跨輪 token, 未改 reference、cutoffs、裝置讀取、detail_writer、send_replace 或 HTTP schema, 尚未實作其餘 capture 範圍及跨輪發布
+
+Linux / Rust 1.100.0 完整 service 單輪 389 項通過 (70.58 秒), 結束後完整 serial HTTP 單輪 226 項通過 (131.59 秒), 未重試已記錄的 browser 阻擋項目

@@ -1923,6 +1923,20 @@ struct RecentCallScan {
     finished: bool,
 }
 
+// Owned query values captured at the existing synchronous snapshot boundary.
+// This is not an atomic settings/result read or a cross-round version token.
+#[derive(Debug, PartialEq)]
+struct SnapshotQueries {
+    account_settings: account::Settings,
+    account: Option<Value>,
+    cloud_settings: account::Settings,
+    cloud: Option<Value>,
+    public_settings: [account::Settings; 2],
+    public: [Option<Value>; 2],
+    platform_settings: [account::Settings; 4],
+    platform: [Option<Value>; 4],
+}
+
 struct SelectedSnapshotScan {
     input_hash: [u8; 32],
     after: String,
@@ -4627,6 +4641,21 @@ impl Collector {
         sources
     }
 
+    fn capture_snapshot_queries(&self) -> SnapshotQueries {
+        let account_settings = self.account.settings();
+        let account = self.account.result();
+        let cloud_settings = self.cloud.settings();
+        let cloud = self.cloud.result();
+        let public_settings = self.public.each_ref().map(|source| source.settings());
+        let public = self.public.each_ref().map(|source| source.result());
+        let platform_settings = self.platform.each_ref().map(|source| source.settings());
+        let platform = self.platform.each_ref().map(|source| source.result());
+        SnapshotQueries {
+            account_settings, account, cloud_settings, cloud,
+            public_settings, public, platform_settings, platform,
+        }
+    }
+
     fn snapshots(&self, health: &str, watch_health: &str, version: u64) -> Snapshots {
         let monitor_events = self
             .journal
@@ -4927,14 +4956,10 @@ impl Collector {
         let sqlite_enabled = self.applied_sqlite_enabled;
         let model_api_enabled = self.applied_model_api_enabled && health != "disabled";
         let command_switches = self.applied_command_switches;
-        let account_settings = self.account.settings();
-        let account = self.account.result();
-        let cloud_settings = self.cloud.settings();
-        let cloud = self.cloud.result();
-        let public_settings = self.public.each_ref().map(|source| source.settings());
-        let public = self.public.each_ref().map(|source| source.result());
-        let platform_settings = self.platform.each_ref().map(|source| source.settings());
-        let platform = self.platform.each_ref().map(|source| source.result());
+        let SnapshotQueries {
+            account_settings, account, cloud_settings, cloud,
+            public_settings, public, platform_settings, platform,
+        } = self.capture_snapshot_queries();
         let diagnostic_locations: Vec<_> = self.desktop.source_locations()
             .chain(self.core.source_location())
             .map(Path::to_path_buf)
@@ -5707,6 +5732,40 @@ mod log_tests {
         let scan = scan.as_ref().unwrap();
         assert!(scan.finished && !scan.valid && scan.reader.is_none());
         assert!(scan.projections.is_empty());
+    }
+
+    #[test]
+    fn snapshot_query_capture_matches_existing_reads_and_owns_results() {
+        let home = tempfile::tempdir().unwrap();
+        let collector = Collector::new(home.path().join("monitoring"), true, None);
+        let original = || SnapshotQueries {
+            account_settings: collector.account.settings(), account: collector.account.result(),
+            cloud_settings: collector.cloud.settings(), cloud: collector.cloud.result(),
+            public_settings: collector.public.each_ref().map(|source| source.settings()),
+            public: collector.public.each_ref().map(|source| source.result()),
+            platform_settings: collector.platform.each_ref().map(|source| source.settings()),
+            platform: collector.platform.each_ref().map(|source| source.result()),
+        };
+        assert_eq!(collector.capture_snapshot_queries(), original());
+        let sources = [&collector.account, &collector.cloud,
+            &collector.public[0], &collector.public[1],
+            &collector.platform[0], &collector.platform[1], &collector.platform[2], &collector.platform[3]];
+        for (index, source) in sources.iter().enumerate() {
+            source.configure(account::Settings { enabled: index % 2 == 0, interval: 300 + index as u64 });
+            source.publish(json!({"health":"ok","items":[{"id":index,"count":0,"missing":null,"enabled":false}]}));
+        }
+        let captured = collector.capture_snapshot_queries();
+        let expected = original();
+        assert_eq!(captured, expected);
+        let versions: Vec<_> = sources.iter().map(|source| source.version()).collect();
+        assert_eq!(collector.capture_snapshot_queries(), expected);
+        assert_eq!(sources.iter().map(|source| source.version()).collect::<Vec<_>>(), versions);
+        for source in sources {
+            source.configure(account::Settings { enabled: false, interval: 999 });
+            source.publish(json!({"health":"changed","items":[]}));
+        }
+        assert_eq!(captured, expected);
+        assert_ne!(collector.capture_snapshot_queries(), captured);
     }
 
     #[test]
