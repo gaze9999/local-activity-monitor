@@ -4468,7 +4468,13 @@ impl Collector {
             *self.selected_snapshot_scan.lock().unwrap_or_else(|error| error.into_inner()) = None;
             return None;
         };
-        let epoch: i64 = membership.db.query_row("SELECT value FROM selection_epoch", [], |row| row.get(0)).ok()?;
+        let epoch: i64 = match membership.db.query_row("SELECT value FROM selection_epoch", [], |row| row.get(0)) {
+            Ok(epoch) => epoch,
+            Err(_) => {
+                *self.selected_snapshot_scan.lock().unwrap_or_else(|error| error.into_inner()) = None;
+                return None;
+            }
+        };
         let mut hash = Sha256::new();
         hash.update(membership.identity.to_le_bytes());
         hash.update(membership.revision.to_le_bytes());
@@ -5754,6 +5760,14 @@ mod log_tests {
             assert_eq!(scan.projections[0].projection.calls.len(),512);
             assert!(scan.reader.is_some() && !scan.finished);
         }
+        // An unreadable membership epoch must release an in-flight source transaction.
+        let membership = collector.source_membership.as_ref().unwrap();
+        let epoch: i64 = membership.db.query_row("SELECT value FROM selection_epoch", [], |row| row.get(0)).unwrap();
+        membership.db.execute("UPDATE selection_epoch SET value='unreadable'", []).unwrap();
+        assert!(collector.selected_overflow_projections(&selection).is_none());
+        assert!(collector.selected_snapshot_scan.lock().unwrap().is_none());
+        membership.db.execute("UPDATE selection_epoch SET value=?", [epoch]).unwrap();
+        assert!(collector.selected_overflow_projections_with_limits(&selection,1,16*1024*1024).is_none());
         // Allow exactly the charged first page, then exhaust capacity within the same source.
         let first_page_budget = collector.selected_snapshot_scan.lock().unwrap().as_ref().unwrap().staged_bytes;
         assert!(collector.selected_overflow_projections_with_limits(&selection,1,first_page_budget).is_none());

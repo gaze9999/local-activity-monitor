@@ -1597,3 +1597,15 @@ python tools/measure_rust_memory.py --binary rust/service/target/debug/local-act
 Linux / Rust 1.100.0、原 Cargo.lock, 該 focused 測試通過 (0.15 秒), runtime 位元組比較與 diff 檢查通過, 未重跑任何延後測試
 
 這驗證既有 charge 門檻的中途取消與恢復, staged_bytes 仍主要依序列化來源長度記帳, 不是所有 allocation 的計量, 未解除 16 MiB staging 容量、未實作 reducer 或跨輪共同 candidate
+
+### Snapshot stage 的 epoch 讀取失敗清理
+
+以 `d8d6758` 為基底, LAM main `5c03daf` 與 workbench-workspace main `4616074` 核對未變, 依既有 stage 失敗須釋放 reader / payload 的規格, 補查頁面讀取前的 selection_epoch 錯誤路徑
+
+原先 epoch query 的 `.ok()?` 會直接返回, 在已讀完第一頁時仍保留 selected_snapshot_scan 與其 source reader, 合成 fixture 暫時將 epoch 改為無法讀成 i64 的值, 先重現 cache 未清除, 修正後 query 失敗清除該 stage 再返回 None
+
+恢復原 epoch 後從第一頁重新讀取, 600 calls 與原有 materialized oracle 完整相符, 容量耗盡、signature 變更與分頁 / 驗證輪次 assertions 均保留
+
+Linux / Rust 1.100.0、原 Cargo.lock, snapshot_payload_ 篩選 2 項通過 (0.15 秒), diff 檢查通過, 未執行延後的 HTTP 測試或完整套件
+
+僅變更既有 epoch query 失敗時的清理, 不改變 query、查詢次數、selection hash、16 MiB budget、正常成功資料或 response schema, 不代表共同 candidate 或整體記憶體上限完成
