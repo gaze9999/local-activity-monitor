@@ -1696,3 +1696,15 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, targeted candidate 測試 1 筆通過、4
 此為單來源 checkpoint reader 的來源序號條件, 不涵蓋多來源 winner / first-insertion slots 或全域 discovery 順序, 未重跑大型 encoded payload、HTTP 或其他延後測試
 
 Linux / Rust 1.100.0 / 原 Cargo.lock, fail-before 耗時 0.51 秒, test-only 修正後 targeted 測試 1 筆通過、414 筆未選取, 耗時 0.69 秒, 兩次記錄保留, 不構成完整 candidate 或容量驗收
+
+### 兩來源 winner 先定案再分頁
+
+以 `de6ed3d` 為基準新增 test-only fixture, 兩個 checkpoint source 各保存 600 calls, 同一已知 thread 有 300 個重複 call ID, 第二來源使用不同檔案事件內容, 確保不是只比對總數
+
+真實 select_recent_calls 選出 1,200 個來源呼叫, 依現行 canonical overflow traversal 先決定 900 個 winner, 只將 winner ID 交給實際 SelectedCheckpointReader, 並反向處理兩來源, 不讓 300 個 loser 進入 FileSummary
+
+四窗完整 file_activity 與未修改的 merge_snapshot / FileSummary materialized 結果、Collector::snapshots 序列化結果完全相符, reader 完成後核對來源 signature, 不保留跨來源完整 payload vector
+
+此 fixture 固定為單一已知 thread 與 canonical fallback, 不是通用 thread identity / winner planner, 也未證明 Python 完整來源 first-insertion slots、metadata-only 來源、來源檔案 identity、跨來源變更取消或完整 worker 發布, production 與原 oracle 均未修改
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 新 targeted 測試 1 筆通過、415 筆未選取, 耗時 0.56 秒, 未重跑大型 padding、HTTP 或其他延後檢查
