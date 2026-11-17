@@ -397,7 +397,11 @@ source_details_pending 已沿同一 signature 的 SelectedCheckpointReader 讀�
 
 每頁仍最多 512 calls / 16 MiB encoded charge, 不保留第二份完整 payload vector, 但會額外讀取、解碼 losers, 此成本不能宣稱為零或固定 RSS, active payload 仍只複製 winners, 因原 detail-pending 集合僅取自 overflow projections, 詳見 validation 的讀取量測與驗收邊界
 
-Project summary、MCP catalog augmentation、完整 error windows 與正式發布仍待串接, raw failure components 不在此步套用名稱, 未因此重跑 deferred 額外 metadata-only / 無 ID 來源實驗
+Project summary 已由完成的 rows 組合, catalog 優先提供 name / icon / kind 與指定時間欄位, 缺少 catalog 的 observed project 沿 row fallback, 每個 thread 只計一次, 無 thread 的 catalog project 保留 count 0, 根目錄及其他 detail 欄位不進入 summary
+
+project_details 的初始化、metadata 停用清除與 refresh replacement 經同一內容 revision setter, refresh 沿原 BTreeMap equality 回報 changed, 保留 roots preservation、資料讀取與失敗處理順序, candidate 完成前後核對 owner revision
+
+MCP catalog augmentation、完整 error windows 與正式發布仍待串接, raw failure components 不在此步套用名稱, 未因此重跑 deferred 額外 metadata-only / 無 ID 來源實驗
 
 建構 eligibility 仍用原 Option, SelectedInputs 的舊 validate_sources 亦保留 Option wrapper, 新 try_validate_sources 提供有類型的驗證結果, 不改動同步 snapshots 或原失敗 fallback
 

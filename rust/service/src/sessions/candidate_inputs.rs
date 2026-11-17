@@ -97,6 +97,7 @@ pub(super) struct CandidateInputs {
     overflow: Sessions,
     history_revision: u64,
     thread_metadata_revision: u64,
+    project_details_revision: u64,
     overflow_details_revision: u64,
     queries: [(Arc<account::Shared>, u64); 8],
     sources: SnapshotSourceSettings,
@@ -126,6 +127,7 @@ impl CandidateInputs {
             active:Self::sessions(&collector.files)?, overflow:Self::sessions(&collector.overflow_files)?,
             history_revision:collector.history_revision.value()?,
             thread_metadata_revision:collector.thread_metadata_revision.value()?,
+            project_details_revision:collector.project_details_revision.value()?,
             overflow_details_revision:collector.overflow_details_revision.value()?,
             queries:Self::queries(collector).into_iter().map(|source|
                 Some((Arc::clone(source), source.content_revision()?)))
@@ -141,6 +143,7 @@ impl CandidateInputs {
             && SourceTopology::capture(collector).as_ref() == Some(&self.topology)
             && collector.history_revision.value() == Some(self.history_revision)
             && collector.thread_metadata_revision.value() == Some(self.thread_metadata_revision)
+            && collector.project_details_revision.value() == Some(self.project_details_revision)
             && collector.overflow_details_revision.value() == Some(self.overflow_details_revision)
             && Self::sessions_match(&self.active, &collector.files)
             && Self::sessions_match(&self.overflow, &collector.overflow_files)
@@ -249,6 +252,33 @@ mod tests {
         }
         assert_eq!(collector.files[&path].projection.calls.len(), 1);
         (temporary, collector, path)
+    }
+
+    #[test]
+    fn candidate_inputs_track_project_catalog_replacement_and_clear() {
+        let (_temporary, mut collector, _) = fixture();
+        let stopped = AtomicBool::new(false);
+        let capture = |collector: &Collector| CandidateInputs::capture(collector, true, &stopped).unwrap();
+        let projects = [("project".to_owned(), json!({"name":"First","root":"fixture/root"}))].into_iter().collect();
+        let guard = capture(&collector);
+        assert!(collector.replace_project_details(projects));
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let revision = collector.project_details_revision.value();
+        let guard = capture(&collector);
+        assert!(!collector.replace_project_details(collector.project_details.clone()));
+        assert_eq!(collector.project_details_revision.value(), revision);
+        assert!(guard.validate(&collector, true, &stopped).is_some());
+        let guard = capture(&collector);
+        let mut projects = collector.project_details.clone();
+        projects.get_mut("project").unwrap()["name"] = json!("Updated");
+        assert!(collector.replace_project_details(projects));
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        assert!(collector.replace_project_details(Default::default()));
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = capture(&collector);
+        assert!(!collector.replace_project_details(Default::default()));
+        assert!(guard.validate(&collector, true, &stopped).is_some());
     }
 
     #[test]

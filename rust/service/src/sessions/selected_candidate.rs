@@ -428,7 +428,20 @@ impl SelectedCandidate {
                         .and_then(|id| self.thread_slots.get(id)).copied().unwrap_or(usize::MAX);
                     rank(left).cmp(&rank(right))
                 }));
-            json!({"rows":rows,"totals":totals,"nested_totals":nested_totals})
+            let mut projects: BTreeMap<String, Value> = collector.project_details.iter().map(|(id, detail)| {
+                let mut value = json!({"id":id,"name":detail["name"],"icon":detail["icon"],"kind":detail["kind"],"thread_count":0});
+                for key in ["origin", "created_at", "updated_at"] {
+                    if let Some(field) = detail.get(key) { value[key] = field.clone(); }
+                }
+                (id.clone(), value)
+            }).collect();
+            for row in &rows {
+                if let Some(id) = row["project_id"].as_str().filter(|id| !id.is_empty()) {
+                    let project = projects.entry(id.to_owned()).or_insert_with(|| json!({"id":id,"name":row["project_name"],"icon":null,"kind":row["project_kind"],"thread_count":0}));
+                    project["thread_count"] = json!(project["thread_count"].as_u64().unwrap_or(0) + 1);
+                }
+            }
+            json!({"rows":rows,"totals":totals,"nested_totals":nested_totals,"projects":projects.into_values().collect::<Vec<_>>()})
         }).collect::<Vec<_>>().try_into().map_err(|_| Failure::State)?;
         let (mcp_events,sql_events): (Vec<_>,Vec<_>) = reducers.observations.finish().into_iter().partition(|event| event.get("server").is_some());
         let sql_events = sqlite::identified(sql_events);

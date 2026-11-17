@@ -2083,3 +2083,18 @@ Production snapshots、detail publication 時機、設定保存與 fallback 不�
 Linux / Rust 1.100.0 / 原 Cargo.lock, 第一版八情境 targeted 通過 1 項、428 項未選取, 75.89 秒, 補上 readiness 變更 / suppression 驗證後同一 targeted 通過 1 項、428 項未選取, 77.18 秒, cargo check 通過並維持 8 個既有 warnings, 本輪測試與編譯無失敗
 
 Production caller、同步 snapshots、detail index publication 與 fallback 未切換, deferred fixtures 未執行, 完整 catalogs / diagnostics owners、error windows、同批 detail index 與資源 / 平台驗收仍保留
+
+### Candidate project summary 與實際 catalog owner
+
+基準 `83def45`, project_details 的 production 初始化、metadata 停用與 refresh replacement 全部改經 setter, 保留原 equality、roots preservation 與讀取順序, refresh 使用 setter changed 結果取代原比較, 不額外重複比較 map
+
+- CandidateInputs 保存 project_details revision 而非整張 map, 新測試核對首次 replacement、相同內容、名稱變更、清空與重複清空
+- Candidate 四窗 rows components 加入 projects, 沿 catalog-first、row fallback、project ID 排序及 thread count 規則, 未新增對外 API 或資料來源
+- 原八情境加入 catalog override、無 thread 的 catalog project、既有第二 thread 的 observed fallback, 以明列 JSON 核對候選及未修改的同步 snapshots, catalog root 私有標記不出現在 summary, 未增加額外 session source 或重跑 deferred metadata-only source fixture
+- 首次 targeted test 編譯因 assertion 將 Value 與 Vec<Value> 直接比較而 E0277, 改為比較 json!(expected_projects), 未改 production 行為或放寬預期結果, 原編譯錯誤記錄保留
+
+本輪原始來源再核對 LAM main `5c03daf`、workbench-workspace main `ce972bd`, 與前輪相同, LAM consumer pin 未變更
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 修正 assertion 型別後 owner targeted 通過 1 項、429 項未選取, 0.01 秒, 八情境串接 targeted 通過 1 項、429 項未選取, 72.56 秒, cargo check 通過並維持 8 個既有 warnings
+
+Production snapshots 的 project summary 實作未改, 無新增查詢或外部傳輸, 同步 aggregation、設定保存、detail publication 與 fallback 不變, MCP catalog / diagnostics owners、完整 error windows、同批 detail index 與資源 / 平台驗收仍待完成, deferred fixtures 未執行

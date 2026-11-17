@@ -482,7 +482,7 @@ impl Monitor {
             let (plugins, plugin_report, _) = plugins::scan(home);
             collector.replace_thread_metadata(metadata);
             collector.metadata_reports = reports;
-            collector.project_details = projects;
+            collector.replace_project_details(projects);
             collector.project_roots_status = roots_status;
             collector.dots = dots;
             collector.schedules = schedules;
@@ -912,7 +912,7 @@ impl Monitor {
                             collector.overflow_thread_workdirs = scratch.into_iter().filter_map(|(id,entry)| entry["_cwd"].as_str().map(|cwd| (id,cwd.to_owned()))).collect();
                         } else { collector.overflow_workdirs.clear(); collector.overflow_workdir_scan = None; }
                         changed |= previous_workdirs != collector.overflow_thread_workdirs;
-                        collector.project_details.clear();
+                        collector.replace_project_details(BTreeMap::new());
                         collector.project_roots_status = projects::RootStatus::default();
                         collector.dots = std::array::from_fn(|index| json!({"window":WINDOWS[index],"activity_items_scope":"latest_loaded_snapshot","activity":[]}));
                         changed
@@ -941,7 +941,6 @@ impl Monitor {
                         let mut changed = !same_metadata_reports(&metadata_reports, &collector.metadata_reports) || schedules != collector.schedules
                             || plugins != collector.plugins || collector.plugin_report.as_ref() != Some(&plugin_report)
                             || dots != collector.dots
-                            || projects != collector.project_details
                             || roots_status != collector.project_roots_status
                             || collector.schedule_report.as_ref().is_none_or(|previous| {
                                 let mut previous = previous.clone();
@@ -955,7 +954,7 @@ impl Monitor {
                         collector.plugin_report = Some(plugin_report);
                         collector.dots = dots;
                         changed |= collector.replace_thread_metadata(metadata);
-                        collector.project_details = projects;
+                        changed |= collector.replace_project_details(projects);
                         collector.project_roots_status = roots_status;
                         collector.schedule_report = Some(report);
                         collector.metadata_reports = metadata_reports;
@@ -2592,6 +2591,7 @@ struct Collector {
     thread_metadata: Map<String, Value>,
     thread_metadata_revision: project::ContentRevision,
     project_details: BTreeMap<String, Value>,
+    project_details_revision: project::ContentRevision,
     project_roots_status: projects::RootStatus,
     worktrees: worktrees::Collector,
     schedule_report: Option<Value>,
@@ -2946,6 +2946,7 @@ impl Collector {
             thread_metadata: Map::new(),
             thread_metadata_revision: project::ContentRevision::default(),
             project_details: BTreeMap::new(),
+            project_details_revision: project::ContentRevision::default(),
             project_roots_status: projects::RootStatus::default(),
             worktrees: worktrees::Collector::new(catalog_home.clone()),
             metadata_enabled: true,
@@ -4777,6 +4778,13 @@ impl Collector {
         self.overflow_details_ready = ready;
     }
 
+    fn replace_project_details(&mut self, projects: BTreeMap<String, Value>) -> bool {
+        let changed = self.project_details != projects;
+        if changed { self.project_details_revision.bump(); }
+        self.project_details = projects;
+        changed
+    }
+
     fn replace_thread_metadata(&mut self, metadata: Map<String, Value>) -> bool {
         // Preserve the existing refresh comparison, including top-level row order.
         // A successful unchanged refresh does not invalidate an in-progress batch.
@@ -5947,7 +5955,21 @@ mod log_tests {
             }
             let mut metadata = Map::new();
             metadata.insert(id.into(), json!({"name":"named current thread", "project_id":"fixture-project", "project_name":"Fixture", "execution":{"model_provider":"fixture"}}));
+            if !same_thread {
+                metadata.insert(second_id.into(), json!({"project_id":"fallback-project","project_name":"Fallback","project_kind":"observed"}));
+            }
             collector.replace_thread_metadata(metadata);
+            collector.replace_project_details([
+                ("fixture-project".into(), json!({"name":"Catalog override","icon":"folder","kind":"catalog","origin":"fixture","created_at":null,"updated_at":"2026-11-13T00:00:00Z","root":"PRIVATE_PROJECT_ROOT"})),
+                ("empty-project".into(), json!({"name":"No threads","kind":"catalog"})),
+            ].into_iter().collect());
+            let mut expected_projects = vec![
+                json!({"id":"empty-project","name":"No threads","icon":null,"kind":"catalog","thread_count":0}),
+                json!({"id":"fixture-project","name":"Catalog override","icon":"folder","kind":"catalog","origin":"fixture","created_at":null,"updated_at":"2026-11-13T00:00:00Z","thread_count":1}),
+            ];
+            if !same_thread {
+                expected_projects.insert(1, json!({"id":"fallback-project","name":"Fallback","icon":null,"kind":"observed","thread_count":1}));
+            }
             let expected_winners = if same_thread { 900 } else if active { 1800 } else { 1200 };
             let mut materialized = BTreeMap::<String, Projection>::new();
             let mut detail_pending = BTreeSet::new();
@@ -6100,7 +6122,7 @@ mod log_tests {
                     .then_with(|| if ordered {
                         thread_slots[left["thread_id"].as_str().unwrap()].cmp(&thread_slots[right["thread_id"].as_str().unwrap()])
                     } else { std::cmp::Ordering::Equal }));
-                json!({"rows":rows,"totals":totals,"nested_totals":nested_totals})
+                json!({"rows":rows,"totals":totals,"nested_totals":nested_totals,"projects":expected_projects})
             });
             let rows = expected_rows(false);
             let expected_tool_errors = |ordered| {
@@ -6286,6 +6308,7 @@ mod log_tests {
                 assert_eq!(window["codex"]["git"], expected_commands[index]["git"]);
                 assert_eq!(window["codex"]["checks"], expected_commands[index]["checks"]);
                 assert_eq!(window["codex"]["skills"], expected_skills[index]);
+                assert_eq!(window["codex"]["projects"], json!(expected_projects));
             }
             if same_thread && !nested && !active {
                 let make_ready_candidate = |collector: &Collector| selected_candidate::SelectedCandidate::new(collector, &selection,
@@ -8761,7 +8784,7 @@ mod log_tests {
         assert!(!collector.populate_overflow_workdirs(&root, &mut cached_metadata));
         assert_eq!(cached_metadata[&id]["_cwd"], "/fixture/private-workdir");
         collector.replace_thread_metadata(metadata);
-        collector.project_details = projects;
+        collector.replace_project_details(projects);
         collector.files.values_mut().next().unwrap().projection.allowance = allowance::project(&json!({"primary":{"used_percent":80}}), now() - Duration::days(1));
         let duplicate_dir = root.join("duplicate");
         std::fs::create_dir(&duplicate_dir).unwrap();
