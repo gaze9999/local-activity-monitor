@@ -4338,7 +4338,7 @@ impl Collector {
     }
 
     fn selected_detail_index(&self, root: &Path, selection: &CallSelection) -> Option<(details::Index, BTreeSet<String>)> {
-        self.selected_detail_index_with_limit(root, selection, 16 * 1024 * 1024)
+        self.selected_detail_index_with_limit(root, selection, details::STAGING_LIMIT)
     }
 
     fn selected_detail_index_with_limit(&self, root: &Path, selection: &CallSelection, stage_limit: usize) -> Option<(details::Index, BTreeSet<String>)> {
@@ -5958,6 +5958,7 @@ mod log_tests {
                     Advance::Complete(result) => {
                         assert_eq!(result.session_errors, expected_errors);
                         assert!(result.failures.is_empty());
+                        assert!(result.detail_index.files.is_empty());
                         assert_eq!(result.read_work[1], 2);
                         let errors = collector.render_error_windows_captured(&journal, "ok", reference, &result.session_errors, |_| result.failures);
                         assert_eq!(errors, expected_windows);
@@ -6084,7 +6085,7 @@ mod log_tests {
                 checkpoint_signature:second_cursor.signature.clone(),materialized:true,
                 call_headers:Some(second_calls.iter().map(|row| lam_history_store::CallHeader {
                     call_id:row.call_id.clone(),event_time:row.event_time.clone()}).collect())}]).unwrap();
-            collector.duplicate_session_paths.insert("fixture-second".into(), second_path);
+            collector.duplicate_session_paths.insert(second_key.clone(), second_path);
             // Construct complete context through the production parser, not by
             // patching model/context_at without the context_seen invariant.
             let metadata_path = root.join(format!("metadata-rollout-{id}.jsonl"));
@@ -6109,7 +6110,7 @@ mod log_tests {
             membership.mark_verified(&[VerifiedMembership {key:metadata_key.clone(),fingerprint,
                 checkpoint_signature:metadata_cursor.signature.clone(),materialized:true,call_headers:Some(Vec::new())}]).unwrap();
             collector.discovered_files = Some(3);
-            collector.duplicate_session_paths.insert("fixture-metadata".into(), metadata_path);
+            collector.duplicate_session_paths.insert(metadata_key.clone(), metadata_path);
             let selection = collector.select_recent_calls(1200, 2000).unwrap();
             assert!(selection.complete);
             assert_eq!(selection.calls.values().map(BTreeSet::len).sum::<usize>(), 1200);
@@ -6193,8 +6194,8 @@ mod log_tests {
                 let checkpoint = store.selected_checkpoint(&lam_history_store::ExpectedCursor {
                     source_key:source,signature:Some(&original.cursor.signature)}, &ids).unwrap().unwrap();
                 let projection = checkpoint::snapshot_projection(checkpoint, false).unwrap();
-                let source_path = if source == &key { &path } else if source == &second_key { &collector.duplicate_session_paths["fixture-second"] }
-                    else { &collector.duplicate_session_paths["fixture-metadata"] };
+                let source_path = if source == &key { &path } else if source == &second_key { &collector.duplicate_session_paths[&second_key] }
+                    else { &collector.duplicate_session_paths[&metadata_key] };
                 expected_session_errors.extend(Session::projection_error_events(&projection.projection, source_path, &projection.projection.errors));
                 let thread = projection.projection.id.as_ref().unwrap();
                 if projection.source_details_pending { detail_pending.insert(thread.clone()); }
@@ -6387,6 +6388,9 @@ mod log_tests {
             }
             // Process winner sources in reverse to show reduction is independent of
             // page arrival once canonical-fallback winners have been fixed.
+            let expected_index = collector.selected_detail_index(&root, &selection).unwrap().0;
+            let detail_shape = |index: &details::Index| index.files.iter().map(|(thread, files)|
+                (thread.clone(), files.iter().map(|file| (file.path.clone(), file.anchor.clone(), file.calls.len())).collect::<Vec<_>>())).collect::<Vec<_>>();
             let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool, statistics_units: usize| -> Result<([Value;4], [Value;4], [Value;4], [Value;4], [Value;4], [Value;4], [Value;4], Value), Failure> {
                 use selected_candidate::{Advance, SelectedCandidate, Source};
                 let mut candidate = SelectedCandidate::new(&collector, &selection,
@@ -6410,6 +6414,13 @@ mod log_tests {
                     match candidate.advance(&collector, &selection, true, &stopped, 1)? {
                         Advance::Pending(next) => candidate = next,
                         Advance::Complete(completed) => {
+                            assert_eq!(detail_shape(&completed.detail_index), detail_shape(&expected_index));
+                            for thread in expected_index.files.keys() {
+                                for call in ["call0000", "call0300", "call0599", "call0899"] {
+                                    assert_eq!(completed.detail_index.select_call(thread, call).map(|file| file.path),
+                                        expected_index.select_call(thread, call).map(|file| file.path));
+                                }
+                            }
                             assert_eq!(completed.session_errors, expected_session_errors);
                             assert!(completed.session_errors.iter().any(|event| event["code"] == "first-source"));
                             assert!(completed.session_errors.iter().any(|event| event["code"] == "second-source"));
@@ -8424,6 +8435,9 @@ mod log_tests {
             unknown.calls.insert("not-enrolled".into(), ["call".into()].into_iter().collect());
             assert!(SelectedCandidate::new(collector, &unknown, collector.capture_snapshot_time(), Vec::new(),
                 true, 10_000, 10_000, true, &stopped).is_none());
+            let limited = SelectedCandidate::new(collector, &selection, collector.capture_snapshot_time(), Vec::new(),
+                true, 10_000, 10_000, true, &stopped).unwrap().with_detail_limit(0);
+            assert_eq!(limited.advance(collector, &selection, true, &stopped, 1).err(), Some(selected_candidate::Failure::DetailCapacity));
             let time = collector.capture_snapshot_time();
             let reference = time.reference;
             let journal = collector.capture_snapshot_journal();
@@ -8434,6 +8448,14 @@ mod log_tests {
                     Advance::Pending(next) => candidate = next,
                     Advance::Complete(result) => {
                         assert_eq!(result.read_work, [0; 5]);
+                        let expected_index = collector.detail_index(&root).0;
+                        let shape = |index: &details::Index| index.files.iter().map(|(thread, files)|
+                            (thread.clone(), files.iter().map(|file| (file.path.clone(), file.anchor.clone(), file.calls.len())).collect::<Vec<_>>())).collect::<Vec<_>>();
+                        assert_eq!(shape(&result.detail_index), shape(&expected_index));
+                        let actual = result.detail_index.select_call(first, "tool").unwrap().tool("tool", true, false);
+                        let expected = expected_index.select_call(first, "tool").unwrap().tool("tool", true, false);
+                        assert!(actual.is_some());
+                        assert_eq!(actual, expected);
                         let errors = collector.render_error_windows_captured(&journal, "ok", reference,
                             &result.session_errors, |ordered| {
                                 assert_eq!(ordered, collector.has_complete_source_order());

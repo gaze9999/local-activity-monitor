@@ -2470,3 +2470,18 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, 完整順序 / finalizer focused 通過 1
 Linux / Rust 1.100.0 / 原 Cargo.lock, strengthened complete-order fixture 通過 1 項、450 項未選取, 0.20 秒, no-ID 回歸 0.07 秒, 原八情境 active / checkpoint candidate 93.56 秒通過, 維持 8 個既有 warnings, git diff --check 通過
 
 Production worker 與 fallback 未切換, 此步完成上述 error-window 串接證據, 尚未完成 candidate detail index 或 final Snapshots 的共同發布, 詳細資料必須保留 first permitted source, 不能直接重用 summary 的 replacement winner
+
+### Candidate 同批 detail index
+
+基準 `b4efa31`, 同一批 selected payload pages 在 summary winner 過濾前建立 owned detail index, active 來源讀取全部 selected calls 而非只讀摘要 winner, checkpoint 來源保留原 anchor / CheckpointGuard, 不重新讀取完整 payload 建立另一組 Projection
+
+- Payload 反向分頁時先按原 source slot 保存各來源 index, 完成時依原順序組合, detail lookup 維持 first permitted source, 不誤用摘要的後來源 replacement winner
+- 共用原 detail index 的 16 MiB stage 常數, 沿用 projection_bytes 保守計費並包含 checkpoint guard 資料, 超限拒絕整組 candidate, 不是提高上限或宣稱程序 RSS 上限
+- Active-only 完整順序 fixture 比對全部 thread / path / anchor / call counts, 真實 tool detail 非空且與原 detail_index 相同, 零 detail 預算明確拒絕
+- 八情境 checkpoint / active / nested fixture 比對完整 index 結構及重複 call 在各來源的選取路徑, 原摘要、錯誤、取消、來源變更、readiness 驗證保留, 無 ID 情境明確要求 detail index 為空
+
+首次 checkpoint 比對在建立原 selected_detail_index oracle 時失敗, 1.89 秒, 原大型 fixture 的第二與 metadata 路徑以任意標籤登記而非真實 source_key, 改正 fixture 登記及參照後通過, 不修改 production overflow_path 或略過原驗證, 失敗 log / patch 保留
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, active-only 0.23 秒、八情境 87.29 秒、無 ID 0.07 秒各通過 1 項, changed call / response guard 各通過 0.04 秒, compact page sharing 通過 0.00 秒, 各 450 項未選取, 初次 compact filter 使用錯誤模組而選到 0 項, 改用實際 shared_position_tests 後取得上述通過, 維持 8 個既有 warnings, git diff --check 通過
+
+CompletedCandidate 現在擁有摘要與對應 detail index, 並在來源 / input 最後驗證後回傳, 但尚未由 production finalizer 組成完整 Snapshots 或共同發布, workdir readiness 與原 fallback 不變, 本輪未重跑 HTTP、完整套件、容量量測或先前延後的檢查

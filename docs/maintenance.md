@@ -429,6 +429,8 @@ Allowance 的既有 health / usage 過濾已抽為共用 finalizer 並保留 pro
 
 Active-only candidate 已接受零 materialized checkpoint 與受 guard 保護的 active selected keys, 完整來源的 thread 分組、retained error history 優先序及 canonical fallback 均對照四窗 production error summaries / renderer logs 通過, finalizer 追加的 JEV telemetry 來源維持原位置, 下一步 detail index 必須另外保留 first permitted source 與原 selected positions, 不可重用摘要 winner 丟掉較早明細來源, 共同發布仍未切換
 
+Candidate detail index 已沿同批 pages 在 winner 過濾前保存 selected positions, 完成後恢復原 source slot 順序以保留 first permitted source, active / checkpoint / mixed 的 index 與原路徑比對通過, 共用原 16 MiB detail stage 限制且超限拒絕整組, owned index 與摘要同時通過最後驗證後回傳, 下一步仍是完整 Snapshots finalizer 與設定 / 來源 guard 覆蓋到共同發布, 不先切換 worker 或改 fallback
+
 建構 eligibility 仍用原 Option, SelectedInputs 的舊 validate_sources 亦保留 Option wrapper, 新 try_validate_sources 提供有類型的驗證結果, 不改動同步 snapshots 或原失敗 fallback
 
 來源路徑只從既有 active / session_paths / duplicate_session_paths 解析, 以 checkpoint key 核對, 缺少已觀察路徑、fingerprint 或 active 與 membership stamp 不同時拒絕, 不重新 discovery 或猜測來源位置

@@ -1,7 +1,7 @@
 //! Selected active/checkpoint candidate orchestration. The production worker does not call
 //! this path. Checkpoint source order must already be verified by its caller;
 //! Final snapshot augmentation remains a separate gate.
-use super::{candidate_inputs::SelectedInputs, checkpoint, commands, mcp, project, sqlite,
+use super::{candidate_inputs::SelectedInputs, checkpoint, commands, details, mcp, project, sqlite,
     CallSelection, Collector, Projection, SnapshotTime, CALL_LIMIT, WALK_LIMIT};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -54,6 +54,9 @@ pub(super) struct SelectedCandidate {
     thread_slots: BTreeMap<String, usize>,
     source_threads: Vec<Option<String>>,
     allowance: Option<Value>,
+    detail_indexes: BTreeMap<usize, details::Index>,
+    detail_stage_bytes: usize,
+    detail_stage_limit: usize,
     session_errors: Vec<Vec<Value>>,
     names: HashMap<String, Value>,
     ordered: bool,
@@ -72,7 +75,7 @@ pub(super) enum Advance {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Failure {
     Cancelled, Disabled, InvalidBudget, InputsRejected, PhysicalSource,
-    CheckpointRead, CheckpointChanged, InvalidProjection, StatisticsCapacity, State,
+    CheckpointRead, CheckpointChanged, InvalidProjection, StatisticsCapacity, DetailCapacity, State,
 }
 
 pub(super) struct CompletedCandidate {
@@ -87,6 +90,7 @@ pub(super) struct CompletedCandidate {
     pub session_errors: Vec<Value>,
     // Source-selected usage, before finalizer health / usage-switch filtering.
     pub allowance: Option<Value>,
+    pub detail_index: details::Index,
     #[cfg(test)]
     pub read_work: [usize; 5],
 }
@@ -138,9 +142,13 @@ impl SelectedCandidate {
             metadata:BTreeMap::new(), partial:BTreeMap::new(), detail_pending:BTreeSet::new(),
             #[cfg(test)] read_work:[0; 5],
             winners:BTreeMap::new(), slots:BTreeMap::new(),
-            next_slots:BTreeMap::new(), thread_slots:BTreeMap::new(), source_threads:Vec::new(), allowance:None, session_errors:Vec::new(), names:HashMap::new(), ordered,
+            next_slots:BTreeMap::new(), thread_slots:BTreeMap::new(), source_threads:Vec::new(), allowance:None, detail_indexes:BTreeMap::new(), detail_stage_bytes:1024,
+            detail_stage_limit:details::STAGING_LIMIT, session_errors:Vec::new(), names:HashMap::new(), ordered,
             statistics_units, statistics_key_bytes, reducers:None })
     }
+
+    #[cfg(test)]
+    pub(super) fn with_detail_limit(mut self, limit: usize) -> Self { self.detail_stage_limit = limit; self }
 
     #[cfg(test)]
     pub(super) fn awaiting_validation(&self) -> bool { matches!(self.phase, Phase::Validate) }
@@ -200,6 +208,7 @@ impl SelectedCandidate {
         Self::controls(enabled, stopped)?;
         if budget == 0 { return Err(Failure::InvalidBudget); }
         self.validate_inputs(collector, selection, enabled, stopped)?;
+        if self.detail_stage_bytes > self.detail_stage_limit { return Err(Failure::DetailCapacity); }
         let budget = budget.min(16);
         match self.phase {
             Phase::Headers => {
@@ -284,11 +293,17 @@ impl SelectedCandidate {
                     let path = if source_index < self.active.len() { self.active[source_index].clone() }
                         else { self.source_paths[source_index - self.active.len()].clone() };
                     if !self.valid_path(collector, &path) { return Err(Failure::PhysicalSource); }
+                    let detail_source;
                     let (mut projection, complete) = if source_index < self.active.len() {
                         let state = collector.files.get(&self.active[source_index]).ok_or(Failure::InputsRejected)?;
                         let mut projection = Projection::for_id(state.projection.id.clone());
-                        let ids: Vec<_> = self.winners.iter().filter(|(_, winner)| **winner == source_index)
-                            .map(|((_, id), _)| id).skip(self.active_offset).take(512).collect();
+                        let key = checkpoint::key(collector.session_root.as_deref().ok_or(Failure::InputsRejected)?, &path).ok_or(Failure::InputsRejected)?;
+                        let selected = selection.calls.get(&key);
+                        // Detail lookup keeps first-source positions, independently
+                        // of later-source summary winners. Read all selected calls.
+                        let ids: Vec<_> = state.projection.calls.keys().filter(|id| selected.is_some_and(|ids| ids.contains(*id)))
+                            .skip(self.active_offset).take(512).collect();
+                        detail_source = state.anchor.clone().map(|anchor| (anchor, None));
                         for id in &ids { projection.calls.insert((*id).clone(), state.projection.calls.get(*id).ok_or(Failure::InputsRejected)?.clone()); }
                         self.active_offset += ids.len();
                         let complete = ids.len() < 512;
@@ -320,9 +335,25 @@ impl SelectedCandidate {
                         if projection.source_details_pending {
                             if let Some(id) = &projection.projection.id { self.detail_pending.insert(id.clone()); }
                         }
+                        detail_source = Some((projection.anchor.clone(), Some(details::CheckpointGuard {
+                            directory:collector.checkpoints.directory().to_path_buf(), source_key:source.key.clone(), signature:source.signature.clone(),
+                        })));
                         (projection.projection, reader.is_complete())
                     };
                     if projection.id != self.source_threads[source_index] { return Err(Failure::InvalidProjection); }
+                    if projection.id.is_some() {
+                        if let Some((anchor, guard)) = detail_source {
+                            let root = collector.session_root.as_deref().ok_or(Failure::InputsRejected)?;
+                            let reserve = details::Index::projection_bytes(root, &path, &projection, None)
+                                .saturating_add(guard.as_ref().map_or(0, |guard| guard.directory.as_os_str().len()
+                                    .saturating_add(guard.source_key.len()).saturating_add(guard.signature.len()).saturating_add(512)));
+                            if reserve > self.detail_stage_limit.saturating_sub(self.detail_stage_bytes) { return Err(Failure::DetailCapacity); }
+                            self.detail_stage_bytes += reserve;
+                            if !self.detail_indexes.entry(source_index).or_default().add_projection(root, &path, &anchor, &projection, guard) {
+                                return Err(Failure::InvalidProjection);
+                            }
+                        }
+                    }
                     // No-ID sources still contribute metadata and undergo every
                     // source validation, but baseline excludes their calls from rows.
                     if let Some(thread) = projection.id.as_deref() {
@@ -515,7 +546,13 @@ impl SelectedCandidate {
         }
         let session_errors = active_order.into_iter().chain(self.active.len()..self.session_errors.len())
             .flat_map(|index| std::mem::take(&mut self.session_errors[index])).collect();
-        Ok(CompletedCandidate { files,series,statistics,commands,skills,rows,observations,failures,session_errors,allowance:self.allowance.take(),
+        // Payload pages arrive in reverse source order. Detail lookup must
+        // retain the original first-permitted source, not summary winner order.
+        let mut detail_index = details::Index::default();
+        for index in std::mem::take(&mut self.detail_indexes).into_values() {
+            for (thread, files) in index.files { detail_index.files.entry(thread).or_default().extend(files); }
+        }
+        Ok(CompletedCandidate { files,series,statistics,commands,skills,rows,observations,failures,session_errors,allowance:self.allowance.take(),detail_index,
             #[cfg(test)] read_work:self.read_work })
     }
 }

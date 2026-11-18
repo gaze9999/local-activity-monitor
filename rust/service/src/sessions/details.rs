@@ -251,6 +251,8 @@ impl DetailFile {
         Some(cwd.to_owned())
     }
 }
+pub(super) const STAGING_LIMIT: usize = 16 * 1024 * 1024;
+
 #[derive(Clone, Default)]
 pub(crate) struct Index {
     pub files: BTreeMap<String, Vec<DetailFile>>,
