@@ -2373,3 +2373,15 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, `sessions::skill_detail::tests` 通過 7 
 Linux / Rust 1.100.0 / 原 Cargo.lock, `sessions::instructions::tests` 通過 6 項、442 項未選取, 0.54 秒, 包含原 workspace 來源限制、遮蔽與 symlink 拒絕回歸, 維持 8 個既有 warnings, git diff --check 通過
 
 未新增來源查詢或修改端點, 本輪未重跑獨立 read_parity_tests、HTTP、完整套件與其他平台, 數量邊界使用可讀的短文件, 不宣稱涵蓋缺檔、權限或競態的完整排列
+
+### Plugin MCP 名稱上限與狀態優先序
+
+基準 `4f68d66`, 僅新增測試, 不改 production metadata 投影
+
+- inline mcpServers 與 .mcp.json 兩種既有來源各測 256 / 257 個有效名稱, 並組合有 / 無無效名稱, 共 8 組
+- 256 個有效名稱回報 available 與完整 count, 含無效名稱時為 unavailable 且 count=null, 257 個有效名稱則優先標 truncated 且 count=null, 最多輸出排序後前 256 個名稱
+- 回應不包含合成 command / env 值, 來源檔案位元組未變, Python 實際 `_plugin_metadata` 同 8 組 oracle 均通過
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, `plugin_mcp_inventory_caps_names_without_exposing_arguments` 通過 1 項、448 項未選取, 0.05 秒, 維持 8 個既有 warnings, git diff --check 通過
+
+測試直接涵蓋 metadata reader, 未新增 API 或改來源查詢, 未重跑 scanner / watcher、HTTP、完整套件或其他平台, 不宣稱驗證 MCP 實際連線或啟動

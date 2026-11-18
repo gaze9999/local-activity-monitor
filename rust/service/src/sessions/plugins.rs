@@ -474,6 +474,45 @@ pub(super) fn scan(home: &Path) -> (Value, Value, Vec<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_mcp_inventory_caps_names_without_exposing_arguments() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let directory = root.join("1.0");
+        fs::create_dir(&directory).unwrap();
+        for external in [false, true] {
+            for count in [256, 257] {
+                for invalid in [false, true] {
+                    let mut servers = serde_json::Map::new();
+                    for index in 0..count {
+                        servers.insert(format!("server-{index:03}"), json!({"command":"PRIVATE_COMMAND","env":{"TOKEN":"PRIVATE_TOKEN"}}));
+                    }
+                    if invalid {
+                        servers.insert("invalid name".into(), json!({"command":"PRIVATE_COMMAND"}));
+                    }
+                    let manifest = if external { json!({"mcpServers":"./.mcp.json"}) }
+                        else { json!({"mcpServers":servers}) };
+                    let definitions = json!({"mcpServers":servers}).to_string();
+                    fs::write(directory.join(".mcp.json"), &definitions).unwrap();
+                    let manifest = manifest.to_string();
+                    fs::write(directory.join("plugin.json"), &manifest).unwrap();
+                    let result = metadata(&root, &directory, &mut Budget::default());
+                    let expected = if count > ROWS { "truncated" } else if invalid { "unavailable" } else { "available" };
+                    assert_eq!(result["mcp_status"], expected);
+                    assert_eq!(result["mcp_count"], if expected == "available" { json!(count) } else { Value::Null });
+                    let names = result["mcp_servers"].as_array().unwrap();
+                    assert_eq!(names.len(), ROWS);
+                    assert_eq!(names.first().unwrap(), "server-000");
+                    assert_eq!(names.last().unwrap(), "server-255");
+                    assert!(!result.to_string().contains("PRIVATE"));
+                    assert_eq!(fs::read_to_string(directory.join("plugin.json")).unwrap(), manifest);
+                    assert_eq!(fs::read_to_string(directory.join(".mcp.json")).unwrap(), definitions);
+                }
+            }
+        }
+    }
+
     fn utf16_json(text: &str, big_endian: bool) -> Vec<u8> {
         let mut raw = if big_endian { vec![0xfe, 0xff] } else { vec![0xff, 0xfe] };
         for unit in text.encode_utf16() {
