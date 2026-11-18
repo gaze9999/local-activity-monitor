@@ -2456,3 +2456,17 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, focused 最終通過 1 項、450 項未�
 Linux / Rust 1.100.0 / 原 Cargo.lock, 完整順序 / finalizer focused 通過 1 項、450 項未選取, 0.31 秒, no-ID 兩情境回歸通過 0.10 秒, HTTP local_allowance_observation_replays_changes_after_reenable 通過 1 項、228 項未選取, 0.27 秒, 驗證停用後讀入新資料仍隱藏用量、重新啟用顯示最新 80, 維持 8 個既有 warnings, git diff --check 通過
 
 本輪 HTTP 驗證既有 production finalizer, 不代表 worker 已切換 candidate, candidate 的 finalizer / 發布仍需維持設定 guard 直到共同發布, 未重跑完整套件、八情境獨立 reducers 或先前延後的 restart / timestamp 檢查, 完整來源順序的 errors / detail index / 共同發布仍未驗收
+
+### Active-only candidate 與完整 error-window 順序
+
+基準 `e0b89eb`, candidate 允許非空 active sources 搭配零個 materialized checkpoint sources, selected keys 可屬於受 guard 保護的 active path, 仍拒絕未知 selected key、空 active / checkpoint 集合及 materialized source 數量不符, 不以重複加入 active checkpoint 來假裝完整來源路徑
+
+沿原三來源 / 兩 thread / 一 tool failure 的來源順序測試, 以真實 active fingerprint / checkpoint signature 登記非 materialized membership, 完整 candidate 流程不讀 checkpoint payload page, 對照原 snapshots 的四窗 error summary 與 log payload
+
+- 完整來源順序保留首次 thread 分組的 z / a / m, tool failure 依 start-time window 與來源分組保留原插入位置
+- retained history 反向排列後仍保持原 m / a / z 優先序, 來源順序不完整時維持 canonical a / m / z
+- Log 比對只排除原 finalizer 額外追加的 jev_telemetry source, 並先核對其 source 名稱, 其餘完整 renderer payload 逐項相同, 未移動 JEV 查詢或讀取位置
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, strengthened complete-order fixture 通過 1 項、450 項未選取, 0.20 秒, no-ID 回歸 0.07 秒, 原八情境 active / checkpoint candidate 93.56 秒通過, 維持 8 個既有 warnings, git diff --check 通過
+
+Production worker 與 fallback 未切換, 此步完成上述 error-window 串接證據, 尚未完成 candidate detail index 或 final Snapshots 的共同發布, 詳細資料必須保留 first permitted source, 不能直接重用 summary 的 replacement winner

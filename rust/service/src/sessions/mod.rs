@@ -8401,6 +8401,61 @@ mod log_tests {
         collector.error_history.clear();
         collector.logs_enabled = true;
         collector.updated = Some(chrono::DateTime::parse_from_rfc3339("2026-11-13T02:00:00Z").unwrap().with_timezone(&Utc));
+        // Enroll actual active sources without inventing materialized overflow.
+        let mut membership = SourceMembership::new().unwrap();
+        for (path, state) in &collector.files {
+            let key = checkpoint::key(&root, path).unwrap();
+            let fingerprint = source_fingerprint(state.identity.unwrap(), state.size, state.modified).unwrap();
+            membership.insert(&[MembershipRecord {key:key.clone(),fingerprint:Some(fingerprint.clone())}]).unwrap();
+            membership.mark_verified(&[VerifiedMembership {key,fingerprint,
+                checkpoint_signature:state.checkpoint_signature.clone().unwrap(),materialized:false,call_headers:None}]).unwrap();
+        }
+        collector.source_membership = Some(membership);
+        collector.source_membership_root = Some(file_identity(&std::fs::metadata(&root).unwrap()));
+        collector.source_membership_complete = true;
+        collector.discovery = None;
+        let candidate_errors = |collector: &Collector| {
+            use selected_candidate::{Advance, SelectedCandidate};
+            let stopped = AtomicBool::new(false);
+            let selection = collector.select_recent_calls(10, 100).unwrap();
+            assert!(selection.complete);
+            assert_eq!(selection.calls.values().map(BTreeSet::len).sum::<usize>(), 1);
+            let mut unknown = selection.clone();
+            unknown.calls.insert("not-enrolled".into(), ["call".into()].into_iter().collect());
+            assert!(SelectedCandidate::new(collector, &unknown, collector.capture_snapshot_time(), Vec::new(),
+                true, 10_000, 10_000, true, &stopped).is_none());
+            let time = collector.capture_snapshot_time();
+            let reference = time.reference;
+            let journal = collector.capture_snapshot_journal();
+            let mut candidate = SelectedCandidate::new(collector, &selection, time, Vec::new(),
+                collector.has_complete_source_order(), 10_000, 10_000, true, &stopped).unwrap();
+            for _ in 0..32 {
+                match candidate.advance(collector, &selection, true, &stopped, 1).unwrap() {
+                    Advance::Pending(next) => candidate = next,
+                    Advance::Complete(result) => {
+                        assert_eq!(result.read_work, [0; 5]);
+                        let errors = collector.render_error_windows_captured(&journal, "ok", reference,
+                            &result.session_errors, |ordered| {
+                                assert_eq!(ordered, collector.has_complete_source_order());
+                                result.failures
+                            });
+                        let baseline = collector.snapshots("ok", "ok", 1);
+                        for index in 0..4 {
+                            let window: Value = serde_json::from_slice(&baseline.window_bytes(index)).unwrap();
+                            assert_eq!(errors[index].0, window["errors"]);
+                            let mut logs: Value = serde_json::from_slice(&baseline.logs[index]).unwrap();
+                            // JEV telemetry is appended by the existing finalizer,
+                            // outside error-window rendering and candidate scope.
+                            let telemetry = logs["sources"].as_array_mut().unwrap().pop().unwrap();
+                            assert_eq!(telemetry["source"], "jev_telemetry");
+                            assert_eq!(serde_json::from_slice::<Value>(&errors[index].1).unwrap(), logs);
+                        }
+                        return;
+                    }
+                }
+            }
+            panic!("active-only error candidate did not complete");
+        };
         let codes = |collector: &Collector| {
             let snapshots = collector.snapshots("ok", "ok", 1);
             let value: Value = serde_json::from_slice(&snapshots.window_bytes(3)).unwrap();
@@ -8408,6 +8463,7 @@ mod log_tests {
                 .map(|event| event["code"].as_str().unwrap().to_owned()).collect::<Vec<_>>()
         };
         assert_eq!(codes(&collector), ["z", "a", "m"]);
+        candidate_errors(&collector);
         let snapshots = collector.snapshots("ok", "ok", 1);
         for window in 0..4 {
             let value: Value = serde_json::from_slice(&snapshots.window_bytes(window)).unwrap();
@@ -8426,9 +8482,11 @@ mod log_tests {
         }).collect::<Vec<_>>(), ["z", "a", "tool", "m"]);
         collector.error_history = value["errors"]["events"].as_array().unwrap().iter().rev().cloned().collect();
         assert_eq!(codes(&collector), ["m", "a", "z"]);
+        candidate_errors(&collector);
         collector.error_history.clear();
         collector.discovered_files = Some(4);
         assert_eq!(codes(&collector), ["a", "m", "z"]);
+        candidate_errors(&collector);
     }
 
     #[test]

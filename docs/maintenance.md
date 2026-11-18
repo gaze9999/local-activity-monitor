@@ -427,6 +427,8 @@ Desktop source.checked_at 在無新事件的 refresh 也可能改變, 不能將�
 
 Allowance 的既有 health / usage 過濾已抽為共用 finalizer 並保留 production 原呼叫位置, candidate allowance 的 complete-source-order / canonical fallback 與同時間 / 較新來源已逐項對照四窗 production usage, HTTP 停用 / 重新啟用回歸通過, 此結果只完成 allowance 範圍, 其餘 error windows 完整來源順序、detail index、設定 guard 至共同發布仍待串接
 
+Active-only candidate 已接受零 materialized checkpoint 與受 guard 保護的 active selected keys, 完整來源的 thread 分組、retained error history 優先序及 canonical fallback 均對照四窗 production error summaries / renderer logs 通過, finalizer 追加的 JEV telemetry 來源維持原位置, 下一步 detail index 必須另外保留 first permitted source 與原 selected positions, 不可重用摘要 winner 丟掉較早明細來源, 共同發布仍未切換
+
 建構 eligibility 仍用原 Option, SelectedInputs 的舊 validate_sources 亦保留 Option wrapper, 新 try_validate_sources 提供有類型的驗證結果, 不改動同步 snapshots 或原失敗 fallback
 
 來源路徑只從既有 active / session_paths / duplicate_session_paths 解析, 以 checkpoint key 核對, 缺少已觀察路徑、fingerprint 或 active 與 membership stamp 不同時拒絕, 不重新 discovery 或猜測來源位置

@@ -99,7 +99,7 @@ impl SelectedCandidate {
     {
         // Never silently publish a checkpoint-only view of mutable active calls.
         if !collector.overflow_files.is_empty()
-            || !collector.source_membership_complete || sources.is_empty() || sources.len() > WALK_LIMIT
+            || !collector.source_membership_complete || (sources.is_empty() && collector.files.is_empty()) || sources.len() > WALK_LIMIT
             || selection.calls.values().try_fold(0usize, |total, ids| total.checked_add(ids.len()))? > CALL_LIMIT { return None; }
         let membership = collector.source_membership.as_ref()?;
         if sources.len() != membership.materialized_count().ok()? { return None; }
@@ -111,8 +111,11 @@ impl SelectedCandidate {
                     rusqlite::params![source.key, source.signature, membership.generation, membership.revision], |row| row.get::<_, bool>(0)).ok()? { return None; }
             inputs = inputs.source(source.key.clone(), source.signature.clone())?;
         }
-        if selection.calls.keys().any(|key| !keys.contains(key)) { return None; }
         let root = collector.session_root.as_deref()?;
+        // Selected calls may belong exclusively to guarded active sources.
+        // Only materialized overflow sources require checkpoint signatures.
+        for path in collector.files.keys() { keys.insert(checkpoint::key(root, path)?); }
+        if selection.calls.keys().any(|key| !keys.contains(key)) { return None; }
         let paths: BTreeMap<_,_> = collector.files.keys().chain(collector.session_paths.values())
             .chain(collector.duplicate_session_paths.values())
             .map(|path| Some((checkpoint::key(root, path)?, path.clone()))).collect::<Option<_>>()?;
