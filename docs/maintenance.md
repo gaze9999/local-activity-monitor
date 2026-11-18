@@ -750,3 +750,9 @@ Candidate 現使用保留 context provenance 的無 call payload 中間投影, �
 新增 60 次 context 追加的 native probe, 寫入 / GET / 驗證 / 兩秒等待合計 268.87 秒, 超過本次初始候選完成時間, 非固定每兩秒的獨立 writer
 
 寫入期間已觀察 revision 不倒退, 最大落後 7 個版本, 停止寫入後完整 50,000 統計與 mutation-60 通過, 不放寬 input guards 換取發布, 此為有限工作負載驗收, 不推論無限變動時的新鮮度上限
+
+### Rust test bundle 的發行前缺口
+
+現有 --rust-preview 只複製 LAM LICENSE / NOTICE 與 UI 資產, 尚未產生 Rust 相依套件授權本文清單, 不能把本機 smoke 通過當作完整發行包驗收
+
+本次 Linux optimized binary 動態依賴 OpenSSL 3 與系統函式庫, ELF version references 包含 GLIBC_2.39, 尚未確認較舊 Linux 相容性, 其他平台亦未驗收, 後續發行工作須先決定支援環境並完成對應建置與實測, 不自動切換 TLS backend 或相依版本

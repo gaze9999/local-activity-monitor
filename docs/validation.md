@@ -2868,3 +2868,17 @@ Optimized binary 之後以現有 tools/build_frontend.py --verify-offline 核對
 實際 smoke 使用 disposable home 與 loopback, 驗證完整 HTML、CSP、兩種圖示內容與 MIME、snapshot 版本及空 threads、en / ja locales、instance endpoint、任意來源檔案 404 與未產生 jev-monitor.json, 結束後子程序已清理
 
 這是 test bundle 的 HTTP / 資產驗證, 未執行瀏覽器視覺互動、完整 release license audit、installer 或跨平台封裝, 沒有 Tag / Release、發布、安裝或使用者裝置切換, 原失敗與待驗項目保留
+
+### Rust preview 的相依宣告與 ELF 清單
+
+以原 Cargo.lock 執行 offline locked cargo metadata --filter-platform x86_64-unknown-linux-gnu, 從 service root 只遍歷 normal dependency edges, 得到 184 個 package nodes, 其中 181 個 registry packages、3 個本儲存庫 crates, 未把 build/dev edges 加入這個數量
+
+181 個 registry packages 均有 manifest license expression, 三個 workspace crates 未在 Cargo.toml 宣告 license / license-file, 儲存庫根目錄另有 LAM MIT LICENSE, 不把欄位缺少推論為沒有授權
+
+10 個 registry packages 沒有頂層 LICENSE / COPYING / NOTICE / COPYRIGHT 類檔名: rustpython-ast、rustpython-parser-core、rustpython-parser-vendored、rustpython-parser、unic-char-property、unic-char-range、unic-common、unic-emoji-char、unic-ucd-ident、unic-ucd-version, rustpython-parser-vendored 另有 source_location / text_size 下的 LICENSE, 此為檔案盤點而非所有來源或法律義務的判定
+
+檢查 build_rust_preview 確認目前只複製根目錄 LICENSE / NOTICE, 不包含上述相依套件本文, 原 NOTICE 對 native bundle 的 Python / PyInstaller 描述亦不能當作 Rust preview 的完整成分清單, 本輪不猜測授權選擇、不取得新來源或發布套件
+
+對前述實測 optimized executable 執行 readelf, DT_NEEDED 包含 libssl.so.3、libcrypto.so.3、libgcc_s.so.1、libm.so.6、libc.so.6、ld-linux-x86-64.so.2, GLIBC version references 最高包含 GLIBC_2.39, 只證明此 binary 的需求資訊, 不保證其他 Linux 版本可執行, 本輪沒有更換 TLS、靜態連結或擴大支援承諾
+
+原 metadata JSON 與逐 package 檔案清單保留於本機驗證證據, 此盤點不取代 compiler/runtime、build-generated content、其他平台及完整第三方授權稽核, production 與 lockfile 未修改, git diff --check 通過
