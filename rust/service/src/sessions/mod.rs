@@ -6228,17 +6228,18 @@ mod log_tests {
         assert!(fallback_value["codex"]["observed_tool_calls"].as_u64().unwrap() < 20);
         // Each cancellation happens after a real pending round, before any
         // watch replacement. A fresh driver remains possible after reenable.
-        for at_statistics in [false, true] {
-            for (enabled, stopping, expected) in [
-                (false, false, selected_candidate::Failure::Disabled),
-                (true, true, selected_candidate::Failure::Cancelled),
+        for phase in 0..3 {
+            for (enabled, stopping, changed, expected) in [
+                (false, false, false, selected_candidate::Failure::Disabled),
+                (true, true, false, selected_candidate::Failure::Cancelled),
+                (true, false, true, selected_candidate::Failure::InputsRejected),
             ] {
                 let (sender, _receiver) = tokio::sync::watch::channel(collector.snapshots("ok", "ok", 9));
                 let old = sender.borrow().windows[3].clone();
                 let driver = WorkerCandidate::start(&collector, &stopped).unwrap();
                 let WorkerAdvance::Pending(mut driver) = driver.advance(&collector, "ok", "ok", 10, true, &stopped, &sender).unwrap()
                     else { panic!("source enrollment must remain private"); };
-                if at_statistics {
+                if phase == 1 {
                     for _ in 0..64 {
                         if driver.finishing_statistics() { break; }
                         let WorkerAdvance::Pending(next) = driver.advance(&collector, "ok", "ok", 10, true, &stopped, &sender).unwrap()
@@ -6251,8 +6252,20 @@ mod log_tests {
                     driver = next;
                     assert!(driver.finishing_statistics());
                 }
+                if phase == 2 {
+                    for _ in 0..64 {
+                        if driver.ready_to_render() { break; }
+                        let WorkerAdvance::Pending(next) = driver.advance(&collector, "ok", "ok", 10, true, &stopped, &sender).unwrap()
+                            else { panic!("completed reducer must remain private"); };
+                        driver = next;
+                    }
+                    assert!(driver.ready_to_render());
+                }
                 stopped.store(stopping, Ordering::Release);
+                let original_usage = collector.applied_command_switches.usage;
+                if changed { collector.applied_command_switches.usage = !original_usage; }
                 let result = driver.advance(&collector, "ok", "ok", 10, enabled, &stopped, &sender);
+                collector.applied_command_switches.usage = original_usage;
                 assert!(matches!(result, Err(error) if error == expected));
                 stopped.store(false, Ordering::Release);
                 assert_eq!(sender.borrow().version(), 9);
@@ -6311,6 +6324,23 @@ mod log_tests {
             }
             assert!(finished);
         }
+        let (sender, _receiver) = tokio::sync::watch::channel(collector.snapshots("ok", "ok", 9));
+        let old = sender.borrow().windows[3].clone();
+        let mut driver = WorkerCandidate::start(&collector, &stopped).unwrap();
+        for _ in 0..64 {
+            if driver.ready_to_render() { break; }
+            let WorkerAdvance::Pending(next) = driver.advance(&collector, "ok", "ok", 10, true, &stopped, &sender).unwrap()
+                else { panic!("reducer completion must remain private"); };
+            driver = next;
+        }
+        assert!(driver.ready_to_render());
+        std::fs::write(&path, "replaced after reduction\n").unwrap();
+        let WorkerAdvance::Pending(driver) = driver.advance(&collector, "ok", "ok", 10, true, &stopped, &sender).unwrap()
+            else { panic!("rendering cannot publish before physical validation"); };
+        assert!(matches!(driver.advance(&collector, "ok", "ok", 10, true, &stopped, &sender),
+            Err(selected_candidate::Failure::PhysicalSource)));
+        assert_eq!(sender.borrow().version(), 9);
+        assert_eq!(sender.borrow().windows[3], old);
     }
 
     #[test]

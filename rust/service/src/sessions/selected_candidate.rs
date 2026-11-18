@@ -590,6 +590,7 @@ const WORKER_STATISTICS_KEY_BYTES: usize = details::STAGING_LIMIT;
 enum WorkerPhase {
     Sources { after: String, sources: Vec<Source> },
     Reducing(SelectedCandidate),
+    Finalizing(CompletedCandidate),
     Publishing(PendingPublication),
 }
 
@@ -608,6 +609,9 @@ impl WorkerCandidate {
     pub(super) fn finishing_statistics(&self) -> bool {
         matches!(&self.phase, WorkerPhase::Reducing(candidate) if matches!(candidate.phase, Phase::Statistics(_)))
     }
+
+    #[cfg(test)]
+    pub(super) fn ready_to_render(&self) -> bool { matches!(self.phase, WorkerPhase::Finalizing(_)) }
 
     pub(super) fn start(collector: &Collector, stopped: &AtomicBool) -> Option<Self> {
         let membership = collector.source_membership.as_ref()?;
@@ -664,10 +668,11 @@ impl WorkerCandidate {
                 } else { 16 };
                 match candidate.advance(collector, &self.selection, enabled, stopped, budget)? {
                     Advance::Pending(next) => WorkerPhase::Reducing(next),
-                    Advance::Complete(mut result) => WorkerPhase::Publishing(result.prepare_publication(collector,
-                        &self.selection, health, watch_health, version, stopped)?),
+                    Advance::Complete(result) => WorkerPhase::Finalizing(result),
                 }
             }
+            WorkerPhase::Finalizing(mut result) => WorkerPhase::Publishing(result.prepare_publication(collector,
+                &self.selection, health, watch_health, version, stopped)?),
             WorkerPhase::Publishing(publication) => match publication.advance(collector, &self.selection, enabled, stopped, 16, sender)? {
                 PublicationAdvance::Pending(next) => WorkerPhase::Publishing(next),
                 PublicationAdvance::Published => return Ok(WorkerAdvance::Published),

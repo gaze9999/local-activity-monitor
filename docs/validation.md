@@ -2650,3 +2650,17 @@ Linux / Rust 1.100.0 / 原 Cargo.lock / debug build, 單次量測且前一步曾
 兩來源完整 oracle 的初次回歸在 84.41 秒停於 fixture 的 16 輪等待上限, 原候選尚未抵達 final validation, 未發生快照比對錯誤, 保留失敗記錄與 patch 後只將該等待上限改為 24 輪以容納新增統計階段, 仍要求到達指定 validation phase 且其前不可回 Complete
 
 修正後完整兩來源 oracle 通過 144.73 秒, 涵蓋八組同 / 不同 thread、primary / nested、active / checkpoint 組合, winner / 全部四窗 / source errors / detail index / physical replacement / 最終取消檢查維持原斷言, git diff --check 與既有 public-content hook 納入交付檢查
+
+### Worker Finalizing 邊界
+
+基準 `b9425c6`, reducer 完成改回 Pending(Finalizing), 下一輪只沿原 prepare_publication 取用同一 CompletedCandidate, SnapshotTime、selection、captured inputs 與 physical fingerprints 均保留, finalizer 仍執行一次, 沒有新增來源 query 或 HTTP endpoint
+
+新增邊界的停止 / 停用與 applied usage switch 變更檢查保持舊 watch, 相同 input 變更案例亦涵蓋 Sources 與 Statistics 階段, 初次 focused 通過 5.61 秒
+
+最大 50,000 primary / 100,000 nested fixture 通過 48.99 秒, primary 498 輪、含 readback / 斷言 27.55 秒、最長 advance 4,807.72 ms, 四窗 55,003,238 bytes 與所有 exact counts / p99 / detail locator 保持, peak 701,825,024 bytes
+
+Linux / Rust 1.100.0 / 原 Cargo.lock / debug build, 單次觀察, 不將 4.81 秒當作 5 秒 HTTP SLA 通過, 未量得 native 最大負載請求 / 停止延遲, 四窗 finalizer 仍同步且不能以重複 source capture 代替相同批次的分輪組裝
+
+補充 physical guard: reducer 完成後替換真實來源檔案, rendering 仍只回 Pending, 下一輪 physical 驗證明確拒絕且舊 version / bytes 不變, 含其餘 controls / capacity 的 focused 通過 6.52 秒, 同批 detail index 0.08 秒、完整 error order 0.45 秒、native HTTP usage reenable 0.16 秒、單來源 oversized replay 0.94 秒均通過
+
+本步未改 SelectedCandidate 的來源排序或統計分頁, 前一步 144.73 秒完整兩來源 oracle 保留為歷史證據, 未重跑完整套件或平台驗收, 5 個既有 warnings 保留

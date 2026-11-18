@@ -702,3 +702,9 @@ Focused byte oracle 曾抓出 preserve_order 與排序 map 的差異, 已保留�
 最大案例由 105 輪變為 497 輪, 最長 advance 本次 6.42 秒, 含 readback 的總時間則由 22.63 秒增加為 27.13 秒, 這是增加可檢查取消與輸入變更機會的取捨, 不是總耗時改善, 四窗同步 finalizer 仍是未完成的回應性缺口
 
 統計分頁中停止 / 停用保持舊 watch, 每輪輸入檢查與原發布前來源驗證均保留, 未將 private rows 當作可發布結果, 詳細測試與量測界線見 validation
+
+### Reducer 完成與最終組裝分輪
+
+Worker 現將完整 reducer 結果留在私有 Finalizing 階段, 下一次 advance 才沿原 prepare_publication 組裝四窗, 中間再次檢查停止 / 停用與 captured inputs, 不重抓四次 query、不移動各來源讀取時點, 組裝後仍須完整 publication guard 才能替換 watch
+
+最大案例本次最長 advance 4.81 秒, 498 輪總計 27.55 秒含 readback, 這只是單步分離的實際觀察, 同步四窗組裝仍未拆開且尚未證明 native 最大負載的 HTTP / 停止延遲
