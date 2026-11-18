@@ -989,6 +989,25 @@ mod jsonl_line_tests {
 mod csv_line_review_tests {
     use super::*;
     #[test]
+    fn quoted_csv_fields_preserve_embedded_lines_and_doubled_quotes() {
+        for delimiter in [',', '\t'] {
+            for quote in ['"', '\''] {
+                for separator in ["\n", "\r\n"] {
+                    for embedded in ["\n", "\r", "\r\n", "\n\n"] {
+                        let source = format!("a{delimiter}b{separator}{quote}x{embedded}y{quote}{delimiter}{quote}x{quote}{quote}z{quote}{separator}");
+                        let expected = json!({"columns":["a","b"],"rows":[{
+                            "a":format!("x{embedded}y"),"b":format!("x{quote}z")
+                        }]});
+                        let (hint, format) = if delimiter == ',' { ("csv", "CSV") } else { ("tsv", "TSV") };
+                        assert_eq!(parse(&source), Some(expected.clone()), "{source:?}");
+                        assert_eq!(parse_document(&source, hint), Some((expected, format)), "{source:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn cr_only_csv_classification_remains_unrecognized() {
         for separator in ["\n", "\r", "\r\n", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\u{85}", "\u{2028}", "\u{2029}"] {
             let source = format!("a,b{separator}c,d");

@@ -2385,3 +2385,15 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, `sessions::instructions::tests` 通過 6 
 Linux / Rust 1.100.0 / 原 Cargo.lock, `plugin_mcp_inventory_caps_names_without_exposing_arguments` 通過 1 項、448 項未選取, 0.05 秒, 維持 8 個既有 warnings, git diff --check 通過
 
 測試直接涵蓋 metadata reader, 未新增 API 或改來源查詢, 未重跑 scanner / watcher、HTTP、完整套件或其他平台, 不宣稱驗證 MCP 實際連線或啟動
+
+### CSV / TSV 引號內換行與跳脫保留
+
+基準 `713e5c7`, 僅新增回歸, 不修改 dialect 或解析器
+
+- 逗號 / tab、單 / 雙引號、LF / CRLF 記錄分隔、欄位內 LF / CR / CRLF / 空白行共 32 組, 同時驗證自動辨識與指定 csv / tsv 的文件解析
+- 欄位內換行逐字保留, 雙寫引號還原成原字元, 不將欄位內空白行誤當空資料列, Python 實際 parse_text 的兩條路徑均得到相同格式與資料
+- 原單獨 CR 作為記錄分隔時不辨識的相容性規則保留, 不擴大允許的資料格式
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, `csv_line_review_tests` 通過 2 項、448 項未選取, 0.02 秒, 維持 8 個既有 warnings, git diff --check 通過
+
+未新增 API、讀取來源或持久化, 未重跑 HTTP、完整套件與其他平台, 此結果涵蓋上述合成資料, 不代表任意 CSV 都與 Python 等價
