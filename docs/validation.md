@@ -2361,3 +2361,15 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, 無新增 production 或 fixture 變更, 
 Linux / Rust 1.100.0 / 原 Cargo.lock, `sessions::skill_detail::tests` 通過 7 項、439 項未選取, 1.70 秒, 既有 `skill_document_details_require_observed_source_and_filter_sensitive_files` HTTP fixture 通過 1 項、228 項未選取, 0.48 秒, 維持 8 個既有 warnings, git diff --check 通過
 
 首次測試呼叫因 shell 找不到 cargo 未執行, 使用已恢復的既有工具鏈後完成上述檢查, 未安裝工具, HTTP 使用既有來源限制與遮蔽案例, 新 1000-entry 邊界直接測試 render, 未驗證競態、其他平台或整體耗時上限, 原停止候選未變
+
+### 指示文件的根目錄與文件數量上限
+
+基準 `88387f7`, 僅新增測試, 不改 production reader 或 API
+
+- 33 個有文件的根目錄只處理前 32 個, 重複首個根目錄時仍先套用輸入數量上限再去重, 最後保留 31 份文件, 不以後續根目錄補滿
+- 22 個合成 Git workspace 各提供 parent / canonical / entry 三份短文件, 文件數量限於 64, 保留逐 workspace 的來源順序, 最後一份為第 22 組的 parent, 未回傳的 entry 原檔保留
+- Python 實際 `project_instructions.instructions` 以相同資料核對根目錄上限、去重順序與文件上限, 三組結果相同, fixture Git 操作只設定合成 remote 名稱, 不呼叫遠端
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, `sessions::instructions::tests` 通過 6 項、442 項未選取, 0.54 秒, 包含原 workspace 來源限制、遮蔽與 symlink 拒絕回歸, 維持 8 個既有 warnings, git diff --check 通過
+
+未新增來源查詢或修改端點, 本輪未重跑獨立 read_parity_tests、HTTP、完整套件與其他平台, 數量邊界使用可讀的短文件, 不宣稱涵蓋缺檔、權限或競態的完整排列

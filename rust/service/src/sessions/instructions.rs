@@ -353,6 +353,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn instruction_root_limit_counts_selected_roots_before_deduplication() {
+        let home = tempfile::tempdir().unwrap();
+        let base = home.path().canonicalize().unwrap();
+        let roots: Vec<_> = (0..33).map(|index| base.join(index.to_string())).collect();
+        for (index, root) in roots.iter().enumerate() {
+            fs::create_dir(root).unwrap();
+            fs::write(root.join("AGENTS.md"), format!("root {index}")).unwrap();
+        }
+        let result = read(&roots);
+        let documents = result["documents"].as_array().unwrap();
+        assert_eq!(documents.len(), 32);
+        assert_eq!(documents[31]["text"], "root 31");
+        assert_eq!(result["health"], "ok");
+        let repeated: Vec<_> = std::iter::once(roots[0].clone()).chain(roots).collect();
+        let result = read(&repeated);
+        let documents = result["documents"].as_array().unwrap();
+        assert_eq!(documents.len(), 31);
+        assert_eq!(documents[30]["text"], "root 30");
+    }
+
+    #[test]
+    fn instruction_document_limit_preserves_registered_source_order() {
+        let home = tempfile::tempdir().unwrap();
+        let base = home.path().canonicalize().unwrap();
+        let mut roots = Vec::new();
+        for index in 0..22 {
+            let parent = base.join(index.to_string());
+            let child = parent.join("child");
+            fs::create_dir_all(&child).unwrap();
+            assert!(Command::new("git").args(["init", "-q"]).arg(&child).status().unwrap().success());
+            assert!(Command::new("git").arg("-C").arg(&child)
+                .args(["remote", "add", "origin", "https://example.invalid/owner/child.git"])
+                .status().unwrap().success());
+            fs::write(parent.join(".gitmodules"), "[submodule \"child\"]\npath = child\nurl = https://example.invalid/owner/child.git\n").unwrap();
+            fs::create_dir_all(parent.join("project-agents/child")).unwrap();
+            fs::write(parent.join("workspace.json"), json!({"projects":[{
+                "path":"child","repository":"https://example.invalid/owner/child.git",
+                "instructions":"project-agents/child/AGENTS.md"
+            }]}).to_string()).unwrap();
+            fs::write(parent.join("AGENTS.md"), format!("parent {index}")).unwrap();
+            fs::write(parent.join("project-agents/child/AGENTS.md"), format!("canonical {index}")).unwrap();
+            fs::write(child.join("AGENTS.md"), format!("entry {index}")).unwrap();
+            roots.push(child);
+        }
+        let result = read(&roots);
+        let documents = result["documents"].as_array().unwrap();
+        assert_eq!(documents.len(), 64);
+        for index in 0..21 {
+            assert_eq!(documents[index * 3]["text"], format!("parent {index}"));
+            assert_eq!(documents[index * 3 + 1]["text"], format!("canonical {index}"));
+            assert_eq!(documents[index * 3 + 2]["text"], format!("entry {index}"));
+        }
+        assert_eq!(documents[63]["text"], "parent 21");
+        assert_eq!(result["health"], "ok");
+        assert_eq!(fs::read_to_string(roots[21].join("AGENTS.md")).unwrap(), "entry 21");
+    }
+
+    #[test]
     fn instruction_masking_adds_nonletter_boundaries_without_writes() {
         let home = tempfile::tempdir().unwrap();
         let root = home.path().canonicalize().unwrap();
