@@ -12395,3 +12395,46 @@ fn oversized_single_source_checkpoint_replays_without_cursor_conflict() {
     assert_ne!(replayed.cursor.signature, saved.cursor.signature);
     assert_eq!(fs::read_to_string(&path).unwrap(), contents);
 }
+
+#[test]
+#[ignore = "phase-cost probe: 5020 physical sources"]
+fn native_reenable_phase_costs_with_large_working_set() {
+    let home = tempdir().unwrap();
+    let root = home.path().join("sessions");
+    fs::create_dir(&root).unwrap();
+    let stamp = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).to_rfc3339();
+    for n in 1..=5020 {
+        let id = format!("00000000-0000-4000-8000-{n:012}");
+        let mut contents = event(&stamp, "session_meta", json!({"id":id}));
+        if n <= 20 {
+            contents.push_str(&event(&stamp, "response_item", json!({"type":"function_call","name":"fixture_tool","call_id":format!("call{n:02}"),"arguments":"{}"})));
+        }
+        fs::write(root.join(format!("rollout-{id}.jsonl")), contents).unwrap();
+    }
+    let mut service = Service::start(home.path(), false, None);
+    let post = |body: &str| service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),body);
+    assert_eq!(post(r#"{"debug_mode":true}"#).status, 200);
+    for label in ["initial", "reenabled"] {
+        let began = Instant::now();
+        let response = post(r#"{"observations":{"codex":true}}"#);
+        eprintln!("large source {label} POST: elapsed_ms={} status={}", began.elapsed().as_secs_f64()*1000.0, response.status);
+        assert_eq!(response.status, 200);
+        let deadline = Instant::now() + Duration::from_secs(180);
+        loop {
+            let value = service.get("/api/snapshot?window=all").json();
+            if value["codex"]["observed_tool_calls"] == 20 {
+                assert_eq!(value["codex"]["files"], 5020);
+                let phases: Vec<_> = value["monitor"]["debug"]["records"].as_array().unwrap().iter()
+                    .filter(|record| record["kind"] == "collection")
+                    .map(|record| json!({"refresh_ms":record["refresh_ms"],"phase_metrics":record["phase_metrics"]})).collect();
+                eprintln!("large source {label} completed: elapsed_ms={} phases={}", began.elapsed().as_secs_f64()*1000.0, json!(phases));
+                break;
+            }
+            assert!(Instant::now() < deadline, "all genuine calls must become visible");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(post(r#"{"observations":{"codex":false}}"#).status, 200);
+        assert_eq!(service.get("/api/snapshot?window=all").json()["codex"]["health"], "disabled");
+    }
+    service.stop();
+}

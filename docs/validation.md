@@ -2570,3 +2570,25 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, 修正後 opt-in HTTP 通過 1 項、229 
 此修正解除可由原始來源重播、且重播結果能在原保存預算內落盤的 conflict, 真實 call payload 若仍超過單次保存上限, 原 oversized 防護仍生效, 不宣稱所有超限來源都已完成容量驗收
 
 重新啟用延遲另已追到 `force_replay = was_active`、工作集重播及 snapshots 發布後才確認 settings 的呼叫路徑, 尚無各階段時間拆分, 本輪不移除 replay、不提前宣稱設定已套用、不放寬 5 秒等待, 先前 4.78 秒的效能餘裕問題仍保留
+
+### Reenable 分段量測與同窗 JEV log source
+
+基準 `33cba5a`, opt-in `native_reenable_phase_costs_with_large_working_set` 使用 5,020 個隔離 JSONL 來源及 20 個真實 function calls, 開啟既有 debug metrics, 從 disabled 啟用、完整顯示 calls、停用再重新啟用, 保持原 5 秒 settings applied 等待與真實發布確認
+
+診斷 run 在重新啟用時觀察 sessions 約 1.20 秒、history 小於 1 ms、watcher setup 約 1 ms, 完整 snapshot 組裝約 3.35 秒, 初次 / 重新啟用 POST 分別 4,880.49 / 5,020.34 ms 並回 200, 總測試 27.52 秒
+
+更細分段 run 觀察四窗建立約 2.60 秒後尚須組裝 logs, 首次 POST 在 5,005.06 ms 回既有 202, 因測試要求已發布的 200 而失敗, 5.20 秒, 失敗 log / patch 保留, 未將 202 改成完成或放寬驗收
+
+來源顯示 logs 為取得 JEV health / checked_at 而重新解析四個完整已序列化視窗, 現改為在同一窗 finalizer 的相同序列化位置保留兩欄並組成原 log source, 不重讀 JEV、不更改查詢順序、候選 publication 或 settings 確認, 原 JSON field reader 只保留給既有測試
+
+| 相同 5,020 來源 probe | 診斷基準 | 移除重複視窗解析後 |
+| --- | --- | --- |
+| 首次啟用 POST | 4,880.49 ms / 200 | 4,848.25 ms / 200 |
+| 重新啟用 POST | 5,020.34 ms / 200 | 4,341.01 ms / 200 |
+| 整個 probe | 27.52 秒 | 23.56 秒 |
+
+兩欄捕捉的 focused 測試涵蓋四窗、Codex enabled / disabled 與 JEV switch 組合, 每窗 log source 都以獨立解析該窗 JSON 的欄位為 oracle, 通過 0.05 秒, 既有完整 error order / publication 0.51 秒、無 ID candidate 0.14 秒、JSON parser 兩項 0.00 秒、實際 JEV 資料庫 HTTP 四窗與停用流程 0.32 秒、debug phase metrics 0.11 秒均通過
+
+Linux / Rust 1.100.0 / 原 Cargo.lock 的 debug build, probe 每種條件各一次, 基準另含暫時診斷輸出, 不是 p95、release 效能或保證改善比例, 首次啟用仍接近 5 秒, 不將效能餘裕列為已充分驗收, 暫時 instrumentation 未加入 production, 最終維持 5 個既有 warnings, git diff --check 通過
+
+未新增 HTTP endpoint / 外部查詢, `/api/logs` 的 JEV source 欄位改由同批 `/api/snapshot` finalizer 值取得, 值與讀取時點不變, `/api/settings` 仍只在實際發布符合請求後回已套用狀態, 未重跑完整套件或先前 deferred 項目

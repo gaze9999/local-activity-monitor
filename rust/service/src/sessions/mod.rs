@@ -5265,6 +5265,7 @@ impl Collector {
         let SnapshotDiagnostics { locations: diagnostic_locations, logs_overview } =
             self.capture_snapshot_diagnostics(&journal, health);
         let journal_source = &journal.source;
+        let mut jev_log_sources: [Value; 4] = std::array::from_fn(|_| Value::Null);
         let windows: [Bytes; 4] = std::array::from_fn(|index| {
             let boundary = HOURS[index].map(|hours| reference - Duration::hours(hours));
             let mut totals = BTreeMap::new();
@@ -5800,6 +5801,10 @@ impl Collector {
                 &self.runtime,
                 &journal_source,
             );
+            // Keep the log source from this exact finalized window. Reading
+            // two fields does not require reparsing the full serialized batch.
+            jev_log_sources[index] = json!({"source":"jev_telemetry","health":snapshot["jev"]["health"],
+                "files":[],"checked_at":snapshot["jev"]["reader"]["checked_at"]});
             if let Some(candidate) = candidate {
                 snapshot["codex"]["file_activity"] = candidate.files[index].clone();
                 snapshot["codex"]["skills"] = candidate.skills[index].clone();
@@ -5816,8 +5821,7 @@ impl Collector {
             let mut logs =
                 serde_json::from_slice::<Value>(&errors[index].1).unwrap_or_else(|_| json!({}));
             if let Some(sources) = logs["sources"].as_array_mut() {
-                let jev = snapshot_json::field(&windows[index], "jev").unwrap_or(Value::Null);
-                sources.push(json!({"source":"jev_telemetry","health":jev["health"],"files":[],"checked_at":jev["reader"]["checked_at"]}));
+                sources.push(std::mem::take(&mut jev_log_sources[index]));
             }
             logs.to_string().into()
         });
@@ -5970,6 +5974,27 @@ mod log_tests {
         assert_eq!(restored.calls.iter().map(|call| call.call_id.as_str()).collect::<Vec<_>>(), ["a", "z"]);
         let payloads: Vec<Value> = restored.calls.iter().map(|call| serde_json::from_str(&call.payload).unwrap()).collect();
         assert!(payloads[0]["sequence"].as_u64().unwrap() > payloads[1]["sequence"].as_u64().unwrap());
+    }
+
+    #[test]
+    fn log_sources_match_the_same_finalized_snapshot_windows() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut collector = Collector::new(directory.path().join("monitoring"), true, None);
+        for enabled in [true, false] {
+            collector.applied_command_switches.jev = enabled;
+            for health in ["ok", "disabled"] {
+                let snapshots = collector.snapshots(health, "ok", 1);
+                for index in 0..4 {
+                    let window: Value = serde_json::from_slice(&snapshots.windows[index]).unwrap();
+                    let logs: Value = serde_json::from_slice(&snapshots.logs[index]).unwrap();
+                    let sources: Vec<_> = logs["sources"].as_array().unwrap().iter()
+                        .filter(|source| source["source"] == "jev_telemetry").collect();
+                    assert_eq!(sources.len(), 1);
+                    assert_eq!(*sources[0], json!({"source":"jev_telemetry","health":window["jev"]["health"],
+                        "files":[],"checked_at":window["jev"]["reader"]["checked_at"]}));
+                }
+            }
+        }
     }
 
     #[test]

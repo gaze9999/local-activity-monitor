@@ -26,6 +26,7 @@ pub(super) fn patch_monitor(original: &[u8], apply: impl FnOnce(&mut Map<String,
     Some(bytes)
 }
 
+#[cfg(test)]
 pub(super) fn field(original: &[u8], name: &str) -> Option<Value> {
     if legacy_value_required(original)? {
         return serde_json::from_slice::<Value>(original).ok().map(|value| value[name].clone());

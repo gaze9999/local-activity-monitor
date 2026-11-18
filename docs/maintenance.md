@@ -670,3 +670,11 @@ Rust `main.rs` 的 font / GPU worker 各自先發布自己的結果, 再標記 D
 現只在 typed InvalidQuery 時補讀 bounded 零 call cursor, 保留其 signature 走原 CAS, focused race 與真實 native 單來源驗證已確認重播資料完整、不同 writer 的新 cursor 不被覆寫, 一般讀取失敗與大小限制不變
 
 這只解除可重播並在原保存預算內寫入的 conflict, 真實 oversized call payload 的保存上限仍保留, 重新啟用延遲亦尚未最佳化, 已確認其 force replay / 發布後 settings 確認路徑, 下一步需量測各階段成本再決定有界排程, 不提前回覆設定完成或移除重播
+
+### Reenable 已量測的重複解析成本
+
+`33cba5a` 後分段量測確認大型工作集的 snapshot 組裝比 history / watcher setup 明顯昂貴, logs 原為兩個 JEV 欄位重解析四個完整視窗, 現於同一 finalizer 時點捕捉 health / checked_at 組成相同 log source, 不移動來源查詢或提前確認設定
+
+5,020 來源 debug-build probe 的重新啟用 POST 由診斷基準 5,020.34 ms / 200 變為 4,341.01 ms / 200, 詳見 validation 原始條件與證據界線, 中間曾有 202 未完成的失敗 run 並保留, 不將單次觀察當作穩定 SLA, 首次啟用仍接近 5 秒
+
+四窗 log source、candidate errors / 無 ID、真實 JEV 資料庫 HTTP、JSON parser 與 debug metrics 回歸通過, force replay、source guards、大小上限與設定實際套用後才確認的行為維持, 高 selected / nested 容量、持續負載與跨平台仍需驗收
