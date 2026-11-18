@@ -2834,3 +2834,23 @@ Linux / Rust 1.100.0 / 原 Cargo.lock 的獨立 ignored test native_maximum_call
 | 再次 pending 後停止 | 151.96 ms |
 
 原 180 秒 completion 與五秒 socket / stop 不變, 未跳過來源驗證、沒有部分 candidate 發布, 原 incomplete fallback 計數依既有行為呈現, 沒有量測所有中間候選取消次數或 wall-clock metadata age, revision lag 不等於秒數, 單次結果不證明無限更新 SLA、跨平台或原 headerless failure 已修復, git diff --check 通過
+
+### Linux optimized 建置與驗收
+
+基準 7deb229, Rust 1.100.0 / 原 Cargo.lock, 使用 cargo test --release --offline --locked 完成 optimized 建置, 2 分 39 秒, 沒有安裝工具、建立 Tag / GitHub Release 或部署, 本機執行檔 SHA-256 為 b4ee9f807e7db5fabc0a2fe24ec9cb5b6437bcf5aee5073f3455f605669562a5
+
+原嚴格 native 50,000 calls / 5,007 來源 / 18,548,469 bytes checkpoint 測試通過 85.25 秒, 保持完整統計、實際 detail、200 設定套用、原 socket / stop 與 completion 限制
+
+| 階段 | Optimized 本次實測 |
+| --- | --- |
+| Initial / rescan 完整發布 | 26.71 / 20.52 秒 |
+| Initial / rescan max GET | 500.50 / 92.29 ms |
+| 停用 / 重新啟用 | 167.45 / 1,007.00 ms, 均為 200 |
+| 重新啟用後完整恢復 | 26.00 秒, max GET 503.30 ms |
+| Pending stop | 223.47 ms |
+
+同 optimized binary 的篩選回歸: service 452 通過 / 0 失敗 / 1 ignored / 6 filtered, 29.13 秒, serial HTTP 215 通過 / 0 失敗 / 5 ignored / 15 filtered, 131.77 秒
+
+排除規則仍為兩者 --skip restart --skip timestamp, HTTP 再排除 core_sql_diagnostics_follow_the_wal_and_publish_only_metadata 與 overflow_tool_detail_uses_verified_source_and_masks_secrets, 沒有重試這些 deferred 項目, ignored 的原生容量 / 變動 probes 只依各自已執行記錄判讀
+
+這是 Linux optimized 單次實際執行, 不是來源 bundle / frontend 資產 / installer、其他平台、browser 或已安裝使用者版本驗收, 不能把與 debug 的差異歸因為新的產品最佳化, 原 headerless incident 仍保留, 5 個既有 warnings 不變, git diff --check 通過
