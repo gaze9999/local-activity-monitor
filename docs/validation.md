@@ -2775,3 +2775,18 @@ CandidateInputs 全部 13 項通過 0.35 秒, 涵蓋 observation / metadata / pr
 相同 5,007 來源、18,548,469 bytes checkpoint 與 Linux debug 條件, 不以跨 run 的時間或 byte 長度差異推論完整等價或穩定 SLA, 平台 / 持續變動負載及原 deferred 項目仍未完成
 
 八組兩來源 active / checkpoint、同 / 異 thread、primary / nested 的完整四窗 / detail / source mutation oracle 通過 177.89 秒, 原斷言保留, git diff --check 通過, 仍有 5 個既有 warnings, 未重跑完整套件
+
+### e8faea3 串接後篩選回歸
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, production 與 fixture 未變動, 以原 offline locked 設定執行 service binary 及 serial HTTP, 結果如下
+
+| 範圍 | 通過 | 失敗 | ignored | filtered | 耗時 |
+| --- | --- | --- | --- | --- | --- |
+| Service binary | 451 | 0 | 1 | 6 | 168.91 秒 |
+| Serial HTTP | 215 | 0 | 3 | 15 | 144.58 秒 |
+
+兩者均使用 --skip restart --skip timestamp, HTTP 另明確排除 core_sql_diagnostics_follow_the_wal_and_publish_only_metadata 與 overflow_tool_detail_uses_verified_source_and_masks_secrets, 沒有以完整 suite 名義重試原 deferred 項目
+
+Service 排除的六項為 core_timestamp_preserves_fractional_precision_and_detail_identity、desktop_api_cap_keeps_new_equal_timestamp_arrivals_like_python、payload_mutations_preserve_selection_keys_and_latest_timestamp、snapshot_context_requires_observed_timestamp_like_python、snapshot_metadata_merge_retains_timestamp_ties_and_interval_start_dedup、seconds_match_python_calendar_and_microsecond_boundaries, 此為保守的名稱篩選, 不代表這六項本身都曾失敗
+
+HTTP 排除上述兩項及 13 個含 restart 的測試, opt-in 的最大容量 service probe 與三個 native probes 保持 ignored, 先前已執行的容量結果仍依各自記錄判讀, 本輪不宣稱完整套件、跨平台、browser 或持續變動最大負載驗收, 5 個既有 warnings 不變
