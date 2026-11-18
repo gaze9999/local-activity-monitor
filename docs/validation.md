@@ -2616,3 +2616,19 @@ Linux / Rust 1.100.0 / 原 Cargo.lock / debug build, focused opt-in 通過 1 項
 此步完成上述功能容量與拒絕資料完整性證據, 同時顯示最大 primary case 的單步延遲與程序記憶體成本仍高, 不把 10.42 秒步驟標成前景回應 / 停止延遲通過, 後續需分別量測 reducer finish 與整批 finalizer / serialization 再決定可中斷或低複製的處理方式, 不以降低選取數、提高預算或略過 guard 隱藏成本
 
 Materialized membership 在測試中以真實已保存來源明確登記, 不是同時驗證 5,000 以上來源的 native admission, 該路徑保留前一輪獨立證據, 本輪未重跑 native HTTP、完整套件或跨平台
+
+### Candidate 最終編碼借用與原順序驗證
+
+基準 `061532c`, 最大案例的暫時分段診斷通過 44.85 秒, reducer finish 4,823.98 ms、assemble 5,744.29 ms, 最長 advance 11,056.83 ms, instrumentation 只保留於診斷 patch, 未加入 production
+
+最終編碼改為借用完成 candidate 的 file_activity、skills、projects、activity_series、tool_series、tool_statistics, 不再逐窗複製這六個 Value 樹, 其餘 finalizer 與查詢順序不變, 無新增 endpoint、外部讀取或請求次數
+
+新增獨立 clone-and-replace oracle 比對完整編碼 bytes 與原值未改寫, 涵蓋原欄位順序、新欄位、跳脫字元、Unicode、數字、null 與無 Codex 物件, 第一個 sorted map 實作因 preserve_order 差異失敗, 保留原記錄後修正為原物件迭代順序, 未降低斷言
+
+- JSON focused 3 項通過, 0.00 秒
+- 完整 error order / publication 0.54 秒、無 ID candidate 0.12 秒、跨 staging 與 budget / controls 3.87 秒、同批 detail index 0.12 秒、四窗 log source 0.05 秒均通過
+- 最大 50,000 primary 與 100,000 nested 拒絕仍沿原 fixture, 四窗精確統計與真實最後一筆 locator 不變, 通過 1 項 / 49.69 秒, 455 項未選取
+
+最大 primary 本次 105 輪, 含四窗 readback / 斷言共 22.63 秒, 最長 advance 9,650.57 ms, 四窗仍為 55,003,238 bytes, 程序 peak 694,489,088 bytes、readback 後 RSS 323,010,560 bytes, 診斷基準 peak 806,682,624 bytes、RSS 772,169,728 bytes
+
+Linux / Rust 1.100.0 / 原 Cargo.lock / debug build, 每種條件一次, 本次另有短 focused 回歸同時執行, 數值不是受控 benchmark、release SLA 或獨立 reducer RSS, 仍不宣稱最大負載回應性通過, 保留原 deferred、平台與完整套件未驗收項目

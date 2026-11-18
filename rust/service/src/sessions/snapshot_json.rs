@@ -8,6 +8,42 @@ use std::io::{self, Write};
 
 type Root<'a> = BTreeMap<String, &'a RawValue>;
 
+// Borrow completed fields after source augmentation, retaining original key order.
+pub(super) fn with_codex_fields(snapshot: &Value, fields: &[(&str, &Value)]) -> Vec<u8> {
+    struct Codex<'a> { original: &'a Map<String, Value>, fields: &'a [(&'a str, &'a Value)] }
+    impl Serialize for Codex<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let added = self.fields.iter().filter(|(key,_)| !self.original.contains_key(*key)).count();
+            let mut map = serializer.serialize_map(Some(self.original.len() + added))?;
+            for (key, value) in self.original {
+                let replacement = self.fields.iter().rev().find(|(name,_)| *name == key);
+                map.serialize_entry(key, replacement.map_or(value, |(_,value)| *value))?;
+            }
+            for (index, (key, value)) in self.fields.iter().enumerate() {
+                if !self.original.contains_key(*key) && !self.fields[..index].iter().any(|(name,_)| name == key) {
+                    let value = self.fields.iter().rev().find(|(name,_)| name == key).map_or(*value, |(_,value)| *value);
+                    map.serialize_entry(key, value)?;
+                }
+            }
+            map.end()
+        }
+    }
+    struct Snapshot<'a> { root: &'a Map<String, Value>, codex: Codex<'a> }
+    impl Serialize for Snapshot<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut map = serializer.serialize_map(Some(self.root.len()))?;
+            for (key, value) in self.root {
+                if key == "codex" { map.serialize_entry(key, &self.codex)?; }
+                else { map.serialize_entry(key, value)?; }
+            }
+            map.end()
+        }
+    }
+    let Some(root) = snapshot.as_object() else { return snapshot.to_string().into_bytes(); };
+    let Some(original) = root.get("codex").and_then(Value::as_object) else { return snapshot.to_string().into_bytes(); };
+    serde_json::to_vec(&Snapshot { root, codex: Codex { original, fields } }).expect("completed snapshot values serialize")
+}
+
 pub(super) fn patch_monitor(original: &[u8], apply: impl FnOnce(&mut Map<String, Value>)) -> Option<Vec<u8>> {
     if legacy_value_required(original)? {
         let mut value: Value = serde_json::from_slice(original).ok()?;
@@ -100,6 +136,23 @@ mod tests {
         value.get_mut("monitor")?.as_object_mut()?.insert("requests".into(), json!(1));
         serde_json::to_vec(&value).ok()
     }
+    #[test]
+    fn candidate_fields_borrow_exact_value_encoding() {
+        let replacements = json!({"activity_series":[{"time":"2026-11-18T01:00:00Z"}],
+            "tool_statistics":[{"tool":"工具\\\"", "average_ms":1.25, "returned":null}], "new_field":true});
+        let fields: Vec<_> = replacements.as_object().unwrap().iter().map(|(key,value)| (key.as_str(),value)).collect();
+        for root in [json!({"monitor":{"keep":true},"codex":{"tool_statistics":[],"unknown":[1,null],"activity_series":null}}),
+            json!({"codex":{}}), json!({"codex":null}), json!({}), Value::Null, json!([])] {
+            let before = root.to_string();
+            let mut oracle = root.clone();
+            if let Some(codex) = oracle.get_mut("codex").and_then(Value::as_object_mut) {
+                for (key,value) in &fields { codex.insert((*key).into(), (*value).clone()); }
+            }
+            assert_eq!(with_codex_fields(&root, &fields), oracle.to_string().into_bytes());
+            assert_eq!(root.to_string(), before);
+        }
+    }
+
     #[test]
     fn snapshot_json_preserves_value_semantics_and_rejections() {
         let mut fixtures = vec![

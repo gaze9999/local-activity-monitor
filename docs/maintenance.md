@@ -686,3 +686,11 @@ Rust `main.rs` 的 font / GPU worker 各自先發布自己的結果, 再標記 D
 新增的實際缺口是最大 primary case 單次 advance 10.42 秒、四窗 55.00 MB、程序 peak 約 807 MB, 邏輯 admission 不是 RSS 或前景延遲保證, 詳細條件與 readback 成本見 validation
 
 下一步優先拆出 reducer finish、候選 finalizer 與 serialization 的成本, 保留 exact counts / p99、同批 index、取消與來源 guard, 再決定有界化或減少複製, 不能只縮短 fixture 或降低接受的資料量, native 最大負載回應性與跨平台仍未驗收
+
+### 候選最終編碼的低複製處理
+
+50,000 calls 的分段診斷量得 reducer finish 4.82 秒、finalizer 5.74 秒, 後者原會為四窗複製完成的六組 Value 欄位, 現只在既有最終編碼位置借用完成值, 保留 source augmentation、同批 index 與所有 publication guards
+
+Focused byte oracle 曾抓出 preserve_order 與排序 map 的差異, 已保留失敗並改為依原物件順序取代值、僅將新增欄位接在末端, 不放寬比對條件
+
+最大案例的單次 advance 仍約 9.65 秒, 功能與降低複製通過不等於前景延遲驗收, reducer finish 的大型 Value 建立與同步四窗 finalizer 仍需後續處理, 不改容量上限或省略取消 / 來源驗證

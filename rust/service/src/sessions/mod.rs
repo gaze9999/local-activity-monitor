@@ -5806,13 +5806,14 @@ impl Collector {
             jev_log_sources[index] = json!({"source":"jev_telemetry","health":snapshot["jev"]["health"],
                 "files":[],"checked_at":snapshot["jev"]["reader"]["checked_at"]});
             if let Some(candidate) = candidate {
-                snapshot["codex"]["file_activity"] = candidate.files[index].clone();
-                snapshot["codex"]["skills"] = candidate.skills[index].clone();
-                snapshot["codex"]["projects"] = candidate.rows[index]["projects"].clone();
-                snapshot["codex"]["activity_series"] = candidate.series[index]["activity"].clone();
-                snapshot["codex"]["tool_series"] = candidate.series[index]["tools"].clone();
-                snapshot["codex"]["tool_statistics"] = candidate.statistics[index].clone();
-                return Bytes::from(snapshot.to_string());
+                return Bytes::from(snapshot_json::with_codex_fields(&snapshot, &[
+                    ("file_activity", &candidate.files[index]),
+                    ("skills", &candidate.skills[index]),
+                    ("projects", &candidate.rows[index]["projects"]),
+                    ("activity_series", &candidate.series[index]["activity"]),
+                    ("tool_series", &candidate.series[index]["tools"]),
+                    ("tool_statistics", &candidate.statistics[index]),
+                ]));
             }
             let statistics = project::ToolStatistics::new(&threads, boundary, tool_events_enabled && health != "disabled");
             Bytes::from(series.snapshot_json(&snapshot, Some(&statistics)).into_bytes().into_boxed_slice())
