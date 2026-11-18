@@ -5503,7 +5503,7 @@ impl Collector {
                 "codex":{
                     "source":"codex","health":health,"started_at":stamp(self.started),"files":self.discovered_file_count(),
                     "bytes_read":self.read_bytes,"malformed_lines":self.malformed,
-                    "threads":rows,"tools":totals,"nested_tools":nested_totals,"observed_tool_calls":observed,
+                    "threads":null,"tools":totals,"nested_tools":nested_totals,"observed_tool_calls":observed,
                     "git":git,"checks":checks,
                     "schedules":self.schedules,
                     "metadata_sources":self.schedule_report.iter().collect::<Vec<_>>(),
@@ -5517,6 +5517,7 @@ impl Collector {
                                   "checkpoint":self.checkpoints.report}
                 }
             });
+            snapshot["codex"]["threads"] = Value::Array(rows);
             snapshot["logs"] = logs_overview.clone();
             if let Some(read_state) = snapshot["codex"]["read_state"].as_object_mut() {
                 read_state.extend(json!({"initial_pending_files":initial_pending,"history_pending_files":0,"history_pending_bytes":0,"error_pending_files":0,"error_pending_bytes":0,"working_file_limit":FILE_LIMIT,"working_files":self.files.len(),"outside_working_set":outside_working_set,"discovery_pending":self.discovery.is_some(),"source_index_ready":source_index_ready,"source_index_unverified":source_index_unverified,"source_index_materialized":source_index_materialized,"overflow_snapshot_sources":candidate.map_or(overflow.len(), |value| value.overflow_sources),"overflow_snapshot_incomplete":overflow_incomplete,"overflow_details_pending":candidate.map_or(overflow_details_pending.len(), |value| value.overflow_details_pending.len())}).as_object().expect("read state fields").clone());
@@ -5904,6 +5905,17 @@ impl Drop for Collector {
 #[cfg(test)]
 mod log_tests {
     use super::*;
+
+    #[test]
+    fn moved_snapshot_rows_preserve_serialized_values_and_field_order() {
+        for rows in [Vec::new(), vec![json!({"thread_id":"a","thread_name":"測試", "tool_calls":null,
+            "events":[{"nested":{"value":1.25}},true,"x\n"]}),json!({"thread_id":"b","tool_calls":0})]] {
+            let original = json!({"codex":{"source":"codex","threads":rows,"tools":{"x":1}},"after":true});
+            let mut moved = json!({"codex":{"source":"codex","threads":null,"tools":{"x":1}},"after":true});
+            moved["codex"]["threads"] = Value::Array(rows);
+            assert_eq!(moved.to_string(), original.to_string());
+        }
+    }
 
     #[test]
     fn uptime_seconds_matches_python_half_even_and_adjacent_boundaries() {

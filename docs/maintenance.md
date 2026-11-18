@@ -728,3 +728,11 @@ Statistics 階段現於每頁 512 群組完成後編碼並釋放該頁 Value row
 `fc1eefd` 已通過 native 最大工作集的 initial / rescan / pending stop, 仍接近 completion 界線, 下一步針對每次驗證都複製 topology maps、ReadProgress 字串與逐筆 tree lookup 的成本
 
 Guard 現直接借用比較相同 topology / progress 欄位, 以同長度的 ordered-map zip 檢查 path、owner / revision 與 progress, 初次 capture 仍保有完整自有副本, SQL epoch、設定與其他 guards 的讀取及判斷不變
+
+### Native 最大工作集重新啟用驗收
+
+原最大工作集重新啟用超過五秒, 分段診斷為 setup 1.39 ms、collect 1.91 秒、首次 snapshot 2.99 秒, 未提前回覆設定完成
+
+現將完成的 thread rows 移入原 snapshot 欄位, 避免 json! 重新序列化並複製每筆 Value, 保留欄位順序、四窗來源時點、force replay 與 publication guards
+
+原嚴格驗收本次通過: 停用 71.44 ms / 200、重新啟用 3,774.62 ms / 200, 後續完整 50,000 calls 統計與 detail 恢復、pending stop 均通過, 仍屬單次 Linux debug 觀察, 不宣稱穩定 SLA 或跨平台完成, 原失敗與診斷證據保留於 validation

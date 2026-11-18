@@ -12358,6 +12358,31 @@ fn native_maximum_calls_rescan_and_http_latency() {
         assert!(began.elapsed() < Duration::from_secs(180), "maximum refresh must expose pending fallback");
         std::thread::sleep(Duration::from_millis(200));
     }
+    for enabled in [false, true] {
+        let body = json!({"observations":{"codex":enabled}}).to_string();
+        let began = Instant::now();
+        let response = service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), &body);
+        eprintln!("native maximum setting enabled={enabled}: elapsed_ms={} status={}", began.elapsed().as_secs_f64()*1000.0, response.status);
+        assert_eq!(response.status, 200);
+        if !enabled {
+            let value = service.get("/api/snapshot?window=all").json();
+            assert_eq!(value["codex"]["health"], "disabled");
+            assert!(value["codex"].get("observed_tool_calls").is_none());
+        }
+    }
+    wait_complete(&service, "reenabled", true);
+    let detail = service.get("/api/codex/tool?thread_id=00000000-0000-4000-8000-000000000007&call_id=call49999");
+    assert_eq!(detail.status, 200);
+    assert_eq!(detail.json()["tool"], "tool49999");
+    assert_eq!(refresh().status, 200);
+    let began = Instant::now();
+    loop {
+        let value = service.get("/api/snapshot?window=all").json();
+        if value["codex"]["read_state"]["source_index_materialized"] == 7
+            && value["codex"]["observed_tool_calls"].as_u64().is_some_and(|count| count < 50_000) { break; }
+        assert!(began.elapsed() < Duration::from_secs(180), "maximum reenabled refresh must expose pending fallback");
+        std::thread::sleep(Duration::from_millis(200));
+    }
     let stopping = Instant::now();
     service.stop();
     eprintln!("native maximum pending stop: elapsed_ms={} payload_bytes={payload_bytes}", stopping.elapsed().as_secs_f64()*1000.0);

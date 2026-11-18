@@ -2735,3 +2735,43 @@ CandidateInputs 全部 13 項通過 0.35 秒, 涵蓋 observation / metadata / pr
 兩次都保留原 180 秒 completion 與 5 秒 socket / stop 設定, 原 18,548,469 bytes 真實 checkpoint payload 不變, 本次期間未同時執行其他本任務測試, 前一步有短 microprobe / 編譯重疊, 僅為 Linux debug 單次觀察, 不歸納 p95 或所有操作加速, native 最大負載的停用 / 重新啟用與跨平台仍不在本次驗收範圍
 
 最後八組完整兩來源 / four-window / source-mutation oracle 通過 152.94 秒, 保留所有原斷言, 5 個既有 warnings 與未驗收的平台 / deferred 項目不變, git diff --check 通過
+
+### Native 最大工作集停用 / 重新啟用的未完成驗收
+
+沿用 50,000 真實 calls / 5,007 來源 / 18,548,469 bytes checkpoint 的隔離 Linux debug fixture, 在 rescan fallback pending 時停用再重新啟用, 保留原 5 秒 applied 等待、200 成功斷言與 180 秒 completion 界線
+
+嚴格驗收失敗於重新啟用: 停用 152.96 ms / 200 且 snapshot 已 disabled, 重新啟用 5,003.86 ms / 202, 此次完整測試 268.11 秒, 後續 recovery / stop 未執行, 不是資料遺失證據
+
+另以暫時診斷版本觀察 202 後續狀態, 不取代嚴格驗收, 第一個診斷誤用只接受 200 的 Reply::json helper 而失敗, 已保留該次結果, 改為直接解析 response body 並檢查 refresh_pending=true 後完成 429.54 秒
+
+| 診斷觀察 | 實測 |
+| --- | --- |
+| Initial / rescan 完整 50,000 calls | 121.39 / 110.38 秒 |
+| Pending 停用 | 81.07 ms / 200, disabled 且不顯示 calls |
+| 重新啟用 HTTP | 5,017.03 ms / 202, refresh_pending=true |
+| 202 後完整資料恢復 | 127.15 秒, 50,000 筆 exact statistics 與最後一筆真實 detail 通過 |
+| 恢復期間最大 GET | 1,037.33 ms |
+| 再次 refresh pending 後停止 | 131.81 ms |
+
+診斷 PASS 只證明最終資料恢復及停止, 不證明五秒內套用, 已還原嚴格 fixture, production、容量與 guards 均未修改, 原失敗與診斷 log / patch 分別保留, 下一步需量測 reenable 啟動、collect 與 finalizer 成本, 不能提前回覆 200 或省略 force replay
+
+### 移動完成的 thread rows 與嚴格驗收
+
+後續分段診斷量得重新啟用 setup 1.39 ms、collect 1.91 秒、首次 snapshot 2.99 秒, 發布總計 5.17 秒, 另一個細分診斷 run 則於 4.85 秒回覆 200, 顯示原實作接近界線而非固定停滯
+
+原 json! 會重新序列化借用的 Vec<Value> 並複製 rows, 現在原 threads 欄位位置先放 null, 立即以 Value::Array 移入完成的 rows, 不改其他欄位、來源查詢、endpoint、參數、請求數、快照時點或 guards, 空列與巢狀 / Unicode / null 數值的 byte-order parity 通過 0.00 秒
+
+原嚴格 native 測試未放寬 200、五秒 socket / settings、180 秒 completion 或完整資料斷言, 本次 395.98 秒通過
+
+| 階段 | 實測 |
+| --- | --- |
+| Initial / rescan | 116.21 / 108.34 秒 |
+| Pending 停用 | 71.44 ms / 200, disabled 且不顯示 calls |
+| 重新啟用 | 3,774.62 ms / 200 |
+| 重新啟用後完整資料 | 111.49 秒, 50,000 exact statistics 與真實最後一筆 detail |
+| 恢復期間最大 GET | 1,203.76 ms |
+| 再次 pending stop | 145.51 ms |
+
+相同 5,007 來源、18,548,469 bytes checkpoint 與 Linux debug 條件, 不以跨 run 的時間或 byte 長度差異推論完整等價或穩定 SLA, 平台 / 持續變動負載及原 deferred 項目仍未完成
+
+八組兩來源 active / checkpoint、同 / 異 thread、primary / nested 的完整四窗 / detail / source mutation oracle 通過 177.89 秒, 原斷言保留, git diff --check 通過, 仍有 5 個既有 warnings, 未重跑完整套件
