@@ -2664,3 +2664,19 @@ Linux / Rust 1.100.0 / 原 Cargo.lock / debug build, 單次觀察, 不將 4.81 �
 補充 physical guard: reducer 完成後替換真實來源檔案, rendering 仍只回 Pending, 下一輪 physical 驗證明確拒絕且舊 version / bytes 不變, 含其餘 controls / capacity 的 focused 通過 6.52 秒, 同批 detail index 0.08 秒、完整 error order 0.45 秒、native HTTP usage reenable 0.16 秒、單來源 oversized replay 0.94 秒均通過
 
 本步未改 SelectedCandidate 的來源排序或統計分頁, 前一步 144.73 秒完整兩來源 oracle 保留為歷史證據, 未重跑完整套件或平台驗收, 5 個既有 warnings 保留
+
+### 完成統計的 RawValue 編碼
+
+基準 `ac5b173`, Statistics 每頁仍最多 512 群組, 以原 Value 編碼產生每列 JSON 後立即釋放該頁, 四窗完成值改為經 RawValue::from_string 驗證的陣列, finalizer 同位置借用 encoded statistics, 其餘五組欄位仍沿 Value 借用, 不改來源 query、capture 時點、排序、容量或發布 guards
+
+同輸入的 clone-and-replace byte oracle 同時驗證 Value 與 Encoded 分支, 保留 Unicode、跳脫、null、新 / 舊欄位與缺失 Codex 邊界, JSON focused 3 項通過 0.00 秒
+
+最大 fixture 通過 50.14 秒, 四窗 50,000 exact statistics rows / p99 / 真實最後 locator 與 100,000 nested 超限 fallback 計數均保留, primary 498 輪、含 readback 29.36 秒、最長 advance 2,006.67 ms、peak 441,212,928 bytes、readback 後 RSS 331,612,160 bytes
+
+本次視窗 bytes 55,003,234, 前次 55,003,238, 跨 run 含動態欄位的總長度不作等價證據, 行為等價依同輸入 byte oracle 與原完整 source / window oracle 判斷, 不猜測這 4 bytes 的欄位來源
+
+Linux / Rust 1.100.0 / 原 Cargo.lock / debug build, 每次量測條件各一次, 分頁編碼降低單步與 retained tree 成本但本次總時間由 27.55 秒增為 29.36 秒, 不宣稱整體加速、RSS 上限或 native 最大負載前景延遲已通過
+
+跨 staging / capacity / stop / disable / input 與 source replacement guards 通過 6.63 秒、完整 error order 0.50 秒、無 ID candidate 0.52 秒、同批 detail index 0.10 秒通過, 5 個既有 warnings 保留
+
+八組完整兩來源 source-order / four-window oracle 通過 147.95 秒, 測試只將新的已驗證 raw statistics 解析回 Value 供原 oracle 比對, 未移除或調整欄位、順序、p99、guard 與詳細資料斷言, git diff --check 通過, native 最大負載 HTTP 與跨平台仍待驗收

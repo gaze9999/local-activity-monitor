@@ -3,7 +3,7 @@
 //! until publication guards pass.
 use super::{candidate_inputs::SelectedInputs, checkpoint, commands, details, mcp, project, sqlite,
     CallSelection, Collector, Projection, SnapshotTime, CALL_LIMIT, WALK_LIMIT};
-use serde_json::{json, Value};
+use serde_json::{json, value::RawValue, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -21,7 +21,8 @@ struct Reducers {
     files: [project::FileSummary; 4],
     series: [project::ActivitySeries; 4],
     statistics: [project::OwnedStatistics; 4],
-    statistics_rows: [Vec<Value>; 4],
+    statistics_rows: [String; 4],
+    encoded_statistics: [Option<Box<RawValue>>; 4],
     commands: [commands::WindowSummary; 4],
     skills: [project::SkillSummary; 4],
     rows: [WindowRows; 4],
@@ -82,7 +83,7 @@ pub(super) enum Failure {
 pub(super) struct CompletedCandidate {
     pub files: [Value; 4],
     pub series: [Value; 4],
-    pub statistics: [Value; 4],
+    pub statistics: [Box<RawValue>; 4],
     pub commands: [Value; 4],
     pub skills: [Value; 4],
     pub rows: [Value; 4],
@@ -180,7 +181,8 @@ impl SelectedCandidate {
         let cutoffs = self.inputs.as_ref().unwrap().time.cutoffs;
         let (tools, files, switches) = self.inputs.as_ref().unwrap().reducer_switches();
         self.reducers = Some(Reducers {
-            statistics_rows: std::array::from_fn(|_| Vec::new()),
+            statistics_rows: std::array::from_fn(|_| "[".into()),
+            encoded_statistics: std::array::from_fn(|_| None),
             files:std::array::from_fn(|_| project::FileSummary::new(1000)),
             series:std::array::from_fn(|_| project::ActivitySeries::new()),
             statistics:cutoffs.map(|cutoff| project::OwnedStatistics::new(cutoff, tools, self.statistics_units, self.statistics_key_bytes)),
@@ -400,9 +402,18 @@ impl SelectedCandidate {
             }
             Phase::Statistics(index) => {
                 let reducers = self.reducers.as_mut().ok_or(Failure::State)?;
-                let complete = reducers.statistics[index].finish_page(&mut reducers.statistics_rows[index], 512)
+                let mut rows = Vec::new();
+                let complete = reducers.statistics[index].finish_page(&mut rows, 512)
                     .ok_or(Failure::StatisticsCapacity)?;
+                let encoded = &mut reducers.statistics_rows[index];
+                for row in rows {
+                    if encoded.len() != 1 { encoded.push(','); }
+                    encoded.push_str(&row.to_string());
+                }
                 if complete {
+                    encoded.push(']');
+                    reducers.encoded_statistics[index] = Some(RawValue::from_string(std::mem::take(encoded))
+                        .map_err(|_| Failure::State)?);
                     self.phase = if index == 3 { Phase::Physical } else { Phase::Statistics(index + 1) };
                 }
             }
@@ -456,7 +467,8 @@ impl SelectedCandidate {
             json!({"events":events,"total":total,"operations":operations})
         });
         let series = reducers.series.map(|series| { let (activity,tools) = series.finish(); json!({"activity":activity,"tools":tools}) });
-        let statistics = reducers.statistics_rows.map(Value::Array);
+        let statistics = reducers.encoded_statistics.into_iter().collect::<Option<Vec<_>>>()
+            .ok_or(Failure::State)?.try_into().map_err(|_| Failure::State)?;
         let switches = self.inputs.as_ref().ok_or(Failure::State)?.reducer_switches().2;
         let commands = reducers.commands.map(|summary| {
             let (mut git,mut checks) = summary.finish();

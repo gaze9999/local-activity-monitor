@@ -708,3 +708,9 @@ Focused byte oracle 曾抓出 preserve_order 與排序 map 的差異, 已保留�
 Worker 現將完整 reducer 結果留在私有 Finalizing 階段, 下一次 advance 才沿原 prepare_publication 組裝四窗, 中間再次檢查停止 / 停用與 captured inputs, 不重抓四次 query、不移動各來源讀取時點, 組裝後仍須完整 publication guard 才能替換 watch
 
 最大案例本次最長 advance 4.81 秒, 498 輪總計 27.55 秒含 readback, 這只是單步分離的實際觀察, 同步四窗組裝仍未拆開且尚未證明 native 最大負載的 HTTP / 停止延遲
+
+### 完成統計的分頁編碼
+
+Statistics 階段現於每頁 512 群組完成後編碼並釋放該頁 Value rows, 每窗完成時驗證 JSON 並保留 RawValue, finalizer 在原欄位順序直接借用已驗證內容, 不再長期保留四組大型統計 Value 樹或在組裝時重走全部統計欄位
+
+最大案例本次最長 advance 2.01 秒、peak 約 441 MB, 含 readback 的總時間 29.36 秒, 仍是 debug 單次量測而非 native HTTP SLA, logical admission、exact p99、來源選取與 publication guards 未變

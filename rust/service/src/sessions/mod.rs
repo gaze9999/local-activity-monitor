@@ -5807,12 +5807,12 @@ impl Collector {
                 "files":[],"checked_at":snapshot["jev"]["reader"]["checked_at"]});
             if let Some(candidate) = candidate {
                 return Bytes::from(snapshot_json::with_codex_fields(&snapshot, &[
-                    ("file_activity", &candidate.files[index]),
-                    ("skills", &candidate.skills[index]),
-                    ("projects", &candidate.rows[index]["projects"]),
-                    ("activity_series", &candidate.series[index]["activity"]),
-                    ("tool_series", &candidate.series[index]["tools"]),
-                    ("tool_statistics", &candidate.statistics[index]),
+                    ("file_activity", snapshot_json::SnapshotField::Value(&candidate.files[index])),
+                    ("skills", snapshot_json::SnapshotField::Value(&candidate.skills[index])),
+                    ("projects", snapshot_json::SnapshotField::Value(&candidate.rows[index]["projects"])),
+                    ("activity_series", snapshot_json::SnapshotField::Value(&candidate.series[index]["activity"])),
+                    ("tool_series", snapshot_json::SnapshotField::Value(&candidate.series[index]["tools"])),
+                    ("tool_statistics", snapshot_json::SnapshotField::Encoded(&candidate.statistics[index])),
                 ]));
             }
             let statistics = project::ToolStatistics::new(&threads, boundary, tool_events_enabled && health != "disabled");
@@ -6445,7 +6445,7 @@ mod log_tests {
                             assert_eq!(result.rows[index]["rows"], json!([]));
                             assert_eq!(result.allowance, Some(window["codex"]["usage"].clone()));
                             assert_eq!(result.files[index], window["codex"]["file_activity"]);
-                            assert_eq!(result.statistics[index], window["codex"]["tool_statistics"]);
+                            assert_eq!(serde_json::from_str::<Value>(result.statistics[index].get()).unwrap(), window["codex"]["tool_statistics"]);
                         }
                         if active { assert_eq!(result.allowance.unwrap()["limits"][0]["used_percent"], 99); }
                         complete = true;
@@ -6972,7 +6972,7 @@ mod log_tests {
                                     });
                                 assert_eq!(errors, expected_error_windows);
                             }
-                            return Ok((completed.files, completed.series, completed.statistics, completed.commands,
+                            return Ok((completed.files, completed.series, completed.statistics.map(|value| serde_json::from_str::<Value>(value.get()).unwrap()), completed.commands,
                                 completed.skills, completed.rows, completed.observations, failures));
                         }
                     }

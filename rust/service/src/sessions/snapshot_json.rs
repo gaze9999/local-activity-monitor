@@ -8,21 +8,25 @@ use std::io::{self, Write};
 
 type Root<'a> = BTreeMap<String, &'a RawValue>;
 
+#[derive(Clone, Copy, Serialize)]
+#[serde(untagged)]
+pub(super) enum SnapshotField<'a> { Value(&'a Value), Encoded(&'a RawValue) }
+
 // Borrow completed fields after source augmentation, retaining original key order.
-pub(super) fn with_codex_fields(snapshot: &Value, fields: &[(&str, &Value)]) -> Vec<u8> {
-    struct Codex<'a> { original: &'a Map<String, Value>, fields: &'a [(&'a str, &'a Value)] }
+pub(super) fn with_codex_fields(snapshot: &Value, fields: &[(&str, SnapshotField<'_>)]) -> Vec<u8> {
+    struct Codex<'a> { original: &'a Map<String, Value>, fields: &'a [(&'a str, SnapshotField<'a>)] }
     impl Serialize for Codex<'_> {
         fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             let added = self.fields.iter().filter(|(key,_)| !self.original.contains_key(*key)).count();
             let mut map = serializer.serialize_map(Some(self.original.len() + added))?;
             for (key, value) in self.original {
                 let replacement = self.fields.iter().rev().find(|(name,_)| *name == key);
-                map.serialize_entry(key, replacement.map_or(value, |(_,value)| *value))?;
+                map.serialize_entry(key, &replacement.map_or(SnapshotField::Value(value), |(_,value)| *value))?;
             }
             for (index, (key, value)) in self.fields.iter().enumerate() {
                 if !self.original.contains_key(*key) && !self.fields[..index].iter().any(|(name,_)| name == key) {
                     let value = self.fields.iter().rev().find(|(name,_)| name == key).map_or(*value, |(_,value)| *value);
-                    map.serialize_entry(key, value)?;
+                    map.serialize_entry(key, &value)?;
                 }
             }
             map.end()
@@ -148,7 +152,13 @@ mod tests {
             if let Some(codex) = oracle.get_mut("codex").and_then(Value::as_object_mut) {
                 for (key,value) in &fields { codex.insert((*key).into(), (*value).clone()); }
             }
-            assert_eq!(with_codex_fields(&root, &fields), oracle.to_string().into_bytes());
+            let borrowed: Vec<_> = fields.iter().map(|(key,value)| (*key,SnapshotField::Value(value))).collect();
+            assert_eq!(with_codex_fields(&root, &borrowed), oracle.to_string().into_bytes());
+            let encoded = RawValue::from_string(replacements["tool_statistics"].to_string()).unwrap();
+            let borrowed: Vec<_> = fields.iter().map(|(key,value)| (*key, if *key == "tool_statistics" {
+                SnapshotField::Encoded(&encoded)
+            } else { SnapshotField::Value(value) })).collect();
+            assert_eq!(with_codex_fields(&root, &borrowed), oracle.to_string().into_bytes());
             assert_eq!(root.to_string(), before);
         }
     }
