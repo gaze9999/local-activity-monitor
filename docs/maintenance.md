@@ -425,6 +425,8 @@ Desktop source.checked_at 在無新事件的 refresh 也可能改變, 不能將�
 
 後續 candidate 已保留 optional source thread ID, 無 ID 來源的 calls 不納入 thread 摘要但仍完成來源驗證, active / checkpoint session errors 依既有不同規則處理, 各來源 allowance 獨立擷取並保留同時間 winner 規則, checkpoint-only 與 active + checkpoint 的合成無 ID 情境通過, 正式 health / usage 過濾、complete-source-order 全流程、detail index 與 worker 發布仍待串接, 詳見 validation
 
+Allowance 的既有 health / usage 過濾已抽為共用 finalizer 並保留 production 原呼叫位置, candidate allowance 的 complete-source-order / canonical fallback 與同時間 / 較新來源已逐項對照四窗 production usage, HTTP 停用 / 重新啟用回歸通過, 此結果只完成 allowance 範圍, 其餘 error windows 完整來源順序、detail index、設定 guard 至共同發布仍待串接
+
 建構 eligibility 仍用原 Option, SelectedInputs 的舊 validate_sources 亦保留 Option wrapper, 新 try_validate_sources 提供有類型的驗證結果, 不改動同步 snapshots 或原失敗 fallback
 
 來源路徑只從既有 active / session_paths / duplicate_session_paths 解析, 以 checkpoint key 核對, 缺少已觀察路徑、fingerprint 或 active 與 membership stamp 不同時拒絕, 不重新 discovery 或猜測來源位置

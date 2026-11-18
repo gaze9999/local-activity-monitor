@@ -4998,6 +4998,10 @@ impl Collector {
         (mcp_events, all_mcp)
     }
 
+    fn finalize_snapshot_allowance(&self, allowance: Option<Value>, health: &str) -> Option<Value> {
+        allowance.filter(|_| self.applied_command_switches.usage && health != "disabled")
+    }
+
     fn snapshots(&self, health: &str, watch_health: &str, version: u64) -> Snapshots {
         let SnapshotOpening { journal, debug } = self.capture_snapshot_opening();
         let monitor_events = &journal.events;
@@ -5084,8 +5088,8 @@ impl Collector {
                 value["updated_at"].as_str().unwrap_or_default(),
                 if complete_source_order { usize::MAX - index } else { *index },
             ))
-            .map(|(_, value)| value.clone())
-            .filter(|_| self.applied_command_switches.usage && health != "disabled");
+            .map(|(_, value)| value.clone());
+        let allowance = self.finalize_snapshot_allowance(allowance, health);
         let source_index_ready = self.discovery.is_none()
             && self.source_membership_complete
             && self
@@ -8298,22 +8302,72 @@ mod log_tests {
             let value: Value = serde_json::from_slice(&snapshots.window_bytes(3)).unwrap();
             value["codex"]["usage"].clone()
         };
+        let candidate_usage = |collector: &mut Collector, health| {
+            use selected_candidate::{Advance, SelectedCandidate, Source};
+            let mut store = lam_history_store::Store::open(&root.join("monitoring"), lam_history_store::Access::ReadOnly).unwrap().unwrap();
+            let mut membership = SourceMembership::new().unwrap();
+            let mut sources: Vec<_> = paths.iter().map(|path| {
+                let key = checkpoint::key(&root, path).unwrap();
+                let cursor = store.checkpoint(&key, 0).unwrap().unwrap().cursor;
+                let metadata = std::fs::metadata(path).unwrap();
+                let fingerprint = source_fingerprint(file_identity(&metadata), metadata.len(), metadata.modified().ok()).unwrap();
+                membership.insert(&[MembershipRecord {key:key.clone(),fingerprint:Some(fingerprint.clone())}]).unwrap();
+                membership.mark_verified(&[VerifiedMembership {key:key.clone(),fingerprint,
+                    checkpoint_signature:cursor.signature.clone(),materialized:true,call_headers:Some(Vec::new())}]).unwrap();
+                Source {key,signature:cursor.signature}
+            }).collect();
+            sources.sort_by(|left, right| left.key.cmp(&right.key));
+            // This small all-active fixture does not need production overflow
+            // membership. Enroll its actual cursors for the candidate boundary.
+            collector.source_membership = Some(membership);
+            collector.source_membership_root = Some(file_identity(&std::fs::metadata(&root).unwrap()));
+            collector.source_membership_complete = true;
+            collector.discovery = None;
+            let selection = collector.select_recent_calls(10, 100).unwrap();
+            assert!(selection.complete);
+            let mut candidate = SelectedCandidate::new(collector, &selection, collector.capture_snapshot_time(),
+                sources, collector.has_complete_source_order(), 10_000, 10_000, true, &stopped).unwrap();
+            for _ in 0..32 {
+                match candidate.advance(collector, &selection, true, &stopped, 1).unwrap() {
+                    Advance::Pending(next) => candidate = next,
+                    Advance::Complete(result) => {
+                        let value = collector.finalize_snapshot_allowance(result.allowance, health).unwrap_or(Value::Null);
+                        let baseline = collector.snapshots(health, "ok", 1);
+                        for index in 0..4 {
+                            let window: Value = serde_json::from_slice(&baseline.window_bytes(index)).unwrap();
+                            assert_eq!(value, window["codex"]["usage"]);
+                        }
+                        return value;
+                    }
+                }
+            }
+            panic!("allowance candidate did not finish");
+        };
         assert_eq!(usage(&collector, "ok")["limits"][0]["used_percent"], 90);
+        assert!(collector.has_complete_source_order());
+        assert_eq!(candidate_usage(&mut collector, "ok")["limits"][0]["used_percent"], 90);
         set_time(&paths[0], 300);
         assert_eq!(usage(&collector, "ok")["limits"][0]["used_percent"], 90);
         collector.refresh(&root, &stopped, true, true, CommandSwitches::default());
         assert_eq!(usage(&collector, "ok")["limits"][0]["used_percent"], 10);
+        assert_eq!(candidate_usage(&mut collector, "ok")["limits"][0]["used_percent"], 10);
         collector.discovered_files = Some(3);
         assert_eq!(usage(&collector, "ok")["limits"][0]["used_percent"], 90);
+        assert!(!collector.has_complete_source_order());
+        assert_eq!(candidate_usage(&mut collector, "ok")["limits"][0]["used_percent"], 90);
         collector.discovered_files = Some(2);
         set_time(&paths[1], 300);
         collector.refresh(&root, &stopped, true, true, CommandSwitches::default());
         assert_eq!(usage(&collector, "ok")["limits"][0]["used_percent"], 90);
+        assert_eq!(candidate_usage(&mut collector, "ok")["limits"][0]["used_percent"], 90);
         collector.files.get_mut(&paths[0]).unwrap().projection.allowance.as_mut().unwrap()["updated_at"] = json!("2026-11-14T01:00:00.000Z");
         assert_eq!(usage(&collector, "ok")["limits"][0]["used_percent"], 10);
+        assert_eq!(candidate_usage(&mut collector, "ok")["limits"][0]["used_percent"], 10);
         assert!(usage(&collector, "disabled").is_null());
+        assert!(candidate_usage(&mut collector, "disabled").is_null());
         collector.applied_command_switches.usage = false;
         assert!(usage(&collector, "ok").is_null());
+        assert!(candidate_usage(&mut collector, "ok").is_null());
     }
 
     #[test]

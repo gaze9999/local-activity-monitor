@@ -2444,3 +2444,15 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, 修正後八情境測試通過 1 項、44
 Linux / Rust 1.100.0 / 原 Cargo.lock, focused 最終通過 1 項、450 項未選取, 0.85 秒, 原八情境 candidate 通過 93.17 秒, 原 production allowance tie、physical guard、session error source-order 各通過 0.11 / 0.08 / 0.09 秒, 維持 8 個既有 warnings, git diff --check 通過
 
 此為合成 no-ID checkpoint / active projection 驗證, 不代表真實無 ID JSONL 完整匯入或全部平台驗收, complete-source-order allowance 的 candidate 全流程仍待驗證, 未執行 HTTP 或完整套件, production staging / fallback 與外部來源讀取位置不變, 完整 finalizer / detail index / 四窗共同發布仍未串接
+
+### Allowance finalizer 與完整來源順序
+
+基準 `5ab16b7`, 把 snapshots 原有 allowance 的 usage 開關 / health 過濾抽成 finalize_snapshot_allowance, production 在原位置呼叫相同條件, candidate owned allowance 亦可經同一 finalizer, 不更改用量來源、winner 或發布策略
+
+- 延伸原 allowance tie fixture, 保留原 10 / 90、未 refresh 的 mtime 不改來源順序、較新 updated_at、disabled 與 usage 關閉的全部獨立預期
+- Candidate 經完整 Headers / Payload / Physical / Validate 流程後比對四窗 usage, 涵蓋 complete-source-order 首次同時間來源、refresh 後來源順序變更、canonical fallback 最後同時間來源、較新 active allowance、disabled 與 usage 關閉
+- 第一次新增 candidate 驗證在 select_recent_calls 回傳 None 時停止, 0.03 秒, 原小型 all-active fixture 不需要 overflow selection membership, 改以實際 checkpoint cursor、source key 與檔案 fingerprint 登記測試 membership, 不偽造 selection 或放寬候選 guard, 失敗 log / patch 保留
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 完整順序 / finalizer focused 通過 1 項、450 項未選取, 0.31 秒, no-ID 兩情境回歸通過 0.10 秒, HTTP local_allowance_observation_replays_changes_after_reenable 通過 1 項、228 項未選取, 0.27 秒, 驗證停用後讀入新資料仍隱藏用量、重新啟用顯示最新 80, 維持 8 個既有 warnings, git diff --check 通過
+
+本輪 HTTP 驗證既有 production finalizer, 不代表 worker 已切換 candidate, candidate 的 finalizer / 發布仍需維持設定 guard 直到共同發布, 未重跑完整套件、八情境獨立 reducers 或先前延後的 restart / timestamp 檢查, 完整來源順序的 errors / detail index / 共同發布仍未驗收
