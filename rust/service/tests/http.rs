@@ -12260,16 +12260,22 @@ fn desktop_diagnostic_retries_failed_storage_on_source_update() {
 #[test]
 #[ignore = "capacity acceptance: native 50000 calls and 5007 physical sources"]
 fn native_maximum_calls_rescan_and_http_latency() {
-    native_maximum_calls(false);
+    native_maximum_calls(0);
 }
 
 #[test]
 #[ignore = "capacity acceptance: bounded source mutation during native 50000-call publication"]
 fn native_maximum_calls_mutation_burst_and_http_latency() {
-    native_maximum_calls(true);
+    native_maximum_calls(10);
 }
 
-fn native_maximum_calls(mutate: bool) {
+#[test]
+#[ignore = "capacity acceptance: sustained bounded source updates during native 50000-call publication"]
+fn native_maximum_calls_sustained_updates_and_http_latency() {
+    native_maximum_calls(60);
+}
+
+fn native_maximum_calls(mutation_count: usize) {
     use std::io::Write;
     let home = tempdir().unwrap();
     let root = home.path().join("sessions");
@@ -12359,7 +12365,7 @@ fn native_maximum_calls(mutate: bool) {
         let body = "{}";
         service.request_body(&format!("POST /api/refresh HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()),body)
     };
-    if mutate {
+    if mutation_count != 0 {
         assert_eq!(refresh().status, 200);
         let began = Instant::now();
         loop {
@@ -12373,7 +12379,9 @@ fn native_maximum_calls(mutate: bool) {
         let metadata_path = root.join(format!("rollout-{metadata_id}.jsonl"));
         let mut last_seen = 0usize;
         let mut maximum_get_ms = 0.0f64;
-        for revision in 1..=10 {
+        let changing = Instant::now();
+        let mut maximum_revision_lag = 0;
+        for revision in 1..=mutation_count {
             let update = event(&stamp, "turn_context", json!({"model":format!("mutation-{revision}")}));
             fs::OpenOptions::new().append(true).open(&metadata_path).unwrap()
                 .write_all(update.as_bytes()).unwrap();
@@ -12393,14 +12401,16 @@ fn native_maximum_calls(mutate: bool) {
                 assert!(seen >= last_seen && seen <= revision);
                 last_seen = seen;
             }
+            maximum_revision_lag = maximum_revision_lag.max(revision - last_seen);
             std::thread::sleep(Duration::from_secs(2));
         }
-        eprintln!("native maximum mutation burst: writes=10 last_seen={last_seen} max_get_ms={maximum_get_ms}");
+        assert!(changing.elapsed() >= Duration::from_secs(2 * mutation_count as u64));
+        eprintln!("native maximum mutation burst: writes={mutation_count} elapsed_ms={} last_seen={last_seen} max_revision_lag={maximum_revision_lag} max_get_ms={maximum_get_ms}",changing.elapsed().as_secs_f64()*1000.0);
         wait_complete(&service, "after_mutations", true);
         let value = service.get("/api/snapshot?window=all").json();
         let row = value["codex"]["threads"].as_array().unwrap().iter()
             .find(|row| row["thread_id"] == metadata_id).unwrap();
-        assert_eq!(row["model"], "mutation-10");
+        assert_eq!(row["model"], format!("mutation-{mutation_count}"));
         assert_eq!(refresh().status, 200);
         let began = Instant::now();
         loop {

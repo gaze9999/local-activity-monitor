@@ -2816,3 +2816,21 @@ HTTP 排除上述兩項及 13 個含 restart 的測試, opt-in 的最大容量 s
 以暫時 connection-error 記錄執行一次原嚴格 native 50,000 calls / 5,007 來源流程, 378.87 秒通過, 停用 96.91 ms / 200、重新啟用 4,540.76 ms / 200, 後續完整統計 / detail 恢復 90.83 秒、最大 GET 1,020.91 ms、pending stop 91.21 ms, 未觀察到 Hyper connection error
 
 這次未重現不是原失敗已解決的證據, 仍缺原始回應 byte 數、child exit 狀態及 connection error, 因此不能將問題歸因為 timeout、OOM 或候選 metadata, 不做猜測性產品修正或連續重試, 暫時診斷程式碼已還原, 原失敗及本次 log / patch 保留
+
+### 60 次持續更新的 native 最大工作集驗收
+
+沿用隔離的 50,000 calls / 5,007 來源, 共用 fixture 改以 mutation_count 選擇原 rescan 流程、十次 burst 與新增六十次 updates, 原 rescan / reenable 流程與嚴格斷言保留, 未改 production
+
+Linux / Rust 1.100.0 / 原 Cargo.lock 的獨立 ignored test native_maximum_calls_sustained_updates_and_http_latency 通過 576.43 秒, 每輪依序 append、GET、完整 statistics 一致性檢查及兩秒等待, 不是獨立固定速率 writer
+
+| 觀察 | 本次結果 |
+| --- | --- |
+| 初始完整候選 | 122.89 秒 |
+| 60 次追加階段 | 268.87 秒 |
+| 寫入期間最後可見 revision | 56, 最大落後 7 個 revision |
+| 寫入期間最大 GET | 1,267.64 ms |
+| 停止追加後完整發布 | 128.54 秒, exact 50,000 statistics 與 mutation-60 通過 |
+| 恢復期間最大 GET | 1,113.90 ms |
+| 再次 pending 後停止 | 151.96 ms |
+
+原 180 秒 completion 與五秒 socket / stop 不變, 未跳過來源驗證、沒有部分 candidate 發布, 原 incomplete fallback 計數依既有行為呈現, 沒有量測所有中間候選取消次數或 wall-clock metadata age, revision lag 不等於秒數, 單次結果不證明無限更新 SLA、跨平台或原 headerless failure 已修復, git diff --check 通過

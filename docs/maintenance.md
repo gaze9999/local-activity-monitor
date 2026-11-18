@@ -744,3 +744,9 @@ Guard 現直接借用比較相同 topology / progress 欄位, 以同長度的 or
 Candidate 現使用保留 context provenance 的無 call payload 中間投影, 不變更原 single-pass serializer、來源順序、timestamp tie 規則與發布 guards, 有界變動後可完成全部統計並保留最後 mutation-10, 無限持續變動的新鮮度 SLA 仍未驗收
 
 另一次較早 run 在尚未進入新增變動階段的 reenable recovery 收到無 HTTP header 的連線結束, 原測試未保留 child exit receipt, 成因仍未知, 不將本次 context 修正視為解決該問題
+
+### 最大工作集的有界持續更新
+
+新增 60 次 context 追加的 native probe, 寫入 / GET / 驗證 / 兩秒等待合計 268.87 秒, 超過本次初始候選完成時間, 非固定每兩秒的獨立 writer
+
+寫入期間已觀察 revision 不倒退, 最大落後 7 個版本, 停止寫入後完整 50,000 統計與 mutation-60 通過, 不放寬 input guards 換取發布, 此為有限工作負載驗收, 不推論無限變動時的新鮮度上限
