@@ -12467,6 +12467,82 @@ fn native_maximum_calls(mutation_count: usize) {
 }
 
 #[test]
+#[ignore = "capacity acceptance: 5001 physical sources and 100000 nested tools"]
+fn native_nested_capacity_preserves_fallback_counts() {
+    let home = tempdir().unwrap();
+    let root = home.path().join("sessions");
+    fs::create_dir(&root).unwrap();
+    let start = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now() - Duration::from_secs(2));
+    let stamp = start.to_rfc3339();
+    let completed = (start + chrono::Duration::seconds(1)).to_rfc3339();
+    let id = "00000000-0000-4000-8000-000000000001";
+    let path = root.join(format!("rollout-{id}.jsonl"));
+    let mut file = std::io::BufWriter::new(fs::File::create(&path).unwrap());
+    file.write_all(event(&stamp, "session_meta", json!({"id":id})).as_bytes()).unwrap();
+    for n in 0..1000 {
+        let arguments = (0..100).map(|offset| format!("await tools.nested{:06}({{}});", n * 100 + offset)).collect::<String>();
+        file.write_all(event(&stamp, "response_item", json!({"type":"function_call",
+            "name":"exec","call_id":format!("call{n:05}"),"arguments":arguments})).as_bytes()).unwrap();
+        file.write_all(event(&completed, "response_item", json!({"type":"function_call_output",
+            "call_id":format!("call{n:05}"),"output":"ok"})).as_bytes()).unwrap();
+    }
+    file.flush().unwrap();
+    drop(file);
+    fs::File::options().write(true).open(&path).unwrap().set_times(
+        fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000))).unwrap();
+    fn wait_counts(service: &Service, label: &str, overflow: bool, after: Option<u64>) -> u64 {
+        let began = Instant::now();
+        let mut maximum_get_ms = 0.0f64;
+        loop {
+            let request = Instant::now();
+            let reply = service.get("/api/snapshot?window=all");
+            maximum_get_ms = maximum_get_ms.max(request.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(reply.status, 200);
+            let value = reply.json();
+            let codex = &value["codex"];
+            let state = &codex["read_state"];
+            let refreshes = value["monitor"]["refreshes"].as_u64().unwrap();
+            if after.is_none_or(|previous| refreshes > previous) && codex["observed_tool_calls"] == 1000 && (!overflow ||
+                (state["source_index_materialized"] == 1 && state["outside_working_set"] == 1)) {
+                let rows = codex["tool_statistics"].as_array().unwrap();
+                let nested: std::collections::BTreeMap<_,_> = rows.iter().filter(|row| row["nested"] == true)
+                    .map(|row| (row["tool"].as_str().unwrap(), row["calls"].as_u64().unwrap())).collect();
+                assert_eq!(nested.len(), 100_000);
+                assert_eq!(rows.iter().filter(|row| row["nested"] == true).count(), nested.len());
+                for n in 0..100_000 { assert_eq!(nested.get(format!("nested{n:06}").as_str()), Some(&1)); }
+                assert_eq!(rows.iter().filter(|row| row["nested"] != true)
+                    .map(|row| row["calls"].as_u64().unwrap()).sum::<u64>(), 1000);
+                eprintln!("native nested {label}: elapsed_ms={} max_get_ms={maximum_get_ms} response_bytes={} state={state}",
+                    began.elapsed().as_secs_f64()*1000.0, reply.body.len());
+                return refreshes;
+            }
+            assert!(began.elapsed() < Duration::from_secs(180), "nested counts incomplete: {state}");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+    let mut warm = Service::start(home.path(), true, None);
+    wait_counts(&warm, "warm", false, None);
+    warm.stop();
+    drop(warm);
+    for n in 2..=5001 {
+        let id = format!("00000000-0000-4000-8000-{n:012}");
+        fs::write(root.join(format!("rollout-{id}.jsonl")), event(&stamp, "session_meta", json!({"id":id}))).unwrap();
+    }
+    let mut service = Service::start(home.path(), true, None);
+    let refreshes = wait_counts(&service, "initial", true, None);
+    let body = "{}";
+    let response = service.request_body(&format!("POST /api/refresh HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),body);
+    assert_eq!(response.status, 200);
+    wait_counts(&service, "after_refresh", true, Some(refreshes));
+    let detail = service.get("/api/codex/tool?thread_id=00000000-0000-4000-8000-000000000001&call_id=call00999");
+    assert_eq!(detail.status, 200);
+    assert_eq!(detail.json()["tool"], "exec");
+    let stopping = Instant::now();
+    service.stop();
+    eprintln!("native nested stop: elapsed_ms={}", stopping.elapsed().as_secs_f64()*1000.0);
+}
+
+#[test]
 #[ignore = "capacity acceptance: 5020 physical sources and 20 MiB aggregate checkpoints"]
 fn native_candidate_overflow_rescan_and_http_latency() {
     let home = tempdir().unwrap();

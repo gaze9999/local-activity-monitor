@@ -2899,3 +2899,21 @@ Optimized binary 之後以現有 tools/build_frontend.py --verify-offline 核對
 初次取樣嘗試的 fixture 通過 79.67 秒, 但環境未提供 task children 檔案, 因此沒有任何程序記憶體樣本, 不作記憶體證據, 保留原記錄後另以短程序確認 PPid 與 status 可讀, 才改用上述取樣路徑
 
 本輪沒有 production / 測試程式碼、容量或門檻變更, 沒有執行 deferred 檢查, 原服務停止流程完成, 原始取樣、測試輸出及結果保留, 此 Linux 單次量測不證明持續負載 SLA、平台驗收或原 headerless incident 已修復
+
+### Native 高 nested cardinality 的資料保存
+
+基準 d564f06, 新增 opt-in HTTP fixture native_nested_capacity_preserves_fallback_counts, 延用容量驗收的 1,000 個 exec calls / 100,000 個不同 nested tools, 真實 JSONL 經正常收集與 checkpoint 後加入 5,000 個 metadata-only 來源, 實際 native worker 的 working set 為 5,000、outside working set 與 materialized source 均為 1
+
+測試逐一核對 nested000000 至 nested099999 各有一次 call, 不接受重複列抵銷缺少列, primary 統計合計仍為 1,000, 並讀取最後 call00999 的真實 exec detail, refresh 後須觀察 monitor.refreshes 增加才接受相同完整計數, 不把 POST 已回覆或舊快照當作新一輪已執行
+
+Linux / Rust 1.100.0 / 原 Cargo.lock / optimized 的 focused test 通過 13.84 秒, 235 項未選取, 5 個既有 warnings, 沒有 production、容量上限或來源格式變更
+
+| 階段 | 完成耗時 | 最大 GET |
+| --- | --- | --- |
+| 單一來源暖機 | 4.57 秒 | 841.50 ms |
+| 5,001 來源初次完整資料 | 6.10 秒 | 205.61 ms |
+| Refresh 後新 collection 的完整資料 | 2.56 秒 | 117.73 ms |
+
+停止 60.56 ms, 原五秒 socket / stop 與 180 秒 completion 限制未變, outside source 的 incomplete fallback 標示仍保留
+
+此 HTTP 證據確認上述工作負載的對外計數、明細與回應性, 不直接觀察 candidate 的內部拒絕原因或所有中間發布, StatisticsCapacity 拒絕仍以既有 in-process driver 測試為證, 不宣稱此案例超過 16 MiB payload staging、持續變動、跨平台或完整套件驗收, 原 deferred 檢查未執行
