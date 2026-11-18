@@ -5952,7 +5952,8 @@ mod log_tests {
             assert!(!cursor_payload["projection"]["errors"].as_array().unwrap().is_empty());
             for error in cursor_payload["projection"]["errors"].as_array_mut().unwrap() {
                 error["code"] = json!("second-source");
-                error["record_offset"] = Value::Null;
+                assert!(error["record_offset"].is_u64());
+                assert!(error["record_hash"].is_string());
             }
             second_cursor.payload = cursor_payload.to_string();
             let second_calls: Vec<_> = calls.iter().enumerate().map(|(n, call)| {
@@ -6069,7 +6070,7 @@ mod log_tests {
                 materialized.entry(thread.clone()).or_insert_with(|| Projection::for_id(Some(thread.clone())))
                     .merge_snapshot(&projection.projection, None, &cutoffs);
             }
-            assert_eq!(detail_pending, [id.to_owned()].into_iter().collect());
+            assert_eq!(detail_pending, [id.to_owned(), second_id.to_owned()].into_iter().collect());
             let expected_payload_bytes: usize = calls.iter().chain(&second_calls).map(|call| call.payload.len()).sum();
             let extra_payload_bytes: usize = if same_thread { calls[300..].iter().map(|call| call.payload.len()).sum() } else { 0 };
             assert_eq!(materialized.values().map(|projection| projection.calls.len()).sum::<usize>(), expected_winners);

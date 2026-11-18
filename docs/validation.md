@@ -2178,7 +2178,7 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, owner targeted 7 項通過、428 項未�
 
 此步沒有新增 API 查詢或設定讀取, 未串接 candidate error / API windows, session error source-order、同批 detail index、volatile source finalization 與完整資源 / 平台驗收保留, production aggregation / fallback 與 telemetry 時機不變, deferred checks 未執行
 
-### Pending: candidate per-source session errors
+### Candidate per-source session errors
 
 基準 `e5956f3`, 實驗尚未驗收, 不作 production adoption 或完整 error windows 證據
 
@@ -2192,6 +2192,12 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, owner targeted 7 項通過、428 項未�
 Linux / Rust 1.100.0, 實驗 cargo check 通過並維持 8 個既有 warnings, 原 production `complete_source_session_errors_follow_first_thread_then_source_order` 精確測試通過 1 項、434 項未選取, 0.10 秒, 這些結果不代表新 candidate 分組或錯誤輸出通過
 
 LAM main `5c03daf`、workbench-workspace main `ce972bd` 再核對未變, consumer pin 未變, 其他 deferred checks 未執行, 實驗程式碼另行保留且不包含於本次文件 checkpoint, production fallback 與讀取時機未變
+
+後續基準 `df91deb` 的原因修正保留第二來源 error 的 record_offset / record_hash, 不再刪除 locator, 並將 detail_pending 的預期改為兩個來源 thread ID 的去重集合, 加入 locator 型別斷言, 不放寬 Projection 或 checkpoint 驗證
+
+前兩次失敗 log 與原 patch 保留, 修正後八情境 fixture 通過 1 項、449 項未選取, 68.55 秒, 包含同 / 異 thread、nested / direct、active / checkpoint 組合及原 candidate 取消、來源變更、明細 readiness 檢查, 原 production source-order、summary/detail winner 與 tool-start / source-switch 精確回歸各通過 1 項, 分別 0.11 / 0.03 / 0.00 秒
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, git diff --check 通過, 此結果確認該八情境的 per-source session errors 與 materialized oracle 相符, 完整 error windows、metadata-only / 無 ID 來源與 production 切換仍待完成
 
 ### Model API window 同步 finalization 審查
 

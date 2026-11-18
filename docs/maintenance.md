@@ -413,7 +413,7 @@ Candidate 另核對實際供 snapshots 讀取的 retained API queue revision, De
 
 Model API window 的候選串接建議保留在原同步 finalizer, 不移入跨輪 reducer: retained queue 已由既有規則限制 1000 筆, 先核對 api_events_revision 與 requested / applied flags, 每窗仍依 Core source()、summary、Desktop source clone / disabled overlay 的原順序執行, 不擷取跨輪 volatile reports, 不新增來源查詢, 保留其後 ActivitySeries、device、JEV 的相對順序, 此為來源審查建議, 尚未實作完整 finalizer 或切換 production
 
-Session error per-source candidate 擷取仍為未驗收工作, 已嘗試在 header read 保留各來源錯誤, active 沿 complete-source-order 分組後追加 checkpoint errors, 但延伸八情境 fixture 連續兩次失敗, 不重試或視為完成, 實驗修改與重現方式保留供使用者測試, 詳見 validation 的 pending 記錄
+Session error per-source candidate 在 header read 保留各來源錯誤, active 沿 complete-source-order 分組後追加 checkpoint errors, 原八情境 fixture 的兩次失敗已確認為新增 error locator 後的過時 detail_pending 預期與 offset / hash 不成對, 後續保留 locator 並修正預期後通過, 原失敗 log 與 patch 保留, 完整 error windows 與 production 整合仍待驗證, 詳見 validation 的 per-source session errors 記錄
 
 Error windows 已分離為可接受 owned tool failures 的 render_error_windows_captured, production 經原 wrapper 提供一次性 reducer, 仍在原來源設定 / journal 準備後才執行 reducer, 其餘 rendering 區段未改, candidate 尚未呼叫此入口
 
