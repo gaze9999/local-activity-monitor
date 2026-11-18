@@ -2403,3 +2403,15 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, `plugin_mcp_inventory_caps_names_without_
 Linux / Rust 1.100.0 / 原 Cargo.lock, `csv_line_review_tests` 通過 2 項、448 項未選取, 0.02 秒, 維持 8 個既有 warnings, git diff --check 通過
 
 未新增 API、讀取來源或持久化, 未重跑 HTTP、完整套件與其他平台, 此結果涵蓋上述合成資料, 不代表任意 CSV 都與 Python 等價
+
+### Candidate 接入既有 error-window renderer
+
+基準 `ab6487c`, CompletedCandidate 保留 ToolErrorSummary 原有 typed start / event, 不先包成 JSON 再由 finalizer 解析, session_errors 的 per-source 順序維持不變
+
+- 八情境 fixture 在 canonical 模式直接將 owned failures 與 session_errors 送入實際 render_error_windows_captured, 對照未改動 materialized error_windows_captured, 四個 window 的 error summary 與 log bytes 完整相同
+- journal 由測試明確擷取一次並供兩條路徑使用, 不新增隱含擷取或移動 production 原讀取位置, fixture 同時保留原 reducers、取消、來源變更與 readiness 的驗證
+- 原 ordered 模式仍比對 raw failure 順序, 本輪不把 canonical renderer 的通過當成 complete-source-order candidate 整體驗收
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 精確八情境測試通過 1 項、449 項未選取, 95.52 秒, 維持 8 個既有 warnings, git diff --check 通過, 原兩次 session-error 失敗 log 與 patch 的 SHA-256 未變
+
+未改 production worker / fallback、API、來源讀取或查詢次數, 未重跑 HTTP、完整套件、metadata-only / 無 ID 實驗與其他平台, 最終發布與 journal / volatile source 的正式 finalizer 時序仍待整合

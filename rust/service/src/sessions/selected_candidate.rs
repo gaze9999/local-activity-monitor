@@ -82,7 +82,7 @@ pub(super) struct CompletedCandidate {
     pub skills: [Value; 4],
     pub rows: [Value; 4],
     pub observations: [Value; 4],
-    pub failures: Value,
+    pub failures: Vec<(Option<chrono::DateTime<chrono::Utc>>, Value)>,
     pub session_errors: Vec<Value>,
     #[cfg(test)]
     pub read_work: [usize; 5],
@@ -493,8 +493,7 @@ impl SelectedCandidate {
         }
         let session_errors = active_order.into_iter().chain(self.active.len()..self.session_errors.len())
             .flat_map(|index| std::mem::take(&mut self.session_errors[index])).collect();
-        let failures: Vec<_> = failures.into_iter().map(|(start,event)| json!({"start":start.map(project::stamp),"event":event})).collect();
-        Ok(CompletedCandidate { files,series,statistics,commands,skills,rows,observations,failures:json!(failures),session_errors,
+        Ok(CompletedCandidate { files,series,statistics,commands,skills,rows,observations,failures,session_errors,
             #[cfg(test)] read_work:self.read_work })
     }
 }

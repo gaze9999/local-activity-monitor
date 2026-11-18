@@ -415,11 +415,11 @@ Model API window 的候選串接建議保留在原同步 finalizer, 不移入跨
 
 Session error per-source candidate 在 header read 保留各來源錯誤, active 沿 complete-source-order 分組後追加 checkpoint errors, 原八情境 fixture 的兩次失敗已確認為新增 error locator 後的過時 detail_pending 預期與 offset / hash 不成對, 後續保留 locator 並修正預期後通過, 原失敗 log 與 patch 保留, 完整 error windows 與 production 整合仍待驗證, 詳見 validation 的 per-source session errors 記錄
 
-Error windows 已分離為可接受 owned tool failures 的 render_error_windows_captured, production 經原 wrapper 提供一次性 reducer, 仍在原來源設定 / journal 準備後才執行 reducer, 其餘 rendering 區段未改, candidate 尚未呼叫此入口
+Error windows 已分離為可接受 owned tool failures 的 render_error_windows_captured, production 經原 wrapper 提供一次性 reducer, 仍在原來源設定 / journal 準備後才執行 reducer, 其餘 rendering 區段未改, candidate 的八情境 fixture 已在 canonical 模式將 typed failures 與 per-source session_errors 送入此入口, 四窗 error summary 與 log bytes 符合 materialized oracle, 尚未切換 production caller
 
 Desktop source.checked_at 在無新事件的 refresh 也可能改變, 不能將完整 source report 當成跨輪穩定 payload revision, session error 來源順序與 source metadata 的同步 finalization 邊界仍須確立, logs / retained API owner guards 已建立, 不先替 candidate 加入容易反覆失效的 volatile report guard
 
-完整 error windows 與正式發布仍待串接, raw failure components 不在此步套用名稱, 未因此重跑 deferred 額外 metadata-only / 無 ID 來源實驗
+正式 finalizer / 發布與 complete-source-order candidate 的 error windows 仍待串接驗證, raw failure components 保留 typed start / event, 不在 reducer 套用名稱, 命名仍由 error-window renderer 處理, 未因此重跑 deferred 額外 metadata-only / 無 ID 來源實驗
 
 建構 eligibility 仍用原 Option, SelectedInputs 的舊 validate_sources 亦保留 Option wrapper, 新 try_validate_sources 提供有類型的驗證結果, 不改動同步 snapshots 或原失敗 fallback
 

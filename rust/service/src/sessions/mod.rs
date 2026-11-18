@@ -6238,6 +6238,9 @@ mod log_tests {
             };
             let tool_errors = expected_tool_errors(false);
             assert_eq!(tool_errors.as_array().unwrap().len(), expected_winners);
+            let journal = collector.capture_snapshot_journal();
+            let expected_error_windows = collector.error_windows_captured(&journal, "ok", reference,
+                &statistics_threads, &expected_session_errors);
 
             assert_eq!(winners.len(), expected_winners);
             assert_eq!(winners[&(second_id.to_owned(), "call0300".to_owned())], &second_key);
@@ -6277,8 +6280,18 @@ mod log_tests {
                                 if same_thread { 300 } else { 0 }, extra_payload_bytes]);
                             eprintln!("candidate checkpoint reads same_thread={same_thread} nested={nested} active={active}: pages={} calls={} payload_bytes={} extra_calls={} extra_payload_bytes={}",
                                 completed.read_work[0], completed.read_work[1], completed.read_work[2], completed.read_work[3], completed.read_work[4]);
+                            let failures = json!(completed.failures.iter().map(|(start, event)|
+                                json!({"start":start.map(stamp),"event":event})).collect::<Vec<_>>());
+                            if !ordered {
+                                let errors = collector.render_error_windows_captured(&journal, "ok", reference,
+                                    &completed.session_errors, |complete_order| {
+                                        assert!(!complete_order);
+                                        completed.failures
+                                    });
+                                assert_eq!(errors, expected_error_windows);
+                            }
                             return Ok((completed.files, completed.series, completed.statistics, completed.commands,
-                                completed.skills, completed.rows, completed.observations, completed.failures));
+                                completed.skills, completed.rows, completed.observations, failures));
                         }
                     }
                 }
