@@ -2854,3 +2854,17 @@ Linux / Rust 1.100.0 / 原 Cargo.lock 的獨立 ignored test native_maximum_call
 排除規則仍為兩者 --skip restart --skip timestamp, HTTP 再排除 core_sql_diagnostics_follow_the_wal_and_publish_only_metadata 與 overflow_tool_detail_uses_verified_source_and_masks_secrets, 沒有重試這些 deferred 項目, ignored 的原生容量 / 變動 probes 只依各自已執行記錄判讀
 
 這是 Linux optimized 單次實際執行, 不是來源 bundle / frontend 資產 / installer、其他平台、browser 或已安裝使用者版本驗收, 不能把與 debug 的差異歸因為新的產品最佳化, 原 headerless incident 仍保留, 5 個既有 warnings 不變, git diff --check 通過
+
+### Linux Rust test bundle 與固定 UI 資產
+
+Optimized binary 之後以現有 tools/build_frontend.py --verify-offline 核對封裝前置條件, 初次因 checkout 尚無 _web / _workbench 且預設 WBUI 來源取得失敗而停止, 原 log 保留, 沒有調整 pin 或覆寫已存在 bundle
+
+改從本機已存在且 origin 為 gaze9999/workbench-ui 的儲存庫, 複製到新隔離來源 checkout 並固定 e9741c60590894fa8362f71bd0d4e8197caf4e5c, 不修改另一份工作 checkout, 正常 pinned builder 建置與驗證通過
+
+四份 Workbench UI 資產另逐 byte 比對該固定 commit 的 src blobs, 完全相同, 不是只信任包內 manifest, LAM frontend manifest 與 WBUI pin 檢查均通過, 未變更版本或 pin
+
+建立新的本機 test-only bundle, 複製前一筆已驗證 SHA-256 的 optimized executable、_web、_workbench、LICENSE、NOTICE, 執行專案 tools/smoke_release.py --rust-assets 通過
+
+實際 smoke 使用 disposable home 與 loopback, 驗證完整 HTML、CSP、兩種圖示內容與 MIME、snapshot 版本及空 threads、en / ja locales、instance endpoint、任意來源檔案 404 與未產生 jev-monitor.json, 結束後子程序已清理
+
+這是 test bundle 的 HTTP / 資產驗證, 未執行瀏覽器視覺互動、完整 release license audit、installer 或跨平台封裝, 沒有 Tag / Release、發布、安裝或使用者裝置切換, 原失敗與待驗項目保留
