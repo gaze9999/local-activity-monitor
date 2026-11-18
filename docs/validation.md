@@ -2790,3 +2790,21 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, production 與 fixture 未變動, 以原 
 Service 排除的六項為 core_timestamp_preserves_fractional_precision_and_detail_identity、desktop_api_cap_keeps_new_equal_timestamp_arrivals_like_python、payload_mutations_preserve_selection_keys_and_latest_timestamp、snapshot_context_requires_observed_timestamp_like_python、snapshot_metadata_merge_retains_timestamp_ties_and_interval_start_dedup、seconds_match_python_calendar_and_microsecond_boundaries, 此為保守的名稱篩選, 不代表這六項本身都曾失敗
 
 HTTP 排除上述兩項及 13 個含 restart 的測試, opt-in 的最大容量 service probe 與三個 native probes 保持 ignored, 先前已執行的容量結果仍依各自記錄判讀, 本輪不宣稱完整套件、跨平台、browser 或持續變動最大負載驗收, 5 個既有 warnings 不變
+
+### 最大工作集變動與 active context provenance
+
+初版把十次追加驗證接在既有重新啟用流程後, 368.80 秒於 reenable recovery 的 HTTP helper 找不到 header delimiter 而失敗, 尚未執行新增 appends, 原 child 狀態未保留且無服務錯誤訊息, 不推論 OOM、資料錯誤或已修復
+
+後續將變動驗證拆成獨立 ignored test, 共用原 50,000 calls / 5,007 來源 fixture, 初次完整發布後先 refresh 至 pending, 對 working metadata-only 來源追加十次 turn_context, 每次 GET 後等待兩秒, 不使用真實使用者資料
+
+獨立初版在 299.79 秒失敗, pending 期間已觀察 model revision 4, 完整 50,000 statistics 通過後, 來源 model 卻為 null 而非 mutation-10, 保留 log / patch, 另以最小 two-stage metadata merge 重現 None / Some(latest) 差異
+
+修正限 active candidate 的中間 metadata constructor: 原 merge_snapshot 會複製 model / context_at 卻不帶 context_seen, 再次作為來源合併時被略過, 現保留該來源旗標, 無 call payload、固定 cutoffs、有界 incoming preview 與原單次 finalizer 行為不變
+
+- Snapshot merge 篩選回歸 28 項通過、431 項未選取, 5.92 秒, 其中新測試確認 model、effort、context time、execution、較舊來源不覆蓋與同時間後來源優先, 不重跑 timestamp-named deferred 路徑
+- Native 獨立變動測試通過 313.27 秒, 寫入期間 GET 最大 808.56 ms, 每次確認 statistics 筆數等於 observed calls 且每個 tool calls=1, 已觀察的非空 revision 不倒退
+- 停止寫入後 98.32 秒完整發布, 50,000 exact statistics 與 mutation-10 皆通過, 恢復期間 GET 最大 881.06 ms, 再次 pending 後停止 131.47 ms
+- 原五秒 socket / stop 與 180 秒 completion 不變, 未修改 production endpoint、查詢參數、資料來源或請求數, 單次有限 burst 不等於無限持續變動 SLA
+- HTTP helper 在沒有 header 時改輸出收到的 byte 數與可取得的程序狀態, 仍立即失敗, 不輸出 response 本文、不自動重試, 非 Linux 的程序狀態可為 None
+
+完整八組 source-order / 四窗 / detail / mutation oracle 通過 160.32 秒, 原斷言不變, 5 個既有 warnings 保留, git diff --check 通過, 未以本次範圍宣稱完整套件或平台驗收

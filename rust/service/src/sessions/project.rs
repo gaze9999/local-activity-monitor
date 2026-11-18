@@ -2063,6 +2063,14 @@ impl Projection {
             .map(|(id, call)| (id.clone(), call.clone())));
     }
 
+    pub(super) fn snapshot_source_metadata(&self, cutoffs: &[Option<Time>; 4]) -> Self {
+        let mut metadata = Self::for_id(self.id.clone());
+        metadata.merge_snapshot(self, Some(&BTreeSet::new()), cutoffs);
+        // This intermediate remains a source for a later merge, not a final row.
+        metadata.context_seen = self.context_seen;
+        metadata
+    }
+
     /// Snapshot-only merge for the fixed publication windows. Retain the union
     /// of each window's incoming preview before cloning metadata. Keeping only
     /// the all-time winners would lose valid events at submillisecond cutoffs.
@@ -2270,6 +2278,26 @@ impl Projection {
 #[cfg(test)]
 mod snapshot_merge_tests {
     use super::*;
+
+    #[test]
+    fn active_source_metadata_preserves_context_through_candidate_merge() {
+        let time = timestamp(Some("2026-11-13T01:00:00Z"));
+        let original = source("latest", time);
+        let header = original.snapshot_source_metadata(&[None; 4]);
+        assert!(header.calls.is_empty());
+        let mut candidate = Projection::for_id(original.id.clone());
+        candidate.merge_snapshot(&header, None, &[None; 4]);
+        assert_eq!(candidate.model, original.model);
+        assert_eq!(candidate.effort, original.effort);
+        assert_eq!(candidate.context_at, original.context_at);
+        assert_eq!(candidate.execution, original.execution);
+        let earlier = source("earlier", time.map(|time| time - chrono::Duration::seconds(1)));
+        candidate.merge_snapshot(&earlier.snapshot_source_metadata(&[None; 4]), None, &[None; 4]);
+        assert_eq!(candidate.model, original.model);
+        let later = source("tie", time);
+        candidate.merge_snapshot(&later.snapshot_source_metadata(&[None; 4]), None, &[None; 4]);
+        assert_eq!(candidate.model, later.model);
+    }
 
     #[test]
     fn tool_error_summary_owns_failure_events_and_preserves_call_order() {

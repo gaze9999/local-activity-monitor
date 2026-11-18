@@ -94,7 +94,9 @@ impl Service {
         let split = data
             .windows(4)
             .position(|part| part == b"\r\n\r\n")
-            .unwrap();
+            .unwrap_or_else(|| panic!("HTTP response lacks headers: bytes={} service_status={:?}",
+                data.len(), fs::read_to_string(format!("/proc/{}/status", self.child.id()))
+                    .ok().map(|status| status.lines().take(3).collect::<Vec<_>>().join(" | "))));
         let headers = String::from_utf8(data[..split].to_vec()).unwrap();
         let status = headers
             .split_ascii_whitespace()
@@ -12258,6 +12260,16 @@ fn desktop_diagnostic_retries_failed_storage_on_source_update() {
 #[test]
 #[ignore = "capacity acceptance: native 50000 calls and 5007 physical sources"]
 fn native_maximum_calls_rescan_and_http_latency() {
+    native_maximum_calls(false);
+}
+
+#[test]
+#[ignore = "capacity acceptance: bounded source mutation during native 50000-call publication"]
+fn native_maximum_calls_mutation_burst_and_http_latency() {
+    native_maximum_calls(true);
+}
+
+fn native_maximum_calls(mutate: bool) {
     use std::io::Write;
     let home = tempdir().unwrap();
     let root = home.path().join("sessions");
@@ -12347,6 +12359,62 @@ fn native_maximum_calls_rescan_and_http_latency() {
         let body = "{}";
         service.request_body(&format!("POST /api/refresh HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()),body)
     };
+    if mutate {
+        assert_eq!(refresh().status, 200);
+        let began = Instant::now();
+        loop {
+            let value = service.get("/api/snapshot?window=all").json();
+            if value["codex"]["read_state"]["source_index_materialized"] == 7
+                && value["codex"]["observed_tool_calls"].as_u64().is_some_and(|count| count < 50_000) { break; }
+            assert!(began.elapsed() < Duration::from_secs(180), "mutation fixture must begin during pending fallback");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let metadata_id = "00000000-0000-4000-8000-000000005007";
+        let metadata_path = root.join(format!("rollout-{metadata_id}.jsonl"));
+        let mut last_seen = 0usize;
+        let mut maximum_get_ms = 0.0f64;
+        for revision in 1..=10 {
+            let update = event(&stamp, "turn_context", json!({"model":format!("mutation-{revision}")}));
+            fs::OpenOptions::new().append(true).open(&metadata_path).unwrap()
+                .write_all(update.as_bytes()).unwrap();
+            let request = Instant::now();
+            let reply = service.get("/api/snapshot?window=all");
+            maximum_get_ms = maximum_get_ms.max(request.elapsed().as_secs_f64()*1000.0);
+            let value = reply.json();
+            let count = value["codex"]["observed_tool_calls"].as_u64().unwrap();
+            assert!(count <= 50_000);
+            let statistics = value["codex"]["tool_statistics"].as_array().unwrap();
+            assert_eq!(statistics.len() as u64, count);
+            assert!(statistics.iter().all(|row| row["calls"] == 1));
+            let row = value["codex"]["threads"].as_array().unwrap().iter()
+                .find(|row| row["thread_id"] == metadata_id).unwrap();
+            if let Some(model) = row["model"].as_str() {
+                let seen: usize = model.strip_prefix("mutation-").unwrap().parse().unwrap();
+                assert!(seen >= last_seen && seen <= revision);
+                last_seen = seen;
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        eprintln!("native maximum mutation burst: writes=10 last_seen={last_seen} max_get_ms={maximum_get_ms}");
+        wait_complete(&service, "after_mutations", true);
+        let value = service.get("/api/snapshot?window=all").json();
+        let row = value["codex"]["threads"].as_array().unwrap().iter()
+            .find(|row| row["thread_id"] == metadata_id).unwrap();
+        assert_eq!(row["model"], "mutation-10");
+        assert_eq!(refresh().status, 200);
+        let began = Instant::now();
+        loop {
+            let value = service.get("/api/snapshot?window=all").json();
+            if value["codex"]["read_state"]["source_index_materialized"] == 7
+                && value["codex"]["observed_tool_calls"].as_u64().is_some_and(|count| count < 50_000) { break; }
+            assert!(began.elapsed() < Duration::from_secs(180), "maximum mutation refresh must expose pending fallback");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let stopping = Instant::now();
+        service.stop();
+        eprintln!("native maximum mutation pending stop: elapsed_ms={}",stopping.elapsed().as_secs_f64()*1000.0);
+        return;
+    }
     assert_eq!(refresh().status, 200);
     wait_complete(&service, "rescan", true);
     assert_eq!(refresh().status, 200);

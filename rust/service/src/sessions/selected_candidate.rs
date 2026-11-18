@@ -236,8 +236,8 @@ impl SelectedCandidate {
                         let ids: Vec<_> = state.projection.ordered_calls().into_iter()
                             .filter(|(id, _)| selected.is_some_and(|ids| ids.contains(*id)))
                             .map(|(id, _)| id.clone()).collect();
-                        let mut metadata = Projection::for_id(state.projection.id.clone());
-                        metadata.merge_snapshot(&state.projection, Some(&BTreeSet::new()), &self.inputs.as_ref().ok_or(Failure::State)?.time.cutoffs);
+                        let metadata = state.projection.snapshot_source_metadata(
+                            &self.inputs.as_ref().ok_or(Failure::State)?.time.cutoffs);
                         let errors = if state.projection.id.is_some() {
                             super::Session::projection_error_events(&state.projection, &path, &state.projection.errors).collect()
                         } else { Vec::new() };

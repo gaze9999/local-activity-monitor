@@ -736,3 +736,11 @@ Guard 現直接借用比較相同 topology / progress 欄位, 以同長度的 or
 現將完成的 thread rows 移入原 snapshot 欄位, 避免 json! 重新序列化並複製每筆 Value, 保留欄位順序、四窗來源時點、force replay 與 publication guards
 
 原嚴格驗收本次通過: 停用 71.44 ms / 200、重新啟用 3,774.62 ms / 200, 後續完整 50,000 calls 統計與 detail 恢復、pending stop 均通過, 仍屬單次 Linux debug 觀察, 不宣稱穩定 SLA 或跨平台完成, 原失敗與診斷證據保留於 validation
+
+### 變動來源的 context 保留
+
+最大工作集的十次 metadata 追加驗證發現, pending fallback 可顯示更新後 model, 完整 candidate 卻變回 null, 原因為 active header 先 merge 成中間 metadata 時未保留 context_seen, 第二次 merge 因而略過 model / effort
+
+Candidate 現使用保留 context provenance 的無 call payload 中間投影, 不變更原 single-pass serializer、來源順序、timestamp tie 規則與發布 guards, 有界變動後可完成全部統計並保留最後 mutation-10, 無限持續變動的新鮮度 SLA 仍未驗收
+
+另一次較早 run 在尚未進入新增變動階段的 reenable recovery 收到無 HTTP header 的連線結束, 原測試未保留 child exit receipt, 成因仍未知, 不將本次 context 修正視為解決該問題
