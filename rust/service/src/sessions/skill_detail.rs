@@ -85,22 +85,30 @@ pub(crate) fn render(
         }
     }
     let mut truncated = false;
-    let walker = WalkDir::new(&root)
+    let mut walker = WalkDir::new(&root)
         .max_depth(5)
         .follow_links(false)
-        .into_iter()
-        .filter_entry(|entry| {
-            entry.path() == root
-                || (!entry.file_name().to_string_lossy().starts_with('.')
-                    && !["__pycache__", "node_modules", "venv", "dist", "build"]
-                        .contains(&entry.file_name().to_string_lossy().as_ref()))
-        });
-    for (visited, entry) in walker.enumerate() {
-        if visited >= 1000 || files.len() >= 200 {
+        .into_iter();
+    let mut visited = 0;
+    while let Some(entry) = walker.next() {
+        if entry.as_ref().is_ok_and(|entry| entry.depth() == 0) {
+            continue;
+        }
+        visited += 1;
+        if visited > 1000 || files.len() >= 200 {
             truncated = true;
             break;
         }
         let Ok(entry) = entry else { continue };
+        if entry.file_name().to_string_lossy().starts_with('.')
+            || ["__pycache__", "node_modules", "venv", "dist", "build"]
+                .contains(&entry.file_name().to_string_lossy().as_ref())
+        {
+            if entry.file_type().is_dir() {
+                walker.skip_current_dir();
+            }
+            continue;
+        }
         if entry.depth() == 5 && entry.file_type().is_dir() {
             truncated = true;
         }
@@ -170,6 +178,50 @@ pub(crate) fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inventory_visit_budget_counts_hidden_entries() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let path = root.join("SKILL.md");
+        fs::write(&path, "primary fixture").unwrap();
+        let candidate = lam_session_core::SkillRead {
+            name: "fixture".into(), path: path.to_string_lossy().into_owned(), workdir: None,
+        };
+        for index in 0..999 {
+            fs::write(root.join(format!(".hidden-{index:04}")), "excluded fixture").unwrap();
+        }
+        for truncated in [false, true] {
+            if truncated {
+                fs::write(root.join(".hidden-extra"), "excluded fixture").unwrap();
+            }
+            let detail = render("fixture", &candidate, None).unwrap();
+            assert_eq!(detail["files_truncated"], truncated);
+            assert_eq!(detail["files"].as_array().unwrap().len(), 1);
+            assert_eq!(detail["documents"].as_array().unwrap().len(), 1);
+            assert_eq!(detail["documents"][0]["text"], "primary fixture");
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 1000 + usize::from(truncated));
+        }
+    }
+
+    #[test]
+    fn inventory_skips_excluded_directory_contents() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let path = root.join("SKILL.md");
+        fs::write(&path, "primary fixture").unwrap();
+        let candidate = lam_session_core::SkillRead {
+            name: "fixture".into(), path: path.to_string_lossy().into_owned(), workdir: None,
+        };
+        for directory in [".hidden", "__pycache__", "node_modules", "venv", "dist", "build"] {
+            fs::create_dir(root.join(directory)).unwrap();
+            fs::write(root.join(directory).join("guide.md"), "excluded fixture").unwrap();
+            let detail = render("fixture", &candidate, Some(&format!("{directory}/guide.md"))).unwrap();
+            assert_eq!(detail["files"].as_array().unwrap().len(), 1);
+            assert_eq!(detail["files_truncated"], false);
+            assert!(detail["documents"].as_array().unwrap().is_empty());
+        }
+    }
 
     #[test]
     fn capped_inventory_retains_primary_documents() {

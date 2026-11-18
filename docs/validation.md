@@ -2348,3 +2348,16 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, `sessions::skill_detail::tests` 通過 5 
 - Node 已可用, Node preview 測試未因缺少執行檔而提早返回, 使用合成 module loader, 不宣稱驗證真實 js-yaml 套件
 
 Linux / Rust 1.100.0 / 原 Cargo.lock, 無新增 production 或 fixture 變更, git diff --check 通過, 未執行瀏覽器、跨平台或 production candidate 最終發布驗收
+
+### Skill inventory 的隱藏項目掃描預算
+
+基準 `7c3920c`, 對齊 Python `CodexCollector.skill_detail` 先計數再篩選的 1000-entry 預算, 不將根目錄本身算作子項目
+
+- 新邊界 fixture 先重現 Rust 在 1001 個項目含 1000 個隱藏檔時仍回傳 files_truncated=false, 原因是 filter_entry 在計數前排除隱藏項目
+- 改為逐項計數後排除, 1000 個項目不截斷, 1001 個項目標示截斷, 預先保留的 SKILL.md 仍可讀取, Python 實際 collector 的相同兩組合成資料均通過
+- 保留隱藏目錄與 __pycache__ / node_modules / venv / dist / build 的子樹排除, 新回歸確認清單與精確選取都不讀取其文件, 原 200-file 與深度上限不變
+- GET /api/codex/skill 的 skill / thread_id / call_id / file、來源與查詢次數不變, 僅影響本機目錄遍歷預算與 files_truncated, 不新增 API 或外部讀取
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, `sessions::skill_detail::tests` 通過 7 項、439 項未選取, 1.70 秒, 既有 `skill_document_details_require_observed_source_and_filter_sensitive_files` HTTP fixture 通過 1 項、228 項未選取, 0.48 秒, 維持 8 個既有 warnings, git diff --check 通過
+
+首次測試呼叫因 shell 找不到 cargo 未執行, 使用已恢復的既有工具鏈後完成上述檢查, 未安裝工具, HTTP 使用既有來源限制與遮蔽案例, 新 1000-entry 邊界直接測試 render, 未驗證競態、其他平台或整體耗時上限, 原停止候選未變
