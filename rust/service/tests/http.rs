@@ -12254,3 +12254,105 @@ fn desktop_diagnostic_retries_failed_storage_on_source_update() {
     );
     service.stop();
 }
+
+#[test]
+#[ignore = "capacity acceptance: 5020 physical sources and 20 MiB aggregate checkpoints"]
+fn native_candidate_overflow_rescan_and_http_latency() {
+    let home = tempdir().unwrap();
+    let root = home.path().join("sessions");
+    fs::create_dir(&root).unwrap();
+    let stamp = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).to_rfc3339();
+    let paths: Vec<_> = (1..=20).map(|n| {
+        let id = format!("00000000-0000-4000-8000-{n:012}");
+        let path = root.join(format!("rollout-{id}.jsonl"));
+        let contents = event(&stamp, "session_meta", json!({"id":id}))
+            + &event(&stamp, "response_item", json!({"type":"function_call","name":"fixture_tool","call_id":format!("call{n:02}"),"arguments":"{}"}));
+        fs::write(&path, contents).unwrap();
+        fs::File::options().write(true).open(&path).unwrap().set_times(
+            fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000))).unwrap();
+        path
+    }).collect();
+    let mut warm = Service::start(home.path(), true, None);
+    snapshot_when(&warm, |value| value["codex"]["observed_tool_calls"] == 20);
+    warm.stop();
+    drop(warm);
+    let mut store = Store::open(&home.path().join("monitoring"), Access::ReadWrite).unwrap().unwrap();
+    let mut payload_bytes = 0usize;
+    for path in &paths {
+        let mut checkpoint = store.checkpoint(&checkpoint_key(path), 100).unwrap().unwrap();
+        assert_eq!(checkpoint.calls.len(), 1);
+        checkpoint.calls[0].payload.push_str(&" ".repeat(1024 * 1024));
+        payload_bytes += checkpoint.calls[0].payload.len();
+        store.save_checkpoints(&[checkpoint.cursor], &checkpoint.calls, &[]).unwrap();
+    }
+    assert!(payload_bytes > 16 * 1024 * 1024);
+    drop(store);
+    for n in 21..=5020 {
+        let id = format!("00000000-0000-4000-8000-{n:012}");
+        fs::write(root.join(format!("rollout-{id}.jsonl")), event(&stamp, "session_meta", json!({"id":id}))).unwrap();
+    }
+    let mut service = Service::start(home.path(), true, None);
+    let mut maximum_get_ms = 0.0f64;
+    let mut wait_complete = |label: &str| {
+        let began = Instant::now();
+        let mut saw_incomplete = false;
+        let mut last_report = Instant::now();
+        loop {
+            let request = Instant::now();
+            let reply = service.get("/api/snapshot?window=all");
+            maximum_get_ms = maximum_get_ms.max(request.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(reply.status, 200);
+            let value = reply.json();
+            let state = &value["codex"]["read_state"];
+            saw_incomplete |= state["source_index_materialized"] == 20 && value["codex"]["observed_tool_calls"].as_u64().is_some_and(|count| count < 20);
+            if value["codex"]["observed_tool_calls"] == 20 && state["source_index_materialized"] == 20
+                && state["outside_working_set"] == 20 && state["overflow_snapshot_sources"] == 20
+                && state["overflow_snapshot_incomplete"] == true && saw_incomplete {
+                eprintln!("native candidate {label}: elapsed_ms={} max_get_ms={} payload_bytes={} response_bytes={}",
+                    began.elapsed().as_secs_f64()*1000.0, maximum_get_ms, payload_bytes, reply.body.len());
+                return;
+            }
+            if last_report.elapsed() >= Duration::from_secs(10) {
+                eprintln!("native candidate {label} pending: elapsed_s={} calls={} state={state}", began.elapsed().as_secs(), value["codex"]["observed_tool_calls"]);
+                last_report = Instant::now();
+            }
+            assert!(began.elapsed() < Duration::from_secs(180), "native candidate {label} did not complete: calls={} state={state}", value["codex"]["observed_tool_calls"]);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    wait_complete("initial");
+    let body = "{}";
+    let refreshed = service.request_body(&format!("POST /api/refresh HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), body);
+    assert_eq!(refreshed.status, 200);
+    wait_complete("unchanged_rescan");
+    fn refresh_to_pending(service: &Service) {
+        let body = "{}";
+        assert_eq!(service.request_body(&format!("POST /api/refresh HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()), body).status, 200);
+        let began = Instant::now();
+        loop {
+            let value = service.get("/api/snapshot?window=all").json();
+            if value["codex"]["read_state"]["source_index_materialized"] == 20
+                && value["codex"]["observed_tool_calls"].as_u64().is_some_and(|count| count < 20) { return; }
+            assert!(began.elapsed() < Duration::from_secs(180), "refresh must expose original fallback before candidate completion");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    refresh_to_pending(&service);
+    for enabled in [false, true] {
+        let body = json!({"observations":{"codex":enabled}}).to_string();
+        let began = Instant::now();
+        let response = service.request_body(&format!("POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",service.port,body.len()),&body);
+        eprintln!("native candidate setting enabled={enabled}: elapsed_ms={} status={}", began.elapsed().as_secs_f64()*1000.0, response.status);
+        assert_eq!(response.status,200);
+        if !enabled {
+            let value = service.get("/api/snapshot?window=all").json();
+            assert_eq!(value["codex"]["health"], "disabled");
+            assert!(value["codex"].get("observed_tool_calls").is_none());
+        }
+    }
+    wait_complete("reenabled");
+    refresh_to_pending(&service);
+    let stopping = Instant::now();
+    service.stop();
+    eprintln!("native candidate pending stop: elapsed_ms={}", stopping.elapsed().as_secs_f64()*1000.0);
+}

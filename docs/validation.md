@@ -2516,3 +2516,37 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, capacity / controls 通過 1 項、451 �
 容量測試觀察程序 RSS 53,182,464 → 54,071,296 bytes、peak 61,923,328 bytes, 包含 fixture、baseline 與 allocator retained memory, 不是 reducer 獨立量測或記憶體保證, checkpoint whitespace 為合成容量案例, 不是實際大檔解析 / detail body 驗收
 
 尚未驗證 native worker 超過 5,000 實體來源的完整 admission / 持續重掃、該負載下 HTTP / 停用延遲、最大 50,000 selected calls、高 nested cardinality、跨平台與原 deferred 項目, 本輪未重跑未受改動的八情境完整 finalizer 或完整套件
+
+### Native 大來源候選排程與 HTTP 回應
+
+基準 `ca1e915`, 新增 opt-in `native_candidate_overflow_rescan_and_http_latency`, 真實本機服務使用隔離的 5,020 個合成 JSONL 來源, 5,000 個 metadata-only working sources 搭配 20 個合法 call 來源, 每個 checkpoint payload 加約 1 MiB JSON whitespace, 合計 20,976,180 bytes, 不使用使用者裝置或真實資料
+
+原 worker 每個 16 筆候選步驟都重做完整 collection, 大來源案例在 180 秒內仍只顯示 fallback 15 calls, 診斷確認候選有前進, 但 headers 尚未完成便受到正常 refresh 重建, 不是以略過 guard 解決
+
+修正為 collection 沒有其他待辦時直接驅動有界候選步驟, 每步之間檢查 wake channel、停止 / 停用與下一個 future deadline, 收到 wake 即回原 collection, 共用原 publication / fallback 邏輯, 所有 input / source guards 不變
+
+保留的先前失敗:
+
+- 初始 fixture 使用未啟用的 chrono clock API, 編譯失敗後改成既有 SystemTime 轉換, 不調整相依套件
+- 單一 20 MiB checkpoint 在 180.68 秒未完成, Store::checkpoint 的既有單來源 16 MiB restore 上限使 materialized=0, load_health=unavailable、write_health=conflict, 改以 20 個各自低於上限的來源測試 aggregate staging, 未解除單來源限制
+- Aggregate 初次 181.14 秒未完成, source_index_materialized=20 / unverified=0 但只顯示 15 calls, 同時發現 fixture 錯誤要求 overflow_snapshot_incomplete=false, 原 finalizer 對任何 overflow 都保留 true, 改為保留此原預期並獨立要求全部 20 calls
+- 修正旗標後的診斷仍在 180.91 秒未完成, trace 顯示每個全 collection 只前進 16 headers 及週期性重建, 失敗 log / patch 與暫時 instrumentation 留在隔離證據, 未加入 production
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 修正後 opt-in HTTP 通過 1 項、229 項未選取, 共 200.52 秒, 各次等待仍保留 180 秒上限, 每次 HTTP 與停止仍保留原 5 秒上限
+
+| 實際操作 | 觀察結果 |
+| --- | --- |
+| 初次 native admission / publication | 62.42 秒, 從 fallback 15 calls 到完整 20 calls, 20 materialized / 0 unverified, 保留 overflow incomplete=true |
+| 未修改來源的手動 rescan | 53.49 秒重新發布全部 20 calls, 未因 generation 重掃永久失效 |
+| Pending 時停用 Codex | POST 200, 73.32 ms, GET health=disabled 且不暴露 observed_tool_calls |
+| 重新啟用 Codex | POST 200, 4,777.81 ms, 之後 69.57 秒恢復全部 20 calls |
+| Pending 時關閉服務 stdin | 76.46 ms 內成功退出 |
+| 候選期間 HTTP GET | 最大觀察 549.24 ms, 完整回應約 3.97 MB |
+
+重新啟用 POST 已接近原 5 秒界線, 本次通過不代表有充足效能餘裕, 未設定新的 SLA 或放寬逾時, 整體完成仍需數十秒, 此證據是上述 Linux 合成負載的一次量測, 不是跨平台保證或 RSS 上限
+
+單來源超過 16 MiB restore 的既有 unavailable / conflict 路徑仍未修復, aggregate candidate 不等於已解決它, 50,000 selected calls、高 nested cardinality、真實大 payload 與跨平台驗收保留, 未重跑原 deferred 檢查
+
+同一修正的回歸: driver 容量 / controls 3.31 秒、native 同批 detail index / 舊 index 0.12 秒、完整 error order / publication 0.59 秒各通過 1 項、451 項未選取, HTTP usage 停用 / 重新啟用 0.16 秒與 stdin pause / resume / stop 4.34 秒各通過 1 項、229 項未選取, 維持 5 個既有 warnings, git diff --check 通過
+
+未新增 HTTP endpoint 或外部資料來源, `/api/snapshot?window=all`、`/api/refresh`、`/api/settings` 沿用既有欄位與設定來源, 本輪變更內部候選排程而非新增外部查詢, 高來源測試為 ignored opt-in, 不把未執行的完整套件列為通過

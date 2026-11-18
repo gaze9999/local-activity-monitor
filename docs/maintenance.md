@@ -652,3 +652,13 @@ Rust `main.rs` 的 font / GPU worker 各自先發布自己的結果, 再標記 D
 20,976,060 bytes 合成 checkpoint 已通過 9 輪完成、精確邊界、超限拒絕、pending / stop / disable 與同批 index 驗證, native 小型 worker 與 HTTP usage 回歸通過, 詳見 validation 對應節
 
 下一個驗收重點是 native worker 超過 5,000 實體來源後的 admission / 不變重掃完成、前景 HTTP 與停用延遲、50,000 selected calls 及 nested cardinality 容量, 目前合成 driver 量測不能取代這些驗收, 原 deferred 與失敗證據保留
+
+### Native 大來源候選排程驗收
+
+基準 `ca1e915` 的每頁候選會重跑完整 collection, 5,020 實體來源下 headers 尚未完成就因正常 refresh 重建, 180 秒仍停在 fallback 15 / 20 calls
+
+已改為其他 collection 工作完成時直接推進有界候選步驟, 步驟間檢查 wake、停止 / 停用與 future deadline, 有新工作立即回原 collection, 不略過任何來源 / input guard 或改變 fallback
+
+隔離 native HTTP 案例現可完成初次發布、未變更 rescan、pending 停用 / 重新啟用及 pending 停止, 20 個各約 1 MiB checkpoint 與 5,000 個 working metadata sources, 具體延遲與保留失敗見 validation 對應節
+
+原 incomplete=true 的 overflow 語意保持, 重新啟用 POST 本次 4.78 秒已接近原 5 秒限制, 仍需效能餘裕驗證, 單來源超過 16 MiB restore 的 unavailable / conflict 路徑、50,000 selected calls、高 nested cardinality 與跨平台仍未驗收

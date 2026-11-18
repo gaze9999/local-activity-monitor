@@ -668,7 +668,7 @@ impl Monitor {
                 let mut cloud_version = collector.cloud.version();
                 let mut public_versions = collector.public.each_ref().map(|source| source.version());
                 let mut platform_versions = collector.platform.each_ref().map(|source| source.version());
-                while !stop.load(Ordering::Acquire) && codex_control.load(Ordering::Acquire) {
+                'collection: while !stop.load(Ordering::Acquire) && codex_control.load(Ordering::Acquire) {
                     let jev_changed = jev_dirty.swap(false, Ordering::AcqRel);
                     let requested = manual_refresh.swap(false, Ordering::AcqRel);
                     let next_account_version = collector.account.version();
@@ -1171,23 +1171,26 @@ impl Monitor {
                         publish.send_replace(next);
                         snapshot_candidate = selected_candidate::WorkerCandidate::start(&collector, &stop);
                     }
-                    if let Some(candidate) = snapshot_candidate.take() {
-                        collector.set_phase("projections");
-                        match candidate.advance(&collector, health, watch_health, version + 1,
-                            codex_control.load(Ordering::Acquire), &stop, &publish) {
-                            Ok(selected_candidate::WorkerAdvance::Pending(next)) => snapshot_candidate = Some(next),
-                            Ok(selected_candidate::WorkerAdvance::Published) => {
-                                version += 1;
-                                collector.published_detail_index = Arc::clone(&publish.borrow().detail_index);
-                            }
-                            Err(_) if !stop.load(Ordering::Acquire) && codex_control.load(Ordering::Acquire) => {
-                                // Keep the existing incomplete/failure fallback. Do
-                                // not restart the same failed batch without new work.
-                                version += 1;
-                                publish.send_replace(collector.snapshots(health, watch_health, version));
-                            }
-                            Err(_) => {}
+                    advance_snapshot_candidate(&mut collector, &mut snapshot_candidate, health,
+                        watch_health, &mut version, &codex_control, &stop, &publish);
+                    // When collection is quiescent, do not rescan every active
+                    // file for every bounded candidate page. A wake or future
+                    // deadline returns to the normal collection path; every
+                    // step still validates controls and retained input guards.
+                    while snapshot_candidate.is_some()
+                        && !rescan_ready && !pending && !collector.recent_call_refresh_pending()
+                        && !collector.worktrees.pending() && !collector.core.backfill()
+                        && (!desktop_pending || desktop_retry)
+                        && !stop.load(Ordering::Acquire) && codex_control.load(Ordering::Acquire)
+                    {
+                        match signal.try_recv() {
+                            Ok(()) => break,
+                            Err(mpsc::TryRecvError::Disconnected) => break 'collection,
+                            Err(mpsc::TryRecvError::Empty) => {}
                         }
+                        if next_future.is_some_and(|due| due <= now()) { break; }
+                        advance_snapshot_candidate(&mut collector, &mut snapshot_candidate, health,
+                            watch_health, &mut version, &codex_control, &stop, &publish);
                     }
                     collector.set_phase("idle");
                     if snapshot_candidate.is_none()
@@ -1242,6 +1245,36 @@ impl Monitor {
             snapshots,
         ))
     }
+}
+
+fn advance_snapshot_candidate(
+    collector: &mut Collector,
+    candidate: &mut Option<selected_candidate::WorkerCandidate>,
+    health: &str,
+    watch_health: &str,
+    version: &mut u64,
+    enabled: &AtomicBool,
+    stopped: &AtomicBool,
+    publish: &watch::Sender<Snapshots>,
+) {
+    let Some(current) = candidate.take() else { return; };
+    collector.set_phase("projections");
+    match current.advance(collector, health, watch_health, *version + 1,
+        enabled.load(Ordering::Acquire), stopped, publish) {
+        Ok(selected_candidate::WorkerAdvance::Pending(next)) => *candidate = Some(next),
+        Ok(selected_candidate::WorkerAdvance::Published) => {
+            *version += 1;
+            collector.published_detail_index = Arc::clone(&publish.borrow().detail_index);
+        }
+        Err(_) if !stopped.load(Ordering::Acquire) && enabled.load(Ordering::Acquire) => {
+            // Keep the existing incomplete/failure fallback. Do not restart
+            // the same failed batch without new collection work.
+            *version += 1;
+            publish.send_replace(collector.snapshots(health, watch_health, *version));
+        }
+        Err(_) => {}
+    }
+    collector.set_phase("idle");
 }
 
 #[cfg(test)]
