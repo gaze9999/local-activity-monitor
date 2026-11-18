@@ -642,3 +642,13 @@ Rust `main.rs` 的 font / GPU worker 各自先發布自己的結果, 再標記 D
 測試限定 candidate 已以跨頁累計已觀察 call 數補回單來源的絕對序號, 必須在未來 winner 篩選前處理, 不能使用留下的預覽數或時間窗內 call 數作為位移
 
 目前 production 的 overflow 沒有完整全域來源順序, 仍沿 canonical fallback, 本結果不是現行所有快照都排序錯誤的證據, 也尚未解決跨來源 replacement 保留首次插入 slot、metadata-only 來源與 live / restore 順序差異, 未將此測試修正套入 production
+
+### Worker candidate 串接進度
+
+在 `5e9d1ad` 完整 finalizer / publication guard 之後, worker 已加入跨輪 Sources / Reducing / Publishing 驅動, 保留原 incomplete fallback, Pending 不發布部分資料且不自行更新 history reference, 真正輸入變更仍取消舊候選
+
+保守 admission 為明確設計決定: statistics 使用 CALL_LIMIT × 3 邏輯單位與既有 16 MiB key-byte budget, 超限整批 fallback, 不提高原 detail budget、不截斷 statistics, 不宣稱 RSS 上限
+
+20,976,060 bytes 合成 checkpoint 已通過 9 輪完成、精確邊界、超限拒絕、pending / stop / disable 與同批 index 驗證, native 小型 worker 與 HTTP usage 回歸通過, 詳見 validation 對應節
+
+下一個驗收重點是 native worker 超過 5,000 實體來源後的 admission / 不變重掃完成、前景 HTTP 與停用延遲、50,000 selected calls 及 nested cardinality 容量, 目前合成 driver 量測不能取代這些驗收, 原 deferred 與失敗證據保留

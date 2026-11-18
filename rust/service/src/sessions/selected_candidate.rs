@@ -1,6 +1,6 @@
-//! Selected active/checkpoint candidate orchestration. The production worker does not call
-//! this path. Checkpoint source order must already be verified by its caller;
-//! Final snapshot augmentation remains a separate gate.
+//! Selected active/checkpoint candidate orchestration. Checkpoint source order
+//! must already be verified by its caller. Full snapshot assembly stays private
+//! until publication guards pass.
 use super::{candidate_inputs::SelectedInputs, checkpoint, commands, details, mcp, project, sqlite,
     CallSelection, Collector, Projection, SnapshotTime, CALL_LIMIT, WALK_LIMIT};
 use serde_json::{json, Value};
@@ -568,6 +568,97 @@ impl SelectedCandidate {
         Ok(CompletedCandidate { files,series,statistics,commands,skills,rows,observations,failures,session_errors,allowance:self.allowance.take(),detail_index,
             metadata,overflow_sources:self.sources.len(),overflow_details_pending,time,inputs:None,physical:BTreeMap::new(),
             #[cfg(test)] read_work:self.read_work })
+    }
+}
+
+// Worker admission keeps exact output or falls back; these logical budgets
+// are not allocator/RSS bounds. Three units per selected primary call cover
+// group, distinct-thread entry and duration; nested excess is rejected whole.
+const WORKER_STATISTICS_UNITS: usize = CALL_LIMIT * 3;
+const WORKER_STATISTICS_KEY_BYTES: usize = details::STAGING_LIMIT;
+
+enum WorkerPhase {
+    Sources { after: String, sources: Vec<Source> },
+    Reducing(SelectedCandidate),
+    Publishing(PendingPublication),
+}
+
+pub(super) struct WorkerCandidate {
+    selection: CallSelection,
+    opening: Option<SelectedInputs>,
+    phase: WorkerPhase,
+    statistics_units: usize,
+    statistics_key_bytes: usize,
+}
+
+pub(super) enum WorkerAdvance { Pending(WorkerCandidate), Published }
+
+impl WorkerCandidate {
+    pub(super) fn start(collector: &Collector, stopped: &AtomicBool) -> Option<Self> {
+        let membership = collector.source_membership.as_ref()?;
+        if !collector.source_membership_complete || !collector.overflow_files.is_empty()
+            || membership.materialized_count().ok()? == 0 { return None; }
+        let selection = collector.select_recent_calls(CALL_LIMIT, 100_000)?;
+        let opening = SelectedInputs::capture(collector, &selection, collector.capture_snapshot_time(), true, stopped)?;
+        Some(Self { selection, opening:Some(opening), phase:WorkerPhase::Sources {after:String::new(),sources:Vec::new()},
+            statistics_units:WORKER_STATISTICS_UNITS,statistics_key_bytes:WORKER_STATISTICS_KEY_BYTES })
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_statistics_limits(mut self, units: usize, key_bytes: usize) -> Self {
+        self.statistics_units = units; self.statistics_key_bytes = key_bytes; self
+    }
+
+    pub(super) fn advance(mut self, collector: &Collector, health: &str, watch_health: &str,
+        version: u64, enabled: bool, stopped: &AtomicBool, sender: &tokio::sync::watch::Sender<super::Snapshots>)
+        -> Result<WorkerAdvance, Failure>
+    {
+        SelectedCandidate::controls(enabled, stopped)?;
+        self.phase = match self.phase {
+            WorkerPhase::Sources { mut after, mut sources } => {
+                self.opening = Some(self.opening.take().ok_or(Failure::State)?
+                    .validate(collector, &self.selection, enabled, stopped).ok_or(Failure::InputsRejected)?);
+                let page = collector.source_membership.as_ref().ok_or(Failure::InputsRejected)?
+                    .materialized_page(&after, 64).map_err(|_| Failure::CheckpointRead)?;
+                let complete = page.len() < 64;
+                for (key, signature) in page {
+                    if sources.len() >= WALK_LIMIT { return Err(Failure::InputsRejected); }
+                    after = key.clone(); sources.push(Source {key,signature});
+                }
+                if complete {
+                    let candidate = SelectedCandidate::new(collector, &self.selection, collector.capture_snapshot_time(),
+                        sources, collector.has_complete_source_order(), self.statistics_units, self.statistics_key_bytes, enabled, stopped)
+                        .ok_or(Failure::InputsRejected)?;
+                    self.opening = None;
+                    WorkerPhase::Reducing(candidate)
+                } else { WorkerPhase::Sources {after,sources} }
+            }
+            WorkerPhase::Reducing(candidate) => {
+                // Never combine several nonempty payload pages in one worker
+                // round. Empty sources/header/guard work can use the existing 16.
+                let budget = if matches!(candidate.phase, Phase::Payload) {
+                    let root = collector.session_root.as_deref().ok_or(Failure::InputsRejected)?;
+                    let total = candidate.active.len() + candidate.sources.len();
+                    let nonempty = (candidate.next..total.min(candidate.next + 16)).any(|offset| {
+                        let index = total - offset - 1;
+                        let key = if index < candidate.active.len() { checkpoint::key(root, &candidate.active[index]) }
+                            else { Some(candidate.sources[index - candidate.active.len()].key.clone()) };
+                        key.as_ref().and_then(|key| self.selection.calls.get(key)).is_some_and(|ids| !ids.is_empty())
+                    });
+                    if nonempty { 1 } else { 16 }
+                } else { 16 };
+                match candidate.advance(collector, &self.selection, enabled, stopped, budget)? {
+                    Advance::Pending(next) => WorkerPhase::Reducing(next),
+                    Advance::Complete(mut result) => WorkerPhase::Publishing(result.prepare_publication(collector,
+                        &self.selection, health, watch_health, version, stopped)?),
+                }
+            }
+            WorkerPhase::Publishing(publication) => match publication.advance(collector, &self.selection, enabled, stopped, 16, sender)? {
+                PublicationAdvance::Pending(next) => WorkerPhase::Publishing(next),
+                PublicationAdvance::Published => return Ok(WorkerAdvance::Published),
+            },
+        };
+        Ok(WorkerAdvance::Pending(self))
     }
 }
 

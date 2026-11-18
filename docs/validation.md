@@ -2500,3 +2500,19 @@ CompletedCandidate 現在擁有摘要與對應 detail index, 並在來源 / inpu
 Linux / Rust 1.100.0 / 原 Cargo.lock, 最終 active-only guard / publication 0.56 秒、mixed 八情境 148.09 秒、無 ID 完整 finalizer 0.10 秒各通過 1 項、450 項未選取, 原 worker 共同發布 / 舊 index 保留回歸通過 0.11 秒, HTTP usage 停用 / 重新啟用回歸通過 0.19 秒、228 項未選取, git diff --check 通過
 
 建置回報 8 個 warnings, 包含尚未由 production worker 呼叫的 PublicationAdvance, 測試中的 publication 使用真實 watch channel, 但 production worker 尚未驅動 candidate / publication state machine, 既有 fallback 未改, 完整套件、實際容量 / RSS、跨平台與既有 deferred 檢查未因此結案, 來源檢查仍是順序驗證而非跨檔案原子快照
+
+### Worker 跨輪 candidate 與保守容量 admission
+
+基準 `5e9d1ad`, worker 在原 history / detail / fallback 發布後建立候選工作, 來源登記每輪 64 筆、header / guard 每輪 16 筆, 非空 payload 每輪最多一次 advance, Pending 單獨推進時不重新 refresh history, 避免自行使候選失效, 真正 collection 變更仍丟棄舊候選
+
+- 沿用原 incomplete fallback, pending 不發布部分結果, 成功以同批 Snapshots / index 替換, 容量或其他 guard 失敗回到原 snapshots, 未有新工作前不重啟同一失敗批次
+- 設計決定: statistics 採 CALL_LIMIT × 3 邏輯單位及既有 16 MiB key-byte admission, nested 等額外負擔超限時拒絕整批, 不截斷精確統計, 此預算不是 RSS 上限
+- 合成 checkpoint 的 20 筆合法 JSON payload 加 trailing whitespace, 合計 20,976,060 bytes, 原 16 MiB staging 拒絕, 新 driver 在 9 輪完整發布 20 calls / statistics / detail positions, 四窗共 65,002 bytes
+- 預設 admission 247.04 ms、最長單輪 172.81 ms, 精確 2 units / 48 key bytes 邊界 237.87 ms、最長單輪 163.32 ms, 1 unit 或 47 bytes 均拒絕且舊 watch / window 不變, 明確 fallback 後仍標示 incomplete
+- Pending 後停用或停止均拒絕發布, 重設控制後新候選可完成, 每一 Pending 均檢查舊版本與 window 不變
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, capacity / controls 通過 1 項、451 項未選取, 3.12 秒, 原 native worker 同批 index / 舊 index 回歸 0.49 秒、完整 error order / publication 0.56 秒、無 ID 0.10 秒, HTTP usage 停用 / 重新啟用 0.18 秒, 建置剩 5 個既有 warnings
+
+容量測試觀察程序 RSS 53,182,464 → 54,071,296 bytes、peak 61,923,328 bytes, 包含 fixture、baseline 與 allocator retained memory, 不是 reducer 獨立量測或記憶體保證, checkpoint whitespace 為合成容量案例, 不是實際大檔解析 / detail body 驗收
+
+尚未驗證 native worker 超過 5,000 實體來源的完整 admission / 持續重掃、該負載下 HTTP / 停用延遲、最大 50,000 selected calls、高 nested cardinality、跨平台與原 deferred 項目, 本輪未重跑未受改動的八情境完整 finalizer 或完整套件

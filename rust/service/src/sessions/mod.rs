@@ -663,6 +663,7 @@ impl Monitor {
                 let global_state = home.join(".codex-global-state.json");
                 let mut global_identity = None;
                 let mut previous = initial;
+                let mut snapshot_candidate: Option<selected_candidate::WorkerCandidate> = None;
                 let mut account_version = collector.account.version();
                 let mut cloud_version = collector.cloud.version();
                 let mut public_versions = collector.public.each_ref().map(|source| source.version());
@@ -1110,6 +1111,9 @@ impl Monitor {
                         || previous_checkpoint != collector.checkpoints.report
                         || requested
                     {
+                        // Changed collection inputs invalidate any unpublished batch.
+                        // Pending-only rounds below do not refresh history or reset it.
+                        drop(snapshot_candidate.take());
                         previous = (health, watch_health);
                         let reference = now();
                         collector.set_phase("history");
@@ -1165,9 +1169,29 @@ impl Monitor {
                         let next = collector.snapshots(health, watch_health, version);
                         collector.set_phase("idle");
                         publish.send_replace(next);
+                        snapshot_candidate = selected_candidate::WorkerCandidate::start(&collector, &stop);
+                    }
+                    if let Some(candidate) = snapshot_candidate.take() {
+                        collector.set_phase("projections");
+                        match candidate.advance(&collector, health, watch_health, version + 1,
+                            codex_control.load(Ordering::Acquire), &stop, &publish) {
+                            Ok(selected_candidate::WorkerAdvance::Pending(next)) => snapshot_candidate = Some(next),
+                            Ok(selected_candidate::WorkerAdvance::Published) => {
+                                version += 1;
+                                collector.published_detail_index = Arc::clone(&publish.borrow().detail_index);
+                            }
+                            Err(_) if !stop.load(Ordering::Acquire) && codex_control.load(Ordering::Acquire) => {
+                                // Keep the existing incomplete/failure fallback. Do
+                                // not restart the same failed batch without new work.
+                                version += 1;
+                                publish.send_replace(collector.snapshots(health, watch_health, version));
+                            }
+                            Err(_) => {}
+                        }
                     }
                     collector.set_phase("idle");
-                    if !rescan_ready
+                    if snapshot_candidate.is_none()
+                        && !rescan_ready
                         && !pending
                         && !collector.recent_call_refresh_pending()
                         && !collector.worktrees.pending()
@@ -5913,6 +5937,125 @@ mod log_tests {
         assert_eq!(restored.calls.iter().map(|call| call.call_id.as_str()).collect::<Vec<_>>(), ["a", "z"]);
         let payloads: Vec<Value> = restored.calls.iter().map(|call| serde_json::from_str(&call.payload).unwrap()).collect();
         assert!(payloads[0]["sequence"].as_u64().unwrap() > payloads[1]["sequence"].as_u64().unwrap());
+    }
+
+    #[test]
+    fn worker_candidate_pages_beyond_staging_and_rejects_statistics_budget() {
+        use selected_candidate::{WorkerAdvance, WorkerCandidate};
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        let path = root.join(format!("rollout-{id}.jsonl"));
+        let record = json!({"timestamp":"2026-11-18T01:00:00Z","type":"response_item","payload":{"type":"function_call","name":"fixture_tool","call_id":"call","arguments":"{}"}});
+        std::fs::write(&path, record.to_string() + "\n").unwrap();
+        let mut collector = Collector::new(root.join("monitoring"), true, None);
+        let stopped = AtomicBool::new(false);
+        for _ in 0..4 { collector.refresh(&root, &stopped, true, true, CommandSwitches::default()); }
+        let key = checkpoint::key(&root, &path).unwrap();
+        let mut store = lam_history_store::Store::open(&root.join("monitoring"), lam_history_store::Access::ReadWrite).unwrap().unwrap();
+        let original = store.checkpoint(&key, 10).unwrap().unwrap();
+        let calls: Vec<_> = (0..20).map(|n| {
+            let mut call = original.calls[0].clone();
+            call.call_id = format!("call{n:02}");
+            call.payload.push_str(&" ".repeat(1024 * 1024));
+            call
+        }).collect();
+        let payload_bytes: usize = calls.iter().map(|call| call.payload.len()).sum();
+        assert!(payload_bytes > 16 * 1024 * 1024);
+        store.save_checkpoints(std::slice::from_ref(&original.cursor), &calls, &[]).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let fingerprint = source_fingerprint(file_identity(&metadata), metadata.len(), metadata.modified().ok()).unwrap();
+        let mut membership = SourceMembership::new().unwrap();
+        membership.insert(&[MembershipRecord {key:key.clone(),fingerprint:Some(fingerprint.clone())}]).unwrap();
+        membership.mark_verified(&[VerifiedMembership {key:key.clone(),fingerprint,
+            checkpoint_signature:original.cursor.signature.clone(),materialized:true,
+            call_headers:Some(calls.iter().map(|call| lam_history_store::CallHeader {call_id:call.call_id.clone(),event_time:call.event_time.clone()}).collect())}]).unwrap();
+        drop(calls);
+        collector.source_membership = Some(membership);
+        collector.source_membership_complete = true;
+        collector.source_membership_root = Some(file_identity(&std::fs::metadata(&root).unwrap()));
+        collector.discovery = None;
+        collector.discovered_files = Some(1);
+        collector.files.clear();
+        collector.updated = Some(chrono::DateTime::parse_from_rfc3339("2026-11-18T02:00:00Z").unwrap().with_timezone(&Utc));
+        let selection = collector.select_recent_calls(CALL_LIMIT, 100_000).unwrap();
+        assert!(selection.complete);
+        assert_eq!(selection.calls[&key].len(), 20);
+        assert!(collector.selected_overflow_projections(&selection).is_none());
+        let fallback = collector.snapshots("ok", "ok", 9);
+        let fallback_value: Value = serde_json::from_slice(&fallback.windows[3]).unwrap();
+        assert_eq!(fallback_value["codex"]["read_state"]["overflow_snapshot_incomplete"], true);
+        assert!(fallback_value["codex"]["observed_tool_calls"].as_u64().unwrap() < 20);
+        // Each cancellation happens after a real pending round, before any
+        // watch replacement. A fresh driver remains possible after reenable.
+        for (enabled, stopping, expected) in [
+            (false, false, selected_candidate::Failure::Disabled),
+            (true, true, selected_candidate::Failure::Cancelled),
+        ] {
+            let (sender, _receiver) = tokio::sync::watch::channel(collector.snapshots("ok", "ok", 9));
+            let old = sender.borrow().windows[3].clone();
+            let driver = WorkerCandidate::start(&collector, &stopped).unwrap();
+            let WorkerAdvance::Pending(driver) = driver.advance(&collector, "ok", "ok", 10, true, &stopped, &sender).unwrap()
+                else { panic!("source enrollment must remain private"); };
+            stopped.store(stopping, Ordering::Release);
+            let result = driver.advance(&collector, "ok", "ok", 10, enabled, &stopped, &sender);
+            assert!(matches!(result, Err(error) if error == expected));
+            stopped.store(false, Ordering::Release);
+            assert_eq!(sender.borrow().version(), 9);
+            assert_eq!(sender.borrow().windows[3], old);
+        }
+        let key_bytes = id.len() + "fixture_tool".len();
+        for (units, bytes, accepted) in [(CALL_LIMIT * 3, details::STAGING_LIMIT, true), (2, key_bytes, true), (1, key_bytes, false), (2, key_bytes - 1, false)] {
+            let (sender, _receiver) = tokio::sync::watch::channel(collector.snapshots("ok", "ok", 9));
+            let old = sender.borrow().windows[3].clone();
+            let mut driver = WorkerCandidate::start(&collector, &stopped).unwrap().with_statistics_limits(units, bytes);
+            let before = crate::performance_debug::process_metrics();
+            let started = std::time::Instant::now();
+            let mut slowest_ms = 0.0f64;
+            let mut finished = false;
+            for round in 1..=64 {
+                let step = std::time::Instant::now();
+                let outcome = driver.advance(&collector, "ok", "ok", 10, true, &stopped, &sender);
+                slowest_ms = slowest_ms.max(step.elapsed().as_secs_f64() * 1000.0);
+                match outcome {
+                    Ok(WorkerAdvance::Pending(next)) => {
+                        assert_eq!(sender.borrow().version(), 9);
+                        assert_eq!(sender.borrow().windows[3], old);
+                        driver = next;
+                    }
+                    Ok(WorkerAdvance::Published) => {
+                        assert!(accepted);
+                        assert!(round > 1);
+                        let snapshot = sender.borrow();
+                        assert_eq!(snapshot.version(), 10);
+                        let value: Value = serde_json::from_slice(&snapshot.windows[3]).unwrap();
+                        assert_eq!(value["codex"]["observed_tool_calls"], 20);
+                        assert_eq!(value["codex"]["tool_statistics"][0]["calls"], 20);
+                        assert_eq!(snapshot.detail_index.files[id][0].calls.len(), 20);
+                        let after = crate::performance_debug::process_metrics();
+                        eprintln!("worker candidate capacity: {}", json!({"payload_bytes":payload_bytes,"rounds":round,
+                            "elapsed_ms":started.elapsed().as_secs_f64()*1000.0,"max_step_ms":slowest_ms,
+                            "window_bytes":snapshot.windows.iter().map(Bytes::len).sum::<usize>(),"rss_before":before.get("rss_bytes"),
+                            "rss_after":after.get("rss_bytes"),"process_peak_rss":after.get("peak_rss_bytes"),"logical_units":units,"logical_key_bytes":bytes}));
+                        finished = true;
+                        break;
+                    }
+                    Err(error) => {
+                        assert!(!accepted);
+                        assert_eq!(error, selected_candidate::Failure::StatisticsCapacity);
+                        assert_eq!(sender.borrow().version(), 9);
+                        assert_eq!(sender.borrow().windows[3], old);
+                        sender.send_replace(collector.snapshots("ok", "ok", 10));
+                        let value: Value = serde_json::from_slice(&sender.borrow().windows[3]).unwrap();
+                        assert_eq!(value["codex"]["observed_tool_calls"], fallback_value["codex"]["observed_tool_calls"]);
+                        assert_eq!(value["codex"]["read_state"]["overflow_snapshot_incomplete"], true);
+                        finished = true;
+                        break;
+                    }
+                }
+            }
+            assert!(finished);
+        }
     }
 
     #[test]
