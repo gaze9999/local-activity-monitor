@@ -2808,3 +2808,11 @@ HTTP 排除上述兩項及 13 個含 restart 的測試, opt-in 的最大容量 s
 - HTTP helper 在沒有 header 時改輸出收到的 byte 數與可取得的程序狀態, 仍立即失敗, 不輸出 response 本文、不自動重試, 非 Linux 的程序狀態可為 None
 
 完整八組 source-order / 四窗 / detail / mutation oracle 通過 160.32 秒, 原斷言不變, 5 個既有 warnings 保留, git diff --check 通過, 未以本次範圍宣稱完整套件或平台驗收
+
+### 無 HTTP header 失敗的診斷界線
+
+針對前述 reenable recovery 連線結束, 檢查 server 發現非 SSE 的 Hyper connection errors 原未記錄, header / write timeout 皆維持 15 秒, fixture socket timeout 仍為 5 秒
+
+以暫時 connection-error 記錄執行一次原嚴格 native 50,000 calls / 5,007 來源流程, 378.87 秒通過, 停用 96.91 ms / 200、重新啟用 4,540.76 ms / 200, 後續完整統計 / detail 恢復 90.83 秒、最大 GET 1,020.91 ms、pending stop 91.21 ms, 未觀察到 Hyper connection error
+
+這次未重現不是原失敗已解決的證據, 仍缺原始回應 byte 數、child exit 狀態及 connection error, 因此不能將問題歸因為 timeout、OOM 或候選 metadata, 不做猜測性產品修正或連續重試, 暫時診斷程式碼已還原, 原失敗及本次 log / patch 保留
