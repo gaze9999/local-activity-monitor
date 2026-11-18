@@ -5979,8 +5979,32 @@ mod log_tests {
                 checkpoint_signature:second_cursor.signature.clone(),materialized:true,
                 call_headers:Some(second_calls.iter().map(|row| lam_history_store::CallHeader {
                     call_id:row.call_id.clone(),event_time:row.event_time.clone()}).collect())}]).unwrap();
-            collector.discovered_files = Some(2);
             collector.duplicate_session_paths.insert("fixture-second".into(), second_path);
+            // Construct complete context through the production parser, not by
+            // patching model/context_at without the context_seen invariant.
+            let metadata_path = root.join(format!("metadata-rollout-{id}.jsonl"));
+            std::fs::copy(&path, &metadata_path).unwrap();
+            let metadata_key = checkpoint::key(&root, &metadata_path).unwrap();
+            let mut metadata_projection = Projection::for_id(Some(id.to_owned()));
+            let context = json!({"timestamp":"2026-11-13T01:59:00Z","type":"turn_context",
+                "payload":{"model":"metadata-only-model","reasoning_effort":"high"}});
+            assert!(metadata_projection.consume(context.to_string().as_bytes(), 0, true, true,
+                &BTreeMap::new(), McpSwitches::default(), true, true, CommandSwitches::default()));
+            assert!(metadata_projection.calls.is_empty());
+            let mut metadata_cursor = original.cursor.clone();
+            metadata_cursor.source_key = metadata_key.clone();
+            let mut metadata_payload: Value = serde_json::from_str(&metadata_cursor.payload).unwrap();
+            metadata_payload["projection"] = serde_json::to_value(&metadata_projection).unwrap();
+            metadata_cursor.payload = metadata_payload.to_string();
+            store.save_checkpoints(std::slice::from_ref(&metadata_cursor), &[], &[]).unwrap();
+            let metadata = std::fs::metadata(&metadata_path).unwrap();
+            let fingerprint = source_fingerprint(file_identity(&metadata), metadata.len(), metadata.modified().ok()).unwrap();
+            let membership = collector.source_membership.as_mut().unwrap();
+            membership.insert(&[MembershipRecord {key:metadata_key.clone(),fingerprint:Some(fingerprint.clone())}]).unwrap();
+            membership.mark_verified(&[VerifiedMembership {key:metadata_key.clone(),fingerprint,
+                checkpoint_signature:metadata_cursor.signature.clone(),materialized:true,call_headers:Some(Vec::new())}]).unwrap();
+            collector.discovered_files = Some(3);
+            collector.duplicate_session_paths.insert("fixture-metadata".into(), metadata_path);
             let selection = collector.select_recent_calls(1200, 2000).unwrap();
             assert!(selection.complete);
             assert_eq!(selection.calls.values().map(BTreeSet::len).sum::<usize>(), 1200);
@@ -6016,7 +6040,8 @@ mod log_tests {
                 assert!(collector.activity_view.as_ref().unwrap().sql[3].total > 0);
             }
             collector.applied_sqlite_enabled = !active;
-            let sources = [&key, &second_key];
+            let mut sources = [&key, &second_key, &metadata_key];
+            sources.sort(); // Checkpoint ordering uses actual SHA-256 source keys, not filenames.
             if active {
                 let ids: Vec<_> = selection.calls[&key].iter().cloned().collect();
                 let checkpoint = store.selected_checkpoint(&lam_history_store::ExpectedCursor {
@@ -6059,11 +6084,12 @@ mod log_tests {
                     .merge_snapshot(&state.projection, Some(&selection.calls[&key]), &cutoffs);
             }
             for source in sources {
-                let ids: Vec<_> = selection.calls[source].iter().cloned().collect();
+                let ids: Vec<_> = selection.calls.get(source).into_iter().flatten().cloned().collect();
                 let checkpoint = store.selected_checkpoint(&lam_history_store::ExpectedCursor {
                     source_key:source,signature:Some(&original.cursor.signature)}, &ids).unwrap().unwrap();
                 let projection = checkpoint::snapshot_projection(checkpoint, false).unwrap();
-                let source_path = if source == &key { &path } else { &collector.duplicate_session_paths["fixture-second"] };
+                let source_path = if source == &key { &path } else if source == &second_key { &collector.duplicate_session_paths["fixture-second"] }
+                    else { &collector.duplicate_session_paths["fixture-metadata"] };
                 expected_session_errors.extend(Session::projection_error_events(&projection.projection, source_path, &projection.projection.errors));
                 let thread = projection.projection.id.as_ref().unwrap();
                 if projection.source_details_pending { detail_pending.insert(thread.clone()); }
@@ -6199,7 +6225,7 @@ mod log_tests {
                     .merge_snapshot(&projection.projection, None, &cutoffs);
                 let next_thread = thread_slots.len();
                 thread_slots.entry(thread.clone()).or_insert(next_thread);
-                for call in &selection.calls[source] {
+                for call in selection.calls.get(source).into_iter().flatten() {
                     let key = (thread.clone(), call.clone());
                     let next_call = next_slots.entry(thread.clone()).or_default();
                     call_slots.entry(key.clone()).or_insert_with(|| { let slot = *next_call; *next_call += 1; slot });
@@ -6227,7 +6253,14 @@ mod log_tests {
                     } else { std::cmp::Ordering::Equal }));
                 json!({"rows":rows,"totals":totals,"nested_totals":nested_totals,"projects":expected_projects})
             });
+            assert_eq!(materialized[id].calls.len(), if same_thread { 900 } else { 600 });
             let rows = expected_rows(false);
+            for window in &rows {
+                let row = window["rows"].as_array().unwrap().iter().find(|row| row["thread_id"] == id).unwrap();
+                assert_eq!(row["model"], "metadata-only-model");
+                assert_eq!(row["reasoning_effort"], "high");
+                assert_eq!(row["context_updated_at"], "2026-11-13T01:59:00.000Z");
+            }
             let expected_tool_errors = |ordered| {
                 let events: Vec<_> = materialized.iter().flat_map(|(thread, projection)| {
                     let calls = if ordered { projection.ordered_calls() } else { projection.calls.iter().collect() };
@@ -6275,8 +6308,8 @@ mod log_tests {
                             assert_eq!(completed.session_errors, expected_session_errors);
                             assert!(completed.session_errors.iter().any(|event| event["code"] == "first-source"));
                             assert!(completed.session_errors.iter().any(|event| event["code"] == "second-source"));
-                            assert_eq!(validation_rounds, 2, "one-source final validation rounds");
-                            assert_eq!(completed.read_work, [4, 1200, expected_payload_bytes,
+                            assert_eq!(validation_rounds, 3, "one-source final validation rounds");
+                            assert_eq!(completed.read_work, [5, 1200, expected_payload_bytes,
                                 if same_thread { 300 } else { 0 }, extra_payload_bytes]);
                             eprintln!("candidate checkpoint reads same_thread={same_thread} nested={nested} active={active}: pages={} calls={} payload_bytes={} extra_calls={} extra_payload_bytes={}",
                                 completed.read_work[0], completed.read_work[1], completed.read_work[2], completed.read_work[3], completed.read_work[4]);
@@ -6485,7 +6518,17 @@ mod log_tests {
             assert!(candidate.awaiting_physical_validation());
             std::fs::write(&path, b"changed JSONL fixture\n").unwrap();
             assert_eq!(initial.advance(&collector, &selection, true, &stopped, 1).err(), Some(Failure::PhysicalSource));
-            assert_eq!(candidate.advance(&collector, &selection, true, &stopped, 1).err(), Some(Failure::PhysicalSource));
+            // Physical validation follows path order, separately from source-key
+            // order. Earlier unchanged paths may consume their own budget first.
+            let mut rejected = false;
+            for _ in 0..sources.len() {
+                match candidate.advance(&collector, &selection, true, &stopped, 1) {
+                    Ok(selected_candidate::Advance::Pending(next)) => candidate = next,
+                    Ok(selected_candidate::Advance::Complete(_)) => panic!("published changed physical source"),
+                    Err(error) => { assert_eq!(error, Failure::PhysicalSource); rejected = true; break; }
+                }
+            }
+            assert!(rejected, "changed source must be rejected within the physical source pass");
         }
     }
 

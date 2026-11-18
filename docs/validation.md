@@ -2415,3 +2415,16 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, `csv_line_review_tests` 通過 2 項、44
 Linux / Rust 1.100.0 / 原 Cargo.lock, 精確八情境測試通過 1 項、449 項未選取, 95.52 秒, 維持 8 個既有 warnings, git diff --check 通過, 原兩次 session-error 失敗 log 與 patch 的 SHA-256 未變
 
 未改 production worker / fallback、API、來源讀取或查詢次數, 未重跑 HTTP、完整套件、metadata-only / 無 ID 實驗與其他平台, 最終發布與 journal / volatile source 的正式 finalizer 時序仍待整合
+
+### Metadata-only candidate 使用合法 context
+
+基準 `b4c1281`, 在原八情境 fixture 加入第三個無 selected calls、具有相同 thread ID 的 checkpoint, 由實際 Projection::consume(turn_context) 建立完整 context, 不再手改 model / context_at 而遺漏 context_seen, 遍歷依實際 SHA-256 source key 排序
+
+- 四窗 rows 的 model、reasoning_effort 與 context_updated_at 符合完整 materialized oracle, 其餘 file / series / statistics / commands / skills / observations 與 canonical error summaries / log bytes 的原比較保留
+- metadata-only checkpoint 仍參與 header、空 payload page、實體檔案與 signature 驗證, 每次完整讀取為 5 pages / 1,200 selected calls, 最後驗證涵蓋全部 3 個 sources, 不因未選中 call 略過來源
+- 第一個新嘗試在 timestamp 預期失敗, 1.55 秒, 實際既有 stamp 使用毫秒格式, 改為 `.000Z` 後第二次於實體驗證的單步預期失敗, 11.90 秒, 新增 metadata 路徑依字典序排在被修改的 rollout 之前
+- 實體驗證預期改為最多 sources.len() 個 budget-1 步驟, 明確禁止 Complete 並要求 PhysicalSource, 不更動產品驗證或放寬拒絕條件, 原兩次 metadata 失敗記錄與本輪兩次失敗 log / patch 均保留
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 修正後八情境測試通過 1 項、449 項未選取, 95.82 秒, 三項來源錯誤順序 / 命名相依回歸分別通過 1 項, 0.13 / 0.03 / 0.01 秒, 維持 8 個既有 warnings, git diff --check 通過
+
+本輪仍為合成 checkpoint fixture, context 使用 production parser, cursor / 實體檔案沿用既有合成方式, 不代表真實 metadata-only JSONL 的完整匯入驗收, 未改 production worker / fallback、API 或查詢次數, 無 ID 來源、allowance 串接、完整 finalizer / 發布、HTTP 與其他平台仍待完成
