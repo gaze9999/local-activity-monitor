@@ -19,6 +19,12 @@ struct ReadProgress {
     checkpoint_signature: Option<String>,
 }
 impl ReadProgress {
+    fn matches(&self, session: &Session) -> bool {
+        self.offset == session.offset && self.size == session.size
+            && self.partial_bytes == session.partial.len() && self.discard == session.discard
+            && self.identity == session.identity && self.modified == session.modified
+            && self.anchor == session.anchor && self.checkpoint_signature == session.checkpoint_signature
+    }
     fn capture(session: &Session) -> Self {
         Self { offset:session.offset, size:session.size, partial_bytes:session.partial.len(),
             discard:session.discard, identity:session.identity, modified:session.modified,
@@ -73,6 +79,20 @@ struct SourceTopology {
     duplicates: BTreeMap<String, PathBuf>,
 }
 impl SourceTopology {
+    fn matches(&self, collector: &Collector) -> bool {
+        if collector.discovery.is_some() { return false; }
+        let membership = match &collector.source_membership {
+            Some(source) => {
+                let Ok(epoch) = source.db.query_row("SELECT value FROM selection_epoch", [], |row| row.get::<_, i64>(0)) else { return false; };
+                Some((source.identity, source.revision, epoch))
+            }
+            None => None,
+        };
+        self.membership == membership && self.root_identity == collector.source_membership_root
+            && self.root == collector.session_root && self.complete == collector.source_membership_complete
+            && self.discovered_files == collector.discovered_files && self.order == collector.snapshot_source_order
+            && self.paths == collector.session_paths && self.duplicates == collector.duplicate_session_paths
+    }
     fn capture(collector: &Collector) -> Option<Self> {
         // Discovery may temporarily own and mutate the membership database.
         if collector.discovery.is_some() { return None; }
@@ -119,8 +139,8 @@ impl CandidateInputs {
         }).collect()
     }
     fn sessions_match(expected: &Sessions, actual: &BTreeMap<PathBuf, Session>) -> bool {
-        expected.len() == actual.len() && expected.iter().all(|(path, (content, progress))|
-            actual.get(path).is_some_and(|session| content.matches(session) && *progress == ReadProgress::capture(session)))
+        expected.len() == actual.len() && expected.iter().zip(actual).all(|((path, (content, progress)), (current_path, session))|
+            path == current_path && content.matches(session) && progress.matches(session))
     }
     #[allow(dead_code)] // Ready for bounded candidate integration, not used by snapshots.
     pub(super) fn capture(collector: &Collector, enabled: bool, stopped: &AtomicBool) -> Option<Self> {
@@ -146,7 +166,7 @@ impl CandidateInputs {
     #[allow(dead_code)]
     pub(super) fn validate(self, collector: &Collector, enabled: bool, stopped: &AtomicBool) -> Option<Self> {
         let valid = enabled && !stopped.load(Ordering::Acquire)
-            && SourceTopology::capture(collector).as_ref() == Some(&self.topology)
+            && self.topology.matches(collector)
             && collector.history_revision.value() == Some(self.history_revision)
             && collector.thread_metadata_revision.value() == Some(self.thread_metadata_revision)
             && collector.project_details_revision.value() == Some(self.project_details_revision)
@@ -267,6 +287,47 @@ mod tests {
         }
         assert_eq!(collector.files[&path].projection.calls.len(), 1);
         (temporary, collector, path)
+    }
+
+    #[test]
+    fn candidate_guard_large_topology_keeps_exact_validation() {
+        let (_temporary, mut collector, first) = fixture();
+        let anchor = collector.files[&first].anchor.clone();
+        let signature = collector.files[&first].checkpoint_signature.clone();
+        // In-memory guard fixture, not discovery or filesystem acceptance.
+        for n in 1..5000 {
+            let path = first.parent().unwrap().join(format!("metadata-{n:05}.jsonl"));
+            let mut session = Session::new(&path);
+            session.anchor = anchor.clone();
+            session.checkpoint_signature = signature.clone();
+            collector.files.insert(path.clone(), session);
+            collector.snapshot_source_order.insert(path.clone(), n);
+            collector.session_paths.insert(format!("metadata-{n:05}"), path);
+        }
+        let stopped = AtomicBool::new(false);
+        let mut guard = CandidateInputs::capture(&collector, true, &stopped).unwrap();
+        assert_eq!(guard.topology.matches(&collector), SourceTopology::capture(&collector).as_ref() == Some(&guard.topology));
+        for (path, (_, progress)) in &guard.active {
+            let session = &collector.files[path];
+            assert_eq!(progress.matches(session), *progress == ReadProgress::capture(session));
+        }
+        let began = std::time::Instant::now();
+        for _ in 0..100 { guard = guard.validate(&collector, true, &stopped).unwrap(); }
+        eprintln!("candidate 5000-source guard100 elapsed_ms={}", began.elapsed().as_secs_f64()*1000.0);
+        let progress = ReadProgress::capture(&collector.files[&first]);
+        let session = collector.files.get_mut(&first).unwrap();
+        session.offset += 1;
+        assert!(!progress.matches(session));
+        assert_eq!(progress.matches(session), progress == ReadProgress::capture(session));
+        session.offset -= 1;
+        collector.snapshot_source_order.insert(first.clone(), usize::MAX);
+        assert_eq!(guard.topology.matches(&collector), SourceTopology::capture(&collector).as_ref() == Some(&guard.topology));
+        assert!(guard.validate(&collector, true, &stopped).is_none());
+        let guard = CandidateInputs::capture(&collector, true, &stopped).unwrap();
+        let moved = collector.files.remove(&first).unwrap();
+        collector.files.insert(first.with_extension("replaced"), moved);
+        assert_eq!(guard.active.len(), collector.files.len());
+        assert!(guard.validate(&collector, true, &stopped).is_none());
     }
 
     #[test]

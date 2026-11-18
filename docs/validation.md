@@ -2711,3 +2711,27 @@ HTTP / stdin stop 保留原 5 秒處理設定, 各階段 completion 保留 180 �
 兩次 overflow 都保留 incomplete=true 的既有欄位語意, exact 50,000 rows 與最後一筆 detail 通過, source_index_materialized=7 / unverified=0, 本次確實執行 initial、rescan 與 pending stop, 不將此結果擴大到最大負載停用 / 重新啟用或跨平台
 
 Linux / Rust 1.100.0 / 原 Cargo.lock / debug build, 單次接受觀察, 過程另有短 guard microprobe / 編譯重疊, 不是受控 latency benchmark 或 p95 SLA, rescan 仍接近 180 秒 completion 界線, 後續降低 guard 重複配置成本另作工作範圍, 不把其尚未加入此 binary 的變更歸因於本次結果
+
+### Candidate guard 借用比較
+
+基準 `fc1eefd`, SourceTopology 比較原每次透過 capture 複製三個 maps, sessions_match 每筆 lookup 並複製 ReadProgress anchor / signature, 現直接借用比較全部相同欄位, session maps 先比數量再依有序 key 配對, 仍檢查 path / content owner / revision / progress, 非以 pointer 或數量代替內容
+
+初次 capture 的所有權不變, discovery 拒絕、membership identity / revision / SQL epoch、root identity / path、completeness、discovered count、source order / path maps、offset / size / partial / discard / identity / modified / anchor / checkpoint signature 均保留, 無新 endpoint、外部 query 或 request-count 改變
+
+新增 5,000-source in-memory guard fixture, 不是實體 discovery 驗收, 以原 capture equality 當 oracle, 檢查原內容不變、offset 變更、source order 變更與同數量不同 session key 的拒絕, 100 次 validate 的 debug 單次觀察由 1,103.89 ms 變為 242.22 ms, baseline 與短 native 工作重疊, 不作穩定倍率保證
+
+CandidateInputs 全部 13 項通過 0.35 秒, 涵蓋 observation / metadata / project / MCP / detail readiness / 實際 query-owner、history、設定、payload / framing 與 membership epoch guards, 沒有減少來源驗證頻率或放寬停止 / 停用條件
+
+相同 native 50,000 calls / 5,007 sources 案例通過 271.43 秒, 全部 exact counts / p99、最後 detail、incomplete→complete、rescan 與 pending stop 斷言保留:
+
+| 階段 | 前一步 scheduling-only | 借用 guard 後 |
+| --- | --- | --- |
+| Initial 完成 | 163.81 秒 | 119.55 秒 |
+| Rescan 完成 | 171.65 秒 | 108.73 秒 |
+| Initial max GET | 959.41 ms | 906.93 ms |
+| Rescan max GET | 1,600.77 ms | 1,565.20 ms |
+| Pending stop | 112.34 ms | 592.58 ms |
+
+兩次都保留原 180 秒 completion 與 5 秒 socket / stop 設定, 原 18,548,469 bytes 真實 checkpoint payload 不變, 本次期間未同時執行其他本任務測試, 前一步有短 microprobe / 編譯重疊, 僅為 Linux debug 單次觀察, 不歸納 p95 或所有操作加速, native 最大負載的停用 / 重新啟用與跨平台仍不在本次驗收範圍
+
+最後八組完整兩來源 / four-window / source-mutation oracle 通過 152.94 秒, 保留所有原斷言, 5 個既有 warnings 與未驗收的平台 / deferred 項目不變, git diff --check 通過

@@ -722,3 +722,9 @@ Statistics 階段現於每頁 512 群組完成後編碼並釋放該頁 Value row
 現區分實際 selection / collection 工作與被候選取代的舊組裝 continuation, quiescent loop 保留真正 selection、dirty、來源與設定 guards, 不等重複 payload / detail 組裝完成, 只有候選通過 publication guards 後才釋放被取代的兩個 continuation, 原失敗 fallback 與 completed detail cache 保持
 
 另修正同 input hash 的已知容量拒絕會重建舊 snapshot scan 的問題, 只記住 capacity rejection, transient / parse / signature failures 仍可重試, input hash 含 budget、membership epoch / revision 與 selection, 改變後重新評估, 不提高原上限
+
+### Guard 的低配置比較
+
+`fc1eefd` 已通過 native 最大工作集的 initial / rescan / pending stop, 仍接近 completion 界線, 下一步針對每次驗證都複製 topology maps、ReadProgress 字串與逐筆 tree lookup 的成本
+
+Guard 現直接借用比較相同 topology / progress 欄位, 以同長度的 ordered-map zip 檢查 path、owner / revision 與 progress, 初次 capture 仍保有完整自有副本, SQL epoch、設定與其他 guards 的讀取及判斷不變
