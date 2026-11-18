@@ -5003,6 +5003,12 @@ impl Collector {
     }
 
     fn snapshots(&self, health: &str, watch_health: &str, version: u64) -> Snapshots {
+        self.assemble_snapshots(health, watch_health, version, None)
+    }
+
+    fn assemble_snapshots(&self, health: &str, watch_health: &str, version: u64,
+        candidate: Option<&selected_candidate::CompletedCandidate>) -> Snapshots
+    {
         let SnapshotOpening { journal, debug } = self.capture_snapshot_opening();
         let monitor_events = &journal.events;
         let active_calls = self
@@ -5010,18 +5016,18 @@ impl Collector {
             .values()
             .map(|state| state.projection.calls.len())
             .sum();
-        let selection = (health != "disabled" && self.discovered_file_count() > self.files.len())
+        let selection = (candidate.is_none() && health != "disabled" && self.discovered_file_count() > self.files.len())
             .then(|| self.select_recent_calls(CALL_LIMIT, 100_000)).flatten()
             .filter(|selection| selection.complete);
         let selected_overflow = if let Some(selection) = &selection {
             self.selected_overflow_projections(selection)
         } else {
-            *self.selected_snapshot_scan.lock().unwrap_or_else(|error| error.into_inner()) = None;
+            if candidate.is_none() { *self.selected_snapshot_scan.lock().unwrap_or_else(|error| error.into_inner()) = None; }
             None
         };
         let selection = selection.filter(|_| selected_overflow.is_some());
         let fallback;
-        let (overflow, overflow_incomplete): (&[checkpoint::SnapshotProjection], bool) = if health == "disabled" {
+        let (overflow, overflow_incomplete): (&[checkpoint::SnapshotProjection], bool) = if health == "disabled" || candidate.is_some() {
             (&[], false)
         } else if let Some(overflow) = &selected_overflow {
             (overflow.as_slice(), false)
@@ -5031,7 +5037,7 @@ impl Collector {
             (&fallback, incomplete)
         };
         // Source-backed details and complete metadata for overflow projections are not yet assembled.
-        let overflow_incomplete = overflow_incomplete || !overflow.is_empty();
+        let overflow_incomplete = overflow_incomplete || !overflow.is_empty() || candidate.is_some_and(|value| value.overflow_sources != 0);
         let overflow_details_pending: BTreeSet<_> = overflow
             .iter()
             .filter(|item| item.source_details_pending)
@@ -5042,9 +5048,10 @@ impl Collector {
             .filter(|item| item.calls_incomplete)
             .filter_map(|item| item.projection.id.as_deref())
             .collect();
-        let SnapshotTime { reference, cutoffs } = self.capture_snapshot_time();
+        let SnapshotTime { reference, cutoffs } = candidate.map_or_else(|| self.capture_snapshot_time(), |value|
+            SnapshotTime {reference:value.time.reference,cutoffs:value.time.cutoffs});
         let mut threads = BTreeMap::<&str, (Projection, bool)>::new();
-        for (path, state) in self.ordered_working_sources().into_iter().filter(|_| health != "disabled") {
+        for (path, state) in self.ordered_working_sources().into_iter().filter(|_| health != "disabled" && candidate.is_none()) {
             if let Some(id) = state.projection.id.as_deref() {
                 let (projection, partial) = threads
                     .entry(id)
@@ -5069,6 +5076,9 @@ impl Collector {
                 *partial |= item.partial;
             }
         }
+        if let Some(candidate) = candidate {
+            threads.extend(candidate.metadata.iter().map(|(thread, metadata)| (thread.as_str(), metadata.clone())));
+        }
         let pending_status: BTreeSet<_> = self
             .files
             .values()
@@ -5089,7 +5099,7 @@ impl Collector {
                 if complete_source_order { usize::MAX - index } else { *index },
             ))
             .map(|(_, value)| value.clone());
-        let allowance = self.finalize_snapshot_allowance(allowance, health);
+        let allowance = self.finalize_snapshot_allowance(candidate.map_or(allowance, |value| value.allowance.clone()), health);
         let source_index_ready = self.discovery.is_none()
             && self.source_membership_complete
             && self
@@ -5166,7 +5176,10 @@ impl Collector {
                 session_errors.extend(Session::projection_error_events(&item.projection, path, &item.projection.errors));
             }
         }
-        let errors = self.error_windows_captured(&journal, health, reference, &threads, &session_errors);
+        if let Some(candidate) = candidate { session_errors = candidate.session_errors.clone(); }
+        let errors = if let Some(candidate) = candidate {
+            self.render_error_windows_captured(&journal, health, reference, &session_errors, |_| candidate.failures.clone())
+        } else { self.error_windows_captured(&journal, health, reference, &threads, &session_errors) };
         let activity = json!({
             "paused":false, "health":health, "last_activity_at":threads.values().filter_map(|(row,_)| row.updated()).max().map(stamp),
             "update_mode":"source_events","watch_health":watch_health,"code_revision":self.backend_revision
@@ -5302,6 +5315,11 @@ impl Collector {
                     event["thread_name"] = name.clone();
                 }
             }
+            if let Some(candidate) = candidate {
+                rows = candidate.rows[index]["rows"].as_array().expect("candidate rows").clone();
+                totals = serde_json::from_value(candidate.rows[index]["totals"].clone()).expect("candidate totals");
+                nested_totals = serde_json::from_value(candidate.rows[index]["nested_totals"].clone()).expect("candidate nested totals");
+            }
             let mut projects: BTreeMap<String, Value> = self.project_details.iter().map(|(id,detail)| {
                 let mut value = json!({"id":id,"name":detail["name"],"icon":detail["icon"],"kind":detail["kind"],"thread_count":0});
                 for key in ["origin","created_at","updated_at"] { if let Some(field)=detail.get(key) { value[key]=field.clone(); } }
@@ -5381,6 +5399,12 @@ impl Collector {
                     history_view::render(&lam_history_store::Aggregate::default(), WINDOWS[index])
                 };
             }
+            if let Some(candidate) = candidate {
+                git = candidate.commands[index]["git"].clone();
+                checks = candidate.commands[index]["checks"].as_array().expect("candidate checks").clone();
+                mcp = candidate.observations[index]["mcp"].clone();
+                sqlite = candidate.observations[index]["sql"].clone();
+            }
             let mut core_source = self.core.source();
             if !model_api_enabled {
                 core_source["health"] = json!("disabled");
@@ -5425,7 +5449,7 @@ impl Collector {
             });
             snapshot["logs"] = logs_overview.clone();
             if let Some(read_state) = snapshot["codex"]["read_state"].as_object_mut() {
-                read_state.extend(json!({"initial_pending_files":initial_pending,"history_pending_files":0,"history_pending_bytes":0,"error_pending_files":0,"error_pending_bytes":0,"working_file_limit":FILE_LIMIT,"working_files":self.files.len(),"outside_working_set":outside_working_set,"discovery_pending":self.discovery.is_some(),"source_index_ready":source_index_ready,"source_index_unverified":source_index_unverified,"source_index_materialized":source_index_materialized,"overflow_snapshot_sources":overflow.len(),"overflow_snapshot_incomplete":overflow_incomplete,"overflow_details_pending":overflow_details_pending.len()}).as_object().expect("read state fields").clone());
+                read_state.extend(json!({"initial_pending_files":initial_pending,"history_pending_files":0,"history_pending_bytes":0,"error_pending_files":0,"error_pending_bytes":0,"working_file_limit":FILE_LIMIT,"working_files":self.files.len(),"outside_working_set":outside_working_set,"discovery_pending":self.discovery.is_some(),"source_index_ready":source_index_ready,"source_index_unverified":source_index_unverified,"source_index_materialized":source_index_materialized,"overflow_snapshot_sources":candidate.map_or(overflow.len(), |value| value.overflow_sources),"overflow_snapshot_incomplete":overflow_incomplete,"overflow_details_pending":candidate.map_or(overflow_details_pending.len(), |value| value.overflow_details_pending.len())}).as_object().expect("read state fields").clone());
             }
             // Report the collector's feature set in Python declaration order,
             // not unrelated account/platform switches from global settings.
@@ -5719,6 +5743,15 @@ impl Collector {
                 &self.runtime,
                 &journal_source,
             );
+            if let Some(candidate) = candidate {
+                snapshot["codex"]["file_activity"] = candidate.files[index].clone();
+                snapshot["codex"]["skills"] = candidate.skills[index].clone();
+                snapshot["codex"]["projects"] = candidate.rows[index]["projects"].clone();
+                snapshot["codex"]["activity_series"] = candidate.series[index]["activity"].clone();
+                snapshot["codex"]["tool_series"] = candidate.series[index]["tools"].clone();
+                snapshot["codex"]["tool_statistics"] = candidate.statistics[index].clone();
+                return Bytes::from(snapshot.to_string());
+            }
             let statistics = project::ToolStatistics::new(&threads, boundary, tool_events_enabled && health != "disabled");
             Bytes::from(series.snapshot_json(&snapshot, Some(&statistics)).into_bytes().into_boxed_slice())
         });
@@ -5735,10 +5768,13 @@ impl Collector {
         let call_errors = threads.iter().flat_map(|(thread, (projection, _))| {
             projection.calls.iter().filter_map(move |(id, call)| call.failure_event(thread, id))
         });
+        let mut candidate_errors: Vec<_> = candidate.into_iter().flat_map(|value| value.failures.iter().map(|(_, event)| event.clone())).collect();
+        candidate_errors.sort_by(|left, right| (left["thread_id"].as_str(), left["call_id"].as_str())
+            .cmp(&(right["thread_id"].as_str(), right["call_id"].as_str())));
         for event in self.core.errors.iter().chain(self.desktop.errors.iter())
             .chain(self.core.logs.iter()).chain(self.desktop.logs.iter())
             .chain(self.error_history.iter()).chain(session_errors.iter()).chain(self.jev_errors.iter())
-            .cloned().chain(call_errors)
+            .cloned().chain(call_errors).chain(candidate_errors)
         {
             if let Some(id) = event["content_id"].as_str().map(str::to_owned) {
                 error_details.entry(id).or_insert(event);
@@ -5749,7 +5785,7 @@ impl Collector {
             logs,
             activity: activity.to_string().into(),
             error_details: Arc::new(error_details),
-            detail_index: Arc::clone(&self.published_detail_index),
+            detail_index: candidate.map_or_else(|| Arc::clone(&self.published_detail_index), |value| Arc::new(value.detail_index.clone())),
             traffic: Arc::clone(&self.traffic),
             memory: Arc::clone(&self.memory),
             collection: Arc::clone(&self.collection),
@@ -5935,6 +5971,7 @@ mod log_tests {
             assert_eq!(selection.calls.values().map(BTreeSet::len).sum::<usize>(), 2);
             let time = collector.capture_snapshot_time();
             let reference = time.reference;
+            collector.updated = Some(reference);
             let mut expected_errors = Vec::new();
             for checkpoint in checkpoints.values() {
                 let projection = checkpoint::snapshot_projection(store.checkpoint(&checkpoint.cursor.source_key, 10).unwrap().unwrap(), false).unwrap();
@@ -5956,6 +5993,17 @@ mod log_tests {
                 match candidate.advance(&collector, &selection, true, &stopped, 1).unwrap() {
                     Advance::Pending(next) => candidate = next,
                     Advance::Complete(result) => {
+                        let finalized = collector.assemble_snapshots("ok", "ok", 1, Some(&result));
+                        for index in 0..4 {
+                            let mut actual: Value = serde_json::from_slice(&finalized.windows[index]).unwrap();
+                            let mut expected: Value = serde_json::from_slice(&baseline.windows[index]).unwrap();
+                            actual["monitor"].as_object_mut().unwrap().remove("uptime_seconds");
+                            expected["monitor"].as_object_mut().unwrap().remove("uptime_seconds");
+                            assert_eq!(actual, expected);
+                            assert_eq!(finalized.logs[index], baseline.logs[index]);
+                        }
+                        assert_eq!(finalized.activity, baseline.activity);
+                        assert_eq!(finalized.error_details, baseline.error_details);
                         assert_eq!(result.session_errors, expected_errors);
                         assert!(result.failures.is_empty());
                         assert!(result.detail_index.files.is_empty());
@@ -6116,6 +6164,7 @@ mod log_tests {
             assert_eq!(selection.calls.values().map(BTreeSet::len).sum::<usize>(), 1200);
             let reference = chrono::DateTime::parse_from_rfc3339("2026-11-13T02:00:00Z").unwrap().with_timezone(&Utc);
             let cutoffs = HOURS.map(|hours| hours.map(|hours| reference - Duration::hours(hours)));
+            collector.updated = Some(reference);
             collector.replace_mcp_catalog([
                 ("sqlite".into(), Some(source_introduction::Description {text:"Catalog database".into(),source:"fixture".into(),path:Some("fixture/README.md".into())})),
                 ("unused".into(), None),
@@ -6391,6 +6440,7 @@ mod log_tests {
             let expected_index = collector.selected_detail_index(&root, &selection).unwrap().0;
             let detail_shape = |index: &details::Index| index.files.iter().map(|(thread, files)|
                 (thread.clone(), files.iter().map(|file| (file.path.clone(), file.anchor.clone(), file.calls.len())).collect::<Vec<_>>())).collect::<Vec<_>>();
+            let publication_checks = std::cell::Cell::new(0usize);
             let reduce = |store: &mut lam_history_store::Store, replace_completed_source: bool, ordered: bool, statistics_units: usize| -> Result<([Value;4], [Value;4], [Value;4], [Value;4], [Value;4], [Value;4], [Value;4], Value), Failure> {
                 use selected_candidate::{Advance, SelectedCandidate, Source};
                 let mut candidate = SelectedCandidate::new(&collector, &selection,
@@ -6413,7 +6463,62 @@ mod log_tests {
                     }
                     match candidate.advance(&collector, &selection, true, &stopped, 1)? {
                         Advance::Pending(next) => candidate = next,
-                        Advance::Complete(completed) => {
+                        Advance::Complete(mut completed) => {
+                            if !ordered {
+                                let finalized = collector.assemble_snapshots("ok", "ok", 1, Some(&completed));
+                                let baseline = collector.snapshots("ok", "ok", 1);
+                                for index in 0..4 {
+                                    let mut actual: Value = serde_json::from_slice(&finalized.windows[index]).unwrap();
+                                    let mut expected: Value = serde_json::from_slice(&baseline.windows[index]).unwrap();
+                                    actual["monitor"].as_object_mut().unwrap().remove("uptime_seconds");
+                                    expected["monitor"].as_object_mut().unwrap().remove("uptime_seconds");
+                                    assert_eq!(actual, expected, "candidate snapshot same_thread={same_thread} nested={nested} active={active} window={index}");
+                                    assert_eq!(finalized.logs[index], baseline.logs[index]);
+                                }
+                                assert_eq!(finalized.activity, baseline.activity);
+                                assert_eq!(finalized.error_details, baseline.error_details);
+                                let check = publication_checks.get();
+                                if check == 0 || (check == 1 && same_thread && !nested && !active) {
+                                    let old_window = baseline.windows[3].clone();
+                                    let (sender, _receiver) = tokio::sync::watch::channel(baseline);
+                                    let mut publication = completed.prepare_publication(&collector, &selection, "ok", "ok", 2, &stopped).unwrap();
+                                    if check == 1 {
+                                        let mut changed = second_cursor.clone();
+                                        let mut signature: Value = serde_json::from_str(&changed.signature).unwrap();
+                                        signature["revision"] = json!(signature["revision"].as_u64().unwrap() + 1);
+                                        changed.signature = signature.to_string();
+                                        store.save_checkpoints(&[changed], &[], &[]).unwrap();
+                                    }
+                                    let mut finished = false;
+                                    for _ in 0..32 {
+                                        match publication.advance(&collector, &selection, true, &stopped, 1, &sender) {
+                                            Ok(selected_candidate::PublicationAdvance::Pending(next)) => {
+                                                assert_eq!(sender.borrow().version(), 1);
+                                                publication = next;
+                                            }
+                                            Ok(selected_candidate::PublicationAdvance::Published) => {
+                                                assert_eq!(check, 0, "changed checkpoint must not publish");
+                                                let snapshot = sender.borrow();
+                                                assert_eq!(snapshot.version(), 2);
+                                                assert_eq!(detail_shape(&snapshot.detail_index), detail_shape(&expected_index));
+                                                finished = true;
+                                                break;
+                                            }
+                                            Err(error) => {
+                                                assert_eq!(check, 1);
+                                                assert_eq!(error, Failure::CheckpointChanged);
+                                                assert_eq!(sender.borrow().version(), 1);
+                                                assert_eq!(sender.borrow().windows[3].clone(), old_window);
+                                                finished = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    assert!(finished);
+                                    if check == 1 { store.save_checkpoints(std::slice::from_ref(&second_cursor), &second_calls, &[]).unwrap(); }
+                                    publication_checks.set(check + 1);
+                                }
+                            }
                             assert_eq!(detail_shape(&completed.detail_index), detail_shape(&expected_index));
                             for thread in expected_index.files.keys() {
                                 for call in ["call0000", "call0300", "call0599", "call0899"] {
@@ -8425,7 +8530,7 @@ mod log_tests {
         collector.source_membership_root = Some(file_identity(&std::fs::metadata(&root).unwrap()));
         collector.source_membership_complete = true;
         collector.discovery = None;
-        let candidate_errors = |collector: &Collector| {
+        let candidate_errors = |collector: &Collector, reject: bool| {
             use selected_candidate::{Advance, SelectedCandidate};
             let stopped = AtomicBool::new(false);
             let selection = collector.select_recent_calls(10, 100).unwrap();
@@ -8446,8 +8551,22 @@ mod log_tests {
             for _ in 0..32 {
                 match candidate.advance(collector, &selection, true, &stopped, 1).unwrap() {
                     Advance::Pending(next) => candidate = next,
-                    Advance::Complete(result) => {
+                    Advance::Complete(mut result) => {
                         assert_eq!(result.read_work, [0; 5]);
+                        let finalized = collector.assemble_snapshots("ok", "ok", 1, Some(&result));
+                        let baseline = collector.snapshots("ok", "ok", 1);
+                        for index in 0..4 {
+                            let mut actual: Value = serde_json::from_slice(&finalized.windows[index]).unwrap();
+                            let mut expected: Value = serde_json::from_slice(&baseline.windows[index]).unwrap();
+                            // Compare immutable batch bytes, not render() live memory / CPU overlays.
+                            // Elapsed uptime remains intentionally live telemetry.
+                            actual["monitor"].as_object_mut().unwrap().remove("uptime_seconds");
+                            expected["monitor"].as_object_mut().unwrap().remove("uptime_seconds");
+                            assert_eq!(actual, expected, "complete candidate snapshot window {index}");
+                            assert_eq!(finalized.logs[index], baseline.logs[index]);
+                        }
+                        assert_eq!(finalized.activity, baseline.activity);
+                        assert_eq!(finalized.error_details, baseline.error_details);
                         let expected_index = collector.detail_index(&root).0;
                         let shape = |index: &details::Index| index.files.iter().map(|(thread, files)|
                             (thread.clone(), files.iter().map(|file| (file.path.clone(), file.anchor.clone(), file.calls.len())).collect::<Vec<_>>())).collect::<Vec<_>>();
@@ -8456,6 +8575,41 @@ mod log_tests {
                         let expected = expected_index.select_call(first, "tool").unwrap().tool("tool", true, false);
                         assert!(actual.is_some());
                         assert_eq!(actual, expected);
+                        let (sender, _receiver) = tokio::sync::watch::channel(collector.snapshots("ok", "ok", 7));
+                        let previous_window = sender.borrow().windows[3].clone();
+                        let previous_index = Arc::clone(&sender.borrow().detail_index);
+                        let mut publication = result.prepare_publication(collector, &selection, "ok", "ok", 8, &stopped).unwrap();
+                        assert_eq!(sender.borrow().version(), 7);
+                        if reject {
+                            let original = collector.tool_events_enabled.load(Ordering::Acquire);
+                            collector.tool_events_enabled.store(!original, Ordering::Release);
+                            let rejected = publication.advance(collector, &selection, true, &stopped, 1, &sender);
+                            collector.tool_events_enabled.store(original, Ordering::Release);
+                            assert!(matches!(rejected, Err(selected_candidate::Failure::InputsRejected)));
+                            assert_eq!(sender.borrow().version(), 7);
+                            assert_eq!(sender.borrow().windows[3].clone(), previous_window);
+                            assert!(Arc::ptr_eq(&sender.borrow().detail_index, &previous_index));
+                        } else {
+                            let mut published = false;
+                            for _ in 0..16 {
+                                match publication.advance(collector, &selection, true, &stopped, 1, &sender).unwrap() {
+                                    selected_candidate::PublicationAdvance::Pending(next) => {
+                                        assert_eq!(sender.borrow().version(), 7);
+                                        publication = next;
+                                    }
+                                    selected_candidate::PublicationAdvance::Published => {
+                                        let snapshot = sender.borrow();
+                                        assert_eq!(snapshot.version(), 8);
+                                        assert_eq!(snapshot.error_details, finalized.error_details);
+                                        assert!(snapshot.detail_index.select_call(first, "tool").unwrap().tool("tool", true, false).is_some());
+                                        assert!(!Arc::ptr_eq(&snapshot.detail_index, &previous_index));
+                                        published = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            assert!(published);
+                        }
                         let errors = collector.render_error_windows_captured(&journal, "ok", reference,
                             &result.session_errors, |ordered| {
                                 assert_eq!(ordered, collector.has_complete_source_order());
@@ -8485,7 +8639,8 @@ mod log_tests {
                 .map(|event| event["code"].as_str().unwrap().to_owned()).collect::<Vec<_>>()
         };
         assert_eq!(codes(&collector), ["z", "a", "m"]);
-        candidate_errors(&collector);
+        candidate_errors(&collector, false);
+        candidate_errors(&collector, true);
         let snapshots = collector.snapshots("ok", "ok", 1);
         for window in 0..4 {
             let value: Value = serde_json::from_slice(&snapshots.window_bytes(window)).unwrap();
@@ -8504,11 +8659,11 @@ mod log_tests {
         }).collect::<Vec<_>>(), ["z", "a", "tool", "m"]);
         collector.error_history = value["errors"]["events"].as_array().unwrap().iter().rev().cloned().collect();
         assert_eq!(codes(&collector), ["m", "a", "z"]);
-        candidate_errors(&collector);
+        candidate_errors(&collector, false);
         collector.error_history.clear();
         collector.discovered_files = Some(4);
         assert_eq!(codes(&collector), ["a", "m", "z"]);
-        candidate_errors(&collector);
+        candidate_errors(&collector, false);
     }
 
     #[test]

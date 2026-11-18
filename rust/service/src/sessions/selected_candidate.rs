@@ -91,6 +91,12 @@ pub(super) struct CompletedCandidate {
     // Source-selected usage, before finalizer health / usage-switch filtering.
     pub allowance: Option<Value>,
     pub detail_index: details::Index,
+    pub metadata: BTreeMap<String, (Projection, bool)>,
+    pub overflow_sources: usize,
+    pub overflow_details_pending: BTreeSet<String>,
+    pub time: SnapshotTime,
+    inputs: Option<SelectedInputs>,
+    physical: BTreeMap<std::path::PathBuf, String>,
     #[cfg(test)]
     pub read_work: [usize; 5],
 }
@@ -416,8 +422,10 @@ impl SelectedCandidate {
                 })?;
                 self.inputs = Some(inputs);
                 if complete {
-                    let completed = self.finish(collector)?;
+                    let mut completed = self.finish(collector)?;
                     self.validate_inputs(collector, selection, enabled, stopped)?;
+                    completed.inputs = self.inputs.take();
+                    completed.physical = std::mem::take(&mut self.physical);
                     return Ok(Advance::Complete(completed));
                 }
             }
@@ -552,8 +560,91 @@ impl SelectedCandidate {
         for index in std::mem::take(&mut self.detail_indexes).into_values() {
             for (thread, files) in index.files { detail_index.files.entry(thread).or_default().extend(files); }
         }
+        let metadata = std::mem::take(&mut self.metadata).into_iter().map(|(thread, projection)| {
+            let partial = self.partial[&thread]; (thread, (projection, partial))
+        }).collect();
+        let overflow_details_pending = self.detail_pending.iter().filter(|id| !collector.overflow_details_ready.contains(*id)).cloned().collect();
+        let time = SnapshotTime { reference, cutoffs };
         Ok(CompletedCandidate { files,series,statistics,commands,skills,rows,observations,failures,session_errors,allowance:self.allowance.take(),detail_index,
+            metadata,overflow_sources:self.sources.len(),overflow_details_pending,time,inputs:None,physical:BTreeMap::new(),
             #[cfg(test)] read_work:self.read_work })
+    }
+}
+
+// A rendered batch remains private until its retained input, checkpoint and
+// physical-source guards pass again. Failure drops only the unpublished batch.
+#[allow(dead_code)]
+pub(super) struct PendingPublication {
+    snapshots: super::Snapshots,
+    inputs: Option<SelectedInputs>,
+    root: std::path::PathBuf,
+    root_identity: (u64, u64),
+    physical: BTreeMap<std::path::PathBuf, String>,
+    physical_after: Option<std::path::PathBuf>,
+    physical_complete: bool,
+}
+
+pub(super) enum PublicationAdvance { Pending(PendingPublication), Published }
+
+#[allow(dead_code)]
+impl CompletedCandidate {
+    pub(super) fn prepare_publication(&mut self, collector: &Collector, selection: &CallSelection,
+        health: &str, watch_health: &str, version: u64, stopped: &AtomicBool) -> Result<PendingPublication, Failure>
+    {
+        if health == "disabled" { return Err(Failure::Disabled); }
+        SelectedCandidate::controls(true, stopped)?;
+        let inputs = self.inputs.take().ok_or(Failure::State)?
+            .validate(collector, selection, true, stopped).ok_or(Failure::InputsRejected)?;
+        let snapshots = collector.assemble_snapshots(health, watch_health, version, Some(self));
+        let inputs = inputs.validate(collector, selection, true, stopped).ok_or(Failure::InputsRejected)?;
+        Ok(PendingPublication { snapshots, inputs:Some(inputs),
+            root:collector.session_root.clone().ok_or(Failure::InputsRejected)?,
+            root_identity:collector.source_membership_root.ok_or(Failure::InputsRejected)?,
+            physical:std::mem::take(&mut self.physical),physical_after:None,physical_complete:false })
+    }
+}
+
+#[allow(dead_code)]
+impl PendingPublication {
+    pub(super) fn advance(mut self, collector: &Collector, selection: &CallSelection,
+        enabled: bool, stopped: &AtomicBool, budget: usize, sender: &tokio::sync::watch::Sender<super::Snapshots>)
+        -> Result<PublicationAdvance, Failure>
+    {
+        use std::ops::Bound::{Excluded, Unbounded};
+        SelectedCandidate::controls(enabled, stopped)?;
+        if budget == 0 { return Err(Failure::InvalidBudget); }
+        self.inputs = Some(self.inputs.take().ok_or(Failure::State)?
+            .validate(collector, selection, enabled, stopped).ok_or(Failure::InputsRejected)?);
+        if !self.physical_complete {
+            let paths: Vec<_> = match &self.physical_after {
+                Some(after) => self.physical.range((Excluded(after.clone()), Unbounded)),
+                None => self.physical.range::<std::path::PathBuf, _>(..),
+            }.take(budget.min(64)).map(|(path, fingerprint)| (path.clone(), fingerprint.clone())).collect();
+            for (path, fingerprint) in paths {
+                SelectedCandidate::controls(enabled, stopped)?;
+                if !physical_matches(&self.root, self.root_identity, &path, &fingerprint) { return Err(Failure::PhysicalSource); }
+                self.physical_after = Some(path);
+            }
+            self.physical_complete = self.physical.last_key_value().is_none_or(|(path, _)| self.physical_after.as_ref() == Some(path));
+            return Ok(PublicationAdvance::Pending(self));
+        }
+        let (inputs, complete) = self.inputs.take().ok_or(Failure::State)?
+            .try_validate_sources(collector, selection, enabled, stopped, budget).map_err(|error| {
+                use super::candidate_inputs::SourceValidationError as Error;
+                match error {
+                    Error::Inputs => Failure::InputsRejected, Error::Read => Failure::CheckpointRead,
+                    Error::Changed => Failure::CheckpointChanged, Error::InvalidBudget => Failure::InvalidBudget,
+                    Error::Cancelled => Failure::Cancelled,
+                }
+            })?;
+        self.inputs = Some(inputs);
+        if !complete { return Ok(PublicationAdvance::Pending(self)); }
+        SelectedCandidate::controls(enabled, stopped)?;
+        self.inputs.take().ok_or(Failure::State)?.validate(collector, selection, enabled, stopped).ok_or(Failure::InputsRejected)?;
+        // Same operation publishes all windows, logs, error details and the
+        // matching immutable position index. Never expose a partial batch.
+        sender.send_replace(self.snapshots);
+        Ok(PublicationAdvance::Published)
     }
 }
 

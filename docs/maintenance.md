@@ -431,6 +431,8 @@ Active-only candidate 已接受零 materialized checkpoint 與受 guard 保護�
 
 Candidate detail index 已沿同批 pages 在 winner 過濾前保存 selected positions, 完成後恢復原 source slot 順序以保留 first permitted source, active / checkpoint / mixed 的 index 與原路徑比對通過, 共用原 16 MiB detail stage 限制且超限拒絕整組, owned index 與摘要同時通過最後驗證後回傳, 下一步仍是完整 Snapshots finalizer 與設定 / 來源 guard 覆蓋到共同發布, 不先切換 worker 或改 fallback
 
+完整 Snapshots assembler 已可使用 candidate metadata / components 與同批 detail index, 不重建完整 call payloads, finalizer 前後及 watch send_replace 前保留 / 重驗 input、實體來源與 checkpoint guard, active-only / mixed / no-ID 完整批次與發布拒絕測試通過, 目前 production snapshots 仍走原無 candidate 分支, 下一步是 worker 驅動跨輪 candidate / publication 狀態及實際容量驗收, 必須沿用既有 fallback, 不將測試 watch channel 的成功當成服務已切換
+
 建構 eligibility 仍用原 Option, SelectedInputs 的舊 validate_sources 亦保留 Option wrapper, 新 try_validate_sources 提供有類型的驗證結果, 不改動同步 snapshots 或原失敗 fallback
 
 來源路徑只從既有 active / session_paths / duplicate_session_paths 解析, 以 checkpoint key 核對, 缺少已觀察路徑、fingerprint 或 active 與 membership stamp 不同時拒絕, 不重新 discovery 或猜測來源位置

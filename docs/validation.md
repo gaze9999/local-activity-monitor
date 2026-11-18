@@ -2485,3 +2485,18 @@ Production worker 與 fallback 未切換, 此步完成上述 error-window 串接
 Linux / Rust 1.100.0 / 原 Cargo.lock, active-only 0.23 秒、八情境 87.29 秒、無 ID 0.07 秒各通過 1 項, changed call / response guard 各通過 0.04 秒, compact page sharing 通過 0.00 秒, 各 450 項未選取, 初次 compact filter 使用錯誤模組而選到 0 項, 改用實際 shared_position_tests 後取得上述通過, 維持 8 個既有 warnings, git diff --check 通過
 
 CompletedCandidate 現在擁有摘要與對應 detail index, 並在來源 / input 最後驗證後回傳, 但尚未由 production finalizer 組成完整 Snapshots 或共同發布, workdir readiness 與原 fallback 不變, 本輪未重跑 HTTP、完整套件、容量量測或先前延後的檢查
+
+### 完整 candidate Snapshots finalizer 與發布前 guard
+
+基準 `ab3c91d`, 原 snapshots 改呼叫共用 assemble_snapshots, 無 candidate 時保留原選取、staging、fallback 與 finalizer 順序, candidate 路徑只提供 metadata-only Projection 與已完成四窗 components, 不重新 materialize call payloads, JEV / 裝置 / credentials 仍在原讀取位置
+
+- Candidate 完整組成四窗、logs、activity、error_details 與同批 detail_index, 保留來源 read-state、allowance 過濾、MCP / SQL、catalog / names、connection 與原 error-detail first-source 優先序
+- 原 SelectedInputs 與 physical fingerprints 在 components 完成後繼續保留, prepare_publication 在組裝前後核對 inputs, PendingPublication 分批重驗實體來源與 checkpoint signatures, 最後再驗 inputs / cancellation 才以單次 watch send_replace 發布完整 Snapshots
+- Pending 與失敗不替換已發布版本, 測試在組裝後改變設定或 checkpoint signature 時確認舊 window / index 保持不變, 成功才一起切換版本及對應 detail index
+- Active-only 完整來源 / retained-history / canonical fallback、無 ID 兩情境及八情境 checkpoint / active / nested 的完整 immutable windows 均與原 snapshots 比較, logs / activity / error_details 亦相符, 只排除刻意即時的 uptime 值
+
+加入 publication 後的首次 mixed 比對在 5.27 秒失敗, 精確差異只有 monitor.available_memory_bytes 與 cpu_usage_percent, 來源確認 window_bytes() 會即時重新取樣 render overlay, 改為比較 Snapshots.windows 的 immutable batch 而非不同時點的 live render, 不改 production telemetry 或任意忽略差異, 失敗 log / patch 保留
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, 最終 active-only guard / publication 0.56 秒、mixed 八情境 148.09 秒、無 ID 完整 finalizer 0.10 秒各通過 1 項、450 項未選取, 原 worker 共同發布 / 舊 index 保留回歸通過 0.11 秒, HTTP usage 停用 / 重新啟用回歸通過 0.19 秒、228 項未選取, git diff --check 通過
+
+建置回報 8 個 warnings, 包含尚未由 production worker 呼叫的 PublicationAdvance, 測試中的 publication 使用真實 watch channel, 但 production worker 尚未驅動 candidate / publication state machine, 既有 fallback 未改, 完整套件、實際容量 / RSS、跨平台與既有 deferred 檢查未因此結案, 來源檢查仍是順序驗證而非跨檔案原子快照
