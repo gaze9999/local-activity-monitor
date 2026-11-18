@@ -1,6 +1,6 @@
 //! Selected active/checkpoint candidate orchestration. The production worker does not call
 //! this path. Checkpoint source order must already be verified by its caller;
-//! no-ID sources and final snapshot augmentation remain separate gates.
+//! Final snapshot augmentation remains a separate gate.
 use super::{candidate_inputs::SelectedInputs, checkpoint, commands, mcp, project, sqlite,
     CallSelection, Collector, Projection, SnapshotTime, CALL_LIMIT, WALK_LIMIT};
 use serde_json::{json, Value};
@@ -52,7 +52,8 @@ pub(super) struct SelectedCandidate {
     slots: BTreeMap<CallKey, u64>,
     next_slots: BTreeMap<String, u64>,
     thread_slots: BTreeMap<String, usize>,
-    source_threads: Vec<String>,
+    source_threads: Vec<Option<String>>,
+    allowance: Option<Value>,
     session_errors: Vec<Vec<Value>>,
     names: HashMap<String, Value>,
     ordered: bool,
@@ -84,6 +85,8 @@ pub(super) struct CompletedCandidate {
     pub observations: [Value; 4],
     pub failures: Vec<(Option<chrono::DateTime<chrono::Utc>>, Value)>,
     pub session_errors: Vec<Value>,
+    // Source-selected usage, before finalizer health / usage-switch filtering.
+    pub allowance: Option<Value>,
     #[cfg(test)]
     pub read_work: [usize; 5],
 }
@@ -132,7 +135,7 @@ impl SelectedCandidate {
             metadata:BTreeMap::new(), partial:BTreeMap::new(), detail_pending:BTreeSet::new(),
             #[cfg(test)] read_work:[0; 5],
             winners:BTreeMap::new(), slots:BTreeMap::new(),
-            next_slots:BTreeMap::new(), thread_slots:BTreeMap::new(), source_threads:Vec::new(), session_errors:Vec::new(), names:HashMap::new(), ordered,
+            next_slots:BTreeMap::new(), thread_slots:BTreeMap::new(), source_threads:Vec::new(), allowance:None, session_errors:Vec::new(), names:HashMap::new(), ordered,
             statistics_units, statistics_key_bytes, reducers:None })
     }
 
@@ -203,7 +206,7 @@ impl SelectedCandidate {
                     let path = if self.next < self.active.len() { self.active[self.next].clone() }
                         else { self.source_paths[self.next - self.active.len()].clone() };
                     if !self.valid_path(collector, &path) { return Err(Failure::PhysicalSource); }
-                    let (projection, partial, ids, errors) = if self.next < self.active.len() {
+                    let (projection, partial, ids, errors, allowance) = if self.next < self.active.len() {
                         let path = &self.active[self.next];
                         let state = collector.files.get(path).ok_or(Failure::InputsRejected)?;
                         let key = checkpoint::key(collector.session_root.as_deref().ok_or(Failure::InputsRejected)?, path).ok_or(Failure::InputsRejected)?;
@@ -213,8 +216,10 @@ impl SelectedCandidate {
                             .map(|(id, _)| id.clone()).collect();
                         let mut metadata = Projection::for_id(state.projection.id.clone());
                         metadata.merge_snapshot(&state.projection, Some(&BTreeSet::new()), &self.inputs.as_ref().ok_or(Failure::State)?.time.cutoffs);
-                        let errors = super::Session::projection_error_events(&state.projection, &path, &state.projection.errors).collect();
-                        (metadata, state.pending() || state.discard, ids, errors)
+                        let errors = if state.projection.id.is_some() {
+                            super::Session::projection_error_events(&state.projection, &path, &state.projection.errors).collect()
+                        } else { Vec::new() };
+                        (metadata, state.pending() || state.discard, ids, errors, state.projection.allowance.clone())
                     } else {
                         let source = &self.sources[self.next - self.active.len()];
                         let mut store = collector.checkpoints.snapshot_reader().map_err(|_| Failure::CheckpointRead)?.ok_or(Failure::CheckpointRead)?;
@@ -223,26 +228,37 @@ impl SelectedCandidate {
                         let projection = checkpoint::snapshot_projection(header, false).ok_or(Failure::InvalidProjection)?;
                         if !projection.projection.calls.is_empty() { return Err(Failure::InvalidProjection); }
                         if projection.source_details_pending {
-                            self.detail_pending.insert(projection.projection.id.clone().ok_or(Failure::InvalidProjection)?);
+                            if let Some(id) = &projection.projection.id { self.detail_pending.insert(id.clone()); }
                         }
                         let ids = selection.calls.get(&source.key).into_iter().flatten().cloned().collect();
                         let errors = super::Session::projection_error_events(&projection.projection, &path, &projection.projection.errors).collect();
-                        (projection.projection, projection.partial, ids, errors)
+                        let allowance = projection.projection.allowance.clone();
+                        (projection.projection, projection.partial, ids, errors, allowance)
                     };
-                    let thread = projection.id.clone().ok_or(Failure::InvalidProjection)?;
-                    let next_thread = self.thread_slots.len();
-                    self.thread_slots.entry(thread.clone()).or_insert(next_thread);
-                    self.metadata.entry(thread.clone()).or_insert_with(|| Projection::for_id(Some(thread.clone())))
-                        .merge_snapshot(&projection, None, &self.inputs.as_ref().ok_or(Failure::State)?.time.cutoffs);
-                    *self.partial.entry(thread.clone()).or_default() |= partial;
-                    for id in ids {
-                        let key = (thread.clone(), id);
-                        let next = self.next_slots.entry(thread.clone()).or_default();
-                        self.slots.entry(key.clone()).or_insert_with(|| { let slot = *next; *next += 1; slot });
-                        self.winners.insert(key, self.next);
+                    // Match snapshots: complete discovery keeps the first equal-time
+                    // allowance, canonical overflow fallback keeps the last.
+                    if let Some(value) = allowance {
+                        let updated = value["updated_at"].as_str().unwrap_or_default();
+                        if self.allowance.as_ref().is_none_or(|previous| updated > previous["updated_at"].as_str().unwrap_or_default()
+                            || (!collector.has_complete_source_order() && updated == previous["updated_at"].as_str().unwrap_or_default())) {
+                            self.allowance = Some(value);
+                        }
+                    }
+                    if let Some(thread) = projection.id.clone() {
+                        let next_thread = self.thread_slots.len();
+                        self.thread_slots.entry(thread.clone()).or_insert(next_thread);
+                        self.metadata.entry(thread.clone()).or_insert_with(|| Projection::for_id(Some(thread.clone())))
+                            .merge_snapshot(&projection, None, &self.inputs.as_ref().ok_or(Failure::State)?.time.cutoffs);
+                        *self.partial.entry(thread.clone()).or_default() |= partial;
+                        for id in ids {
+                            let key = (thread.clone(), id);
+                            let next = self.next_slots.entry(thread.clone()).or_default();
+                            self.slots.entry(key.clone()).or_insert_with(|| { let slot = *next; *next += 1; slot });
+                            self.winners.insert(key, self.next);
+                        }
                     }
                     if !self.valid_path(collector, &path) { return Err(Failure::PhysicalSource); }
-                    self.source_threads.push(thread);
+                    self.source_threads.push(projection.id.clone());
                     self.session_errors.push(errors);
                     self.next += 1;
                 }
@@ -291,7 +307,7 @@ impl SelectedCandidate {
                             self.read_work[1] += page.calls.len();
                             for call in &page.calls {
                                 self.read_work[2] += call.payload.len();
-                                if self.winners.get(&(self.source_threads[source_index].clone(), call.call_id.clone())) != Some(&source_index) {
+                                if self.source_threads[source_index].as_ref().and_then(|thread| self.winners.get(&(thread.clone(), call.call_id.clone()))) != Some(&source_index) {
                                     self.read_work[3] += 1;
                                     self.read_work[4] += call.payload.len();
                                 }
@@ -299,39 +315,42 @@ impl SelectedCandidate {
                         }
                         let projection = checkpoint::snapshot_projection(page, false).ok_or(Failure::InvalidProjection)?;
                         if projection.source_details_pending {
-                            self.detail_pending.insert(projection.projection.id.clone().ok_or(Failure::InvalidProjection)?);
+                            if let Some(id) = &projection.projection.id { self.detail_pending.insert(id.clone()); }
                         }
                         (projection.projection, reader.is_complete())
                     };
-                    let thread = projection.id.as_deref().ok_or(Failure::InvalidProjection)?;
-                    if thread != self.source_threads[source_index] { return Err(Failure::InvalidProjection); }
-                    if projection.calls.keys().any(|id| !self.winners.contains_key(&(thread.to_owned(), id.clone()))) {
-                        return Err(Failure::InvalidProjection);
-                    }
-                    projection.calls.retain(|id, _| self.winners.get(&(thread.to_owned(), id.clone())) == Some(&source_index));
-                    for (id, call) in &mut projection.calls {
-                        let key = (thread.to_owned(), id.clone());
-                        if self.ordered { call.presentation_sequence = *self.slots.get(&key).ok_or(Failure::State)?; }
-                    }
-                    let reducers = self.reducers.as_mut().ok_or(Failure::State)?;
-                    let time = &self.inputs.as_ref().ok_or(Failure::State)?.time;
-                    for (index, cutoff) in time.cutoffs.iter().copied().enumerate() {
-                        if self.ordered {
-                            reducers.files[index].ordered_thread(self.thread_slots[thread]);
-                            reducers.commands[index].ordered_thread(self.thread_slots[thread]);
+                    if projection.id != self.source_threads[source_index] { return Err(Failure::InvalidProjection); }
+                    // No-ID sources still contribute metadata and undergo every
+                    // source validation, but baseline excludes their calls from rows.
+                    if let Some(thread) = projection.id.as_deref() {
+                        if projection.calls.keys().any(|id| !self.winners.contains_key(&(thread.to_owned(), id.clone()))) {
+                            return Err(Failure::InvalidProjection);
                         }
-                        reducers.files[index].observe(&projection, cutoff, self.inputs.as_ref().ok_or(Failure::State)?.reducer_switches().1, None);
-                        reducers.series[index].observe(&projection, cutoff);
+                        projection.calls.retain(|id, _| self.winners.get(&(thread.to_owned(), id.clone())) == Some(&source_index));
+                        for (id, call) in &mut projection.calls {
+                            let key = (thread.to_owned(), id.clone());
+                            if self.ordered { call.presentation_sequence = *self.slots.get(&key).ok_or(Failure::State)?; }
+                        }
+                        let reducers = self.reducers.as_mut().ok_or(Failure::State)?;
+                        let time = &self.inputs.as_ref().ok_or(Failure::State)?.time;
+                        for (index, cutoff) in time.cutoffs.iter().copied().enumerate() {
+                            if self.ordered {
+                                reducers.files[index].ordered_thread(self.thread_slots[thread]);
+                                reducers.commands[index].ordered_thread(self.thread_slots[thread]);
+                            }
+                            reducers.files[index].observe(&projection, cutoff, self.inputs.as_ref().ok_or(Failure::State)?.reducer_switches().1, None);
+                            reducers.series[index].observe(&projection, cutoff);
+                            for (id, call) in &projection.calls {
+                                reducers.statistics[index].observe(thread, call);
+                                reducers.commands[index].observe(thread, id, call);
+                                reducers.skills[index].observe(thread, Some(thread), id, call);
+                                reducers.rows[index].get_mut(thread).ok_or(Failure::State)?.observe(id, call, &mut reducers.totals[index], &mut reducers.nested[index]);
+                            }
+                        }
                         for (id, call) in &projection.calls {
-                            reducers.statistics[index].observe(thread, call);
-                            reducers.commands[index].observe(thread, id, call);
-                            reducers.skills[index].observe(thread, Some(thread), id, call);
-                            reducers.rows[index].get_mut(thread).ok_or(Failure::State)?.observe(id, call, &mut reducers.totals[index], &mut reducers.nested[index]);
+                            reducers.failures.observe(thread, id, call);
+                            reducers.observations.extend(call.activities(thread, id));
                         }
-                    }
-                    for (id, call) in &projection.calls {
-                        reducers.failures.observe(thread, id, call);
-                        reducers.observations.extend(call.activities(thread, id));
                     }
                     if !self.valid_path(collector, &path) { return Err(Failure::PhysicalSource); }
                     if complete { self.reader = None; self.active_offset = 0; self.next += 1; }
@@ -482,7 +501,7 @@ impl SelectedCandidate {
         // Baseline groups only active sources when discovery order is complete,
         // then appends checkpoint source errors. Do not use winner metadata or
         // caller-selected tool presentation order for this separate precedence.
-        let mut active_order: Vec<_> = (0..self.active.len()).collect();
+        let mut active_order: Vec<_> = (0..self.active.len()).filter(|index| self.source_threads[*index].is_some()).collect();
         if collector.has_complete_source_order() {
             let mut first = BTreeMap::new();
             for index in &active_order {
@@ -493,7 +512,7 @@ impl SelectedCandidate {
         }
         let session_errors = active_order.into_iter().chain(self.active.len()..self.session_errors.len())
             .flat_map(|index| std::mem::take(&mut self.session_errors[index])).collect();
-        Ok(CompletedCandidate { files,series,statistics,commands,skills,rows,observations,failures,session_errors,
+        Ok(CompletedCandidate { files,series,statistics,commands,skills,rows,observations,failures,session_errors,allowance:self.allowance.take(),
             #[cfg(test)] read_work:self.read_work })
     }
 }

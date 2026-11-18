@@ -423,6 +423,8 @@ Desktop source.checked_at 在無新事件的 refresh 也可能改變, 不能將�
 
 後續 metadata-only 替代驗證已以 consume(turn_context) 建立合法第三來源, 依真正 source key 排序, 原八情境四窗摘要 / rows / canonical errors 比對通過, metadata-only 仍參與全部來源驗證, 詳見 validation 的合法 context 記錄, 此為合成 checkpoint 驗證, 無 ID / allowance 與完整 finalizer / production 發布仍未完成
 
+後續 candidate 已保留 optional source thread ID, 無 ID 來源的 calls 不納入 thread 摘要但仍完成來源驗證, active / checkpoint session errors 依既有不同規則處理, 各來源 allowance 獨立擷取並保留同時間 winner 規則, checkpoint-only 與 active + checkpoint 的合成無 ID 情境通過, 正式 health / usage 過濾、complete-source-order 全流程、detail index 與 worker 發布仍待串接, 詳見 validation
+
 建構 eligibility 仍用原 Option, SelectedInputs 的舊 validate_sources 亦保留 Option wrapper, 新 try_validate_sources 提供有類型的驗證結果, 不改動同步 snapshots 或原失敗 fallback
 
 來源路徑只從既有 active / session_paths / duplicate_session_paths 解析, 以 checkpoint key 核對, 缺少已觀察路徑、fingerprint 或 active 與 membership stamp 不同時拒絕, 不重新 discovery 或猜測來源位置

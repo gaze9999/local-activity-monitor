@@ -2428,3 +2428,19 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, 精確八情境測試通過 1 項、449 �
 Linux / Rust 1.100.0 / 原 Cargo.lock, 修正後八情境測試通過 1 項、449 項未選取, 95.82 秒, 三項來源錯誤順序 / 命名相依回歸分別通過 1 項, 0.13 / 0.03 / 0.01 秒, 維持 8 個既有 warnings, git diff --check 通過
 
 本輪仍為合成 checkpoint fixture, context 使用 production parser, cursor / 實體檔案沿用既有合成方式, 不代表真實 metadata-only JSONL 的完整匯入驗收, 未改 production worker / fallback、API 或查詢次數, 無 ID 來源、allowance 串接、完整 finalizer / 發布、HTTP 與其他平台仍待完成
+
+### Candidate 無 ID 來源與 allowance 擷取
+
+基準 `6f60a32`, candidate 的 source identity 改為 Option, 無 ID header 不再直接拒絕整組, 仍讀取 selected checkpoint pages、檢查 projection 及實體來源與 signature, 不建立 thread row 或將其 calls 納入摘要, 已有 ID 的 winner / insertion slot 規則不變
+
+- 沿 snapshots 的來源規則, active 無 ID session errors 排除, checkpoint 無 ID errors 保留, 不以空字串 thread ID 代替 None, detail-pending 僅標記真實 thread ID
+- Header 分別擷取各來源原始 allowance, 不依賴不會複製 allowance 的 thread metadata merge, 按 updated_at 選擇, complete-source-order 同時間保留首次來源、canonical fallback 保留最後來源
+- CompletedCandidate 暫存 owned allowance, 尚未套用 finalizer 的 health / usage 開關, 不新增 API 欄位或切換 worker, 正式串接仍須保留原過濾位置
+- 新 fixture 涵蓋 checkpoint-only 與 active + checkpoint 兩種配置, 各有 2 個實際 selected calls, 明確要求 rows 為空、兩個已知 checkpoint error codes 各保留一次、active 最新 allowance 為 99, 四窗 rows / usage / files / statistics / errors 與未修改 snapshots 相符, error log bytes 另比對 materialized renderer
+- 無 ID overflow path 必須以真正 source_key 登記 duplicate_session_paths, 不能使用任意 fixture 標籤再依 thread ID fallback, 此規則來自原 overflow_path, 不修改 lookup 或驗證
+
+初次測試編譯先後遇到 Checkpoint 不實作 Clone 與 SnapshotTime 已移入 candidate, 修正只在測試重新讀取 checkpoint 及預先保留 reference, 首次執行因上述來源登記錯誤失敗 0.01 秒, 三份失敗 log / patch 均保留, 未重跑未修改的失敗版本
+
+Linux / Rust 1.100.0 / 原 Cargo.lock, focused 最終通過 1 項、450 項未選取, 0.85 秒, 原八情境 candidate 通過 93.17 秒, 原 production allowance tie、physical guard、session error source-order 各通過 0.11 / 0.08 / 0.09 秒, 維持 8 個既有 warnings, git diff --check 通過
+
+此為合成 no-ID checkpoint / active projection 驗證, 不代表真實無 ID JSONL 完整匯入或全部平台驗收, complete-source-order allowance 的 candidate 全流程仍待驗證, 未執行 HTTP 或完整套件, production staging / fallback 與外部來源讀取位置不變, 完整 finalizer / detail index / 四窗共同發布仍未串接

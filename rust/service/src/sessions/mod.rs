@@ -5876,6 +5876,107 @@ mod log_tests {
     }
 
     #[test]
+    fn candidate_preserves_no_id_source_allowance_and_checkpoint_errors() {
+        use selected_candidate::{Advance, SelectedCandidate, Source};
+        for active in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let paths: Vec<_> = (1..=2).map(|n| root.join(format!("rollout-00000000-0000-4000-8000-{n:012}.jsonl"))).collect();
+            for (n, path) in paths.iter().enumerate() {
+                let records = [
+                    json!({"timestamp":"2026-11-13T01:00:00Z","type":"response_item","payload":{"type":"function_call","name":"fixture_tool","call_id":"call","arguments":"{}"}}),
+                    json!({"timestamp":"2026-11-13T01:00:01Z","type":"event_msg","payload":{"type":"turn_failed","error_code":format!("source-{n}")}}),
+                    json!({"timestamp":"2026-11-13T01:00:02Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":10 + n}}}}),
+                ];
+                std::fs::write(path, records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+            }
+            let mut collector = Collector::new(root.join("monitoring"), true, None);
+            let stopped = AtomicBool::new(false);
+            for _ in 0..4 { collector.refresh(&root, &stopped, true, true, CommandSwitches::default()); }
+            let mut store = lam_history_store::Store::open(&root.join("monitoring"), lam_history_store::Access::ReadWrite).unwrap().unwrap();
+            let mut membership = SourceMembership::new().unwrap();
+            let mut checkpoints = BTreeMap::new();
+            for path in &paths {
+                let key = checkpoint::key(&root, path).unwrap();
+                let mut checkpoint = store.checkpoint(&key, 10).unwrap().unwrap();
+                assert_eq!(checkpoint.calls.len(), 1);
+                let mut payload: Value = serde_json::from_str(&checkpoint.cursor.payload).unwrap();
+                payload["projection"]["id"] = Value::Null;
+                checkpoint.cursor.payload = payload.to_string();
+                store.save_checkpoints(std::slice::from_ref(&checkpoint.cursor), &checkpoint.calls, &[]).unwrap();
+                let metadata = std::fs::metadata(path).unwrap();
+                let fingerprint = source_fingerprint(file_identity(&metadata), metadata.len(), metadata.modified().ok()).unwrap();
+                membership.insert(&[MembershipRecord {key:key.clone(),fingerprint:Some(fingerprint.clone())}]).unwrap();
+                membership.mark_verified(&[VerifiedMembership {key:key.clone(),fingerprint,
+                    checkpoint_signature:checkpoint.cursor.signature.clone(),materialized:true,
+                    call_headers:Some(checkpoint.calls.iter().map(|call| lam_history_store::CallHeader {call_id:call.call_id.clone(),event_time:call.event_time.clone()}).collect())}]).unwrap();
+                // Without a thread ID, overflow_path resolves only a real source-key enrollment.
+                collector.duplicate_session_paths.insert(key.clone(), path.clone());
+                checkpoints.insert(key, checkpoint);
+            }
+            collector.source_membership = Some(membership);
+            collector.source_membership_root = Some(file_identity(&std::fs::metadata(&root).unwrap()));
+            collector.source_membership_complete = true;
+            collector.discovered_files = Some(2);
+            collector.discovery = None;
+            collector.files.retain(|path, _| active && path == &paths[0]);
+            for state in collector.files.values_mut() {
+                state.projection.id = None;
+                let record = json!({"timestamp":"2026-11-13T01:30:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":99}}}});
+                assert!(state.projection.consume(record.to_string().as_bytes(), 0, true, true, &BTreeMap::new(), McpSwitches::default(), true, true, CommandSwitches::default()));
+            }
+            assert!(!collector.has_complete_source_order());
+            let selection = collector.select_recent_calls(10, 100).unwrap();
+            assert!(selection.complete);
+            assert_eq!(selection.calls.values().map(BTreeSet::len).sum::<usize>(), 2);
+            let time = collector.capture_snapshot_time();
+            let reference = time.reference;
+            let mut expected_errors = Vec::new();
+            for checkpoint in checkpoints.values() {
+                let projection = checkpoint::snapshot_projection(store.checkpoint(&checkpoint.cursor.source_key, 10).unwrap().unwrap(), false).unwrap();
+                assert!(projection.projection.id.is_none());
+                let path = collector.overflow_path(&root, &projection).unwrap();
+                expected_errors.extend(Session::projection_error_events(&projection.projection, path, &projection.projection.errors));
+            }
+            assert_eq!(expected_errors.len(), 2);
+            assert_eq!(expected_errors.iter().map(|event| event["code"].as_str().unwrap()).collect::<BTreeSet<_>>(),
+                ["source-0", "source-1"].into_iter().collect());
+            let baseline = collector.snapshots("ok", "ok", 1);
+            let journal = collector.capture_snapshot_journal();
+            let expected_windows = collector.error_windows_captured(&journal, "ok", reference, &BTreeMap::new(), &expected_errors);
+            let mut candidate = SelectedCandidate::new(&collector, &selection, time,
+                checkpoints.iter().map(|(key, checkpoint)| Source {key:key.clone(),signature:checkpoint.cursor.signature.clone()}).collect(),
+                false, 10_000, 10_000, true, &stopped).unwrap();
+            let mut complete = false;
+            for _ in 0..32 {
+                match candidate.advance(&collector, &selection, true, &stopped, 1).unwrap() {
+                    Advance::Pending(next) => candidate = next,
+                    Advance::Complete(result) => {
+                        assert_eq!(result.session_errors, expected_errors);
+                        assert!(result.failures.is_empty());
+                        assert_eq!(result.read_work[1], 2);
+                        let errors = collector.render_error_windows_captured(&journal, "ok", reference, &result.session_errors, |_| result.failures);
+                        assert_eq!(errors, expected_windows);
+                        for index in 0..4 {
+                            let window: Value = serde_json::from_slice(&baseline.window_bytes(index)).unwrap();
+                            assert_eq!(errors[index].0, window["errors"]);
+                            assert_eq!(result.rows[index]["rows"], window["codex"]["threads"]);
+                            assert_eq!(result.rows[index]["rows"], json!([]));
+                            assert_eq!(result.allowance, Some(window["codex"]["usage"].clone()));
+                            assert_eq!(result.files[index], window["codex"]["file_activity"]);
+                            assert_eq!(result.statistics[index], window["codex"]["tool_statistics"]);
+                        }
+                        if active { assert_eq!(result.allowance.unwrap()["limits"][0]["used_percent"], 99); }
+                        complete = true;
+                        break;
+                    }
+                }
+            }
+            assert!(complete);
+        }
+    }
+
+    #[test]
     fn snapshot_file_candidate_resolves_two_source_winners_before_paging() {
         use selected_candidate::Failure;
         for (same_thread, nested, active) in [(true, false, false), (false, false, false), (true, true, false), (false, true, false),
