@@ -5977,6 +5977,123 @@ mod log_tests {
     }
 
     #[test]
+    #[ignore = "capacity acceptance: 50000 genuine calls and high nested cardinality"]
+    fn worker_candidate_accepts_maximum_primary_calls_and_rejects_nested_excess() {
+        use selected_candidate::{WorkerAdvance, WorkerCandidate};
+        use std::io::Write;
+        for nested in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let count = if nested { 1000 } else { CALL_LIMIT };
+            for source in 0..count.div_ceil(FILE_CALL_LIMIT) {
+                let id = format!("00000000-0000-4000-8000-{:012}", source + 1);
+                let path = root.join(format!("rollout-{id}.jsonl"));
+                let mut file = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+                writeln!(file, "{}", json!({"timestamp":"2026-11-18T01:00:00Z","type":"session_meta","payload":{"id":id}})).unwrap();
+                for n in source * FILE_CALL_LIMIT..count.min((source + 1) * FILE_CALL_LIMIT) {
+                    let tool = if nested { "exec".to_owned() } else { format!("tool{n:05}") };
+                    let arguments = if nested { (0..100).map(|offset| format!("await tools.nested{:06}({{}});", n * 100 + offset)).collect::<String>() } else { "{}".to_owned() };
+                    writeln!(file, "{}", json!({"timestamp":"2026-11-18T01:00:00Z","type":"response_item",
+                        "payload":{"type":"function_call","name":tool,"call_id":format!("call{n:05}"),"arguments":arguments}})).unwrap();
+                    writeln!(file, "{}", json!({"timestamp":"2026-11-18T01:00:01Z","type":"response_item",
+                        "payload":{"type":"function_call_output","call_id":format!("call{n:05}"),"output":"ok"}})).unwrap();
+                }
+            }
+            let mut collector = Collector::new(root.join("monitoring"), true, None);
+            let stopped = AtomicBool::new(false);
+            for round in 0..64 {
+                let (_, pending, _) = collector.refresh(&root, &stopped, true, true, CommandSwitches::default());
+                if !pending { break; }
+                assert!(round < 63, "source ingestion must finish within bounded rounds");
+            }
+            assert_eq!(collector.files.values().map(|state| state.projection.calls.len()).sum::<usize>(), count);
+            let mut membership = SourceMembership::new().unwrap();
+            for (path, state) in &collector.files {
+                assert!(!state.checkpoint_dirty);
+                let key = checkpoint::key(&root, path).unwrap();
+                let fingerprint = source_fingerprint(state.identity.unwrap(), state.size, state.modified).unwrap();
+                membership.insert(&[MembershipRecord {key:key.clone(),fingerprint:Some(fingerprint.clone())}]).unwrap();
+                membership.mark_verified(&[VerifiedMembership {key,fingerprint,
+                    checkpoint_signature:state.checkpoint_signature.clone().unwrap(),materialized:true,
+                    call_headers:Some(state.projection.calls.iter().map(|(id,call)| lam_history_store::CallHeader {
+                        call_id:id.clone(),event_time:call.time.map(stamp) }).collect())}]).unwrap();
+            }
+            collector.source_membership = Some(membership);
+            collector.source_membership_complete = true;
+            collector.source_membership_root = Some(file_identity(&std::fs::metadata(&root).unwrap()));
+            collector.discovery = None;
+            collector.discovered_files = Some(collector.files.len());
+            collector.files.clear();
+            collector.updated = Some(chrono::DateTime::parse_from_rfc3339("2026-11-18T01:30:00Z").unwrap().with_timezone(&Utc));
+            let selection = (0..256).find_map(|_| collector.select_recent_calls(CALL_LIMIT, 100_000).filter(|value| value.complete)).unwrap();
+            assert_eq!(selection.calls.values().map(BTreeSet::len).sum::<usize>(), count);
+            let empty = Collector::new(root.join("empty-monitoring"), true, None).snapshots("ok", "ok", 9);
+            let (sender, _receiver) = tokio::sync::watch::channel(empty);
+            let old = sender.borrow().windows[3].clone();
+            let mut driver = WorkerCandidate::start(&collector, &stopped).unwrap();
+            let before = crate::performance_debug::process_metrics();
+            let began = std::time::Instant::now();
+            let mut slowest_ms = 0.0f64;
+            let mut finished = false;
+            for round in 1..=1024 {
+                let step = std::time::Instant::now();
+                let outcome = driver.advance(&collector, "ok", "ok", 10, true, &stopped, &sender);
+                slowest_ms = slowest_ms.max(step.elapsed().as_secs_f64()*1000.0);
+                match outcome {
+                    Ok(WorkerAdvance::Pending(next)) => {
+                        assert_eq!(sender.borrow().version(), 9);
+                        assert_eq!(sender.borrow().windows[3], old);
+                        driver = next;
+                    }
+                    Ok(WorkerAdvance::Published) => {
+                        assert!(!nested);
+                        let snapshot = sender.borrow();
+                        assert_eq!(snapshot.version(), 10);
+                        for bytes in &snapshot.windows {
+                            let value: Value = serde_json::from_slice(bytes).unwrap();
+                            assert_eq!(value["codex"]["observed_tool_calls"], CALL_LIMIT);
+                            let statistics = value["codex"]["tool_statistics"].as_array().unwrap();
+                            assert_eq!(statistics.len(), CALL_LIMIT);
+                            for (n, row) in statistics.iter().enumerate() {
+                                assert_eq!(row["tool"], format!("tool{n:05}"));
+                                assert_eq!(row["calls"], 1);
+                                assert_eq!(row["returned"], 1);
+                                assert_eq!(row["thread_count"], 1);
+                                assert_eq!(row["known_duration_count"], 1);
+                                assert_eq!(row["average_ms"], 1000.0);
+                                assert_eq!(row["p99_ms"], 1000.0);
+                            }
+                        }
+                        assert_eq!(snapshot.detail_index.files.values().flatten().map(|file| file.calls.len()).sum::<usize>(), CALL_LIMIT);
+                        let last = snapshot.detail_index.select_call("00000000-0000-4000-8000-000000000007", "call49999").unwrap();
+                        assert_eq!(last.tool("call49999", true, false).unwrap()["tool"], "tool49999");
+                        eprintln!("maximum candidate: {}", json!({"calls":count,"rounds":round,"elapsed_ms":began.elapsed().as_secs_f64()*1000.0,
+                            "max_step_ms":slowest_ms,"window_bytes":snapshot.windows.iter().map(Bytes::len).sum::<usize>(),
+                            "before":before,"after":crate::performance_debug::process_metrics()}));
+                        finished = true;
+                        break;
+                    }
+                    Err(error) => {
+                        assert!(nested);
+                        assert_eq!(error, selected_candidate::Failure::StatisticsCapacity);
+                        assert_eq!(sender.borrow().version(), 9);
+                        assert_eq!(sender.borrow().windows[3], old);
+                        sender.send_replace(collector.snapshots("ok", "ok", 10));
+                        let fallback: Value = serde_json::from_slice(&sender.borrow().windows[3]).unwrap();
+                        assert_eq!(fallback["codex"]["observed_tool_calls"], count);
+                        assert_eq!(fallback["codex"]["tool_statistics"].as_array().unwrap().iter()
+                            .filter(|row| row["nested"] == true).map(|row| row["calls"].as_u64().unwrap()).sum::<u64>(), 100_000);
+                        eprintln!("nested capacity rejection: calls={count} rounds={round} elapsed_ms={} max_step_ms={slowest_ms}", began.elapsed().as_secs_f64()*1000.0);
+                        finished = true;
+                        break;
+                    }
+                }
+            }
+            assert!(finished);
+        }
+    }
+
+    #[test]
     fn log_sources_match_the_same_finalized_snapshot_windows() {
         let directory = tempfile::tempdir().unwrap();
         let mut collector = Collector::new(directory.path().join("monitoring"), true, None);

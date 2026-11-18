@@ -2592,3 +2592,27 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, 修正後 opt-in HTTP 通過 1 項、229 
 Linux / Rust 1.100.0 / 原 Cargo.lock 的 debug build, probe 每種條件各一次, 基準另含暫時診斷輸出, 不是 p95、release 效能或保證改善比例, 首次啟用仍接近 5 秒, 不將效能餘裕列為已充分驗收, 暫時 instrumentation 未加入 production, 最終維持 5 個既有 warnings, git diff --check 通過
 
 未新增 HTTP endpoint / 外部查詢, `/api/logs` 的 JEV source 欄位改由同批 `/api/snapshot` finalizer 值取得, 值與讀取時點不變, `/api/settings` 仍只在實際發布符合請求後回已套用狀態, 未重跑完整套件或先前 deferred 項目
+
+### Maximum selected calls 與 nested admission 容量
+
+基準 `919e08e`, opt-in `worker_candidate_accepts_maximum_primary_calls_and_rejects_nested_excess` 直接建立真實合成 JSONL request / response, 經原 parser 與 checkpoint 保存後, 以實際 source key、fingerprint、cursor signature 與 call headers 登記 materialized membership, 驅動原 WorkerCandidate 與 watch publication, 不捏造 call payload 或 locator
+
+| 案例 | 實際驗證 |
+| --- | --- |
+| 50,000 primary calls / 7 個來源 | 每來源不超過 8,192 calls, 全域選取正好 50,000, 50,000 個不同 tool、每個 1 thread / 1 duration, 對應預設 150,000 statistics units 的精確邊界 |
+| 四窗完整發布 | 每窗 50,000 calls 與 50,000 statistics rows, 每 tool 的 calls / returned / known_duration_count / thread_count 均為 1, average / p99 都為 1,000 ms |
+| 詳細資料 | 同批 index 保留 50,000 calls, 真實最後一筆 call49999 locator 讀出 tool49999 |
+| 1,000 exec calls / 100,000 個不同 nested tools | 每 call 100 個真實 code invocation, 預設 candidate 明確回 StatisticsCapacity, 所有 Pending 與拒絕都保持舊 watch / window |
+| 拒絕後原 fallback | 明確呼叫原 snapshots, 保留 1,000 primary 與全部 100,000 nested calls, 未將截斷資料當作成功候選 |
+
+Linux / Rust 1.100.0 / 原 Cargo.lock / debug build, focused opt-in 通過 1 項、454 項未選取, 共 45.50 秒, 原 production 未改, git diff --check 通過, 5 個既有 warnings
+
+容量觀察:
+
+- Primary case 105 輪, 從開始 driver 到完整四窗 readback / 斷言共 23.00 秒, 最長單次 advance 10.42 秒, 四窗 bytes 合計 55,003,238
+- 程序 RSS 125,620,224 → 772,259,840 bytes, peak 806,989,824 bytes, 包含真實 fixture 解析 / checkpoint、readback 與 allocator 保留, 不是 isolated reducer RSS 或上限保證
+- Nested case 7 輪到拒絕, 加上原 fallback 與 readback 共 14.39 秒, 最長單次 advance 1.73 秒
+
+此步完成上述功能容量與拒絕資料完整性證據, 同時顯示最大 primary case 的單步延遲與程序記憶體成本仍高, 不把 10.42 秒步驟標成前景回應 / 停止延遲通過, 後續需分別量測 reducer finish 與整批 finalizer / serialization 再決定可中斷或低複製的處理方式, 不以降低選取數、提高預算或略過 guard 隱藏成本
+
+Materialized membership 在測試中以真實已保存來源明確登記, 不是同時驗證 5,000 以上來源的 native admission, 該路徑保留前一輪獨立證據, 本輪未重跑 native HTTP、完整套件或跨平台

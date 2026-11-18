@@ -678,3 +678,11 @@ Rust `main.rs` 的 font / GPU worker 各自先發布自己的結果, 再標記 D
 5,020 來源 debug-build probe 的重新啟用 POST 由診斷基準 5,020.34 ms / 200 變為 4,341.01 ms / 200, 詳見 validation 原始條件與證據界線, 中間曾有 202 未完成的失敗 run 並保留, 不將單次觀察當作穩定 SLA, 首次啟用仍接近 5 秒
 
 四窗 log source、candidate errors / 無 ID、真實 JEV 資料庫 HTTP、JSON parser 與 debug metrics 回歸通過, force replay、source guards、大小上限與設定實際套用後才確認的行為維持, 高 selected / nested 容量、持續負載與跨平台仍需驗收
+
+### 最大選取與 nested 容量結果
+
+`919e08e` 後已以真實 JSONL / checkpoint 驗證 50,000 selected primary calls、四窗 exact statistics 與同批 detail index, 預設 150,000 statistics units 精確邊界可完成, 100,000 個不同 nested tools 則整批拒絕並保留原 fallback 的完整計數
+
+新增的實際缺口是最大 primary case 單次 advance 10.42 秒、四窗 55.00 MB、程序 peak 約 807 MB, 邏輯 admission 不是 RSS 或前景延遲保證, 詳細條件與 readback 成本見 validation
+
+下一步優先拆出 reducer finish、候選 finalizer 與 serialization 的成本, 保留 exact counts / p99、同批 index、取消與來源 guard, 再決定有界化或減少複製, 不能只縮短 fixture 或降低接受的資料量, native 最大負載回應性與跨平台仍未驗收
