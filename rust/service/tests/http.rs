@@ -12256,6 +12256,114 @@ fn desktop_diagnostic_retries_failed_storage_on_source_update() {
 }
 
 #[test]
+#[ignore = "capacity acceptance: native 50000 calls and 5007 physical sources"]
+fn native_maximum_calls_rescan_and_http_latency() {
+    use std::io::Write;
+    let home = tempdir().unwrap();
+    let root = home.path().join("sessions");
+    fs::create_dir(&root).unwrap();
+    let start = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now() - Duration::from_secs(2));
+    let stamp = start.to_rfc3339();
+    let completed = (start + chrono::Duration::seconds(1)).to_rfc3339();
+    let paths: Vec<_> = (0..7).map(|source| {
+        let id = format!("00000000-0000-4000-8000-{:012}", source + 1);
+        let path = root.join(format!("rollout-{id}.jsonl"));
+        let mut file = std::io::BufWriter::new(fs::File::create(&path).unwrap());
+        file.write_all(event(&stamp, "session_meta", json!({"id":id})).as_bytes()).unwrap();
+        for n in source * 8192..50_000.min((source + 1) * 8192) {
+            file.write_all(event(&stamp, "response_item", json!({"type":"function_call",
+                "name":format!("tool{n:05}"),"call_id":format!("call{n:05}"),"arguments":"{}"})).as_bytes()).unwrap();
+            file.write_all(event(&completed, "response_item", json!({"type":"function_call_output",
+                "call_id":format!("call{n:05}"),"output":"ok"})).as_bytes()).unwrap();
+        }
+        file.flush().unwrap();
+        drop(file);
+        fs::File::options().write(true).open(&path).unwrap().set_times(
+            fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000))).unwrap();
+        path
+    }).collect();
+    fn wait_complete(service: &Service, label: &str, overflow: bool) {
+        let began = Instant::now();
+        let mut maximum_get_ms = 0.0f64;
+        let mut saw_pending = false;
+        let mut last_report = Instant::now();
+        loop {
+            let request = Instant::now();
+            let reply = service.get("/api/snapshot?window=all");
+            maximum_get_ms = maximum_get_ms.max(request.elapsed().as_secs_f64()*1000.0);
+            assert_eq!(reply.status, 200);
+            let value = reply.json();
+            let state = &value["codex"]["read_state"];
+            saw_pending |= state["source_index_materialized"] == 7
+                && value["codex"]["observed_tool_calls"].as_u64().is_some_and(|count| count < 50_000);
+            if value["codex"]["observed_tool_calls"] == 50_000 && (!overflow ||
+                (state["source_index_materialized"] == 7 && state["outside_working_set"] == 7
+                && state["overflow_snapshot_sources"] == 7 && saw_pending)) {
+                let rows = value["codex"]["tool_statistics"].as_array().unwrap();
+                assert_eq!(rows.len(), 50_000);
+                for (n,row) in rows.iter().enumerate() {
+                    assert_eq!(row["tool"], format!("tool{n:05}"));
+                    for key in ["calls", "thread_count", "returned", "known_duration_count"] { assert_eq!(row[key], 1); }
+                    assert_eq!(row["average_ms"], 1000.0);
+                    assert_eq!(row["p99_ms"], 1000.0);
+                }
+                eprintln!("native maximum {label}: elapsed_ms={} max_get_ms={} response_bytes={} state={state}",
+                    began.elapsed().as_secs_f64()*1000.0, maximum_get_ms, reply.body.len());
+                return;
+            }
+            if last_report.elapsed() >= Duration::from_secs(10) {
+                eprintln!("native maximum {label} pending: elapsed_s={} calls={} state={state}", began.elapsed().as_secs(),value["codex"]["observed_tool_calls"]);
+                last_report = Instant::now();
+            }
+            assert!(began.elapsed() < Duration::from_secs(180), "native maximum {label} incomplete: calls={} state={state}",value["codex"]["observed_tool_calls"]);
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+    let mut warm = Service::start(home.path(), true, None);
+    wait_complete(&warm, "warm", false);
+    warm.stop();
+    drop(warm);
+    let mut store = Store::open(&home.path().join("monitoring"), Access::ReadOnly).unwrap().unwrap();
+    let mut payload_bytes = 0;
+    let mut calls = 0;
+    for path in &paths {
+        let checkpoint = store.checkpoint(&checkpoint_key(path), 8192).unwrap().unwrap();
+        calls += checkpoint.calls.len();
+        payload_bytes += checkpoint.calls.iter().map(|call| call.payload.len()).sum::<usize>();
+    }
+    assert_eq!(calls, 50_000);
+    assert!(payload_bytes > 16 * 1024 * 1024);
+    drop(store);
+    for n in 8..=5007 {
+        let id = format!("00000000-0000-4000-8000-{n:012}");
+        fs::write(root.join(format!("rollout-{id}.jsonl")), event(&stamp,"session_meta",json!({"id":id}))).unwrap();
+    }
+    let mut service = Service::start(home.path(), true, None);
+    wait_complete(&service, "initial", true);
+    let detail = service.get("/api/codex/tool?thread_id=00000000-0000-4000-8000-000000000007&call_id=call49999");
+    assert_eq!(detail.status, 200);
+    assert_eq!(detail.json()["tool"], "tool49999");
+    let refresh = || {
+        let body = "{}";
+        service.request_body(&format!("POST /api/refresh HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", service.port, body.len()),body)
+    };
+    assert_eq!(refresh().status, 200);
+    wait_complete(&service, "rescan", true);
+    assert_eq!(refresh().status, 200);
+    let began = Instant::now();
+    loop {
+        let value = service.get("/api/snapshot?window=all").json();
+        if value["codex"]["read_state"]["source_index_materialized"] == 7
+            && value["codex"]["observed_tool_calls"].as_u64().is_some_and(|count| count < 50_000) { break; }
+        assert!(began.elapsed() < Duration::from_secs(180), "maximum refresh must expose pending fallback");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let stopping = Instant::now();
+    service.stop();
+    eprintln!("native maximum pending stop: elapsed_ms={} payload_bytes={payload_bytes}", stopping.elapsed().as_secs_f64()*1000.0);
+}
+
+#[test]
 #[ignore = "capacity acceptance: 5020 physical sources and 20 MiB aggregate checkpoints"]
 fn native_candidate_overflow_rescan_and_http_latency() {
     let home = tempdir().unwrap();

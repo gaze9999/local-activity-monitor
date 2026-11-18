@@ -1177,8 +1177,11 @@ impl Monitor {
                     // file for every bounded candidate page. A wake or future
                     // deadline returns to the normal collection path; every
                     // step still validates controls and retained input guards.
+                    // Legacy payload/detail scans do not block the admitted
+                    // replacement that computes those same outputs privately.
                     while snapshot_candidate.is_some()
-                        && !rescan_ready && !pending && !collector.recent_call_refresh_pending()
+                        && !rescan_ready && !pending && !collector.recent_call_scan_pending()
+                        && !collector.recent_call_details_dirty.load(Ordering::Acquire)
                         && !collector.worktrees.pending() && !collector.core.backfill()
                         && (!desktop_pending || desktop_retry)
                         && !stop.load(Ordering::Acquire) && codex_control.load(Ordering::Acquire)
@@ -1265,6 +1268,10 @@ fn advance_snapshot_candidate(
         Ok(selected_candidate::WorkerAdvance::Published) => {
             *version += 1;
             collector.published_detail_index = Arc::clone(&publish.borrow().detail_index);
+            // The guarded batch includes both complete projections and details.
+            // Release only the redundant legacy continuations after publication.
+            *collector.selected_snapshot_scan.lock().unwrap_or_else(|error| error.into_inner()) = None;
+            *collector.selected_detail_scan.lock().unwrap_or_else(|error| error.into_inner()) = None;
         }
         Err(_) if !stopped.load(Ordering::Acquire) && enabled.load(Ordering::Acquire) => {
             // Keep the existing incomplete/failure fallback. Do not restart
@@ -2076,6 +2083,7 @@ struct SelectedSnapshotScan {
     validating: bool,
     finished: bool,
     valid: bool,
+    capacity_blocked: bool,
 }
 
 struct SelectedDetailScan {
@@ -4642,11 +4650,13 @@ impl Collector {
         hash.update(serde_json::to_vec(&selection.calls).ok()?);
         let input_hash = hash.finalize().into();
         let mut cached = self.selected_snapshot_scan.lock().unwrap_or_else(|error| error.into_inner());
-        if cached.as_ref().is_none_or(|scan| scan.input_hash != input_hash || !scan.valid) {
+        // The same bounded inputs cannot recover a capacity rejection. Keep
+        // transient failures retryable without restarting this deterministic scan.
+        if cached.as_ref().is_none_or(|scan| scan.input_hash != input_hash || (!scan.valid && !scan.capacity_blocked)) {
             // Replacing the stage releases any obsolete SQLite read transaction.
             *cached = Some(SelectedSnapshotScan { input_hash, after: String::new(), reader: None,
                 projections: Vec::new(), completed: None, signatures: BTreeMap::new(), staged_bytes: 0,
-                validating: false, finished: false, valid: true });
+                validating: false, finished: false, valid: true, capacity_blocked: false });
         }
         let scan = cached.as_mut()?;
         if scan.finished && scan.valid {
@@ -4667,6 +4677,7 @@ impl Collector {
                 };
                 let reserve = key.len().saturating_add(signature.len()).saturating_add(512);
                 if scan.signatures.len() >= WALK_LIMIT || reserve > stage_limit.saturating_sub(scan.staged_bytes) {
+                    scan.capacity_blocked = true;
                     scan.valid = false; scan.finished = true; break;
                 }
                 scan.staged_bytes += reserve;
@@ -4691,6 +4702,7 @@ impl Collector {
             let repeated = scan.projections.last().is_some_and(|item| item.source_key == page.cursor.source_key);
             let reserve = call_bytes.saturating_add(if repeated { 0 } else { header_bytes });
             if reserve > stage_limit.saturating_sub(scan.staged_bytes) {
+                scan.capacity_blocked = true;
                 scan.valid = false; scan.finished = true; scan.reader = None; break;
             }
             scan.staged_bytes += reserve;
@@ -7502,6 +7514,15 @@ mod log_tests {
             assert_eq!(scan.staged_bytes, first_page_budget);
         }
         assert!(!collector.recent_call_refresh_pending());
+        for _ in 0..3 {
+            assert!(collector.selected_overflow_projections_with_limits(&selection,1,first_page_budget).is_none());
+            let cached = collector.selected_snapshot_scan.lock().unwrap();
+            let scan = cached.as_ref().unwrap();
+            assert!(scan.capacity_blocked && scan.finished && !scan.valid && scan.reader.is_none());
+            assert_eq!(scan.staged_bytes, first_page_budget);
+            drop(cached);
+            assert!(!collector.recent_call_refresh_pending());
+        }
         // A larger authorized test budget restarts from the beginning; no partial stage leaks.
         assert!(collector.selected_overflow_projections_with_limits(&selection,1,16*1024*1024).is_none());
         assert!(collector.selected_overflow_projections_with_limits(&selection,1,16*1024*1024).is_none());

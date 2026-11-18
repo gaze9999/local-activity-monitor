@@ -714,3 +714,11 @@ Worker 現將完整 reducer 結果留在私有 Finalizing 階段, 下一次 adva
 Statistics 階段現於每頁 512 群組完成後編碼並釋放該頁 Value rows, 每窗完成時驗證 JSON 並保留 RawValue, finalizer 在原欄位順序直接借用已驗證內容, 不再長期保留四組大型統計 Value 樹或在組裝時重走全部統計欄位
 
 最大案例本次最長 advance 2.01 秒、peak 約 441 MB, 含 readback 的總時間 29.36 秒, 仍是 debug 單次量測而非 native HTTP SLA, logical admission、exact p99、來源選取與 publication guards 未變
+
+### Native 最大來源工作集的候選排程
+
+50,000 真實 calls 加上 5,000 個 metadata-only 來源的 native 驗證揭露候選雖可 admission, 卻因舊 payload / detail scans 的 pending 狀態而每輪重建, 原 180 秒仍只發布 fallback 的 41,808 calls
+
+現區分實際 selection / collection 工作與被候選取代的舊組裝 continuation, quiescent loop 保留真正 selection、dirty、來源與設定 guards, 不等重複 payload / detail 組裝完成, 只有候選通過 publication guards 後才釋放被取代的兩個 continuation, 原失敗 fallback 與 completed detail cache 保持
+
+另修正同 input hash 的已知容量拒絕會重建舊 snapshot scan 的問題, 只記住 capacity rejection, transient / parse / signature failures 仍可重試, input hash 含 budget、membership epoch / revision 與 selection, 改變後重新評估, 不提高原上限

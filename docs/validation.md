@@ -2680,3 +2680,34 @@ Linux / Rust 1.100.0 / 原 Cargo.lock / debug build, 每次量測條件各一次
 跨 staging / capacity / stop / disable / input 與 source replacement guards 通過 6.63 秒、完整 error order 0.50 秒、無 ID candidate 0.52 秒、同批 detail index 0.10 秒通過, 5 個既有 warnings 保留
 
 八組完整兩來源 source-order / four-window oracle 通過 147.95 秒, 測試只將新的已驗證 raw statistics 解析回 Value 供原 oracle 比對, 未移除或調整欄位、順序、p99、guard 與詳細資料斷言, git diff --check 通過, native 最大負載 HTTP 與跨平台仍待驗收
+
+### Native 50,000 calls / 5,007 sources 排程驗證
+
+基準 `1011866`, 新增 opt-in `native_maximum_calls_rescan_and_http_latency`, 以 7 個真實 JSONL sources 共 50,000 request / response pairs 先經實際服務寫入 checkpoint, 再新增 5,000 個較新 metadata-only sources, 使全部 calls 進入 overflow, 每來源不超過 8,192 calls, 真實 checkpoint aggregate payload 必須超過 16 MiB
+
+HTTP / stdin stop 保留原 5 秒處理設定, 各階段 completion 保留 180 秒界線, 檢查全部 50,000 個 tool 的 calls / returned / thread_count / known_duration_count 為 1、average / p99 為 1,000 ms, 真實最後一筆 detail, initial 與 rescan 都須先觀察 incomplete fallback 才接受完整結果
+
+保留的失敗與診斷:
+
+- 原 acceptance 208.73 秒失敗, initial 180 秒仍為 41,808 / 50,000, 7 個來源全 materialized 且 unverified=0, 未執行到 rescan / stop
+- 原階段 trace 212.74 秒得到相同 incomplete, 沒有 header-complete 或 candidate rejection, 不能只依此斷定根因
+- 同 input capacity-cache 修正的 focused 通過 0.12 秒, native 仍於 206.11 秒失敗, 這項修正本身不是完整解法
+- 另一次 87.42 秒 bounded diagnostic 在 initial 60 秒主動停止, 不是 acceptance, 明確看到 admission=true、實際 collection pending=false、selection_scan=false、dirty=false, 但舊 snapshot / detail scan pending 持續阻止候選推進
+
+現在 quiescent candidate 不再等待可由其完整結果取代的舊 payload / detail scans, 不略過任何 input / source / control / publication guard, 成功發布才清掉舊 continuation, 拒絕仍沿原 fallback
+
+容量 cache focused 新增相同 input 重讀三次仍 finished / rejected、無 reader 與 pending, 以及原 changed budget、epoch、selection、signature / partial-reader 與 recovery 檢查, 通過 0.13 秒, candidate capacity / controls / input / physical guards 3.85 秒、同批 detail index 0.11 秒通過
+
+修正後 native 完整案例通過 384.26 秒:
+
+| 階段 | 實際結果 |
+| --- | --- |
+| Warm 原服務寫入 | 29.91 秒, max GET 1,181.61 ms, 50,000 calls / 7 sources |
+| 初次 overflow 完成 | 163.81 秒, max GET 959.41 ms, 17,691,027 bytes |
+| 未變更 rescan 完成 | 171.65 秒, max GET 1,600.77 ms, 17,691,658 bytes |
+| 再次 refresh 的 pending stop | 112.34 ms, 原 5 秒停止界線內退出 |
+| Checkpoint payload | 18,548,469 bytes, 真實 payload 而非 padding |
+
+兩次 overflow 都保留 incomplete=true 的既有欄位語意, exact 50,000 rows 與最後一筆 detail 通過, source_index_materialized=7 / unverified=0, 本次確實執行 initial、rescan 與 pending stop, 不將此結果擴大到最大負載停用 / 重新啟用或跨平台
+
+Linux / Rust 1.100.0 / 原 Cargo.lock / debug build, 單次接受觀察, 過程另有短 guard microprobe / 編譯重疊, 不是受控 latency benchmark 或 p95 SLA, rescan 仍接近 180 秒 completion 界線, 後續降低 guard 重複配置成本另作工作範圍, 不把其尚未加入此 binary 的變更歸因於本次結果
