@@ -2632,3 +2632,21 @@ Materialized membership 在測試中以真實已保存來源明確登記, 不是
 最大 primary 本次 105 輪, 含四窗 readback / 斷言共 22.63 秒, 最長 advance 9,650.57 ms, 四窗仍為 55,003,238 bytes, 程序 peak 694,489,088 bytes、readback 後 RSS 323,010,560 bytes, 診斷基準 peak 806,682,624 bytes、RSS 772,169,728 bytes
 
 Linux / Rust 1.100.0 / 原 Cargo.lock / debug build, 每種條件一次, 本次另有短 focused 回歸同時執行, 數值不是受控 benchmark、release SLA 或獨立 reducer RSS, 仍不宣稱最大負載回應性通過, 保留原 deferred、平台與完整套件未驗收項目
+
+### Candidate statistics 的分頁完成
+
+基準 `4226d94`, OwnedStatistics 依既有 tool / nested 排序每頁取出最多指定群組數, candidate 固定每次 advance 512 群組 / 單一視窗, 四窗完成後才進入原 physical 與 source guards, 不改 exact p99、容量判斷、fallback 或發布點
+
+獨立 ToolStatistics oracle 涵蓋啟用 / 停用、時間窗、nested、缺失時間與負 duration, 改以每頁 1 群組驗證每頁上限及完整結果, 零 budget 不消耗資料, focused 4 項通過 0.01 秒
+
+原最大 fixture 通過 49.17 秒, 50,000 primary 的 497 輪完整結果仍為 55,003,238 bytes、四窗 50,000 exact rows 與真實最後一筆 locator, 100,000 nested 超限仍整批拒絕並保留原 fallback 全部計數
+
+Primary driver 含 readback / 斷言 27.13 秒, 最長 advance 6,419.53 ms, peak 702,341,120 bytes, 相對前一步的 22.63 秒 / 9,650.57 ms / 694,489,088 bytes, 這次單步縮短但總時間增加, 不是整體加速或記憶體上限承諾
+
+Linux / Rust 1.100.0 / 原 Cargo.lock / debug build, 單次量測且前一步曾與短回歸重疊, 不能視為受控 benchmark, 此輪最大量測期間未同時執行其他本任務測試, native 前景 HTTP / 停止延遲、同步 finalizer 與跨平台仍未驗收
+
+跨 staging / 容量 / controls 案例新增真實進入 Statistics 並完成一窗後的停用、停止拒絕, 舊 version / bytes 保持不變, 通過 4.47 秒, 完整 error order / publication 0.80 秒、無 ID candidate 0.10 秒、同批 detail index 0.11 秒亦通過, 無新增 HTTP endpoint、query 或請求, 5 個既有 warnings 保留
+
+兩來源完整 oracle 的初次回歸在 84.41 秒停於 fixture 的 16 輪等待上限, 原候選尚未抵達 final validation, 未發生快照比對錯誤, 保留失敗記錄與 patch 後只將該等待上限改為 24 輪以容納新增統計階段, 仍要求到達指定 validation phase 且其前不可回 Complete
+
+修正後完整兩來源 oracle 通過 144.73 秒, 涵蓋八組同 / 不同 thread、primary / nested、active / checkpoint 組合, winner / 全部四窗 / source errors / detail index / physical replacement / 最終取消檢查維持原斷言, git diff --check 與既有 public-content hook 納入交付檢查

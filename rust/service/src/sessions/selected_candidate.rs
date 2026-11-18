@@ -15,12 +15,13 @@ pub(super) struct Source {
     pub signature: String,
 }
 
-enum Phase { Headers, Payload, Physical, Validate }
+enum Phase { Headers, Payload, Statistics(usize), Physical, Validate }
 
 struct Reducers {
     files: [project::FileSummary; 4],
     series: [project::ActivitySeries; 4],
     statistics: [project::OwnedStatistics; 4],
+    statistics_rows: [Vec<Value>; 4],
     commands: [commands::WindowSummary; 4],
     skills: [project::SkillSummary; 4],
     rows: [WindowRows; 4],
@@ -179,6 +180,7 @@ impl SelectedCandidate {
         let cutoffs = self.inputs.as_ref().unwrap().time.cutoffs;
         let (tools, files, switches) = self.inputs.as_ref().unwrap().reducer_switches();
         self.reducers = Some(Reducers {
+            statistics_rows: std::array::from_fn(|_| Vec::new()),
             files:std::array::from_fn(|_| project::FileSummary::new(1000)),
             series:std::array::from_fn(|_| project::ActivitySeries::new()),
             statistics:cutoffs.map(|cutoff| project::OwnedStatistics::new(cutoff, tools, self.statistics_units, self.statistics_key_bytes)),
@@ -290,7 +292,7 @@ impl SelectedCandidate {
                 for _ in 0..budget {
                     Self::controls(enabled, stopped)?;
                     if self.next == self.active.len() + self.sources.len() {
-                        self.phase = Phase::Physical;
+                        self.phase = Phase::Statistics(0);
                         break;
                     }
                     // Reverse payload arrival is safe only after the source-order
@@ -396,6 +398,14 @@ impl SelectedCandidate {
                     if complete { self.reader = None; self.active_offset = 0; self.next += 1; }
                 }
             }
+            Phase::Statistics(index) => {
+                let reducers = self.reducers.as_mut().ok_or(Failure::State)?;
+                let complete = reducers.statistics[index].finish_page(&mut reducers.statistics_rows[index], 512)
+                    .ok_or(Failure::StatisticsCapacity)?;
+                if complete {
+                    self.phase = if index == 3 { Phase::Physical } else { Phase::Statistics(index + 1) };
+                }
+            }
             Phase::Physical => {
                 use std::ops::Bound::{Excluded, Unbounded};
                 let paths: Vec<_> = match &self.physical_after {
@@ -446,7 +456,7 @@ impl SelectedCandidate {
             json!({"events":events,"total":total,"operations":operations})
         });
         let series = reducers.series.map(|series| { let (activity,tools) = series.finish(); json!({"activity":activity,"tools":tools}) });
-        let statistics = reducers.statistics.into_iter().map(|summary| summary.finish()).collect::<Option<Vec<_>>>().ok_or(Failure::StatisticsCapacity)?.try_into().map_err(|_| Failure::State)?;
+        let statistics = reducers.statistics_rows.map(Value::Array);
         let switches = self.inputs.as_ref().ok_or(Failure::State)?.reducer_switches().2;
         let commands = reducers.commands.map(|summary| {
             let (mut git,mut checks) = summary.finish();
@@ -594,6 +604,11 @@ pub(super) struct WorkerCandidate {
 pub(super) enum WorkerAdvance { Pending(WorkerCandidate), Published }
 
 impl WorkerCandidate {
+    #[cfg(test)]
+    pub(super) fn finishing_statistics(&self) -> bool {
+        matches!(&self.phase, WorkerPhase::Reducing(candidate) if matches!(candidate.phase, Phase::Statistics(_)))
+    }
+
     pub(super) fn start(collector: &Collector, stopped: &AtomicBool) -> Option<Self> {
         let membership = collector.source_membership.as_ref()?;
         if !collector.source_membership_complete || !collector.overflow_files.is_empty()

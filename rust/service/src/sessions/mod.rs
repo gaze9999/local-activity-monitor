@@ -6228,21 +6228,36 @@ mod log_tests {
         assert!(fallback_value["codex"]["observed_tool_calls"].as_u64().unwrap() < 20);
         // Each cancellation happens after a real pending round, before any
         // watch replacement. A fresh driver remains possible after reenable.
-        for (enabled, stopping, expected) in [
-            (false, false, selected_candidate::Failure::Disabled),
-            (true, true, selected_candidate::Failure::Cancelled),
-        ] {
-            let (sender, _receiver) = tokio::sync::watch::channel(collector.snapshots("ok", "ok", 9));
-            let old = sender.borrow().windows[3].clone();
-            let driver = WorkerCandidate::start(&collector, &stopped).unwrap();
-            let WorkerAdvance::Pending(driver) = driver.advance(&collector, "ok", "ok", 10, true, &stopped, &sender).unwrap()
-                else { panic!("source enrollment must remain private"); };
-            stopped.store(stopping, Ordering::Release);
-            let result = driver.advance(&collector, "ok", "ok", 10, enabled, &stopped, &sender);
-            assert!(matches!(result, Err(error) if error == expected));
-            stopped.store(false, Ordering::Release);
-            assert_eq!(sender.borrow().version(), 9);
-            assert_eq!(sender.borrow().windows[3], old);
+        for at_statistics in [false, true] {
+            for (enabled, stopping, expected) in [
+                (false, false, selected_candidate::Failure::Disabled),
+                (true, true, selected_candidate::Failure::Cancelled),
+            ] {
+                let (sender, _receiver) = tokio::sync::watch::channel(collector.snapshots("ok", "ok", 9));
+                let old = sender.borrow().windows[3].clone();
+                let driver = WorkerCandidate::start(&collector, &stopped).unwrap();
+                let WorkerAdvance::Pending(mut driver) = driver.advance(&collector, "ok", "ok", 10, true, &stopped, &sender).unwrap()
+                    else { panic!("source enrollment must remain private"); };
+                if at_statistics {
+                    for _ in 0..64 {
+                        if driver.finishing_statistics() { break; }
+                        let WorkerAdvance::Pending(next) = driver.advance(&collector, "ok", "ok", 10, true, &stopped, &sender).unwrap()
+                            else { panic!("statistics must remain private"); };
+                        driver = next;
+                    }
+                    assert!(driver.finishing_statistics());
+                    let WorkerAdvance::Pending(next) = driver.advance(&collector, "ok", "ok", 10, true, &stopped, &sender).unwrap()
+                        else { panic!("one statistics window cannot publish"); };
+                    driver = next;
+                    assert!(driver.finishing_statistics());
+                }
+                stopped.store(stopping, Ordering::Release);
+                let result = driver.advance(&collector, "ok", "ok", 10, enabled, &stopped, &sender);
+                assert!(matches!(result, Err(error) if error == expected));
+                stopped.store(false, Ordering::Release);
+                assert_eq!(sender.borrow().version(), 9);
+                assert_eq!(sender.borrow().windows[3], old);
+            }
         }
         let key_bytes = id.len() + "fixture_tool".len();
         for (units, bytes, accepted) in [(CALL_LIMIT * 3, details::STAGING_LIMIT, true), (2, key_bytes, true), (1, key_bytes, false), (2, key_bytes - 1, false)] {
@@ -7002,7 +7017,7 @@ mod log_tests {
                 SnapshotTime { reference, cutoffs }, sources.into_iter().map(|key|
                     selected_candidate::Source { key:key.clone(), signature:original.cursor.signature.clone() }).collect(),
                 false, 10_000, 10_000, true, &stopped).unwrap();
-            for _ in 0..16 {
+            for _ in 0..24 {
                 if candidate.awaiting_validation() { break; }
                 candidate = match candidate.advance(&collector, &selection, true, &stopped, 1).unwrap() {
                     selected_candidate::Advance::Pending(next) => next,

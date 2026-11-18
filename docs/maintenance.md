@@ -694,3 +694,11 @@ Rust `main.rs` 的 font / GPU worker 各自先發布自己的結果, 再標記 D
 Focused byte oracle 曾抓出 preserve_order 與排序 map 的差異, 已保留失敗並改為依原物件順序取代值、僅將新增欄位接在末端, 不放寬比對條件
 
 最大案例的單次 advance 仍約 9.65 秒, 功能與降低複製通過不等於前景延遲驗收, reducer finish 的大型 Value 建立與同步四窗 finalizer 仍需後續處理, 不改容量上限或省略取消 / 來源驗證
+
+### Statistics 完成階段分頁
+
+候選在 payload 完成後新增私有 Statistics 階段, 每次 advance 最多完成 512 個統計群組, 四窗全部完成才進入原 physical / source validation, exact metrics、150,000 邏輯單位與 16 MiB key budget 均不變
+
+最大案例由 105 輪變為 497 輪, 最長 advance 本次 6.42 秒, 含 readback 的總時間則由 22.63 秒增加為 27.13 秒, 這是增加可檢查取消與輸入變更機會的取捨, 不是總耗時改善, 四窗同步 finalizer 仍是未完成的回應性缺口
+
+統計分頁中停止 / 停用保持舊 watch, 每輪輸入檢查與原發布前來源驗證均保留, 未將 private rows 當作可發布結果, 詳細測試與量測界線見 validation

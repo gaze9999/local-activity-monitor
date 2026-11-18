@@ -214,16 +214,24 @@ impl OwnedStatistics {
         self.finish().map(CompletedStatistics)
     }
 
-    pub(in crate::sessions) fn finish(self) -> Option<Value> {
-        if !self.valid { return None; }
-        Some(Value::Array(self.groups.into_iter().map(|((tool, nested), mut group)| {
+    pub(in crate::sessions) fn finish(mut self) -> Option<Value> {
+        let mut rows = Vec::new();
+        self.finish_page(&mut rows, usize::MAX)?;
+        Some(Value::Array(rows))
+    }
+
+    pub(in crate::sessions) fn finish_page(&mut self, rows: &mut Vec<Value>, limit: usize) -> Option<bool> {
+        if !self.valid || limit == 0 { return None; }
+        for _ in 0..limit.min(self.groups.len()) {
+            let ((tool, nested), mut group) = self.groups.pop_first()?;
             let (average_ms, p99_ms) = metrics(&mut group.durations);
-            serde_json::to_value(Row { tool: &tool, nested, calls: group.calls,
+            rows.push(serde_json::to_value(Row { tool: &tool, nested, calls: group.calls,
                 thread_count: group.threads.len(), returned: (!nested).then_some(group.returned),
                 known_duration_count: (!nested).then_some(group.durations.len()),
                 average_ms, p99_ms, last_at: group.last_at.map(stamp),
-                last_response_at: group.last_response.map(stamp) }).unwrap()
-        }).collect()))
+                last_response_at: group.last_response.map(stamp) }).unwrap());
+        }
+        Some(self.groups.is_empty())
     }
 }
 
@@ -266,7 +274,15 @@ pub(super) mod tests {
                     }
                 }
                 assert!(owned.units <= 1000 && owned.key_bytes <= 1000);
-                assert_eq!(owned.finish(), Some(expected));
+                let mut rows = Vec::new();
+                assert_eq!(owned.finish_page(&mut rows, 0), None);
+                loop {
+                    let before = rows.len();
+                    let complete = owned.finish_page(&mut rows, 1).unwrap();
+                    assert!(rows.len() - before <= 1);
+                    if complete { break; }
+                }
+                assert_eq!(Value::Array(rows), expected);
             }
         }
         let single = call("tool", Some(start), Some(end), &[]);
