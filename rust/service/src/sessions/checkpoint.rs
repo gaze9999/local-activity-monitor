@@ -320,6 +320,18 @@ impl Checkpoints {
             match reader.checkpoint(&key, call_limit) {
                 Ok(Some(value)) => value,
                 Ok(None) => return Loaded::default(),
+                Err(lam_history_store::StoreError::InvalidQuery) => {
+                    // A bounded call read may reject an oversized checkpoint.
+                    // Replay the source, but retain the bounded cursor's CAS
+                    // predecessor so saving does not conflict forever with it.
+                    // A later cursor replacement still fails the normal CAS.
+                    self.report.load_health = "unavailable";
+                    return Loaded {
+                        signature: reader.checkpoint(&key, 0).ok().flatten()
+                            .map(|checkpoint| checkpoint.cursor.signature),
+                        state: None,
+                    };
+                }
                 Err(_) => {
                     self.report.load_health = "unavailable";
                     return Loaded::default();

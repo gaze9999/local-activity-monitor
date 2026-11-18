@@ -5973,6 +5973,70 @@ mod log_tests {
     }
 
     #[test]
+    fn oversized_checkpoint_replays_with_cursor_cas_and_preserves_concurrent_writes() {
+        for concurrent in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let monitoring = root.join("monitoring");
+            let path = root.join("rollout-00000000-0000-4000-8000-000000000001.jsonl");
+            let contents: String = (0..20).map(|n| json!({"timestamp":"2026-11-18T01:00:00Z","type":"response_item",
+                "payload":{"type":"function_call","name":"fixture_tool","call_id":format!("call{n:02}"),"arguments":"{}"}}).to_string() + "\n").collect();
+            std::fs::write(&path, &contents).unwrap();
+            let mut warm = Collector::new(monitoring.clone(), true, None);
+            let stopped = AtomicBool::new(false);
+            for _ in 0..4 { warm.refresh(&root, &stopped, true, true, CommandSwitches::default()); }
+            drop(warm);
+            let key = checkpoint::key(&root, &path).unwrap();
+            let mut store = lam_history_store::Store::open(&monitoring, lam_history_store::Access::ReadWrite).unwrap().unwrap();
+            let mut saved = store.checkpoint(&key, 100).unwrap().unwrap();
+            assert_eq!(saved.calls.len(), 20);
+            let expected: Vec<_> = saved.calls.iter().map(|call| (call.call_id.clone(), call.payload.clone())).collect();
+            for call in &mut saved.calls { call.payload.push_str(&" ".repeat(1024 * 1024)); }
+            store.save_checkpoints(std::slice::from_ref(&saved.cursor), &saved.calls, &[]).unwrap();
+            assert!(matches!(store.checkpoint(&key, 100), Err(lam_history_store::StoreError::InvalidQuery)));
+            let original_signature = saved.cursor.signature.clone();
+            let mut session = Session::new(&path);
+            let mut checkpoints = Checkpoints::new(monitoring, true);
+            let (bytes, malformed, changed) = session.read(&root, &path, ROUND_LIMIT, FILE_CALL_LIMIT as u32,
+                true, true, &BTreeMap::new(), McpSwitches::default(), true, true,
+                CommandSwitches::default(), &mut checkpoints).unwrap();
+            assert_eq!(bytes, contents.len());
+            assert_eq!(malformed, 0);
+            assert!(changed);
+            assert_eq!(session.projection.calls.len(), 20);
+            assert_eq!(session.checkpoint_signature.as_deref(), Some(original_signature.as_str()));
+            assert_eq!(json!(checkpoints.report)["restored"], 0);
+            assert_eq!(json!(checkpoints.report)["load_health"], "unavailable");
+            assert!(session.checkpoint_reset);
+            if concurrent {
+                let mut signature: Value = serde_json::from_str(&saved.cursor.signature).unwrap();
+                signature["revision"] = json!(signature["revision"].as_u64().unwrap() + 1);
+                saved.cursor.signature = signature.to_string();
+                store.save_checkpoints(std::slice::from_ref(&saved.cursor), &[], &[]).unwrap();
+            }
+            let mut files = BTreeMap::from([(path.clone(), session)]);
+            checkpoints.save(&root, &mut files);
+            if concurrent {
+                assert_eq!(json!(checkpoints.report)["write_health"], "conflict");
+                assert_eq!(store.checkpoint(&key, 0).unwrap().unwrap().cursor.signature, saved.cursor.signature);
+                assert!(matches!(store.checkpoint(&key, 100), Err(lam_history_store::StoreError::InvalidQuery)));
+                let preserved = store.selected_checkpoint(&lam_history_store::ExpectedCursor {
+                    source_key:&key, signature:Some(&saved.cursor.signature) }, &[saved.calls[0].call_id.clone()]).unwrap().unwrap();
+                assert_eq!(preserved.calls[0].payload, saved.calls[0].payload);
+                assert!(files[&path].checkpoint_dirty);
+            } else {
+                assert_eq!(json!(checkpoints.report)["write_health"], "ok");
+                let replayed = store.checkpoint(&key, 100).unwrap().unwrap();
+                assert_eq!(replayed.calls.len(), 20);
+                assert_eq!(replayed.calls.iter().map(|call| (call.call_id.clone(), call.payload.clone())).collect::<Vec<_>>(), expected);
+                assert!(replayed.calls.iter().map(|call| call.payload.len()).sum::<usize>() < 16 * 1024 * 1024);
+                assert_ne!(replayed.cursor.signature, original_signature);
+                assert!(!files[&path].checkpoint_dirty);
+            }
+        }
+    }
+
+    #[test]
     fn worker_candidate_pages_beyond_staging_and_rejects_statistics_budget() {
         use selected_candidate::{WorkerAdvance, WorkerCandidate};
         let directory = tempfile::tempdir().unwrap();

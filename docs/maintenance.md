@@ -662,3 +662,11 @@ Rust `main.rs` 的 font / GPU worker 各自先發布自己的結果, 再標記 D
 隔離 native HTTP 案例現可完成初次發布、未變更 rescan、pending 停用 / 重新啟用及 pending 停止, 20 個各約 1 MiB checkpoint 與 5,000 個 working metadata sources, 具體延遲與保留失敗見 validation 對應節
 
 原 incomplete=true 的 overflow 語意保持, 重新啟用 POST 本次 4.78 秒已接近原 5 秒限制, 仍需效能餘裕驗證, 單來源超過 16 MiB restore 的 unavailable / conflict 路徑、50,000 selected calls、高 nested cardinality 與跨平台仍未驗收
+
+### Oversized restore 重播的 CAS 修正
+
+`3efbe32` 後已確認單來源超過 16 MiB 的 restore 拒絕會遺失已存在的 cursor signature, 導致原始來源重播以 expected=None 保存而持續 conflict
+
+現只在 typed InvalidQuery 時補讀 bounded 零 call cursor, 保留其 signature 走原 CAS, focused race 與真實 native 單來源驗證已確認重播資料完整、不同 writer 的新 cursor 不被覆寫, 一般讀取失敗與大小限制不變
+
+這只解除可重播並在原保存預算內寫入的 conflict, 真實 oversized call payload 的保存上限仍保留, 重新啟用延遲亦尚未最佳化, 已確認其 force replay / 發布後 settings 確認路徑, 下一步需量測各階段成本再決定有界排程, 不提前回覆設定完成或移除重播

@@ -12356,3 +12356,42 @@ fn native_candidate_overflow_rescan_and_http_latency() {
     service.stop();
     eprintln!("native candidate pending stop: elapsed_ms={}", stopping.elapsed().as_secs_f64()*1000.0);
 }
+
+#[test]
+fn oversized_single_source_checkpoint_replays_without_cursor_conflict() {
+    let home = tempdir().unwrap();
+    let root = home.path().join("sessions");
+    fs::create_dir(&root).unwrap();
+    let id = "00000000-0000-4000-8000-000000000001";
+    let path = root.join(format!("rollout-{id}.jsonl"));
+    let stamp = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).to_rfc3339();
+    let contents: String = (0..20).map(|n| event(&stamp, "response_item",
+        json!({"type":"function_call","name":"fixture_tool","call_id":format!("call{n:02}"),"arguments":"{}"}))).collect();
+    fs::write(&path, &contents).unwrap();
+    let mut warm = Service::start(home.path(), true, None);
+    snapshot_when(&warm, |value| value["codex"]["observed_tool_calls"] == 20);
+    warm.stop();
+    drop(warm);
+    let mut store = Store::open(&home.path().join("monitoring"), Access::ReadWrite).unwrap().unwrap();
+    let key = checkpoint_key(&path);
+    let mut saved = store.checkpoint(&key, 100).unwrap().unwrap();
+    let expected: Vec<_> = saved.calls.iter().map(|call| (call.call_id.clone(), call.payload.clone())).collect();
+    assert_eq!(expected.len(), 20);
+    for call in &mut saved.calls { call.payload.push_str(&" ".repeat(1024 * 1024)); }
+    store.save_checkpoints(std::slice::from_ref(&saved.cursor), &saved.calls, &[]).unwrap();
+    assert!(matches!(store.checkpoint(&key, 100), Err(lam_history_store::StoreError::InvalidQuery)));
+    drop(store);
+    let mut service = Service::start(home.path(), true, None);
+    let snapshot = snapshot_when(&service, |value| value["codex"]["observed_tool_calls"] == 20
+        && value["codex"]["read_state"]["checkpoint"]["write_health"] == "ok");
+    assert_eq!(snapshot["codex"]["read_state"]["checkpoint"]["restored"], 0);
+    let detail = service.get(&format!("/api/codex/tool?thread_id={id}&call_id=call00"));
+    assert_eq!(detail.status, 200);
+    assert_eq!(detail.json()["tool"], "fixture_tool");
+    service.stop();
+    let mut store = Store::open(&home.path().join("monitoring"), Access::ReadOnly).unwrap().unwrap();
+    let replayed = store.checkpoint(&key, 100).unwrap().unwrap();
+    assert_eq!(replayed.calls.iter().map(|call| (call.call_id.clone(), call.payload.clone())).collect::<Vec<_>>(), expected);
+    assert_ne!(replayed.cursor.signature, saved.cursor.signature);
+    assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+}

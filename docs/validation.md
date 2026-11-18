@@ -2550,3 +2550,23 @@ Linux / Rust 1.100.0 / 原 Cargo.lock, 修正後 opt-in HTTP 通過 1 項、229 
 同一修正的回歸: driver 容量 / controls 3.31 秒、native 同批 detail index / 舊 index 0.12 秒、完整 error order / publication 0.59 秒各通過 1 項、451 項未選取, HTTP usage 停用 / 重新啟用 0.16 秒與 stdin pause / resume / stop 4.34 秒各通過 1 項、229 項未選取, 維持 5 個既有 warnings, git diff --check 通過
 
 未新增 HTTP endpoint 或外部資料來源, `/api/snapshot?window=all`、`/api/refresh`、`/api/settings` 沿用既有欄位與設定來源, 本輪變更內部候選排程而非新增外部查詢, 高來源測試為 ignored opt-in, 不把未執行的完整套件列為通過
+
+### 單來源 oversized restore 的 cursor 保留
+
+基準 `3efbe32`, `Store::checkpoint` 在 call payload 合計超過既有 16 MiB 上限時回傳 typed InvalidQuery, 原 restore 直接丟棄仍存在的 cursor signature, 後續讀原始來源重播卻以 expected=None 保存, 因資料庫已有 cursor 而持續 conflict
+
+只對上述 typed InvalidQuery 補讀零 call 的 bounded cursor, 保留 signature 給原 CAS 保存, 不使用 oversized call payload、不提高任何大小限制, 一般 SQL / I/O 失敗仍走原 unavailable 路徑, cursor-only 讀取失敗也不猜測 signature
+
+- Focused 兩情境通過 0.18 秒、452 項未選取, 原始 20 筆 JSONL calls 保存後在 checkpoint 加 trailing whitespace 超過 16 MiB, 明確驗證原 bounded read 仍拒絕
+- 正常重播讀完整來源, 未計為 restored, 保存後全部 20 筆 payload 與加 whitespace 前逐 byte 相同, cursor 更新且 dirty 清除
+- 在重播與保存之間先更新另一個 cursor revision, 原 CAS 仍回 conflict, 保留新 cursor 與已保存 payload, session dirty 不被清除
+- 真實單來源 native HTTP 通過 1.30 秒、230 項未選取, 起動後恢復全部 20 calls、write_health=ok、restored=0, 真實 tool detail 回 200 / fixture_tool, 停止後資料庫 payload 全部相符、原始 JSONL 不變
+- 既有 HTTP writer lock 重試 0.45 秒、兩個 native collectors 防覆寫 0.91 秒、replacement / prefix rewrite 0.90 秒各通過 1 項、230 項未選取
+
+初次 focused fixture 因常數名稱與 report 私有欄位直接存取而編譯失敗, 改用既有 ROUND_LIMIT 與序列化 report 讀值, 保存回傳 bool 代表 observation 變更而非 commit receipt, 因此以實際 cursor / payload / dirty readback 驗證保存, 失敗 log / patch 保留
+
+維持 5 個既有 warnings, git diff --check 通過, 沒有新增 endpoint 或外部查詢, 只在 typed bounded-query 拒絕時增加一次本機零 call cursor 讀取, 未重跑完整套件或 5,020 來源容量案例
+
+此修正解除可由原始來源重播、且重播結果能在原保存預算內落盤的 conflict, 真實 call payload 若仍超過單次保存上限, 原 oversized 防護仍生效, 不宣稱所有超限來源都已完成容量驗收
+
+重新啟用延遲另已追到 `force_replay = was_active`、工作集重播及 snapshots 發布後才確認 settings 的呼叫路徑, 尚無各階段時間拆分, 本輪不移除 replay、不提前宣稱設定已套用、不放寬 5 秒等待, 先前 4.78 秒的效能餘裕問題仍保留
