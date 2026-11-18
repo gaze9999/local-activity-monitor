@@ -2882,3 +2882,20 @@ Optimized binary 之後以現有 tools/build_frontend.py --verify-offline 核對
 對前述實測 optimized executable 執行 readelf, DT_NEEDED 包含 libssl.so.3、libcrypto.so.3、libgcc_s.so.1、libm.so.6、libc.so.6、ld-linux-x86-64.so.2, GLIBC version references 最高包含 GLIBC_2.39, 只證明此 binary 的需求資訊, 不保證其他 Linux 版本可執行, 本輪沒有更換 TLS、靜態連結或擴大支援承諾
 
 原 metadata JSON 與逐 package 檔案清單保留於本機驗證證據, 此盤點不取代 compiler/runtime、build-generated content、其他平台及完整第三方授權稽核, production 與 lockfile 未修改, git diff --check 通過
+
+### Linux native 最大工作集的程序記憶體
+
+基準 a88f758, 沿用前述 SHA-256 的 optimized 執行檔與未修改的 native_maximum_calls_rescan_and_http_latency, 外部取樣器每 100 ms 讀取測試直接啟動之服務程序的 /proc status, 依 PPid 與 executable 辨識, 不把測試 driver 的 JSON 解析或 fixture allocation 計入服務 RSS
+
+| 程序 / 條件 | 取樣數 | 觀察到的最大 VmRSS | 觀察到的最大 VmHWM | 最大 RssAnon |
+| --- | --- | --- | --- | --- |
+| 7 個來源初次暖機 / checkpoint | 34 | 346,349,568 bytes | 359,469,056 bytes | 330,969,088 bytes |
+| 5,007 來源還原 / candidate / rescan / reenable | 710 | 776,601,600 bytes | 776,601,600 bytes | 760,954,880 bytes |
+
+兩個程序的取樣 VmSwap 均為 0, status 的 kB 欄位乘 1,024 換算 bytes, 這是包含 allocator、SQLite、快照、HTTP 序列化等成本的程序觀察, 不是 reader / reducer / 四窗的獨立歸屬或 RSS 上限, 也不能由兩個程序的峰值相減推論 candidate 成本, 最後一次取樣之後的峰值未觀察
+
+原嚴格 fixture 通過 77.22 秒, initial / rescan / reenabled 分別 25.45 / 21.28 / 20.68 秒, 三階段最大 GET 分別 409.99 / 483.98 / 159.08 ms, 停用 44.76 ms / 200、重新啟用 874.81 ms / 200、pending stop 70.98 ms, 50,000 exact statistics、最後真實 detail 與 18,548,469 bytes checkpoint 條件不變
+
+初次取樣嘗試的 fixture 通過 79.67 秒, 但環境未提供 task children 檔案, 因此沒有任何程序記憶體樣本, 不作記憶體證據, 保留原記錄後另以短程序確認 PPid 與 status 可讀, 才改用上述取樣路徑
+
+本輪沒有 production / 測試程式碼、容量或門檻變更, 沒有執行 deferred 檢查, 原服務停止流程完成, 原始取樣、測試輸出及結果保留, 此 Linux 單次量測不證明持續負載 SLA、平台驗收或原 headerless incident 已修復

@@ -180,6 +180,18 @@ Cloud 測試不取代 Windows watcher、真實來源、SSE、Host/Origin 與持�
 
 此節起於 `3c1fd9e` 的實作計畫, 下表已依 `7338ce6` 更新目前狀態, 共同發布與單一查詢 paired capture 已實作, 不代表跨輪 candidate、16 MiB staging 或跨平台驗收完成
 
+### 目前重建驗收界線
+
+2026-11-18 核對: 下方早期計畫依各節標示的 revision 保留, 不是目前仍未串接 production 的判定, 最新證據以 [validation](validation.md) 的對應驗收節為準
+
+| 範圍 | 已有證據 | 尚未完成 |
+| --- | --- | --- |
+| 跨輪 production 與大型來源 | Worker candidate、完整四窗與同批 detail 已串接, Linux optimized 的 50,000 calls / 5,007 來源、重掃、停用 / 重新啟用與 pending stop 通過 | 不能以單次觀察宣稱穩定 SLA 或其他平台通過 |
+| 有限持續更新 | 60 次循序追加期間 revision 不倒退, 停止追加後完整統計與最後 metadata 通過 | 未量測無限更新的新鮮度上限, 不將其增訂為原本未承諾的 SLA |
+| 延後檢查與原失敗 | 篩選回歸與固定 UI 資產 HTTP smoke 通過 | Core WAL cursor、overflow metadata POST、restart / timestamp 名稱篩選、browser / 平台仍依原決定延後, headerless incident 原因未明, 不自動重試 |
+| 正式來源與使用者環境 | 隔離 fixture 驗證不讀取正式來源 | 正式資料與畫面、冷啟動 / 回補 / 長時間增量、字型及各平台程序生命週期仍依 [功能驗收](features.md#待驗收) 管理 |
+| 容量與可交付測試包 | 邏輯 admission、超限 fallback 完整性與固定資產 test bundle 已有證據 | Reader / reducer / 四窗的獨立 allocation 歸屬尚未量測, 程序 RSS 不等於這些分類, 第三方授權本文與支援平台建置仍見本章發行前缺口 |
+
 ### 重建驗收與下一個實作優先項
 
 依 `5a429e7` 重新核對, 重建目標仍是保留來源行為、完整選取與精確統計, 並讓大型來源的整理可分批完成而不阻塞服務, 不是增加 candidate fixture 數量, 已有單元通過或已交付提交不取代端到端及平台驗收
