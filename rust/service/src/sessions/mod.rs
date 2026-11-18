@@ -5887,11 +5887,12 @@ mod log_tests {
             let root = directory.path().canonicalize().unwrap();
             let id = "00000000-0000-4000-8000-000000000001";
             let path = root.join(format!("rollout-{id}.jsonl"));
-            std::fs::write(&path, format!("{}\n{}\n{}\n{}\n",
+            std::fs::write(&path, format!("{}\n{}\n{}\n{}\n{}\n",
                 json!({"timestamp":"2026-11-13T01:00:00Z","type":"session_meta","payload":{"id":id}}),
                 json!({"timestamp":"2026-11-13T01:00:01Z","type":"response_item","payload":{"type":"function_call","name":fixture_tool,"call_id":"call00","arguments":arguments}}),
                 json!({"timestamp":"2026-11-13T01:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Message Type: MESSAGE\nTask name: fixture\nSender: source\nPayload:\nPRIVATE_BODY"}]}}),
-                json!({"timestamp":"2026-11-13T01:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call00","output":{"exit_code":2}}})
+                json!({"timestamp":"2026-11-13T01:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call00","output":{"exit_code":2}}}),
+                json!({"timestamp":"2026-11-13T01:00:04Z","type":"event_msg","payload":{"type":"turn_failed","error_code":"first-source"}})
             )).unwrap();
             let mut collector = Collector::new(root.join("monitoring"), true, None);
             let stopped = AtomicBool::new(false);
@@ -5948,6 +5949,11 @@ mod log_tests {
             let second_id = if same_thread { id } else { "00000000-0000-4000-8000-000000000002" };
             let mut cursor_payload: Value = serde_json::from_str(&second_cursor.payload).unwrap();
             cursor_payload["projection"]["id"] = json!(second_id);
+            assert!(!cursor_payload["projection"]["errors"].as_array().unwrap().is_empty());
+            for error in cursor_payload["projection"]["errors"].as_array_mut().unwrap() {
+                error["code"] = json!("second-source");
+                error["record_offset"] = Value::Null;
+            }
             second_cursor.payload = cursor_payload.to_string();
             let second_calls: Vec<_> = calls.iter().enumerate().map(|(n, call)| {
                 let mut row = call.clone();
@@ -6042,9 +6048,11 @@ mod log_tests {
                 expected_projects.insert(1, json!({"id":"fallback-project","name":"Fallback","icon":null,"kind":"observed","thread_count":1}));
             }
             let expected_winners = if same_thread { 900 } else if active { 1800 } else { 1200 };
+            let mut expected_session_errors = Vec::new();
             let mut materialized = BTreeMap::<String, Projection>::new();
             let mut detail_pending = BTreeSet::new();
-            for (_, state) in collector.ordered_working_sources() {
+            for (path, state) in collector.ordered_working_sources() {
+                expected_session_errors.extend(state.error_events(path, &state.projection.errors));
                 let thread = state.projection.id.clone().unwrap();
                 materialized.entry(thread.clone()).or_insert_with(|| Projection::for_id(Some(thread)))
                     .merge_snapshot(&state.projection, Some(&selection.calls[&key]), &cutoffs);
@@ -6054,6 +6062,8 @@ mod log_tests {
                 let checkpoint = store.selected_checkpoint(&lam_history_store::ExpectedCursor {
                     source_key:source,signature:Some(&original.cursor.signature)}, &ids).unwrap().unwrap();
                 let projection = checkpoint::snapshot_projection(checkpoint, false).unwrap();
+                let source_path = if source == &key { &path } else { &collector.duplicate_session_paths["fixture-second"] };
+                expected_session_errors.extend(Session::projection_error_events(&projection.projection, source_path, &projection.projection.errors));
                 let thread = projection.projection.id.as_ref().unwrap();
                 if projection.source_details_pending { detail_pending.insert(thread.clone()); }
                 materialized.entry(thread.clone()).or_insert_with(|| Projection::for_id(Some(thread.clone())))
@@ -6258,6 +6268,9 @@ mod log_tests {
                     match candidate.advance(&collector, &selection, true, &stopped, 1)? {
                         Advance::Pending(next) => candidate = next,
                         Advance::Complete(completed) => {
+                            assert_eq!(completed.session_errors, expected_session_errors);
+                            assert!(completed.session_errors.iter().any(|event| event["code"] == "first-source"));
+                            assert!(completed.session_errors.iter().any(|event| event["code"] == "second-source"));
                             assert_eq!(validation_rounds, 2, "one-source final validation rounds");
                             assert_eq!(completed.read_work, [4, 1200, expected_payload_bytes,
                                 if same_thread { 300 } else { 0 }, extra_payload_bytes]);

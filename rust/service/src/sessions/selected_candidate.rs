@@ -53,6 +53,7 @@ pub(super) struct SelectedCandidate {
     next_slots: BTreeMap<String, u64>,
     thread_slots: BTreeMap<String, usize>,
     source_threads: Vec<String>,
+    session_errors: Vec<Vec<Value>>,
     names: HashMap<String, Value>,
     ordered: bool,
     statistics_units: usize,
@@ -82,6 +83,7 @@ pub(super) struct CompletedCandidate {
     pub rows: [Value; 4],
     pub observations: [Value; 4],
     pub failures: Value,
+    pub session_errors: Vec<Value>,
     #[cfg(test)]
     pub read_work: [usize; 5],
 }
@@ -130,7 +132,7 @@ impl SelectedCandidate {
             metadata:BTreeMap::new(), partial:BTreeMap::new(), detail_pending:BTreeSet::new(),
             #[cfg(test)] read_work:[0; 5],
             winners:BTreeMap::new(), slots:BTreeMap::new(),
-            next_slots:BTreeMap::new(), thread_slots:BTreeMap::new(), source_threads:Vec::new(), names:HashMap::new(), ordered,
+            next_slots:BTreeMap::new(), thread_slots:BTreeMap::new(), source_threads:Vec::new(), session_errors:Vec::new(), names:HashMap::new(), ordered,
             statistics_units, statistics_key_bytes, reducers:None })
     }
 
@@ -201,7 +203,7 @@ impl SelectedCandidate {
                     let path = if self.next < self.active.len() { self.active[self.next].clone() }
                         else { self.source_paths[self.next - self.active.len()].clone() };
                     if !self.valid_path(collector, &path) { return Err(Failure::PhysicalSource); }
-                    let (projection, partial, ids) = if self.next < self.active.len() {
+                    let (projection, partial, ids, errors) = if self.next < self.active.len() {
                         let path = &self.active[self.next];
                         let state = collector.files.get(path).ok_or(Failure::InputsRejected)?;
                         let key = checkpoint::key(collector.session_root.as_deref().ok_or(Failure::InputsRejected)?, path).ok_or(Failure::InputsRejected)?;
@@ -211,7 +213,8 @@ impl SelectedCandidate {
                             .map(|(id, _)| id.clone()).collect();
                         let mut metadata = Projection::for_id(state.projection.id.clone());
                         metadata.merge_snapshot(&state.projection, Some(&BTreeSet::new()), &self.inputs.as_ref().ok_or(Failure::State)?.time.cutoffs);
-                        (metadata, state.pending() || state.discard, ids)
+                        let errors = super::Session::projection_error_events(&state.projection, &path, &state.projection.errors).collect();
+                        (metadata, state.pending() || state.discard, ids, errors)
                     } else {
                         let source = &self.sources[self.next - self.active.len()];
                         let mut store = collector.checkpoints.snapshot_reader().map_err(|_| Failure::CheckpointRead)?.ok_or(Failure::CheckpointRead)?;
@@ -223,7 +226,8 @@ impl SelectedCandidate {
                             self.detail_pending.insert(projection.projection.id.clone().ok_or(Failure::InvalidProjection)?);
                         }
                         let ids = selection.calls.get(&source.key).into_iter().flatten().cloned().collect();
-                        (projection.projection, projection.partial, ids)
+                        let errors = super::Session::projection_error_events(&projection.projection, &path, &projection.projection.errors).collect();
+                        (projection.projection, projection.partial, ids, errors)
                     };
                     let thread = projection.id.clone().ok_or(Failure::InvalidProjection)?;
                     let next_thread = self.thread_slots.len();
@@ -239,6 +243,7 @@ impl SelectedCandidate {
                     }
                     if !self.valid_path(collector, &path) { return Err(Failure::PhysicalSource); }
                     self.source_threads.push(thread);
+                    self.session_errors.push(errors);
                     self.next += 1;
                 }
                 if self.next == self.active.len() + self.sources.len() {
@@ -474,8 +479,22 @@ impl SelectedCandidate {
             }
             json!({"mcp":mcp,"sql":sql})
         });
+        // Baseline groups only active sources when discovery order is complete,
+        // then appends checkpoint source errors. Do not use winner metadata or
+        // caller-selected tool presentation order for this separate precedence.
+        let mut active_order: Vec<_> = (0..self.active.len()).collect();
+        if collector.has_complete_source_order() {
+            let mut first = BTreeMap::new();
+            for index in &active_order {
+                let next = first.len();
+                first.entry(&self.source_threads[*index]).or_insert(next);
+            }
+            active_order.sort_by_key(|index| first[&self.source_threads[*index]]);
+        }
+        let session_errors = active_order.into_iter().chain(self.active.len()..self.session_errors.len())
+            .flat_map(|index| std::mem::take(&mut self.session_errors[index])).collect();
         let failures: Vec<_> = failures.into_iter().map(|(start,event)| json!({"start":start.map(project::stamp),"event":event})).collect();
-        Ok(CompletedCandidate { files,series,statistics,commands,skills,rows,observations,failures:json!(failures),
+        Ok(CompletedCandidate { files,series,statistics,commands,skills,rows,observations,failures:json!(failures),session_errors,
             #[cfg(test)] read_work:self.read_work })
     }
 }
