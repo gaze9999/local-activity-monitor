@@ -1,6 +1,6 @@
 # 功能與待實作項目
 
-LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統監測. 共用元件由 Workbench UI 維護, LAM 管理資料來源、欄位意義與設定
+LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統監測, 共用元件由 Workbench UI 維護, LAM 管理資料來源、欄位意義與設定
 
 ## 已實作
 
@@ -44,7 +44,7 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 | 檔案大小分批續查 | 每次取得前 100 個不同檔案, 超出部分顯示已檢查 / 總數 | 定義穩定游標、變更失效、分批預算與取消, 不在每輪重新掃描全部檔案 |
 | 首次啟動引導 | 已有 CLI 啟動及主設定, 尚無首次使用的設定導覽 | 沿既有設定說明 Codex 監測、來源、保存天數與即時更新, 保留有效設定及略過入口 |
 
-其他電腦的資料讀取由 LAM 管理, 共用呈現由 WBUI 提供. 遠端排程與 Dots 的資料串接, 與對外開放 LAM 服務分開規劃
+其他電腦的資料讀取由 LAM 管理, 共用呈現由 WBUI 提供, 遠端排程與 Dots 的資料串接, 與對外開放 LAM 服務分開規劃
 
 ## 共用能力與後續候選
 
@@ -69,7 +69,7 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 
 ## 即時資料推送
 
-來源檔案變更時收集, 完成後直接由 SSE 傳送目前時間範圍的快照與 Log. 圖表與表格使用這份資料, 保留已開啟明細與草稿
+來源檔案變更時收集, 完成後直接由 SSE 傳送目前時間範圍的快照與 Log, 圖表與表格使用這份資料, 保留已開啟明細與草稿
 
 | 資料 | 傳遞方式 | 範圍 |
 | --- | --- | --- |
@@ -85,17 +85,17 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 
 後續優先評估大型表格的可視範圍呈現、階層導覽、組合搜尋與欄位條件篩選, 其餘候選沿 [WBUI 元件盤點](https://github.com/gaze9999/workbench-ui/blob/e9741c60590894fa8362f71bd0d4e8197caf4e5c/docs/component-coverage.md) 管理
 
-程式碼上色可參考 VS Code 的 [TextMate 語法上色](https://code.visualstudio.com/api/language-extensions/syntax-highlight-guide) 與 [語意上色](https://code.visualstudio.com/api/language-extensions/semantic-highlight-guide). TextMate 依 grammar 分詞, 語意 token 由能分析專案的 provider 提供, 兩者與 TOML、CSV 等結構解析分開評估
+程式碼上色可參考 VS Code 的 [TextMate 語法上色](https://code.visualstudio.com/api/language-extensions/syntax-highlight-guide) 與 [語意上色](https://code.visualstudio.com/api/language-extensions/semantic-highlight-guide), TextMate 依 grammar 分詞, 語意 token 由能分析專案的 provider 提供, 兩者與 TOML、CSV 等結構解析分開評估
 
 ## 驗收重點
 
-各分頁共用載入、排序、篩選、返回與明細生命週期, 依資料用途保留專用操作. Context 列開啟目前對話的 Context, 代理訊息按鈕開啟該對話訊息, 父對話連結開啟父對話, 欄位重排與背景更新後仍須保持此對應
+各分頁共用載入、排序、篩選、返回與明細生命週期, 依資料用途保留專用操作, Context 列開啟目前對話的 Context, 代理訊息按鈕開啟該對話訊息, 父對話連結開啟父對話, 欄位重排與背景更新後仍須保持此對應
 
-效能比較分開記錄回補與無回補、冷啟動與差異更新的耗時、CPU 及讀取量. 測試入口見 [測試與建置](validation.md), 資料上限與量測方式見 [效能與資料上限](performance-report.md)
+效能比較分開記錄回補與無回補、冷啟動與差異更新的耗時、CPU 及讀取量, 測試入口見 [測試與建置](validation.md), 資料上限與量測方式見 [效能與資料上限](performance-report.md)
 
 ## 實作與驗證入口
 
-完整任務分流見 [AI 入口](../AI.md), 共用 API 必須核對 `workbench-ui.json` 的實際版本. 元件候選與 1.0.0 待辦依 WBUI 自己的 AI 入口與索引查找, 上方連結使用目前固定來源的完整 SHA
+完整任務分流見 [AI 入口](../AI.md), 共用 API 必須核對 `workbench-ui.json` 的實際版本, 元件候選與 1.0.0 待辦依 WBUI 自己的 AI 入口與索引查找, 上方連結使用目前固定來源的完整 SHA
 
 | 檔案 | 用途 |
 | --- | --- |
@@ -111,6 +111,6 @@ LAM 讀取本機 Codex 與 MCP 紀錄, 提供活動、用量、操作及系統�
 | Workbench UI `src/workbench-ui.js`, `workbench-ui.css`, `workbench-ui.d.mts` | 共用 Tree SVG 圖示、表格空資料與首尾頁, 含型別與樣式 |
 | Workbench UI `docs/usage.md`, `component-coverage.md`, `tests/tree-flow.cjs`, `table-boundary-flow.cjs` | 共用操作規格、元件候選、樹狀鍵盤及表格邊界驗證 |
 
-SQL / SQLite、網路、MCP、錯誤紀錄與技能各自提供歷史分頁入口, 查詢量上限每頁 200 筆. Context 明細依記錄位置保留既有區段與捲動錨點, 重新讀取只替換新增或修改的畫面內容, 來源仍採原有有界按需讀取. 父子代理關聯取自實際 Thread ID, 用途標籤獨立成欄並標示 Goal / Plan 紀錄
+SQL / SQLite、網路、MCP、錯誤紀錄與技能各自提供歷史分頁入口, 查詢量上限每頁 200 筆, Context 明細依記錄位置保留既有區段與捲動錨點, 重新讀取只替換新增或修改的畫面內容, 來源仍採原有有界按需讀取, 父子代理關聯取自實際 Thread ID, 用途標籤獨立成欄並標示 Goal / Plan 紀錄
 
 目前固定的 WBUI 來源支援連續虛擬捲動、數值記號、Tag / badge 分群、通知歷史與鍵盤 / 手把 binding, 實際 revision 依 [workbench-ui.json](../workbench-ui.json) 核對, LAM 依顯示設定啟用, 詳見[使用說明](usage.md)與[驗證紀錄](validation.md)

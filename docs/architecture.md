@@ -1,18 +1,18 @@
 # 程式架構與擴充
 
-任務與驗證分流見 [AI 入口](../AI.md), 實際共用 API 以 `workbench-ui.json` 選定修訂為準. LAM 自有 table adapter 與 WBUI `createTable` 分開, 前者先初始化分頁再掛載當頁, 完整來源 / ID / 排序 / 明細仍由 LAM 管理
+任務與驗證分流見 [AI 入口](../AI.md), 實際共用 API 以 `workbench-ui.json` 選定修訂為準, LAM 自有 table adapter 與 WBUI `createTable` 分開, 前者先初始化分頁再掛載當頁, 完整來源 / ID / 排序 / 明細仍由 LAM 管理
 
-摘要與卡片來源沿 `metricSources` 選取, `summaries` / `cardLayouts` 保存名稱、來源、群組及穩定 ID. 自訂群組移動既有節點而非重建 instance, 診斷分享另外投影去識別化副本, 不改本機完整設定, 格式見[設定規格](settings-format.md)
+摘要與卡片來源沿 `metricSources` 選取, `summaries` / `cardLayouts` 保存名稱、來源、群組及穩定 ID, 自訂群組移動既有節點而非重建 instance, 診斷分享另外投影去識別化副本, 不改本機完整設定, 格式見[設定規格](settings-format.md)
 
-表格數值來源使用完整已載入列及相同篩選流程, 以 rows 參照、更新 revision、篩選及語系快取統計. 列更新遞增 revision, 重複讀值沿用快取, 動態指標最多 5,000 項. 最新值優先來源活動 / 事件時間, 不將顯示排序當成資料時間
+表格數值來源使用完整已載入列及相同篩選流程, 以 rows 參照、更新 revision、篩選及語系快取統計, 列更新遞增 revision, 重複讀值沿用快取, 動態指標最多 5,000 項, 最新值優先來源活動 / 事件時間, 不將顯示排序當成資料時間
 
-WBUI 提供圖表色彩 tokens、tree 展開選項及元件生命週期, LAM 依 `workbench-ui.json` 固定版本套用主題、預設展開與資料配置. 主頁排序控制持續存在, 明細 / 設定重建或關閉時釋放所屬握把事件與預覽, 主頁與明細各自持有控制器
+WBUI 提供圖表色彩 tokens、tree 展開選項及元件生命週期, LAM 依 `workbench-ui.json` 固定版本套用主題、預設展開與資料配置, 主頁排序控制持續存在, 明細 / 設定重建或關閉時釋放所屬握把事件與預覽, 主頁與明細各自持有控制器
 
 ## 執行環境
 
-Python 3.10+ 標準函式庫, 原生 HTML / JavaScript / CSS, setuptools package assets. 服務綁定 loopback, `Host` / `Origin` / `Sec-Fetch-Site` 驗證保留. 來源資料庫採唯讀連線, LAM 的回補資料庫使用交易寫入
+Python 3.10+ 標準函式庫, 原生 HTML / JavaScript / CSS, setuptools package assets, 服務綁定 loopback, `Host` / `Origin` / `Sec-Fetch-Site` 驗證保留, 來源資料庫採唯讀連線, LAM 的回補資料庫使用交易寫入
 
-沒有請求本文的 GET 錯誤回應沿用 HTTP keep-alive, 讓呼叫端完整讀取狀態、表頭及本文. POST 與帶有 Content-Length / Transfer-Encoding 的錯誤請求仍關閉連線, 保留未讀本文的邊界
+沒有請求本文的 GET 錯誤回應沿用 HTTP keep-alive, 讓呼叫端完整讀取狀態、表頭及本文, POST 與帶有 Content-Length / Transfer-Encoding 的錯誤請求仍關閉連線, 保留未讀本文的邊界
 
 | 檔案 | 責任 |
 | --- | --- |
@@ -44,39 +44,39 @@ Python 3.10+ 標準函式庫, 原生 HTML / JavaScript / CSS, setuptools package
 
 ## 來源發現
 
-從當前 `CODEX_HOME/config.toml` 選取 MCP section 名稱與 enabled 狀態, 不回傳 command, env 或 credentials. description 與已設定 README 提供用途, README 最多讀取 64 KiB, 用途快取 60 秒. Python 3.11+ 使用 `tomllib`, Python 3.10 使用只辨識 section / enabled / description 的相容解析, 跳過 multiline 字串
+從當前 `CODEX_HOME/config.toml` 選取 MCP section 名稱與 enabled 狀態, 不回傳 command, env 或 credentials, description 與已設定 README 提供用途, README 最多讀取 64 KiB, 用途快取 60 秒, Python 3.11+ 使用 `tomllib`, Python 3.10 使用只辨識 section / enabled / description 的相容解析, 跳過 multiline 字串
 
-Session 中出現 `mcp__server__tool` 時自動建立來源. 已啟用的 Codex App / Review / Security / CUA plugins 也會提供對應來源. 來源來自設定或既有紀錄, 不執行背景 API 探測. 缺少來源的電腦不會顯示其項目, 原有瀏覽器偏好也不會憑空建立來源
+Session 中出現 `mcp__server__tool` 時自動建立來源, 已啟用的 Codex App / Review / Security / CUA plugins 也會提供對應來源, 來源來自設定或既有紀錄, 不執行背景 API 探測, 缺少來源的電腦不會顯示其項目, 原有瀏覽器偏好也不會憑空建立來源
 
-Plugins 清單另選取設定與快取 manifest 的名稱, 供應商, 版本, 啟用狀態與技能 / MCP 數量, 設定啟用狀態與快取分列. 子代理程式透過 session 的 thread_spawn 與唯讀 thread_spawn_edges 補齊關聯 metadata, 最多 500 個相關對話, 每份狀態回查最多 64 KiB 並共用每輪 8 MiB 預算
+Plugins 清單另選取設定與快取 manifest 的名稱, 供應商, 版本, 啟用狀態與技能 / MCP 數量, 設定啟用狀態與快取分列, 子代理程式透過 session 的 thread_spawn 與唯讀 thread_spawn_edges 補齊關聯 metadata, 最多 500 個相關對話, 每份狀態回查最多 64 KiB 並共用每輪 8 MiB 預算
 
-官方帳戶來源預設關閉, 啟用時建立自己的 Codex app-server stdio 子程序, 只發送 initialize / initialized 與三個 account 唯讀方法, 結束後釋放程序及串流. 使用既有登入, 不讀取 auth.json, 不將 email, 帳戶 ID 或 credentials 投影至頁面. 成功與失敗均快取至少 60 秒, 整次逾時 10 秒, stdout 上限 1 MiB. rateLimitsByLimitId 優先於 legacy rateLimits, primary / secondary 可為 null, 視窗名稱依 windowDurationMins, 不假設 primary 為短期額度. account/usage/read 的帳戶統計與本機對話累計分開
+官方帳戶來源預設關閉, 啟用時建立自己的 Codex app-server stdio 子程序, 只發送 initialize / initialized 與三個 account 唯讀方法, 結束後釋放程序及串流, 使用既有登入, 不讀取 auth.json, 不將 email, 帳戶 ID 或 credentials 投影至頁面, 成功與失敗均快取至少 60 秒, 整次逾時 10 秒, stdout 上限 1 MiB, rateLimitsByLimitId 優先於 legacy rateLimits, primary / secondary 可為 null, 視窗名稱依 windowDurationMins, 不假設 primary 為短期額度, account/usage/read 的帳戶統計與本機對話累計分開
 
-Dots 與雲端 / 遠端對話活動選取 Codex 桌面快取中的 host / thread / timestamp. 即時裝置連線與遠端排程定義尚未串接, 實作狀態見 [功能清單](features.md)
+Dots 與雲端 / 遠端對話活動選取 Codex 桌面快取中的 host / thread / timestamp, 即時裝置連線與遠端排程定義尚未串接, 實作狀態見 [功能清單](features.md)
 
-已知來源使用分類預設, 新來源使用通用分類. 來源分類與工具說明可以在頁面修改. 呼叫若將 namespace 與 name 分開儲存, 會合併完整識別名稱. 不同 MCP 的同名工具分開統計. 新工具沒有特定 adapter 時仍顯示名稱, 操作, 時間, 資源 ID 及可辨識的結果
+已知來源使用分類預設, 新來源使用通用分類, 來源分類與工具說明可以在頁面修改, 呼叫若將 namespace 與 name 分開儲存, 會合併完整識別名稱, 不同 MCP 的同名工具分開統計, 新工具沒有特定 adapter 時仍顯示名稱, 操作, 時間, 資源 ID 及可辨識的結果
 
-公開 API 由 `GET /api/public-query?source=openai|codex` 按需呼叫, 個別 observation 預設 false, 不加入來源收集或計時輪詢. 固定 HTTPS endpoint, 不跟隨 redirect, 每個來源的鎖合併同時查詢, 成功及失敗皆快取 60 秒. 連線逾時 4 秒, OpenAI 本文最多 64 KiB, Codex 版本本文最多 1 MiB. 投影只選狀態或正式 tag 版本與來源時間, 不保留 release 本文 / assets
+公開 API 由 `GET /api/public-query?source=openai|codex` 按需呼叫, 個別 observation 預設 false, 不加入來源收集或計時輪詢, 固定 HTTPS endpoint, 不跟隨 redirect, 每個來源的鎖合併同時查詢, 成功及失敗皆快取 60 秒, 連線逾時 4 秒, OpenAI 本文最多 64 KiB, Codex 版本本文最多 1 MiB, 投影只選狀態或正式 tag 版本與來源時間, 不保留 release 本文 / assets
 
-`GET /api/codex/cloud` 使用所選 CODEX_HOME 的已登入 CLI 執行 `cloud list --json --limit 20`, 只接受有界 cursor, 不經 shell. `codex_cloud` 預設 false, 由使用者查詢, 不加入收集 worker. 每頁最多 20 筆, 輸出上限 1 MiB, 10 秒逾時, 至多快取 10 個來源頁各 60 秒. 只保留標題、ID、狀態、更新時間、環境標籤與嘗試數 metadata, 不保留 summary、URL 或帳戶欄位, 結束及失敗時清理自行建立的子程序
+`GET /api/codex/cloud` 使用所選 CODEX_HOME 的已登入 CLI 執行 `cloud list --json --limit 20`, 只接受有界 cursor, 不經 shell, `codex_cloud` 預設 false, 由使用者查詢, 不加入收集 worker, 每頁最多 20 筆, 輸出上限 1 MiB, 10 秒逾時, 至多快取 10 個來源頁各 60 秒, 只保留標題、ID、狀態、更新時間、環境標籤與嘗試數 metadata, 不保留 summary、URL 或帳戶欄位, 結束及失敗時清理自行建立的子程序
 
-雲端對話查詢與桌面快取分開呈現, 不合併進本機 Token 或操作統計. dots 活動接受既有 durable / chatgpt host 類別並標示雲端, 電腦清單仍只列本機 / 遠端電腦. 排程活動從既有 metadata 同時選取 cloud / remote, 最近執行排序後限制 500 筆, 下次執行時間只取實際排程設定
+雲端對話查詢與桌面快取分開呈現, 不合併進本機 Token 或操作統計, dots 活動接受既有 durable / chatgpt host 類別並標示雲端, 電腦清單仍只列本機 / 遠端電腦, 排程活動從既有 metadata 同時選取 cloud / remote, 最近執行排序後限制 500 筆, 下次執行時間只取實際排程設定
 
 ## 輸入 / 回傳資料
 
-代理訊息依已讀取的工具呼叫或已記錄訊息標頭投影 metadata, 不保存訊息本文. 傳送明細只讀取已觀察 Thread / Call / index 對應的參數及外層工具回覆, 呼叫辨識與實際送達分開. 沒有 Call ID 的接收訊息只連到該對話近期 Context, 不宣稱取得單筆傳送內容
+代理訊息依已讀取的工具呼叫或已記錄訊息標頭投影 metadata, 不保存訊息本文, 傳送明細只讀取已觀察 Thread / Call / index 對應的參數及外層工具回覆, 呼叫辨識與實際送達分開, 沒有 Call ID 的接收訊息只連到該對話近期 Context, 不宣稱取得單筆傳送內容
 
-Context 按需選取最多 1 MiB 的來源片段與最近 32 則可見訊息, 指定 Call ID 時範圍止於該呼叫之前. `visible_context_record()` 只選 user / assistant 訊息及明確的公開思考摘要, 排除 analysis、完整或加密推理. 回補未完成與未記錄分別保留 `pending` 與 `not_recorded`, 不重建完整模型 Context
+Context 按需選取最多 1 MiB 的來源片段與最近 32 則可見訊息, 指定 Call ID 時範圍止於該呼叫之前, `visible_context_record()` 只選 user / assistant 訊息及明確的公開思考摘要, 排除 analysis、完整或加密推理, 回補未完成與未記錄分別保留 `pending` 與 `not_recorded`, 不重建完整模型 Context
 
-`payload_masking` 使用預設 true 的 ContextVar, HTTP 明細請求以 `mask_payloads()` 套用 `mask=0|1`, 結束時重設, 不改變一般 snapshot 的敏感資料投影. 前端 contentMasking 與舊 sqlMasking 相容同步, 切換時清除明細快取. 分頁 revision 含遮蔽模式, 不混接不同模式的資料. 文件、專案與來源檔案的原有選取及編輯規則不受此開關改變
+`payload_masking` 使用預設 true 的 ContextVar, HTTP 明細請求以 `mask_payloads()` 套用 `mask=0|1`, 結束時重設, 不改變一般 snapshot 的敏感資料投影, 前端 contentMasking 與舊 sqlMasking 相容同步, 切換時清除明細快取, 分頁 revision 含遮蔽模式, 不混接不同模式的資料, 文件、專案與來源檔案的原有選取及編輯規則不受此開關改變
 
-Snapshot 不包含 prompt, 完整命令, 任意 MCP input / output 或文件本文. MCP request 只保留白名單 metadata, 例如檔案副檔名, OCR 模式, 寫入開關與資源 ID. response 只保留狀態, 數值 / boolean 與明確的數量摘要
+Snapshot 不包含 prompt, 完整命令, 任意 MCP input / output 或文件本文, MCP request 只保留白名單 metadata, 例如檔案副檔名, OCR 模式, 寫入開關與資源 ID, response 只保留狀態, 數值 / boolean 與明確的數量摘要
 
-已保存操作的 MCP / SQL 明細可按需透過來源 offset 讀取, 舊操作索引依每輪讀取預算向前回補, 索引不保存本文. 巢狀呼叫含動態參數時保留遮蔽後的記錄程式碼, 不執行 expression. 多個工具共用的回傳標示為外層工具回覆, 不分配成個別工具結果. 解析記錄中的 Python 不將其字串跳脫警告輸出為 LAM 程式警告
+已保存操作的 MCP / SQL 明細可按需透過來源 offset 讀取, 舊操作索引依每輪讀取預算向前回補, 索引不保存本文, 巢狀呼叫含動態參數時保留遮蔽後的記錄程式碼, 不執行 expression, 多個工具共用的回傳標示為外層工具回覆, 不分配成個別工具結果, 解析記錄中的 Python 不將其字串跳脫警告輸出為 LAM 程式警告
 
-對話的 Model 與 Reasoning 等級依最新 turn context 或 thread_settings_applied 時間合併, 多份相同 thread 的 session 不以工具紀錄時間覆蓋 Model 設定. `reasoning_effort` 缺少時可由本機 catalog 補齊. `execution` 只保存 Provider, CLI 版本, context window, 審核 / Sandbox / 協作模式, Agent 資訊, 上層 Thread ID 與 Git 分支 / commit, 服務等級, Reasoning 摘要與審核來源. Sandbox JSON 僅取 mode, 不回傳 writable roots. 新的 reasoning 名稱依有效字串保留, 前端動態建立篩選選項
+對話的 Model 與 Reasoning 等級依最新 turn context 或 thread_settings_applied 時間合併, 多份相同 thread 的 session 不以工具紀錄時間覆蓋 Model 設定, `reasoning_effort` 缺少時可由本機 catalog 補齊, `execution` 只保存 Provider, CLI 版本, context window, 審核 / Sandbox / 協作模式, Agent 資訊, 上層 Thread ID 與 Git 分支 / commit, 服務等級, Reasoning 摘要與審核來源, Sandbox JSON 僅取 mode, 不回傳 writable roots, 新的 reasoning 名稱依有效字串保留, 前端動態建立篩選選項
 
-回傳可為 JSON 字串, `structuredContent` 或單一 `content[].text` JSON. 其他格式仍保留工具紀錄. 欄位新增, 缺漏或型別不符不使來源清單消失. 新增特定摘要時在 `request_metadata` / `response_metadata` 加入型別檢查與白名單欄位, 並用 fixture 覆蓋既有與缺漏格式
+回傳可為 JSON 字串, `structuredContent` 或單一 `content[].text` JSON, 其他格式仍保留工具紀錄, 欄位新增, 缺漏或型別不符不使來源清單消失, 新增特定摘要時在 `request_metadata` / `response_metadata` 加入型別檢查與白名單欄位, 並用 fixture 覆蓋既有與缺漏格式
 
 | 分類 | 目前摘要 |
 | --- | --- |
@@ -87,47 +87,47 @@ Snapshot 不包含 prompt, 完整命令, 任意 MCP input / output 或文件本�
 | Runtime / 瀏覽器 | 工具名稱, reset / 操作類型, 結果, 時間與耗時 |
 | 通用 | 個別呼叫 / exec 辨識, 已回傳數, 已提供結果 / 錯誤數, 平均 / P99 耗時, 可取得的 retries / tokens |
 
-`functions.exec` 內的工具按靜態呼叫位置計數. 個別工具耗時維持 null, 另保留整次 exec 耗時. 多個工具共用的回傳不分配給其中任一工具. 單一呼叫才解析獨立摘要. 分類包含依名稱推斷的讀取 / 寫入 / 部署, 原始工具名稱一直保留
+`functions.exec` 內的工具按靜態呼叫位置計數, 個別工具耗時維持 null, 另保留整次 exec 耗時, 多個工具共用的回傳不分配給其中任一工具, 單一呼叫才解析獨立摘要, 分類包含依名稱推斷的讀取 / 寫入 / 部署, 原始工具名稱一直保留
 
-Skill 檔案依 session 中已觀察的 literal SKILL.md 路徑取得. Endpoint 接受 Skill 名稱與可選的目錄內相對文件名稱. 相對名稱必須存在於當次列出的可讀文件中, 讀取前再確認解析位置仍在該 Skill 目錄內. 排除 UNC, symlink, 隱藏目錄, credential 檔與快取目錄. 每次最多列出 200 個檔案, 掃描 1000 個項目與 4 層子目錄. Python 與其他非文件檔只取得 metadata, 不讀取原始碼. Markdown / TXT / RST / AsciiDoc 每份最多讀取 256 KiB, 遮蔽 credentials 後以每頁 32768 字元顯示, hash 對應讀取片段. 一般 refresh 不掃描 Skill 目錄
+Skill 檔案依 session 中已觀察的 literal SKILL.md 路徑取得, Endpoint 接受 Skill 名稱與可選的目錄內相對文件名稱, 相對名稱必須存在於當次列出的可讀文件中, 讀取前再確認解析位置仍在該 Skill 目錄內, 排除 UNC, symlink, 隱藏目錄, credential 檔與快取目錄, 每次最多列出 200 個檔案, 掃描 1000 個項目與 4 層子目錄, Python 與其他非文件檔只取得 metadata, 不讀取原始碼, Markdown / TXT / RST / AsciiDoc 每份最多讀取 256 KiB, 遮蔽 credentials 後以每頁 32768 字元顯示, hash 對應讀取片段, 一般 refresh 不掃描 Skill 目錄
 
-Jev payload 仍只在指定呼叫點開時讀取, 遮蔽 credentials 並保留既有混合回傳隔離. Web 只保存 URL, query / fragment 不保留. 檔案操作保存 patch header, shell 明確讀寫位置, 或工具名稱與 path 參數辨識的檔案位置 / workdir / 工具識別, 不取出命令本文或檔案內文
+Jev payload 仍只在指定呼叫點開時讀取, 遮蔽 credentials 並保留既有混合回傳隔離, Web 只保存 URL, query / fragment 不保留, 檔案操作保存 patch header, shell 明確讀寫位置, 或工具名稱與 path 參數辨識的檔案位置 / workdir / 工具識別, 不取出命令本文或檔案內文
 
 ## 範圍與效能
 
-- 初次每個 session 讀取頭行與最多 1 MiB 尾端, 後續差異讀取. 缺少 lifecycle 時優先反向回查工作事件, 再回補最近 24 小時錯誤. 全部 session 共用每輪 8 MiB
-- 來源變更通知後盤點全部 session, 不再依近期數量篩選. 差異讀取以輪替游標與每輪位元組 / 檔案檢查預算避免單一大檔占滿額度, 未讀完的來源持續回補
-- 每個檔案保留最多 8192 個工具 Call ID, 全部檔案合計最多 50000, 超過移除最舊資料. 去除同 ID 的重複呼叫
-- 未完成行每檔最多 1 MiB, 合計 8 MiB, 超過時丟棄該片段至下個換行. 額外 session error 每檔 50 筆, 全部最多 1000
+- 初次每個 session 讀取頭行與最多 1 MiB 尾端, 後續差異讀取, 缺少 lifecycle 時優先反向回查工作事件, 再回補最近 24 小時錯誤, 全部 session 共用每輪 8 MiB
+- 來源變更通知後盤點全部 session, 不再依近期數量篩選, 差異讀取以輪替游標與每輪位元組 / 檔案檢查預算避免單一大檔占滿額度, 未讀完的來源持續回補
+- 每個檔案保留最多 8192 個工具 Call ID, 全部檔案合計最多 50000, 超過移除最舊資料, 去除同 ID 的重複呼叫
+- 未完成行每檔最多 1 MiB, 合計 8 MiB, 超過時丟棄該片段至下個換行, 額外 session error 每檔 50 筆, 全部最多 1000
 - 工具趨勢保留最近 10080 個分鐘 bucket, 工具 / 時間排行最多 20000 個 bucket
-- 對話工具與 Jev 明細各 100 筆, 檔案修改與讀取各 200 筆, 全部檔案操作列表最多 1000 筆. Git / Skills / 驗證列表最多 500 筆, MCP 列表最多 1000 筆
+- 對話工具與 Jev 明細各 100 筆, 檔案修改與讀取各 200 筆, 全部檔案操作列表最多 1000 筆, Git / Skills / 驗證列表最多 500 筆, MCP 列表最多 1000 筆
 - Catalog 最多 2000 個對話 metadata, Jev 趨勢最多 168 個小時 bucket
-- 對話全部顯示每批建立 50 列 DOM, 全部新表格預設每頁 10 筆, 排行 5 項, 顯示選項預設 5 / 10 / 20, 可自訂最多 8 個 1 - 200 選項. 圖表最多 240 格
+- 對話全部顯示每批建立 50 列 DOM, 全部新表格預設每頁 10 筆, 排行 5 項, 顯示選項預設 5 / 10 / 20, 可自訂最多 8 個 1 - 200 選項, 圖表最多 240 格
 
-SQLite 的 threads 分區持續保存已確認 lifecycle checkpoint 與 Skills 選定 metadata, 不依筆數或容量刪除歷史. 記憶體工作集合仍最多 1000 個 lifecycle checkpoint、500 筆 Skills 及合計 512 KiB. 保存狀態時間, 開始時間, Thread ID, 檔名與讀取 offset. Skills 保存 Thread / Call ID, Skill 與時間. 選定 metadata 變更時保存, 相同且已成功保存的輸入以 SHA-256 摘要略過, 失敗後保留記憶體觀察並於後續更新重試
+SQLite 的 threads 分區持續保存已確認 lifecycle checkpoint 與 Skills 選定 metadata, 不依筆數或容量刪除歷史, 記憶體工作集合仍最多 1000 個 lifecycle checkpoint、500 筆 Skills 及合計 512 KiB, 保存狀態時間, 開始時間, Thread ID, 檔名與讀取 offset, Skills 保存 Thread / Call ID, Skill 與時間, 選定 metadata 變更時保存, 相同且已成功保存的輸入以 SHA-256 摘要略過, 失敗後保留記憶體觀察並於後續更新重試
 
-錯誤歷史同樣略過已成功保存的相同輸入, 記憶體摘要持續套用 24 小時範圍. SQL 與 MCP 的四個時間範圍各共用一次唯讀交易, 空結果省去分類與趨勢查詢, 保留統計上限與來源篩選
+錯誤歷史同樣略過已成功保存的相同輸入, 記憶體摘要持續套用 24 小時範圍, SQL 與 MCP 的四個時間範圍各共用一次唯讀交易, 空結果省去分類與趨勢查詢, 保留統計上限與來源篩選
 
-重啟後若初始尾端涵蓋 checkpoint 至最新位置, 可沿用確認狀態. 未涵蓋的離線區間繼續反向回補, 顯示快取來源與確認時間. 新事件優先覆蓋舊狀態. Skill count 依已保留的 500 筆 metadata 計算, 以 Thread / Call ID / Skill 去重
+重啟後若初始尾端涵蓋 checkpoint 至最新位置, 可沿用確認狀態, 未涵蓋的離線區間繼續反向回補, 顯示快取來源與確認時間, 新事件優先覆蓋舊狀態, Skill count 依已保留的 500 筆 metadata 計算, 以 Thread / Call ID / Skill 去重
 
-關閉觀察項目會停止對應解析或讀取. 來源開關會略過其摘要並隱藏事件, 開啟後重新解析 session 尾端. 來源名稱仍可供使用者重新開啟. 部分紀錄被截短或起訖缺漏時保持 null
+關閉觀察項目會停止對應解析或讀取, 來源開關會略過其摘要並隱藏事件, 開啟後重新解析 session 尾端, 來源名稱仍可供使用者重新開啟, 部分紀錄被截短或起訖缺漏時保持 null
 
-AGENTS.md 的最後修改時間取自實際開啟的檔案, 技能文件沿用既有 metadata 時間. 一般檔案時間只在開啟明細時 stat 已觀察路徑, 拒絕 UNC, symlink 與 credential 檔案, 不加入 snapshot 或 checkpoint
+AGENTS.md 的最後修改時間取自實際開啟的檔案, 技能文件沿用既有 metadata 時間, 一般檔案時間只在開啟明細時 stat 已觀察路徑, 拒絕 UNC, symlink 與 credential 檔案, 不加入 snapshot 或 checkpoint
 
-右上 LAM 狀態依 SSE 連線、來源監聽與資料整理狀態顯示. Codex 狀態從既有對話用量回報及連線診斷 metadata 投影, 最近 5 分鐘顯示最近有回應或連線錯誤, 缺少近期資料時顯示待確認, 停用 Codex 觀察時顯示觀察停用. tooltip 提供依據及觀測時間, 不呼叫遠端探測 API
+右上 LAM 狀態依 SSE 連線、來源監聽與資料整理狀態顯示, Codex 狀態從既有對話用量回報及連線診斷 metadata 投影, 最近 5 分鐘顯示最近有回應或連線錯誤, 缺少近期資料時顯示待確認, 停用 Codex 觀察時顯示觀察停用, tooltip 提供依據及觀測時間, 不呼叫遠端探測 API
 
 ## HTTP 與設定
 
-共用 UI 由 `ui_assets.py` 串接 Workbench UI 的標準函式庫載入器, 預設使用建置產生的 `_workbench/`, 可用 `WORKBENCH_UI_PATH` 明確指定開發來源. LAM 頁面來源在根目錄 `frontend/`, 建置工具驗證六個來源檔案並產生 `_web/` 與 SHA-256 manifest, 後端不再讀取來源目錄. 靜態路由維持固定白名單, 首頁合併 JS / CSS 並計算 CSP hash, 版本識別涵蓋實際檔案的 mtime、大小與內容 hash
+共用 UI 由 `ui_assets.py` 串接 Workbench UI 的標準函式庫載入器, 預設使用建置產生的 `_workbench/`, 可用 `WORKBENCH_UI_PATH` 明確指定開發來源, LAM 頁面來源在根目錄 `frontend/`, 建置工具驗證六個來源檔案並產生 `_web/` 與 SHA-256 manifest, 後端不再讀取來源目錄, 靜態路由維持固定白名單, 首頁合併 JS / CSS 並計算 CSP hash, 版本識別涵蓋實際檔案的 mtime、大小與內容 hash
 
-CLI 啟動時檢查最高的 0.x 正式版本 tag, WBUI 1.0.0 起以既有 GitHub CLI 認證取得 Latest 的已發布非預覽 Release, 使用 Git 的 peeled SHA 解析 annotated tag, 透過既有認證取得該提交並呼叫共用 helper. 候選版本低於目前已建置版本時沿用原版, `--revision` 可明確選擇已確認的完整 SHA. 新的 `_workbench/` 與 `_web/` 都通過驗證後才替換資產並更新 `workbench-ui.json`, 取得失敗時沿用可用版本, 無效或用途不明的既有目錄保留並回報. 檔案修改後的 watcher 建置不查遠端. CI 與發行工具只使用已提交的完整 SHA, 原生程式、wheel、sdist 與原始碼下載包包含兩組建置資產, 不需相鄰 checkout 或網路. 左上角與 LAM 並列的版本取自 WBUI 公開的 `version` 介面
+CLI 啟動時檢查最高的 0.x 正式版本 tag, WBUI 1.0.0 起以既有 GitHub CLI 認證取得 Latest 的已發布非預覽 Release, 使用 Git 的 peeled SHA 解析 annotated tag, 透過既有認證取得該提交並呼叫共用 helper, 候選版本低於目前已建置版本時沿用原版, `--revision` 可明確選擇已確認的完整 SHA, 新的 `_workbench/` 與 `_web/` 都通過驗證後才替換資產並更新 `workbench-ui.json`, 取得失敗時沿用可用版本, 無效或用途不明的既有目錄保留並回報, 檔案修改後的 watcher 建置不查遠端, CI 與發行工具只使用已提交的完整 SHA, 原生程式、wheel、sdist 與原始碼下載包包含兩組建置資產, 不需相鄰 checkout 或網路, 左上角與 LAM 並列的版本取自 WBUI 公開的 `version` 介面
 
 | Endpoint | 用途 |
 | --- | --- |
 | `GET /api/snapshot?window=1h\|24h\|7d\|all` | 彙整 snapshot, window 作用於 Jev DB |
 | `GET /api/codex/jev?thread=...&call=...&index=...` | 指定呼叫的已遮蔽 Jev 內容 |
 | `GET /api/codex/sql?id=...` | 已觀察 SQL 操作的指令內容, 點開明細才讀取並遮蔽憑證 |
-| `GET /api/codex/skill?skill=...&file=...` | 已觀察 Skill 的檔案清單與文件 metadata. file 可省略, 指定時只讀取清單內的文字文件 |
+| `GET /api/codex/skill?skill=...&file=...` | 已觀察 Skill 的檔案清單與文件 metadata, file 可省略, 指定時只讀取清單內的文字文件 |
 | `GET /api/codex/file?thread_id=...&call_id=...&path=...` | 只對已觀察且識別相符的檔案操作按需查詢最後修改時間, 不讀取內容 |
 | `GET /api/codex/file-summary?window=...` | 對所選範圍的已取得檔案事件查詢最多 100 個位置的大小與更新時間 |
 | `GET /api/codex/tool?thread_id=...&call_id=...` | 已取得工具呼叫的 JS, patch 與輸入 / 輸出明細 |
@@ -142,86 +142,86 @@ CLI 啟動時檢查最高的 0.x 正式版本 tag, WBUI 1.0.0 起以既有 GitHu
 | `POST /api/settings` | debug_mode, observations, mcp_sources, mcp_categories, tool_descriptions, mcp_descriptions, mcp_tags, recording, replace_customizations. 舊 max_files / track_all 設定仍接受相容格式, 不再限制來源數量 |
 | `POST /api/jev/recording` | 經驗證的本機 Jev enabled 開關 |
 
-設定先完整驗證再變更. map 各最多 64 個自訂項目, 工具說明最多 400 字元. `/api/settings` body 上限 256 KiB. 觀察設定只存在目前後端程序, 網頁使用 localStorage 保存並在重新連線後套用. 外觀, 圖表, 表格排序 / 分頁, Tab 順序與介面文案屬於前端. 介面文字由 HTML 純文字與 ui() 標籤集中登錄, 略過數字, 單獨單位與帶有拼接空白的片段. data-copy="ignore" 可排除整個元件. 圖表動態控制項保留原始標籤供即時套用, 不修改原始紀錄值或 ID. 新 UI 元件沿用 ui() 與通用表格控制, 新 Tab 會自動接到目前排序尾端
+設定先完整驗證再變更, map 各最多 64 個自訂項目, 工具說明最多 400 字元, `/api/settings` body 上限 256 KiB, 觀察設定只存在目前後端程序, 網頁使用 localStorage 保存並在重新連線後套用, 外觀, 圖表, 表格排序 / 分頁, Tab 順序與介面文案屬於前端, 介面文字由 HTML 純文字與 ui() 標籤集中登錄, 略過數字, 單獨單位與帶有拼接空白的片段, data-copy="ignore" 可排除整個元件, 圖表動態控制項保留原始標籤供即時套用, 不修改原始紀錄值或 ID, 新 UI 元件沿用 ui() 與通用表格控制, 新 Tab 會自動接到目前排序尾端
 
-Snapshot 額外提供 `default_settings` 與讀取器的來源資訊. `sources` 根據當次 collector 結果組合實際位置, health, 選取欄位與上限, 各讀取器保留實際讀取數量與回補狀態. 上限與執行讀取共用 constants, 不額外重掃來源或載入 payload. 頁面依主 / 子 Tab 的資料相依篩選來源, 詳細內容只在展開區塊時建立 DOM. MCP 回傳只投影最多 40 個符合用量, credits, 次數或耗時語意的數值, 排除 credentials 與任意帳戶欄位. Token 用量採 thread 最新累計, 額度保留來源視窗, 剩餘百分比與時間, 不推估帳單金額
+Snapshot 額外提供 `default_settings` 與讀取器的來源資訊, `sources` 根據當次 collector 結果組合實際位置, health, 選取欄位與上限, 各讀取器保留實際讀取數量與回補狀態, 上限與執行讀取共用 constants, 不額外重掃來源或載入 payload, 頁面依主 / 子 Tab 的資料相依篩選來源, 詳細內容只在展開區塊時建立 DOM, MCP 回傳只投影最多 40 個符合用量, credits, 次數或耗時語意的數值, 排除 credentials 與任意帳戶欄位, Token 用量採 thread 最新累計, 額度保留來源視窗, 剩餘百分比與時間, 不推估帳單金額
 
-Snapshot 的 monitor 欄位提供處理器名稱, 實體與可用記憶體容量, GPU 型號 / 專用容量 / 共享上限 / 驅動版本及 runtime, uptime, refresh / process CPU 耗時, 當次 session bytes, 資料保留量, HTTP 回應大小與錯誤計數. GPU 在首次硬體收集階段查詢, 最多 16 張. Windows 使用 System32 的 DXGI 唯讀 API, 區分專用容量與共享上限, 32 位元程序不提供容量, 不採用只有 uint32 的 WMI AdapterRAM. Linux 使用已安裝的 nvidia-smi 或 DRM sysfs, 型號按需由已安裝的 lspci 補充, 外部查詢合計預算 3 秒, 不安裝工具. macOS 使用 system_profiler 的顯示卡資料, Apple M 系列標示統一記憶體, 不將共享容量當成專用容量. 每個外部指令最多 2 秒, 接受輸出最多 128 KiB. 權限, 工具, schema 或驅動欄位不足時保留未知, 不使用 kernel 或 macOS 版本冒充 GPU 驅動版本. 記憶體容量最多每 5 秒查詢一次, macOS 可用容量目前保持未知. 360 個效能樣本及 200 個狀態事件使用 bounded deque, 重新啟動後清空. 整理失敗保留前次 cache, 下次來源變更或手動更新時重試, 紀錄只保存例外類型
+Snapshot 的 monitor 欄位提供處理器名稱, 實體與可用記憶體容量, GPU 型號 / 專用容量 / 共享上限 / 驅動版本及 runtime, uptime, refresh / process CPU 耗時, 當次 session bytes, 資料保留量, HTTP 回應大小與錯誤計數, GPU 在首次硬體收集階段查詢, 最多 16 張, Windows 使用 System32 的 DXGI 唯讀 API, 區分專用容量與共享上限, 32 位元程序不提供容量, 不採用只有 uint32 的 WMI AdapterRAM, Linux 使用已安裝的 nvidia-smi 或 DRM sysfs, 型號按需由已安裝的 lspci 補充, 外部查詢合計預算 3 秒, 不安裝工具, macOS 使用 system_profiler 的顯示卡資料, Apple M 系列標示統一記憶體, 不將共享容量當成專用容量, 每個外部指令最多 2 秒, 接受輸出最多 128 KiB, 權限, 工具, schema 或驅動欄位不足時保留未知, 不使用 kernel 或 macOS 版本冒充 GPU 驅動版本, 記憶體容量最多每 5 秒查詢一次, macOS 可用容量目前保持未知, 360 個效能樣本及 200 個狀態事件使用 bounded deque, 重新啟動後清空, 整理失敗保留前次 cache, 下次來源變更或手動更新時重試, 紀錄只保存例外類型
 
-錯誤觀察使用平台 log 目錄及 CODEX_HOME 的 logs_*.sqlite, 驗證 schema 後唯讀選取 metadata. Desktop 最多 8 個近期 log, 每份初始 256 KiB 尾端, 差異與歷史回補每輪各最多 1 MiB, 未完成行最多 64 KiB. Core 每輪最多最近 2000 列 ID, 歷史回補每輪最多 2000 列. 有 0.08 秒 SQLite 讀取預算, 投影診斷 / SQL metadata, body 只暫讀前 8192 字元供分類, 不保留. 診斷事件與輸出的錯誤清單各最多 1000 筆, source 缺少 / schema 不符顯示健康狀態. 詳細錯誤判定見 [錯誤觀察](error-observation.md)
+錯誤觀察使用平台 log 目錄及 CODEX_HOME 的 logs_*.sqlite, 驗證 schema 後唯讀選取 metadata, Desktop 最多 8 個近期 log, 每份初始 256 KiB 尾端, 差異與歷史回補每輪各最多 1 MiB, 未完成行最多 64 KiB, Core 每輪最多最近 2000 列 ID, 歷史回補每輪最多 2000 列, 有 0.08 秒 SQLite 讀取預算, 投影診斷 / SQL metadata, body 只暫讀前 8192 字元供分類, 不保留, 診斷事件與輸出的錯誤清單各最多 1000 筆, source 缺少 / schema 不符顯示健康狀態, 詳細錯誤判定見 [錯誤觀察](error-observation.md)
 
-表格以原始欄位 ID 對應儲存排序, 顯示與拖曳順序, DOM 位移不改變排序欄位. 原始 cells 使用 WeakMap, popup 關閉清除對應 table view. 桌面多欄位在表格範圍橫向捲動, 760 px 以下改成資料卡. 共用 filter / paginate / column 規則套用新增表格. 熱度使用目前頁面數值逐欄正規化, 預設關閉. 設定匯入 / 匯出 version 1, 原始文案作 key, 格式見 [設定檔格式](settings-format.md)
+表格以原始欄位 ID 對應儲存排序, 顯示與拖曳順序, DOM 位移不改變排序欄位, 原始 cells 使用 WeakMap, popup 關閉清除對應 table view, 桌面多欄位在表格範圍橫向捲動, 760 px 以下改成資料卡, 共用 filter / paginate / column 規則套用新增表格, 熱度使用目前頁面數值逐欄正規化, 預設關閉, 設定匯入 / 匯出 version 1, 原始文案作 key, 格式見 [設定檔格式](settings-format.md)
 
-瀏覽器 document.hidden 時略過自動 HTTP / render, 重新顯示後 refresh. 後端保持收集. Cache 只在整理時建立, HTTP 取值時深複製選定 window 後附上最新程式狀態
+瀏覽器 document.hidden 時略過自動 HTTP / render, 重新顯示後 refresh, 後端保持收集, Cache 只在整理時建立, HTTP 取值時深複製選定 window 後附上最新程式狀態
 
-HTML 內嵌目前 CSS / script 並提供精確 CSP SHA-256, 換行先統一為 LF 以符合 HTML parser. HTTP/1.1 支援連線重用, 保留 Content-Length, 15 秒 socket timeout, 被拒絕的請求關閉連線. assets / snapshot 使用 no-store, 可接受的 response 以 gzip 壓縮. 前端請求包含 15 秒 timeout, 後端重啟後重新取得資料並套用偏好, 前端資產版本穩定變更後才重新載入, 已開啟明細時延後. watcher 不修改其他服務程序
+HTML 內嵌目前 CSS / script 並提供精確 CSP SHA-256, 換行先統一為 LF 以符合 HTML parser, HTTP/1.1 支援連線重用, 保留 Content-Length, 15 秒 socket timeout, 被拒絕的請求關閉連線, assets / snapshot 使用 no-store, 可接受的 response 以 gzip 壓縮, 前端請求包含 15 秒 timeout, 後端重啟後重新取得資料並套用偏好, 前端資產版本穩定變更後才重新載入, 已開啟明細時延後, watcher 不修改其他服務程序
 
 ## 驗證
 
-使用 checkout 的 src 執行隔離 fixture. PowerShell 設定 `$env:PYTHONPATH="src"` 後執行 `python -m unittest discover -s tests -v`. macOS / Linux 使用 `PYTHONPATH=src python -m unittest discover -s tests -v`, 並以 `node --check frontend/app.js` 檢查語法. UI 需另外驗證來源有 / 無, 設定與文件保存, 明細, 分頁 / 分批載入, 圖表設定與淺 / 深色外觀. 原生套件由各目標系統的 GitHub runner 建置並執行隔離 HTTP smoke test
+使用 checkout 的 src 執行隔離 fixture, PowerShell 設定 `$env:PYTHONPATH="src"` 後執行 `python -m unittest discover -s tests -v`, macOS / Linux 使用 `PYTHONPATH=src python -m unittest discover -s tests -v`, 並以 `node --check frontend/app.js` 檢查語法, UI 需另外驗證來源有 / 無, 設定與文件保存, 明細, 分頁 / 分批載入, 圖表設定與淺 / 深色外觀, 原生套件由各目標系統的 GitHub runner 建置並執行隔離 HTTP smoke test
 
 ## 原生 CLI 建置
 
-`tools/launch-portable.py` 直接啟動 server, 不使用原始碼 watcher 或安裝流程. `tools/build_release.py` 在各原生系統使用固定版 PyInstaller 建置資料夾套件, 收入完整 _web/ 與 _workbench/ 建置資產, 說明與 runtime 授權文件. `tools/smoke_release.py` 以暫存 CODEX_HOME 與 loopback 隨機 port 啟動該執行檔, 核對 HTTP, CSP, 資產, 版本與任意檔案存取邊界
+`tools/launch-portable.py` 直接啟動 server, 不使用原始碼 watcher 或安裝流程, `tools/build_release.py` 在各原生系統使用固定版 PyInstaller 建置資料夾套件, 收入完整 _web/ 與 _workbench/ 建置資產, 說明與 runtime 授權文件, `tools/smoke_release.py` 以暫存 CODEX_HOME 與 loopback 隨機 port 啟動該執行檔, 核對 HTTP, CSP, 資產, 版本與任意檔案存取邊界
 
 GPU 容量語意依 [Microsoft DXGI](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/ns-dxgi-dxgi_adapter_desc), [NVIDIA SMI](https://docs.nvidia.com/deploy/nvidia-smi/), [Linux AMDGPU sysfs](https://docs.kernel.org/gpu/amdgpu/driver-misc.html) 與 [Apple silicon 架構](https://developer.apple.com/videos/play/wwdc2020/10686/) 處理
 ## 活動保留與按需檔案資訊
 
-`activity_history.py` 保存 SQL, 網路與 MCP metadata, 預設 90 天, 可設定 0 - 3650 天, 0 表示不自動刪除. 保存不依筆數或容量刪除歷史, 超過期限的事件每輪最多清理 500 筆, checkpoint 保留供來源狀態回查. 記憶體仍保留 SQL 500 筆、網路與 MCP 各 1000 筆及合計 1 MiB 的工作集合, 這些限制不代表資料庫保存上限. 合併更新時保留已取得的回傳與指標, 快取格式 version 3, 可讀取既有 version 1 / 2, 明確保存的舊期限沿用原設定
+`activity_history.py` 保存 SQL, 網路與 MCP metadata, 預設 90 天, 可設定 0 - 3650 天, 0 表示不自動刪除, 保存不依筆數或容量刪除歷史, 超過期限的事件每輪最多清理 500 筆, checkpoint 保留供來源狀態回查, 記憶體仍保留 SQL 500 筆、網路與 MCP 各 1000 筆及合計 1 MiB 的工作集合, 這些限制不代表資料庫保存上限, 合併更新時保留已取得的回傳與指標, 快取格式 version 3, 可讀取既有 version 1 / 2, 明確保存的舊期限沿用原設定
 
-快取位於 SQLite 的 activity 分區, 選取操作分類, 計次, 耗時, 公開參考網址與來源提供的數值指標. 輸入, 輸出與 SQL 文字由明細 API 按需取得. 停用對應檢查時停止顯示該資料, 恢復後沿用仍在保存範圍內的摘要
+快取位於 SQLite 的 activity 分區, 選取操作分類, 計次, 耗時, 公開參考網址與來源提供的數值指標, 輸入, 輸出與 SQL 文字由明細 API 按需取得, 停用對應檢查時停止顯示該資料, 恢復後沿用仍在保存範圍內的摘要
 
 ## 回補資料儲存
 
-`history_store.py` 使用 `CODEX_HOME/monitoring/lam-history.sqlite3`, `application_id` 為 LAM 識別碼, `user_version` 目前為 4, `history_items` 另以 server、operation、statement、nested 欄位保存彙總用的值, 寫入時由 payload 以相同的 SQLite 運算式計算, 彙總查詢不必逐列解析 payload. `history_state` 保存 activity / errors / threads 分區的格式及設定, `history_items` 逐筆保存資料, 依分區、項目類型與時間建立索引. 各分區按穩定項目識別碼 UPSERT, 未變動的 payload 不重寫, 不再每輪刪除整個分區. SQLite 採 WAL 與短交易, 寫入等待上限 0.2 秒, 讀取連線使用 mode=ro 與 query_only, 讀取不占用收集器的更新鎖
+`history_store.py` 使用 `CODEX_HOME/monitoring/lam-history.sqlite3`, `application_id` 為 LAM 識別碼, `user_version` 目前為 4, `history_items` 另以 server、operation、statement、nested 欄位保存彙總用的值, 寫入時由 payload 以相同的 SQLite 運算式計算, 彙總查詢不必逐列解析 payload, `history_state` 保存 activity / errors / threads 分區的格式及設定, `history_items` 逐筆保存資料, 依分區、項目類型與時間建立索引, 各分區按穩定項目識別碼 UPSERT, 未變動的 payload 不重寫, 不再每輪刪除整個分區, SQLite 採 WAL 與短交易, 寫入等待上限 0.2 秒, 讀取連線使用 mode=ro 與 query_only, 讀取不占用收集器的更新鎖
 
-首次載入先檢查 SQLite 分區, 尚無資料時讀取既有 JSON, 經欄位白名單、型別、去重與期限規則投影後匯入. JSON 原檔保留, 已匯入分區以 SQLite 為準. 512 KiB / 1 MiB 限制只套用記憶體工作集合, 不限制 SQLite 歷史保存筆數, 資料庫另包含索引及頁面空間
+首次載入先檢查 SQLite 分區, 尚無資料時讀取既有 JSON, 經欄位白名單、型別、去重與期限規則投影後匯入, JSON 原檔保留, 已匯入分區以 SQLite 為準, 512 KiB / 1 MiB 限制只套用記憶體工作集合, 不限制 SQLite 歷史保存筆數, 資料庫另包含索引及頁面空間
 
-欄位新增、刪除或轉換在 `MIGRATIONS` 加入下一版的明確步驟並更新 `SCHEMA_VERSION`. 升級前使用 SQLite backup 建立 `.schema-vN.bak`, 驗證備份後在同一交易執行步驟及更新版本. 失敗時回復資料與版本, 保留備份. 不支援的版本或其他程式的資料庫會回報不可用, 保持原檔
+欄位新增、刪除或轉換在 `MIGRATIONS` 加入下一版的明確步驟並更新 `SCHEMA_VERSION`, 升級前使用 SQLite backup 建立 `.schema-vN.bak`, 驗證備份後在同一交易執行步驟及更新版本, 失敗時回復資料與版本, 保留備份, 不支援的版本或其他程式的資料庫會回報不可用, 保持原檔
 
-CLI 結束保留此資料庫、遷移備份、既有 JSON 與程式 journal. Windows Job Object 的 handle 由程序保有至系統結束程序, 子程序繼承其歸屬. 啟動器與 watcher 另用標準輸入控制正常退出, SIGTERM / SIGHUP / SIGBREAK 進入既有清理流程
+CLI 結束保留此資料庫、遷移備份、既有 JSON 與程式 journal, Windows Job Object 的 handle 由程序保有至系統結束程序, 子程序繼承其歸屬, 啟動器與 watcher 另用標準輸入控制正常退出, SIGTERM / SIGHUP / SIGBREAK 進入既有清理流程
 
-明確指定 WBUI revision 的建置先驗證目前資產, 再以共用 helper 準備候選版本, 成功後更新 pin. `--latest` 比較已驗證 WBUI 的實際版本, 不以較舊 tag 降版. 初次建置先取得既有 pin, 再檢查正式 tag
+明確指定 WBUI revision 的建置先驗證目前資產, 再以共用 helper 準備候選版本, 成功後更新 pin, `--latest` 比較已驗證 WBUI 的實際版本, 不以較舊 tag 降版, 初次建置先取得既有 pin, 再檢查正式 tag
 
-`/api/codex/file-summary` 只接收既有時間範圍, 對已取得的檔案事件選取最多 100 個不同位置讀取檔案 metadata. 單一檔案 API 仍使用 Thread / Call / 已取得路徑, 保留 UNC, symlink 與憑證檔拒絕規則. 檔案本文由既有文件明細與工具輸入輸出 API 按需提供
+`/api/codex/file-summary` 只接收既有時間範圍, 對已取得的檔案事件選取最多 100 個不同位置讀取檔案 metadata, 單一檔案 API 仍使用 Thread / Call / 已取得路徑, 保留 UNC, symlink 與憑證檔拒絕規則, 檔案本文由既有文件明細與工具輸入輸出 API 按需提供
 
 ## 共用卡片與內容呈現
 
-前端 cardLibrary 保存卡片的來源, 穩定識別碼, 類別, 支援的圖表形式與共用控制項. chartViews 保存各實例的參數與當次資料投影, 總覽副本沿用同一呈現函式並套用自己的範圍. summaryLibrary 保存已載入的摘要指標, 顯示數量, 順序與名稱由瀏覽器偏好管理. 新卡片沿用既有 renderer 與設定保存流程, 不增加資料讀取來源
+前端 cardLibrary 保存卡片的來源, 穩定識別碼, 類別, 支援的圖表形式與共用控制項, chartViews 保存各實例的參數與當次資料投影, 總覽副本沿用同一呈現函式並套用自己的範圍, summaryLibrary 保存已載入的摘要指標, 顯示數量, 順序與名稱由瀏覽器偏好管理, 新卡片沿用既有 renderer 與設定保存流程, 不增加資料讀取來源
 
-payload_detail.py 完成遮蔽與結構投影後建立含 revision 的內容頁, 原有受限明細 API 加上 lazy=1 時回傳分頁. offset 與 revision 只用於已確認的同一工具或診斷紀錄, 前端逐頁建立語法顏色或 Markdown 預覽. Markdown 以文字節點與明確允許的連結建立 DOM, 不執行文件中的 HTML 或程式碼
+payload_detail.py 完成遮蔽與結構投影後建立含 revision 的內容頁, 原有受限明細 API 加上 lazy=1 時回傳分頁, offset 與 revision 只用於已確認的同一工具或診斷紀錄, 前端逐頁建立語法顏色或 Markdown 預覽, Markdown 以文字節點與明確允許的連結建立 DOM, 不執行文件中的 HTML 或程式碼
 
-通用 parser、語法顏色、Markdown 預覽與輸出檢視器由 Workbench UI 提供, LAM 只管理已遮蔽的資料、受限明細 API、內容頁版本與卸載時機. 同一檢視器套用工具、MCP、Git、驗證與錯誤明細, 解開 text 物件與 output / stdout / stderr, 混合 JSON 與 diff 分開顯示, 提供原文切換. 跨頁 JSON 完整讀取後才展開, 內容分批建立 DOM, 關閉明細釋放元件與觀察器, 不改變外層工具回覆的來源判定
+通用 parser、語法顏色、Markdown 預覽與輸出檢視器由 Workbench UI 提供, LAM 只管理已遮蔽的資料、受限明細 API、內容頁版本與卸載時機, 同一檢視器套用工具、MCP、Git、驗證與錯誤明細, 解開 text 物件與 output / stdout / stderr, 混合 JSON 與 diff 分開顯示, 提供原文切換, 跨頁 JSON 完整讀取後才展開, 內容分批建立 DOM, 關閉明細釋放元件與觀察器, 不改變外層工具回覆的來源判定
 
 ## 分批收集與畫面載入
 
-HTTP 服務提供等待狀態後, 單一收集 worker 依序讀取 session、統計投影、工作樹、帳戶、診斷、歷史、MCP、Jev 與硬體資訊. 資料收集在來源及投影之間短暫讓出執行時間, session 在有新資料的區塊之間也讓出執行時間. 快照及活動狀態讀取使用最近已發布結果, 不等待收集鎖. 收集取消保留上一輪完整結果
+HTTP 服務提供等待狀態後, 單一收集 worker 依序讀取 session、統計投影、工作樹、帳戶、診斷、歷史、MCP、Jev 與硬體資訊, 資料收集在來源及投影之間短暫讓出執行時間, session 在有新資料的區塊之間也讓出執行時間, 快照及活動狀態讀取使用最近已發布結果, 不等待收集鎖, 收集取消保留上一輪完整結果
 
-前端只更新目前分頁內容, 已選的總覽副本保留自己的設定. 圖表接近可視範圍後才繪製, 每次排程只處理一張圖表, 切換分頁或更新資料時以最新工作取代尚未執行的工作. 圖表設定欄位在第一次點開齒輪時建立, 摘要與圖表預留顯示空間. 資料明細仍沿用原有按需讀取的路徑與權限檢查
+前端只更新目前分頁內容, 已選的總覽副本保留自己的設定, 圖表接近可視範圍後才繪製, 每次排程只處理一張圖表, 切換分頁或更新資料時以最新工作取代尚未執行的工作, 圖表設定欄位在第一次點開齒輪時建立, 摘要與圖表預留顯示空間, 資料明細仍沿用原有按需讀取的路徑與權限檢查
 
-監測頁使用瀏覽器原生 PerformanceObserver 顯示 TTFB、FCP、LCP、CLS、長任務與最慢互動. 首次資料呈現取首批資料更新 DOM 後的下一個畫面回呼時間, 圖表仍按需繪製. 只保存目前頁面的數值, 重新載入後重算, 不保存 DOM、URL 或事件內容, 不送至後端. LCP 取首次進入背景前的最後樣本, CLS 取間隔未達 1 秒且總長未達 5 秒的最大位移群組, 排除近期輸入造成的位移. Event Timing 使用 interactionId 大於零的最大 duration, 不標示為 INP. 缺少樣本或 API 支援時維持缺值, 參考 [CLS 定義](https://web.dev/articles/cls) 與 [Event Timing](https://www.w3.org/TR/event-timing/)
+監測頁使用瀏覽器原生 PerformanceObserver 顯示 TTFB、FCP、LCP、CLS、長任務與最慢互動, 首次資料呈現取首批資料更新 DOM 後的下一個畫面回呼時間, 圖表仍按需繪製, 只保存目前頁面的數值, 重新載入後重算, 不保存 DOM、URL 或事件內容, 不送至後端, LCP 取首次進入背景前的最後樣本, CLS 取間隔未達 1 秒且總長未達 5 秒的最大位移群組, 排除近期輸入造成的位移, Event Timing 使用 interactionId 大於零的最大 duration, 不標示為 INP, 缺少樣本或 API 支援時維持缺值, 參考 [CLS 定義](https://web.dev/articles/cls) 與 [Event Timing](https://www.w3.org/TR/event-timing/)
 
-`GET /api/history` 依 namespace 與 section 查詢歷史, 每頁 1 - 200 筆, 可使用回傳的 next_cursor 依時間與穩定識別碼接續查詢, 最後一頁回傳 null. offset 上限 1000000, 可指定 since, 資料庫計算 total, 受來源檢查開關及現有 Host / Origin 限制. 這個 API 的保存範圍與畫面最近 24 小時等查詢範圍分開
+`GET /api/history` 依 namespace 與 section 查詢歷史, 每頁 1 - 200 筆, 可使用回傳的 next_cursor 依時間與穩定識別碼接續查詢, 最後一頁回傳 null, offset 上限 1000000, 可指定 since, 資料庫計算 total, 受來源檢查開關及現有 Host / Origin 限制, 這個 API 的保存範圍與畫面最近 24 小時等查詢範圍分開
 
-`source_watch.py` 以 Windows ReadDirectoryChangesW、Linux inotify 或 macOS kqueue 監聽已選來源, 只處理檔名與檔案 metadata. 排除 auth.json、LAM 的 SQLite、checkpoint 與自身記錄檔, Jev 資料庫沿已啟用的來源設定監聽. 通知合併到單一收集 worker, 收集期間到達的通知留待下一輪, 尚未完成的回補按讀取預算繼續處理. 原生監聽失敗時顯示狀態並提供手動更新
+`source_watch.py` 以 Windows ReadDirectoryChangesW、Linux inotify 或 macOS kqueue 監聽已選來源, 只處理檔名與檔案 metadata, 排除 auth.json、LAM 的 SQLite、checkpoint 與自身記錄檔, Jev 資料庫沿已啟用的來源設定監聽, 通知合併到單一收集 worker, 收集期間到達的通知留待下一輪, 尚未完成的回補按讀取預算繼續處理, 原生監聽失敗時顯示狀態並提供手動更新
 
-`GET /api/events?window=...` 直接推送 `{version, window, snapshot, logs}`, 每個畫面一條連線, 快照與 Log 沿原有欄位投影、時間範圍及容量限制. 前端不定時查詢 snapshot、activity 或 logs, 保留分頁、捲動與 modal, 背景頁面關閉串流, 回到前景重新訂閱. HTTP 快照入口保留給相容使用端, 內容明細與設定操作仍依既有權限按需呼叫. 遠端候選入口與登入規格見 [遠端存取](remote-access.md), 服務維持 loopback
+`GET /api/events?window=...` 直接推送 `{version, window, snapshot, logs}`, 每個畫面一條連線, 快照與 Log 沿原有欄位投影、時間範圍及容量限制, 前端不定時查詢 snapshot、activity 或 logs, 保留分頁、捲動與 modal, 背景頁面關閉串流, 回到前景重新訂閱, HTTP 快照入口保留給相容使用端, 內容明細與設定操作仍依既有權限按需呼叫, 遠端候選入口與登入規格見 [遠端存取](remote-access.md), 服務維持 loopback
 
-`session_cursors` 保存每個來源最新的 metadata-only 讀取狀態, 供重啟恢復. `session_calls` 另存有界呼叫工作集合, 個別變動以 Call ID 更新, 不把整批呼叫重寫至 cursor JSON. 退休呼叫先保存白名單活動歷史, 再移除恢復用工作集合. 這兩表與 threads 的最新 lifecycle checkpoint 是來源恢復狀態, 不是活動歷史, 不依 90 天活動期限刪除. SQL / 網路 / MCP / Skills / 錯誤活動歷史預設保存 90 天, 設定 0 時不自動刪除
+`session_cursors` 保存每個來源最新的 metadata-only 讀取狀態, 供重啟恢復, `session_calls` 另存有界呼叫工作集合, 個別變動以 Call ID 更新, 不把整批呼叫重寫至 cursor JSON, 退休呼叫先保存白名單活動歷史, 再移除恢復用工作集合, 這兩表與 threads 的最新 lifecycle checkpoint 是來源恢復狀態, 不是活動歷史, 不依 90 天活動期限刪除, SQL / 網路 / MCP / Skills / 錯誤活動歷史預設保存 90 天, 設定 0 時不自動刪除
 
-資料庫端 `aggregate()` 計算保存範圍的總數、SQL 分類、MCP 直接呼叫與程式碼辨識數量及時間序列, 不載入完整 payload 至 Python. 分類最多回傳 200 項並標示截斷, 時間序列最多 1440 格, 跨較長期間時以分鐘整數倍合併, 未提供時間的紀錄只列入總數
+資料庫端 `aggregate()` 計算保存範圍的總數、SQL 分類、MCP 直接呼叫與程式碼辨識數量及時間序列, 不載入完整 payload 至 Python, 分類最多回傳 200 項並標示截斷, 時間序列最多 1440 格, 跨較長期間時以分鐘整數倍合併, 未提供時間的紀錄只列入總數
 
 ## 效能診斷
 
-`performance_debug.py` 提供預設關閉的數值記錄與檔案輪替, `MonitorState` 記錄收集指標, SSE handler 記錄連線與傳輸指標. 原生記憶體 API 與型別共用, 避免每次取樣建立型別快取. 磁碟寫入失敗保留收集流程並回報診斷健康狀態, 路徑為所選 home 下的固定檔案, 拒絕連結與不支援格式
+`performance_debug.py` 提供預設關閉的數值記錄與檔案輪替, `MonitorState` 記錄收集指標, SSE handler 記錄連線與傳輸指標, 原生記憶體 API 與型別共用, 避免每次取樣建立型別快取, 磁碟寫入失敗保留收集流程並回報診斷健康狀態, 路徑為所選 home 下的固定檔案, 拒絕連結與不支援格式
 
-快照的 `monitor.debug` 與獨立 `debug` SSE 事件提供有界診斷 metadata, 顯示於監測程式 Tab. 診斷事件不提高來源快照版本、不觸發收集, 與快照共用畫面影格排程並保留最新資料, 只有診斷事件時更新當頁的診斷區. 所有一般 SSE 快照仍涵蓋所選時間範圍的其他分頁摘要
+快照的 `monitor.debug` 與獨立 `debug` SSE 事件提供有界診斷 metadata, 顯示於監測程式 Tab, 診斷事件不提高來源快照版本、不觸發收集, 與快照共用畫面影格排程並保留最新資料, 只有診斷事件時更新當頁的診斷區, 所有一般 SSE 快照仍涵蓋所選時間範圍的其他分頁摘要
 
 ## 更新與閱讀互動
 
-WBUI 的 `bindUpdateGuard` 管理 hover、焦點、文字選取、失焦與分頁可見性, `contentHeld` 區分需要保留內容的互動, LAM 保留最新資料與更新時機. 只有 hover 時更新唯一身分對應的既有數值, 保留列順序、篩選結果、分頁及操作目標, 新增、移除及欄位結構變動等候恢復. 使用者主動排序、篩選及換頁立即套用. 手動暫停只保留一份最新快照, 不累積推送佇列, 恢復時使用最新資料. 連線與錯誤提示保持有效, 失焦時停用裝飾動畫, 閒置畫面計時降低頻率, 不新增來源輪詢或改變 SSE 心跳
+WBUI 的 `bindUpdateGuard` 管理 hover、焦點、文字選取、失焦與分頁可見性, `contentHeld` 區分需要保留內容的互動, LAM 保留最新資料與更新時機, 只有 hover 時更新唯一身分對應的既有數值, 保留列順序、篩選結果、分頁及操作目標, 新增、移除及欄位結構變動等候恢復, 使用者主動排序、篩選及換頁立即套用, 手動暫停只保留一份最新快照, 不累積推送佇列, 恢復時使用最新資料, 連線與錯誤提示保持有效, 失焦時停用裝飾動畫, 閒置畫面計時降低頻率, 不新增來源輪詢或改變 SSE 心跳
 
-來源通知涵蓋 Plugins 快取的 manifest、MCP metadata 與 Skill 目錄, 不監看任意外掛程式變更. 工作樹通知只選取 Codex 管理目錄與已辨識 Git metadata 的 HEAD、refs、packed-refs、工作樹登錄及鎖定標記, 不讀取工作區檔案本文. 通知會使工作樹快取失效, 下一次收集重新查詢, 不等待原有 30 秒快取期限
+來源通知涵蓋 Plugins 快取的 manifest、MCP metadata 與 Skill 目錄, 不監看任意外掛程式變更, 工作樹通知只選取 Codex 管理目錄與已辨識 Git metadata 的 HEAD、refs、packed-refs、工作樹登錄及鎖定標記, 不讀取工作區檔案本文, 通知會使工作樹快取失效, 下一次收集重新查詢, 不等待原有 30 秒快取期限
 
 ## 選用查詢與共用呈現
 
@@ -230,15 +230,15 @@ Decisions 投影 input_tokens、input_cached_tokens、output_tokens、num_model_
 每次未命中快取的手動查詢送出一次請求, 缺少憑證時回傳 missing_credentials 並省略外部請求
 snapshot.platform_credentials 提供 mode=no_key / with_key 與各來源 available boolean, 只讀服務環境, 本機統計沿用原有來源
 
-api_queries.py 管理八個固定唯讀 callback、自動查詢間隔、最近結果與 service worker 清理. 所有來源停用時 worker 不定時喚醒, 設定變動及手動查詢各自同步, 第一頁自動結果進入快照, 來源自己的 60 秒快取及讀取上限保留. openai_platform.py 只接受固定模型 / Completions 用量 / Decisions 用量 / 費用來源, 固定 HTTPS endpoint、5 秒逾時、1 MiB 回應上限與無重新導向, 失敗只回傳狀態, 不投影私人 HTTP 本文或認證內容
+api_queries.py 管理八個固定唯讀 callback、自動查詢間隔、最近結果與 service worker 清理, 所有來源停用時 worker 不定時喚醒, 設定變動及手動查詢各自同步, 第一頁自動結果進入快照, 來源自己的 60 秒快取及讀取上限保留, openai_platform.py 只接受固定模型 / Completions 用量 / Decisions 用量 / 費用來源, 固定 HTTPS endpoint、5 秒逾時、1 MiB 回應上限與無重新導向, 失敗只回傳狀態, 不投影私人 HTTP 本文或認證內容
 
-Dots 的 GET /api/codex/dots 重新讀取所選 home 的固定桌面快取, 沿用 16 MiB 上限與 project_dots 投影, 拒絕連結 / reparse 檔案、無效 JSON 與過大內容, 排除私人本文與身分. metadata 檢查關閉時不讀取來源. window 只接受既有的 1h / 24h / 7d / all, 手動查詢與主頁的時間範圍一致. 原始來源不修改, 這條按需查詢不建立額外輪詢
+Dots 的 GET /api/codex/dots 重新讀取所選 home 的固定桌面快取, 沿用 16 MiB 上限與 project_dots 投影, 拒絕連結 / reparse 檔案、無效 JSON 與過大內容, 排除私人本文與身分, metadata 檢查關閉時不讀取來源, window 只接受既有的 1h / 24h / 7d / all, 手動查詢與主頁的時間範圍一致, 原始來源不修改, 這條按需查詢不建立額外輪詢
 
-LAM 保存顯示偏好與完整表格資料, WBUI 管理狀態元件、通知、分群、數值格式、輸入及虛擬 DOM. 表格統計使用保留的完整篩選來源, 呈現範圍與統計範圍分開. 更換表格、關閉明細及 pagehide 清理擁有的 observer / frame / 輸入, 不在卸載時重新掛載全部虛擬列. 共用 API 透過 `workbench-ui.json` 固定版本與能力偵測使用, 最低相容版本為 0.13.0
+LAM 保存顯示偏好與完整表格資料, WBUI 管理狀態元件、通知、分群、數值格式、輸入及虛擬 DOM, 表格統計使用保留的完整篩選來源, 呈現範圍與統計範圍分開, 更換表格、關閉明細及 pagehide 清理擁有的 observer / frame / 輸入, 不在卸載時重新掛載全部虛擬列, 共用 API 透過 `workbench-ui.json` 固定版本與能力偵測使用, 最低相容版本為 0.13.0
 
 
 ## 提示與浮動介面
 
-設定及資料明細使用原生 showModal, 背景操作由瀏覽器 inert 保護. 短說明與圖表讀值保留 role=tooltip, 不放按鈕或表單, Escape 優先關閉提示再處理 modal. 提示文字可用滑鼠移入閱讀, 顯示期間保留入口焦點與原本的 aria-describedby, 關閉後復原. 支援原生 Popover API 時用 manual Top Layer 避免裁切, 不支援時保留既有定位
+設定及資料明細使用原生 showModal, 背景操作由瀏覽器 inert 保護, 短說明與圖表讀值保留 role=tooltip, 不放按鈕或表單, Escape 優先關閉提示再處理 modal, 提示文字可用滑鼠移入閱讀, 顯示期間保留入口焦點與原本的 aria-describedby, 關閉後復原, 支援原生 Popover API 時用 manual Top Layer 避免裁切, 不支援時保留既有定位
 
-欄位說明、圖表讀值與動態文案由 LAM 的有界提示節點管理, 共用 Tooltip / Popover / Menu / Dialog 的語意與互動規格由 WBUI 維護, 不建立通用 Popup 元件. 現有通知歷史是非模態操作面板, 多版本完整清單使用模態明細, 頁內長清單使用 Disclosure, 依用途選擇, 不由外觀決定模態狀態
+欄位說明、圖表讀值與動態文案由 LAM 的有界提示節點管理, 共用 Tooltip / Popover / Menu / Dialog 的語意與互動規格由 WBUI 維護, 不建立通用 Popup 元件, 現有通知歷史是非模態操作面板, 多版本完整清單使用模態明細, 頁內長清單使用 Disclosure, 依用途選擇, 不由外觀決定模態狀態
