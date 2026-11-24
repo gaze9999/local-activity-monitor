@@ -3,8 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
+authors = [{name = "gaze9999"}]
 name = "local-activity-monitor"
-version = "0.22.4"
+version = "0.22.5"
 description = "Loopback-only local Codex and MCP activity dashboard"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -23,3 +24,6 @@ license-files = ["LICENSE", "NOTICE"]
 [tool.setuptools.package-data]
 local_activity_monitor = ["_web/*.html", "_web/*.js", "_web/*.css", "_web/*.json", "_web/*.svg", "_web/*.ico"]
 "local_activity_monitor._workbench" = ["*.js", "*.mjs", "*.css", "manifest.json"]
+
+[project.urls]
+Repository = "https://github.com/gaze9999/local-activity-monitor"
